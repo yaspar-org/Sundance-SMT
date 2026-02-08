@@ -64,13 +64,13 @@ impl<'a> CustomExternalPropagator<'a> {
             self.egraph.get_term_from_lit(lit).uid()
         );
 
-        if let Some(id) = self.egraph.cnfenv.cache.var_map_reverse.get(&lit) {
+        if let Some(id) = self.egraph.cnf_cache.var_map_reverse.get(&lit) {
             let term = self.egraph.get_term(*id);
             self.proof_tracker
                 .borrow_mut()
                 .terms_list
                 .insert(lit, (*id, term, true));
-        } else if let Some(id) = self.egraph.cnfenv.cache.var_map_reverse.get(&-lit) {
+        } else if let Some(id) = self.egraph.cnf_cache.var_map_reverse.get(&-lit) {
             let term = self.egraph.get_term(*id);
             self.proof_tracker
                 .borrow_mut()
@@ -509,11 +509,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         if let Some(term) = nelson_oppen_clause_pair(*pair.0, *pair.1, self.egraph)
                         {
                             debug_println!(25, 0, "adding in the nelson oppen term {}", term);
-                            let term_nnf = term.nnf(&mut self.egraph.cnfenv);
+                            let term_nnf = term.nnf(self.egraph);
                             // println!("we have the term {:?}", term);
                             self.egraph
                                 .insert_predecessor(&term_nnf, None, None, true, None);
-                            let term_cnf = term.cnf_tseitin(&mut self.egraph.cnfenv);
+                            let term_cnf = term.cnf_tseitin(self.egraph);
                             // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
                             for clause in term_cnf {
                                 for lit in &clause.0 {

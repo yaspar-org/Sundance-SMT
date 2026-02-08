@@ -88,7 +88,7 @@ pub fn instantiate_quantifiers(
 
             let term = egraph.get_term(quantifier.id);
             // let negated_term =
-            //     if let Universal = quantifier.polarity {egraph.cnfenv.context.not(term)} else {term};
+            //     if let Universal = quantifier.polarity {egraph.context.not(term)} else {term};
 
             let polarity = quantifier.polarity == Polarity::Universal;
 
@@ -98,14 +98,13 @@ pub fn instantiate_quantifiers(
             }
 
             let (skolemized_quantifier, skolem_vars) =
-                skolemize(&term, &mut egraph.cnfenv.context, polarity);
+                skolemize(&term, &mut egraph.context, polarity);
 
             egraph.added_skolemizations.insert(quantifier.id);
 
-            let skolemized_quantifier: Term =
-                skolemized_quantifier.let_elim(&mut egraph.cnfenv.context);
-            // let (skolemized_quantifier, _) = skolemize(&skolemized_quantifier, egraph.cnfenv.context, &mut egraph.skolem_counter);
-            let skolemized_quantifier = skolemized_quantifier.nnf(&mut egraph.cnfenv);
+            let skolemized_quantifier: Term = skolemized_quantifier.let_elim(&mut egraph.context);
+            // let (skolemized_quantifier, _) = skolemize(&skolemized_quantifier, egraph.context, &mut egraph.skolem_counter);
+            let skolemized_quantifier = skolemized_quantifier.nnf(egraph);
             let additional_constraints =
                 check_for_function_bool(&skolemized_quantifier, egraph, true);
             debug_println!(19, 0, "we are skolemizing {}", term);
@@ -120,7 +119,7 @@ pub fn instantiate_quantifiers(
 
             // note that from_quantifier is true here
             egraph.insert_predecessor(&skolemized_quantifier, None, None, true, None);
-            let clauses = skolemized_quantifier.cnf_tseitin(&mut egraph.cnfenv);
+            let clauses = skolemized_quantifier.cnf_tseitin(egraph);
 
             // learning (not \forall P(x)) => P(c)
             // equivalent to \forall P(x) \/ P(c)
@@ -258,7 +257,7 @@ pub fn instantiate_quantifiers(
 
                 // println!("original_t: {}", t);
                 let t = if quantifier.polarity == Polarity::Existential {
-                    egraph.cnfenv.context.not(t)
+                    egraph.context.not(t)
                 } else {
                     t
                 };
@@ -275,7 +274,7 @@ pub fn instantiate_quantifiers(
                 debug_println!(4, 0, "We have the term {} with id {}", t, t.uid());
 
                 // eliminating lets
-                let let_elim_term = t.let_elim(&mut egraph.cnfenv.context);
+                let let_elim_term = t.let_elim(&mut egraph.context);
 
                 debug_println!(
                     8,
@@ -286,7 +285,7 @@ pub fn instantiate_quantifiers(
                     activation_depth
                 );
 
-                let nnf_term = let_elim_term.nnf(&mut egraph.cnfenv);
+                let nnf_term = let_elim_term.nnf(egraph);
 
                 debug_println!(26, 4, "(assert {})", nnf_term.clone());
                 debug_println!(
@@ -311,7 +310,7 @@ pub fn instantiate_quantifiers(
                 // todo: also might be less efficient as well because we are losing structure from original formula in the egraph
                 egraph.insert_predecessor(&nnf_term, None, None, true, None);
 
-                let cnf_term = nnf_term.cnf_tseitin(&mut egraph.cnfenv);
+                let cnf_term = nnf_term.cnf_tseitin(egraph);
                 debug_println!(7, 0, "We have the cnf term {:?}", cnf_term);
 
                 let mut clauses: Vec<_> = cnf_term
@@ -379,7 +378,6 @@ fn substitute(
                 .collect::<Vec<_>>();
 
             egraph
-                .cnfenv
                 .context
                 .app(qualified_identifier.clone(), new_args, sort.clone())
         }
@@ -388,25 +386,25 @@ fn substitute(
                 .iter()
                 .map(|item| substitute(item, substitutions, egraph))
                 .collect::<Vec<_>>();
-            egraph.cnfenv.context.and(new_items)
+            egraph.context.and(new_items)
         }
         Or(items) => {
             let new_items = items
                 .iter()
                 .map(|item| substitute(item, substitutions, egraph))
                 .collect::<Vec<_>>();
-            egraph.cnfenv.context.or(new_items)
+            egraph.context.or(new_items)
         }
         Eq(a, b) => {
             let (new_a, new_b) = (
                 substitute(a, substitutions, egraph),
                 substitute(b, substitutions, egraph),
             );
-            egraph.cnfenv.context.eq(new_a, new_b)
+            egraph.context.eq(new_a, new_b)
         }
         Not(t) => {
             let new_t = substitute(t, substitutions, egraph);
-            egraph.cnfenv.context.not(new_t)
+            egraph.context.not(new_t)
         }
         Implies(items, implicant) => {
             // assert!(items.len() == 1);
@@ -416,7 +414,7 @@ fn substitute(
                 .collect();
             let new_implicant = substitute(implicant, substitutions, egraph);
 
-            egraph.cnfenv.context.implies(new_items, new_implicant)
+            egraph.context.implies(new_items, new_implicant)
         }
         Forall(var_bindings, middle_term) => {
             // TODO: I don't know if this is actually correct. Will have to investigate the nested forall case further
@@ -445,11 +443,8 @@ fn substitute(
 
                 assert!(!new_attrs.is_empty());
 
-                let new_middle_term = egraph.cnfenv.context.annotated(new_inner_term, new_attrs);
-                let new_term = egraph
-                    .cnfenv
-                    .context
-                    .forall(var_bindings.clone(), new_middle_term);
+                let new_middle_term = egraph.context.annotated(new_inner_term, new_attrs);
+                let new_term = egraph.context.forall(var_bindings.clone(), new_middle_term);
                 new_term.clone()
             } else {
                 panic!("We have a forall case that is not annotated");
@@ -481,11 +476,8 @@ fn substitute(
 
                 assert!(!new_attrs.is_empty());
 
-                let new_middle_term = egraph.cnfenv.context.annotated(new_inner_term, new_attrs);
-                let new_term = egraph
-                    .cnfenv
-                    .context
-                    .exists(var_bindings.clone(), new_middle_term); // I think this gets skolemized but when??
+                let new_middle_term = egraph.context.annotated(new_inner_term, new_attrs);
+                let new_term = egraph.context.exists(var_bindings.clone(), new_middle_term); // I think this gets skolemized but when??
                 new_term.clone()
             } else {
                 panic!(
@@ -500,18 +492,18 @@ fn substitute(
                 substitute(t1, substitutions, egraph),
                 substitute(t2, substitutions, egraph),
             );
-            egraph.cnfenv.context.ite(new_cond, new_t1, new_t2)
+            egraph.context.ite(new_cond, new_t1, new_t2)
         }
         Annotated(t, anns) => {
             let new_t = substitute(t, substitutions, egraph);
-            egraph.cnfenv.context.annotated(new_t, anns.clone())
+            egraph.context.annotated(new_t, anns.clone())
         }
         Distinct(args) => {
             let new_args = args
                 .iter()
                 .map(|t| substitute(t, substitutions, egraph))
                 .collect();
-            egraph.cnfenv.context.distinct(new_args)
+            egraph.context.distinct(new_args)
         }
         // _ => term.clone() // todo: actually need to implement these extra cases
         Let(..) => todo!(),
@@ -610,7 +602,7 @@ pub fn match_term<'a>(
                         *local.sort.as_ref().unwrap()
                             == egraph
                                 .get_term(term.unwrap())
-                                .get_sort(egraph.cnfenv.context.arena())
+                                .get_sort(egraph.context.arena())
                     ); // checking that things are typechecked
                     assignment.insert(local.symbol.to_string(), egraph.get_term(term.unwrap()));
 

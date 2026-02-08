@@ -32,7 +32,7 @@ pub fn process_assignment(
 
     let mut tracker = ProofTracker::new();
 
-    if let Some(t) = egraph.cnfenv.cache.var_map_reverse.get(&lit) {
+    if let Some(t) = egraph.cnf_cache.var_map_reverse.get(&lit) {
         let res = if let Some(r) = reason.clone() {
             r
         } else {
@@ -68,7 +68,7 @@ pub fn process_assignment(
         };
     }
 
-    if let Some(t) = egraph.cnfenv.cache.var_map_reverse.get(&-lit) {
+    if let Some(t) = egraph.cnf_cache.var_map_reverse.get(&-lit) {
         let res = if let Some(r) = reason.clone() {
             r
         } else {
@@ -133,13 +133,13 @@ pub fn process_assignment(
                         None // don't need to add anything
                     } else {
                         debug_println!(11, 2, "name != ctor_name");
-                        let not_tester_term = egraph.cnfenv.context.not(tester_term.clone());
-                        let not_term = egraph.cnfenv.context.not(term);
+                        let not_tester_term = egraph.context.not(tester_term.clone());
+                        let not_term = egraph.context.not(term);
                         let or_not_tester_not_term =
-                            egraph.cnfenv.context.or(vec![not_tester_term, not_term]);
+                            egraph.context.or(vec![not_tester_term, not_term]);
                         egraph.insert_predecessor(&or_not_tester_not_term, None, None, false, None);
                         let tester_cnf = or_not_tester_not_term
-                            .cnf_tseitin(&mut egraph.cnfenv)
+                            .cnf_tseitin(egraph)
                             .into_iter()
                             .map(|x| x.into_iter().collect::<Vec<_>>())
                             .collect();
@@ -166,16 +166,16 @@ pub fn process_assignment(
                         let selector_name_sorts = selector_names.iter().zip(selector_sorts);
                         let mut selector_apps = vec![];
                         for (sel, sort) in selector_name_sorts {
-                            let sym = &egraph.cnfenv.context.allocate_symbol(sel);
+                            let sym = &egraph.context.allocate_symbol(sel);
                             let sel_id = QualifiedIdentifier::simple(sym.clone()); // todo: maybe just store this in egraph, so I don't have to recompute
-                            let sel_app = egraph.cnfenv.context.app(
+                            let sel_app = egraph.context.app(
                                 sel_id,
                                 vec![inner_term.clone()],
                                 Some(sort.clone()),
                             ); // todo: not sure if I should give the sort here
                             selector_apps.push(sel_app);
                         }
-                        let ctor_sym = &egraph.cnfenv.context.allocate_symbol(&ctor_name);
+                        let ctor_sym = &egraph.context.allocate_symbol(&ctor_name);
 
                         // have the simple_sorted id for the global case and the simple id for the appp case
                         let ctor_app = if selector_apps.is_empty() {
@@ -184,41 +184,37 @@ pub fn process_assignment(
                                 ctor_info.datatype_sort.clone(),
                             ); // todo: not sure if this is the right was to do it, gets printed out as (as ctor ctor) -> I think it doesnt make a difference
                             egraph
-                                .cnfenv
                                 .context
                                 .global(ctor_id, Some(ctor_info.datatype_sort.clone())) //ctor_local, Some(ctor_sort))
                         } else {
                             let ctor_id = QualifiedIdentifier::simple(ctor_sym.clone());
                             let ctor_sort = ctor_info.datatype_sort.clone();
-                            egraph
-                                .cnfenv
-                                .context
-                                .app(ctor_id, selector_apps, Some(ctor_sort))
+                            egraph.context.app(ctor_id, selector_apps, Some(ctor_sort))
                         };
-                        let eq = egraph.cnfenv.context.eq(inner_term, ctor_app);
+                        let eq = egraph.context.eq(inner_term, ctor_app);
 
                         // note Can't do it this way and need to do it the below way otherwise tests/regression/smt_files/edge_cases_quantifiers/predecessor_backtrack_insert5.smt2, etc are wrong
                         // need to investigate why
 
-                        // let imp = egraph.cnfenv.context.implies(vec![term], eq);
-                        // let imp_nnf = imp.sundance_nnf(&mut *egraph.cnfenv.context);
+                        // let imp = egraph.context.implies(vec![term], eq);
+                        // let imp_nnf = imp.sundance_nnf(&mut *egraph.context);
                         // debug_println!(24,8, "(assert {})", imp);
                         // egraph.insert_predecessor(&imp_nnf, None, None, true, None);
                         // let mut additional_constraints = check_for_function_bool(&imp_nnf, egraph, false);
-                        // let imp_cnf = imp_nnf.cnf_tseitin(&mut *egraph.cnfenv.context); // todo: do I need any more preprocessing
+                        // let imp_cnf = imp_nnf.cnf_tseitin(&mut *egraph.context); // todo: do I need any more preprocessing
 
                         // for clause in imp_cnf {
                         //     additional_constraints.push(clause.0);
                         // }
                         // Some(additional_constraints)
 
-                        let eq_nnf = eq.nnf(&mut egraph.cnfenv);
+                        let eq_nnf = eq.nnf(egraph);
                         debug_println!(14 - 3, 0, "adding in {}", eq_nnf);
                         egraph.insert_predecessor(&eq_nnf, None, None, true, None);
 
                         let mut additional_constraints =
                             check_for_function_bool(&eq_nnf, egraph, false);
-                        let eq_cnf = eq_nnf.cnf_tseitin(&mut egraph.cnfenv); // todo: do I need any more preprocessing
+                        let eq_cnf = eq_nnf.cnf_tseitin(egraph); // todo: do I need any more preprocessing
                         assert_eq!(eq_cnf.0.len(), 1);
                         let eq_clause = eq_cnf.0[0].0.clone();
                         assert_eq!(eq_clause.len(), 1);
@@ -772,8 +768,8 @@ pub fn union(
     );
     debug_println!(11, 0, "{}", egraph);
     assert_eq!(
-        egraph.get_term(x).get_sort(&mut egraph.cnfenv.context),
-        egraph.get_term(y).get_sort(&mut egraph.cnfenv.context),
+        egraph.get_term(x).get_sort(&mut egraph.context),
+        egraph.get_term(y).get_sort(&mut egraph.context),
         "We are comparing terms {} and {}",
         egraph.get_term(x),
         egraph.get_term(y)
@@ -1342,13 +1338,10 @@ fn union_process_assignment(
     from_quantifier: bool,
 ) -> Option<Vec<Vec<i32>>> {
     debug_println!(6, 0, "before4");
-    let new_assignment = egraph
-        .cnfenv
-        .context
-        .eq(egraph.get_term(x), egraph.get_term(y));
+    let new_assignment = egraph.context.eq(egraph.get_term(x), egraph.get_term(y));
     // if there is a new assignment, we need to check if the equality term exists, if it does we need to work on that
     // otherwise we can just consider the union of these two terms
-    if let Some(new_assignment_lit) = egraph.cnfenv.cache.var_map.get(&new_assignment.uid()) {
+    if let Some(new_assignment_lit) = egraph.cnf_cache.var_map.get(&new_assignment.uid()) {
         // note we don't want reason to be the above thing because the explanation is still the same as teh explanation before
         let reason = proof_parent;
         debug_println!(

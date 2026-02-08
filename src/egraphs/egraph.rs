@@ -1,4 +1,4 @@
-use crate::cnf::SundanceCNFEnv;
+use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::process::DatatypeInfo;
 use crate::egraphs::congruence_closure::union;
 use crate::egraphs::datastructures::{
@@ -7,10 +7,11 @@ use crate::egraphs::datastructures::{
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use sat_interface::Formula;
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt;
-use yaspar_ir::ast::{ATerm::*, FetchSort, ObjectAllocatorExt};
+use yaspar_ir::ast::{ATerm::*, Context, FetchSort, ObjectAllocatorExt};
 use yaspar_ir::ast::{Attribute, Repr, Term, TermAllocator};
 
 impl fmt::Display for Egraph {
@@ -232,7 +233,7 @@ impl fmt::Display for Egraph {
 
 /// The egraph datastructure that keeps track of terms, equalities and parents
 pub struct Egraph {
-    pub cnfenv: SundanceCNFEnv,
+    pub context: Context,
     /// map from u64 to Terms (default: all terms are None, two passes go from Uninitialized to Some, todo (amar): clean this up)
     pub terms_list: Vec<TermOption>, // u64 -> Option<Term>
     /// for each term, if 0 ~> not active, otherwise the level when it first became active (todo: this is depricated, delete)
@@ -288,15 +289,17 @@ pub struct Egraph {
     pub ddsmt: bool,
     /// user flag for whether we should skolemize eagerly
     pub eager_skolem: bool,
+    /// store CNF cache
+    pub cnf_cache: CNFCache,
 }
 
 impl Egraph {
-    pub fn new(mut cnfenv: SundanceCNFEnv, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
-        let tru = cnfenv.context.get_true();
-        let fal = cnfenv.context.get_false();
+    pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
+        let tru = context.get_true();
+        let fal = context.get_false();
 
         Egraph {
-            cnfenv,
+            context,
             terms_list: vec![TermOption::None],
             terms_active: vec![None], // TODO: this should actuallly be None in the terms version
             proof_forest: vec![ProofForestEdge::Root {
@@ -330,14 +333,22 @@ impl Egraph {
             arithmetic_terms: vec![],
             ddsmt,
             eager_skolem,
+            cnf_cache: Default::default(),
+        }
+    }
+
+    fn cnf_env(&mut self) -> CNFEnv<'_> {
+        CNFEnv {
+            context: &mut self.context,
+            cache: &mut self.cnf_cache,
         }
     }
 
     /// Returns the u64 corresponding to a given lit with the correct polarity
     pub fn get_u64_from_lit_with_polarity(&self, lit: i32) -> (u64, bool) {
-        if let Some(num) = self.cnfenv.cache.var_map_reverse.get(&lit) {
+        if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
             (*num, true)
-        } else if let Some(num) = self.cnfenv.cache.var_map_reverse.get(&-lit) {
+        } else if let Some(num) = self.cnf_cache.var_map_reverse.get(&-lit) {
             (*num, false)
         } else {
             panic!(
@@ -353,14 +364,14 @@ impl Egraph {
             0,
             "We are in get_lit_from_u64 with num {} and var_map {:?}",
             num,
-            self.cnfenv.cache.var_map
+            self.cnf_cache.var_map
         );
         debug_println!(5, 0, "We have the term {}", self.get_term(num));
-        *self.cnfenv.cache.var_map.get(&num).unwrap()
+        *self.cnf_cache.var_map.get(&num).unwrap()
     }
 
     pub fn get_lit_from_u64_safe(&self, num: u64) -> Option<i32> {
-        self.cnfenv.cache.var_map.get(&num).cloned()
+        self.cnf_cache.var_map.get(&num).cloned()
     }
 
     pub fn get_term(&self, num: u64) -> Term {
@@ -382,15 +393,15 @@ impl Egraph {
             0,
             "We are in get_term_from_lit with lit {} and var_map_reverse {:?}",
             lit,
-            self.cnfenv.cache.var_map_reverse
+            self.cnf_cache.var_map_reverse
         );
-        if let Some(num) = self.cnfenv.cache.var_map_reverse.get(&lit) {
+        if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
             debug_println!(6, 0, "before5");
             self.get_term(*num)
         } else {
-            let num = self.cnfenv.cache.var_map_reverse.get(&-lit).unwrap();
+            let num = self.cnf_cache.var_map_reverse.get(&-lit).unwrap();
             debug_println!(6, 0, "before6");
-            self.cnfenv.context.not(self.get_term(*num))
+            self.context.not(self.get_term(*num))
         }
     }
 
@@ -400,14 +411,14 @@ impl Egraph {
             0,
             "We are in get_term_from_lit with lit {} and var_map_reverse {:?}",
             lit,
-            self.cnfenv.cache.var_map_reverse
+            self.cnf_cache.var_map_reverse
         );
-        if let Some(num) = self.cnfenv.cache.var_map_reverse.get(&lit) {
+        if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
             debug_println!(6, 0, "before7");
             Some(self.get_term(*num))
-        } else if let Some(num) = self.cnfenv.cache.var_map_reverse.get(&-lit) {
+        } else if let Some(num) = self.cnf_cache.var_map_reverse.get(&-lit) {
             debug_println!(6, 0, "before8");
-            Some(self.cnfenv.context.not(self.get_term(*num)))
+            Some(self.context.not(self.get_term(*num)))
         } else {
             None
         }
@@ -422,8 +433,8 @@ impl Egraph {
             term,
             num
         );
-        debug_println!(11, 0, "We have the var_map {:?}", self.cnfenv.cache.var_map);
-        *self.cnfenv.cache.var_map.get(&num).unwrap()
+        debug_println!(11, 0, "We have the var_map {:?}", self.cnf_cache.var_map);
+        *self.cnf_cache.var_map.get(&num).unwrap()
     }
 
     /// Adds basic information about term to egraph
@@ -857,7 +868,7 @@ impl Egraph {
             return;
         }
 
-        if term.get_sort(&mut self.cnfenv.context).to_string() == "Int" {
+        if term.get_sort(&mut self.context).to_string() == "Int" {
             self.arithmetic_terms.push(term.uid())
         }
 
@@ -1301,7 +1312,7 @@ impl Egraph {
             -self.get_lit_from_u64(x)
         } else {
             debug_println!(6, 0, "before10");
-            let eq_term_class = self.cnfenv.context.eq(self.get_term(x), self.get_term(y));
+            let eq_term_class = self.context.eq(self.get_term(x), self.get_term(y));
             self.get_lit_from_term(&eq_term_class)
         }
     }
@@ -1451,6 +1462,19 @@ impl Egraph {
     }
 }
 
+impl<T> CNFConversion<Egraph> for T
+where
+    T: for<'a> CNFConversion<CNFEnv<'a>>,
+{
+    fn cnf_tseitin(&self, env: &mut Egraph) -> Formula {
+        self.cnf_tseitin(&mut env.cnf_env())
+    }
+
+    fn nnf(&self, env: &mut Egraph) -> Self {
+        self.nnf(&mut env.cnf_env())
+    }
+}
+
 // check that every variable occurs in each multipattern
 // see: https://isabelle.in.tum.de/library/HOL/HOL/SMT.html
 // Some SMT solvers support patterns as a quantifier instantiation
@@ -1496,7 +1520,9 @@ fn check_quantifier_validity_helper(
         Local(local) => {
             let local_id = local.symbol.to_string();
             // println!("We have the local_id {}", local_id);
-            if let std::collections::btree_map::Entry::Occupied(mut e) = contains_var.entry(local_id) {
+            if let std::collections::btree_map::Entry::Occupied(mut e) =
+                contains_var.entry(local_id)
+            {
                 // println!("We are updating the local_id");
                 let _ = Some(e.insert(true));
             }

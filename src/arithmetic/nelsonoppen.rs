@@ -2,33 +2,30 @@ use crate::egraphs::egraph::Egraph;
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::FetchSort;
 use yaspar_ir::ast::{
-    ObjectAllocatorExt as _, Repr, StrAllocator, Term, TermAllocator, alg::QualifiedIdentifier,
+    alg::QualifiedIdentifier, ObjectAllocatorExt as _, Repr, StrAllocator, Term, TermAllocator,
 };
 
 pub fn nelson_oppen_clause(literal: i32, egraph: &mut Egraph) -> Option<Term> {
     let term = egraph.get_term_from_lit(-literal);
     match term.repr() {
         Eq(x, y) => {
-            if x.get_sort(&mut egraph.cnfenv.context).to_string() == "Int"
-                && y.get_sort(&mut egraph.cnfenv.context).to_string() == "Int"
+            if x.get_sort(&mut egraph.context).to_string() == "Int"
+                && y.get_sort(&mut egraph.context).to_string() == "Int"
             {
-                let bool_sort = egraph.cnfenv.context.bool_sort();
+                let bool_sort = egraph.context.bool_sort();
 
-                let lt = QualifiedIdentifier::simple(egraph.cnfenv.context.allocate_symbol("<"));
-                let lt_term = egraph.cnfenv.context.app(
-                    lt,
-                    vec![x.clone(), y.clone()],
-                    Some(bool_sort.clone()),
-                );
-
-                let gt = QualifiedIdentifier::simple(egraph.cnfenv.context.allocate_symbol(">"));
-                let gt_term =
+                let lt = QualifiedIdentifier::simple(egraph.context.allocate_symbol("<"));
+                let lt_term =
                     egraph
-                        .cnfenv
                         .context
-                        .app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
+                        .app(lt, vec![x.clone(), y.clone()], Some(bool_sort.clone()));
 
-                let or = egraph.cnfenv.context.or(vec![lt_term, gt_term, term]);
+                let gt = QualifiedIdentifier::simple(egraph.context.allocate_symbol(">"));
+                let gt_term = egraph
+                    .context
+                    .app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
+
+                let or = egraph.context.or(vec![lt_term, gt_term, term]);
 
                 Some(or)
             } else {
@@ -55,17 +52,17 @@ pub fn nelson_oppen_clause(literal: i32, egraph: &mut Egraph) -> Option<Term> {
 //             }
 //             egraph.nelson_oppen_ineq_literals.insert((x.uid(), y.uid()));
 
-//             let bool_sort = egraph.cnfenv.context.bool_sort();
+//             let bool_sort = egraph.context.bool_sort();
 
-//             let lt = QualifiedIdentifier::simple(egraph.cnfenv.context.allocate_symbol("<"));
-//             let lt_term = egraph.cnfenv.context.app(lt, vec![x.clone(), y.clone()], Some(bool_sort.clone()));
+//             let lt = QualifiedIdentifier::simple(egraph.context.allocate_symbol("<"));
+//             let lt_term = egraph.context.app(lt, vec![x.clone(), y.clone()], Some(bool_sort.clone()));
 
-//             let gt = QualifiedIdentifier::simple(egraph.cnfenv.context.allocate_symbol(">"));
-//             let gt_term = egraph.cnfenv.context.app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
+//             let gt = QualifiedIdentifier::simple(egraph.context.allocate_symbol(">"));
+//             let gt_term = egraph.context.app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
 
-//             let eq_term = egraph.cnfenv.context.eq(x.clone(), y.clone());
+//             let eq_term = egraph.context.eq(x.clone(), y.clone());
 
-//             let or = egraph.cnfenv.context.or(vec![lt_term, gt_term, eq_term]);
+//             let or = egraph.context.or(vec![lt_term, gt_term, eq_term]);
 
 //             // println!("(assert {or}) with lit {literal} and term {term_positive}");
 
@@ -85,28 +82,25 @@ pub fn nelson_oppen_clause_pair(x: u64, y: u64, egraph: &mut Egraph) -> Option<T
     }
     egraph.nelson_oppen_ineq_literals.insert((x, y));
 
-    let bool_sort = egraph.cnfenv.context.bool_sort();
+    let bool_sort = egraph.context.bool_sort();
 
-    let lt = QualifiedIdentifier::simple(egraph.cnfenv.context.allocate_symbol("<"));
-    let lt_term = egraph.cnfenv.context.app(
+    let lt = QualifiedIdentifier::simple(egraph.context.allocate_symbol("<"));
+    let lt_term = egraph.context.app(
         lt,
         vec![egraph.get_term(x), egraph.get_term(y)],
         Some(bool_sort.clone()),
     );
 
-    let gt = QualifiedIdentifier::simple(egraph.cnfenv.context.allocate_symbol(">"));
-    let gt_term = egraph.cnfenv.context.app(
+    let gt = QualifiedIdentifier::simple(egraph.context.allocate_symbol(">"));
+    let gt_term = egraph.context.app(
         gt,
         vec![egraph.get_term(x), egraph.get_term(y)],
         Some(bool_sort),
     );
 
-    let eq_term = egraph
-        .cnfenv
-        .context
-        .eq(egraph.get_term(x), egraph.get_term(y));
+    let eq_term = egraph.context.eq(egraph.get_term(x), egraph.get_term(y));
 
-    let or = egraph.cnfenv.context.or(vec![lt_term, gt_term, eq_term]);
+    let or = egraph.context.or(vec![lt_term, gt_term, eq_term]);
 
     Some(or)
 }

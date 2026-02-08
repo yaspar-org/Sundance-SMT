@@ -1,9 +1,8 @@
-use sundance_smt::cnf::{CNFCache, CNFConversion, SundanceCNFEnv};
-
 use cadical_sys::Status;
 use clap::Parser;
 use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
+use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::datatypes::process::check_for_inductive_datatypes_and_panic;
 use sundance_smt::egraphs::egraph::Egraph;
@@ -72,23 +71,14 @@ fn main() -> Result<(), String> {
     assertions.push(true_term.clone());
     assertions.push(not_false_term);
 
-    // Create Sundance CNF cache to replace yaspar-ir's cache
-    let sundance_cnf_cache = CNFCache::new();
-
-    // Convert to NNF (Negation Normal Form) using Sundance implementation
-    let sundance_env = SundanceCNFEnv {
-        context,
-        cache: sundance_cnf_cache,
-    };
-
-    let mut egraph = Egraph::new(sundance_env, args.lazy_dt, args.ddsmt, args.eager_skolem);
+    let mut egraph = Egraph::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
 
     egraph.insert_predecessor(&false_term, None, None, false, None);
     egraph.insert_predecessor(&true_term, None, None, false, None);
 
     // checking if we have any inductive datatypes -> if we do panic!
     // gets the info about our datatypes
-    let datatype_info = check_for_inductive_datatypes_and_panic(&egraph.cnfenv.context);
+    let datatype_info = check_for_inductive_datatypes_and_panic(&egraph.context);
     egraph.datatype_info = datatype_info;
 
     let mut nnf_terms = vec![];
@@ -96,13 +86,13 @@ fn main() -> Result<(), String> {
         debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
 
         // inline the let bindings
-        let let_elim_term = assert.let_elim(&mut egraph.cnfenv.context);
+        let let_elim_term = assert.let_elim(&mut egraph.context);
         debug_println!(10, 0, "Let_elim form: {}", let_elim_term);
         // todo: for some reason not inling define-fun
 
         let skolemized_term = let_elim_term;
 
-        let nnf_term = skolemized_term.nnf(&mut egraph.cnfenv);
+        let nnf_term = skolemized_term.nnf(&mut egraph);
         debug_println!(
             12,
             0,
@@ -120,7 +110,7 @@ fn main() -> Result<(), String> {
         // Convert to CNF (Conjunctive Normal Form) using Sundance implementation
         // using tseitin transformation because if we have (and true b), we
         // want (and true b) <-> true \land b, not just the forwards direction
-        let cnf_formula = nnf_term.cnf_tseitin(&mut egraph.cnfenv);
+        let cnf_formula = nnf_term.cnf_tseitin(&mut egraph);
 
         debug_println!(4, 0, "We have the cnf formula {}", cnf_formula);
 
@@ -135,19 +125,19 @@ fn main() -> Result<(), String> {
     }
 
     // save the sorts and symbol table for the proof file
-    let sorts = egraph.cnfenv.context.expose_sorts().clone();
-    let symbol_table = egraph.cnfenv.context.expose_symbol_table().clone();
+    let sorts = egraph.context.expose_sorts().clone();
+    let symbol_table = egraph.context.expose_symbol_table().clone();
 
     debug_println!(
         6,
         0,
         "before BOOL: We have the var_map {:?}",
-        egraph.cnfenv.cache.var_map
+        egraph.cnf_cache.var_map
     );
 
     let mut boolean_dt_constraints = vec![];
 
-    // have to do this as a separate loop because `check_for_function_bool` uses egraph.cnfenv.context
+    // have to do this as a separate loop because `check_for_function_bool` uses egraph.context
     // somewhat inefficient especially since we have to clone nnf_term, but I couldn't come up with a
     // better way to do this
     for nnf_term in nnf_terms {
