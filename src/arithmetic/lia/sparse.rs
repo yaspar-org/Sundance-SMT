@@ -1,4 +1,5 @@
-#![allow(dead_code)]
+//! todo:
+
 use num_traits::Zero;
 use slotmap;
 use std::error;
@@ -50,6 +51,7 @@ struct Node<V> {
     up: K,
 }
 
+/// todo:
 pub struct Matrix<V> {
     arena: slotmap::SlotMap<K, Node<V>>,
     baserows: Vec<K>, // length = # rows
@@ -289,7 +291,6 @@ impl<V: Zero + Default + fmt::Debug> Matrix<V> {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
 
     #[test]

@@ -1,5 +1,5 @@
-use crate::arithmetic::lp::{check_integer_constraints_satisfiable, ArithResult, ArithSolver};
-use crate::arithmetic::nelsonoppen::{nelson_oppen_clause, nelson_oppen_clause_pair};
+use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
+use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::SundanceCNFConversion as _;
 use crate::egraphs::congruence_closure::{
     get_child, get_parent, process_assignment, proof_forest_backtrack,
@@ -8,13 +8,12 @@ use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::proof::proof_tracer::SMTProofTracker;
-use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
+use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
-use yaspar_ir::ast::CNFConversion;
 
 /// Should we keep backtracking on stack at level
 ///
@@ -65,25 +64,13 @@ impl<'a> CustomExternalPropagator<'a> {
             self.egraph.get_term_from_lit(lit).uid()
         );
 
-        if let Some(id) = self
-            .egraph
-            .cnfenv
-            .cache
-            .var_map_reverse
-            .get(&lit)
-        {
+        if let Some(id) = self.egraph.cnfenv.cache.var_map_reverse.get(&lit) {
             let term = self.egraph.get_term(*id);
             self.proof_tracker
                 .borrow_mut()
                 .terms_list
                 .insert(lit, (*id, term, true));
-        } else if let Some(id) = self
-            .egraph
-            .cnfenv
-            .cache
-            .var_map_reverse
-            .get(&-lit)
-        {
+        } else if let Some(id) = self.egraph.cnfenv.cache.var_map_reverse.get(&-lit) {
             let term = self.egraph.get_term(*id);
             self.proof_tracker
                 .borrow_mut()
@@ -520,7 +507,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         };
 
                         if let Some(term) =
-                            nelson_oppen_clause_pair(*pair.0, *pair.1, &mut self.egraph)
+                            nelson_oppen_clause_pair(*pair.0, *pair.1, self.egraph)
                         {
                             debug_println!(25, 0, "adding in the nelson oppen term {}", term);
                             let term_nnf = term.sundance_nnf(&mut self.egraph.cnfenv);

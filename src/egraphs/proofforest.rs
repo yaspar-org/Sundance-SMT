@@ -13,7 +13,7 @@ pub enum ProofForestEdge {
         size: u64, // TODO: I don't know of a good way to recover the size when backtracking, so I need to figure out an efficient way to do this or maybe just remove size
         child: u64, // TODO: I am not 100% sure if child actually does anything, I think it is useful for reversing edges in the proof forest, but not 100% sure
         disequalities: DeterministicHashMap<u64, DisequalTerm>, // TODO: this might lead to a lot of allocations
-        children: DeterministicHashSet<u64>
+        children: DeterministicHashSet<u64>,
     },
     /// Represents a node with an equality relationship
     Equality {
@@ -24,7 +24,7 @@ pub enum ProofForestEdge {
         disequalities: DeterministicHashMap<u64, DisequalTerm>,
         level: usize,
         hash: u64,
-        children: DeterministicHashSet<u64>
+        children: DeterministicHashSet<u64>,
     },
     /// Represents a node with congruence relationships
     Congruence {
@@ -35,7 +35,7 @@ pub enum ProofForestEdge {
         disequalities: DeterministicHashMap<u64, DisequalTerm>,
         level: usize,
         hash: u64,
-        children: DeterministicHashSet<u64>
+        children: DeterministicHashSet<u64>,
     },
 }
 
@@ -46,7 +46,7 @@ impl fmt::Display for ProofForestEdge {
                 size,
                 child,
                 disequalities,
-                children
+                children,
             } => {
                 write!(
                     f,
@@ -62,7 +62,7 @@ impl fmt::Display for ProofForestEdge {
                 disequalities,
                 level,
                 hash,
-                children
+                children,
             } => {
                 write!(
                     f,
@@ -76,7 +76,9 @@ impl fmt::Display for ProofForestEdge {
                 parent,
                 child,
                 disequalities,
-                level, hash, children
+                level,
+                hash,
+                children,
             } => {
                 write!(
                     f,
@@ -92,7 +94,7 @@ impl fmt::Display for ProofForestEdge {
                 disequalities,
                 level,
                 hash,
-                children
+                children,
             } => {
                 write!(
                     f,
@@ -144,12 +146,11 @@ impl PartialEq for ProofForestEdge {
 }
 
 impl ProofForestEdge {
-
     /// Get the child of any ProofForestEdge
     pub fn get_child(&self) -> u64 {
         match self {
-            ProofForestEdge::Root { child, .. } 
-            | ProofForestEdge::Equality { child, .. } 
+            ProofForestEdge::Root { child, .. }
+            | ProofForestEdge::Equality { child, .. }
             | ProofForestEdge::Congruence { child, .. } => *child,
         }
     }
@@ -158,7 +159,7 @@ impl ProofForestEdge {
     pub fn get_parent(&self) -> u64 {
         match self {
             ProofForestEdge::Root { .. } => panic!("Root does not have a parent"),
-            ProofForestEdge::Equality { parent, .. } 
+            ProofForestEdge::Equality { parent, .. }
             | ProofForestEdge::Congruence { parent, .. } => *parent,
         }
     }
@@ -175,8 +176,8 @@ impl ProofForestEdge {
     /// Get a reference to the children vector for any ProofForestEdge variant
     pub fn get_children(&self) -> &DeterministicHashSet<u64> {
         match self {
-            ProofForestEdge::Root { children, .. } 
-            | ProofForestEdge::Equality { children, .. } 
+            ProofForestEdge::Root { children, .. }
+            | ProofForestEdge::Equality { children, .. }
             | ProofForestEdge::Congruence { children, .. } => children,
         }
     }
@@ -196,11 +197,16 @@ impl ProofForestEdge {
         diseq: DeterministicHashMap<u64, DisequalTerm>,
     ) -> ProofForestEdge {
         match self {
-            ProofForestEdge::Root { size, child, children, .. } => ProofForestEdge::Root {
+            ProofForestEdge::Root {
+                size,
+                child,
+                children,
+                ..
+            } => ProofForestEdge::Root {
                 size,
                 child,
                 disequalities: diseq,
-                children
+                children,
             },
             ProofForestEdge::Equality {
                 term,
@@ -219,7 +225,7 @@ impl ProofForestEdge {
                 level,
                 hash,
                 disequalities: diseq,
-                children
+                children,
             },
             ProofForestEdge::Congruence {
                 pairs,
@@ -238,7 +244,7 @@ impl ProofForestEdge {
                 level,
                 hash,
                 disequalities: diseq,
-                children
+                children,
             },
         }
     }
@@ -254,7 +260,7 @@ impl ProofForestEdge {
         // or if the hash is outdated (i.e. we have already backtracked on this disequality)
         if let Some(disequality) = disequalities.get(&key) {
             if disequality.hash != hash_level_map[disequality.level] && disequality.hash != 0 {
-                 debug_println!(
+                debug_println!(
                     5,
                     0,
                     "We are inserting a disequality {:?} with key {}",
@@ -265,7 +271,7 @@ impl ProofForestEdge {
                 disequalities.insert(key, t);
             }
         } else {
-             debug_println!(
+            debug_println!(
                 5,
                 0,
                 "We are inserting a disequality {:?} with key {}",

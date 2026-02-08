@@ -20,7 +20,7 @@ pub fn cdcl_decision_procedure(
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
-    timeout: u64, // todo: add timeout functionality
+    _timeout: u64, // todo: add timeout functionality
 ) -> Status {
     let mut solver = CaDiCal::new();
 
@@ -86,19 +86,19 @@ pub fn cdcl_decision_procedure(
     // let quantifier_smt2_proof = proof_tracker.borrow_mut().generate_quantifier_smt2();
 
     // Write proof to file if requested
-    if let Some(p) = proof_file {
-        if let cadical_sys::Status::UNSATISFIABLE = result.unwrap() {
-            if let Err(e) = std::fs::write(&p, edrat_proof) {
-                debug_println!(
-                    2,
-                    0,
-                    "Failed to write eDRAT proof to {}: {}",
-                    p.display(),
-                    e
-                );
-            } else {
-                debug_println!(2, 0, "eDRAT proof written to: {}", p.display());
-            }
+    if let Some(p) = proof_file
+        && let cadical_sys::Status::UNSATISFIABLE = result.unwrap()
+    {
+        if let Err(e) = std::fs::write(&p, edrat_proof) {
+            debug_println!(
+                2,
+                0,
+                "Failed to write eDRAT proof to {}: {}",
+                p.display(),
+                e
+            );
+        } else {
+            debug_println!(2, 0, "eDRAT proof written to: {}", p.display());
         }
     }
     result.unwrap()

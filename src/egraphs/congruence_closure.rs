@@ -3,9 +3,9 @@
 use crate::cnf::SundanceCNFConversion as _;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::preprocess::check_for_function_bool;
-use crate::utils::{fmt_termlist, DeterministicHashMap, DeterministicHashSet};
+use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
 use yaspar_ir::ast::alg::QualifiedIdentifier;
-use yaspar_ir::ast::{CNFConversion, FetchSort, Index, Repr, StrAllocator, Term, TermAllocator};
+use yaspar_ir::ast::{FetchSort, Index, Repr, StrAllocator, Term, TermAllocator};
 
 use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
 use crate::egraphs::egraph::Egraph;
@@ -143,12 +143,7 @@ pub fn process_assignment(
                             .into_iter()
                             .map(|x| x.into_iter().collect::<Vec<_>>())
                             .collect();
-                        debug_println!(
-                            25,
-                            10,
-                            "(assert {})",
-                            or_not_tester_not_term,
-                        );
+                        debug_println!(25, 10, "(assert {})", or_not_tester_not_term,);
                         debug_println!(12, 2, "This gives us {:?}", tester_cnf);
                         Some(tester_cnf)
                     }
@@ -171,7 +166,7 @@ pub fn process_assignment(
                         let selector_name_sorts = selector_names.iter().zip(selector_sorts);
                         let mut selector_apps = vec![];
                         for (sel, sort) in selector_name_sorts {
-                            let sym = &egraph.cnfenv.context.allocate_symbol(&sel);
+                            let sym = &egraph.cnfenv.context.allocate_symbol(sel);
                             let sel_id = QualifiedIdentifier::simple(sym.clone()); // todo: maybe just store this in egraph, so I don't have to recompute
                             let sel_app = egraph.cnfenv.context.app(
                                 sel_id,
@@ -183,18 +178,22 @@ pub fn process_assignment(
                         let ctor_sym = &egraph.cnfenv.context.allocate_symbol(&ctor_name);
 
                         // have the simple_sorted id for the global case and the simple id for the appp case
-                        let ctor_app = if selector_apps.len() == 0 {
+                        let ctor_app = if selector_apps.is_empty() {
                             let ctor_id = QualifiedIdentifier::simple_sorted(
                                 ctor_sym.clone(),
                                 ctor_info.datatype_sort.clone(),
                             ); // todo: not sure if this is the right was to do it, gets printed out as (as ctor ctor) -> I think it doesnt make a difference
                             egraph
-                                .cnfenv.context
+                                .cnfenv
+                                .context
                                 .global(ctor_id, Some(ctor_info.datatype_sort.clone())) //ctor_local, Some(ctor_sort))
                         } else {
                             let ctor_id = QualifiedIdentifier::simple(ctor_sym.clone());
                             let ctor_sort = ctor_info.datatype_sort.clone();
-                            egraph.cnfenv.context.app(ctor_id, selector_apps, Some(ctor_sort))
+                            egraph
+                                .cnfenv
+                                .context
+                                .app(ctor_id, selector_apps, Some(ctor_sort))
                         };
                         let eq = egraph.cnfenv.context.eq(inner_term, ctor_app);
 
@@ -570,7 +569,7 @@ fn leastcommonancestor_helper(
 
     debug_println!(
         11,
-        (indent + 1) as usize,
+        indent + 1,
         "We get the unprocessed proof {:?}",
         proof
     );
@@ -842,15 +841,15 @@ pub fn union(
                 proof_parent_original
             );
             // if level != 0 {
-                egraph.from_quantifier_backtrack_set.insert(
-                    x,
-                    (
-                        proof_parent_original,
-                        y_root_parent.clone(),
-                        proof_parent.clone(), // proof_parent_original
-                        y_root,
-                    ),
-                );
+            egraph.from_quantifier_backtrack_set.insert(
+                x,
+                (
+                    proof_parent_original,
+                    y_root_parent.clone(),
+                    proof_parent.clone(), // proof_parent_original
+                    y_root,
+                ),
+            );
             // }
             // this gets give to proof forest_patrack with inputs (proof_parent, y_root, y_root_parent, egraph)
         }
@@ -1432,15 +1431,13 @@ fn union_process_assignment(
     from_quantifier: bool,
 ) -> Option<Vec<Vec<i32>>> {
     debug_println!(6, 0, "before4");
-    let new_assignment = egraph.cnfenv.context.eq(egraph.get_term(x), egraph.get_term(y));
+    let new_assignment = egraph
+        .cnfenv
+        .context
+        .eq(egraph.get_term(x), egraph.get_term(y));
     // if there is a new assignment, we need to check if the equality term exists, if it does we need to work on that
     // otherwise we can just consider the union of these two terms
-    if let Some(new_assignment_lit) = egraph
-        .cnfenv
-        .cache
-        .var_map
-        .get(&new_assignment.uid())
-    {
+    if let Some(new_assignment_lit) = egraph.cnfenv.cache.var_map.get(&new_assignment.uid()) {
         // note we don't want reason to be the above thing because the explanation is still the same as teh explanation before
         let reason = proof_parent;
         debug_println!(

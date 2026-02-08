@@ -10,10 +10,10 @@ use yaspar_ir::traits::Repr;
 pub trait SundanceCNFConversion<Env> {
     /// Convert to CNF using Tseitin transformation (bidirectional encoding)
     fn sundance_cnf_tseitin(&self, env: Env) -> Formula;
-    
+
     /// Convert to Negative Normal Form (NNF)
     fn sundance_nnf(&self, env: Env) -> Self;
-    
+
     /// Convert to CNF using Plaisted-Greenbaum transformation
     fn sundance_cnf(&self, env: Env) -> Formula;
 }
@@ -65,7 +65,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
     fn sundance_nnf_impl(&self, env: &mut SundanceCNFEnv, polarity: bool) -> Self {
         // Index in the cache array
         let idx = if polarity { 1 } else { 0 };
-        
+
         // Cache lookup; return early if cache is hit
         if let Some(r) = &env
             .cache
@@ -175,7 +175,10 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
             }
             ATerm::Implies(ts, b) => {
                 // notice `(=> a1 a2 ... an b)` is `(or (not a1) ... (not an) b)`
-                let mut nts: Vec<_> = ts.iter().map(|t| t.sundance_nnf_impl(env, !polarity)).collect();
+                let mut nts: Vec<_> = ts
+                    .iter()
+                    .map(|t| t.sundance_nnf_impl(env, !polarity))
+                    .collect();
                 let nb = b.sundance_nnf_impl(env, polarity);
                 nts.push(nb);
                 if polarity {
@@ -207,7 +210,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 }
             }
         };
-        
+
         // Cache the result
         env.cache.nnf_cache.get_mut(&self.uid()).unwrap()[idx] = Some(r.clone());
         if polarity {
@@ -241,7 +244,10 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 // 1 => ts[0].sundance_cnf_nnf(env, formula),
                 _ => {
                     let nv = env.new_var();
-                    let vs: Vec<_> = ts.iter().map(|t| t.sundance_cnf_nnf(env, formula)).collect();
+                    let vs: Vec<_> = ts
+                        .iter()
+                        .map(|t| t.sundance_cnf_nnf(env, formula))
+                        .collect();
                     for v in vs {
                         formula.add(Clause::new(vec![v, -nv]))
                     }
@@ -253,7 +259,10 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 // 1 => ts[0].sundance_cnf_nnf(env, formula),
                 _ => {
                     let nv = env.new_var();
-                    let mut vs: Vec<_> = ts.iter().map(|t| t.sundance_cnf_nnf(env, formula)).collect();
+                    let mut vs: Vec<_> = ts
+                        .iter()
+                        .map(|t| t.sundance_cnf_nnf(env, formula))
+                        .collect();
                     vs.push(-nv);
                     formula.add(Clause::new(vs));
                     nv
@@ -262,7 +271,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
             ATerm::Not(t) => -t.sundance_cnf_nnf(env, formula),
             _ => env.new_var(),
         };
-        
+
         env.cache.var_map.insert(self.uid(), v);
         env.cache.var_map_reverse.insert(v, self.uid());
         v
@@ -287,11 +296,17 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 }
             }
             ATerm::And(ts) => match ts.len() {
-                0 => env.context.get_true().sundance_cnf_nnf_tseitin(env, formula),
+                0 => env
+                    .context
+                    .get_true()
+                    .sundance_cnf_nnf_tseitin(env, formula),
                 // 1 => ts[0].sundance_cnf_nnf_tseitin(env, formula),
                 _ => {
                     let nv = env.new_var();
-                    let vs: Vec<_> = ts.iter().map(|t| t.sundance_cnf_nnf_tseitin(env, formula)).collect();
+                    let vs: Vec<_> = ts
+                        .iter()
+                        .map(|t| t.sundance_cnf_nnf_tseitin(env, formula))
+                        .collect();
                     // Forward direction: x -> (a1 ∧ a2 ∧ ... ∧ an)
                     for v in vs.clone() {
                         formula.add(Clause::new(vec![v, -nv]))
@@ -304,11 +319,17 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 }
             },
             ATerm::Or(ts) => match ts.len() {
-                0 => env.context.get_false().sundance_cnf_nnf_tseitin(env, formula),
+                0 => env
+                    .context
+                    .get_false()
+                    .sundance_cnf_nnf_tseitin(env, formula),
                 // 1 => ts[0].sundance_cnf_nnf_tseitin(env, formula),
                 _ => {
                     let nv = env.new_var();
-                    let vs: Vec<_> = ts.iter().map(|t| t.sundance_cnf_nnf_tseitin(env, formula)).collect();
+                    let vs: Vec<_> = ts
+                        .iter()
+                        .map(|t| t.sundance_cnf_nnf_tseitin(env, formula))
+                        .collect();
                     // Forward direction: x -> (a1 ∨ a2 ∨ ... ∨ an)
                     let mut forward_clause = vs.clone();
                     forward_clause.push(-nv);
@@ -323,7 +344,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
             ATerm::Not(t) => -t.sundance_cnf_nnf_tseitin(env, formula),
             _ => env.new_var(),
         };
-        
+
         env.cache.var_map.insert(self.uid(), v);
         env.cache.var_map_reverse.insert(v, self.uid());
         v
@@ -434,7 +455,7 @@ mod tests {
             context: context,
             cache: cache,
         };
-        
+
         // Test: Simple conjunction (a ∧ b)
         let a = env.context.simple_symbol("a");
         let b = env.context.simple_symbol("b");
@@ -444,7 +465,7 @@ mod tests {
 
         // Should have exactly 4 clauses for Tseitin transformation of (a ∧ b)
         assert_eq!(formula.0.len(), 4);
-        
+
         // Verify variables exist in cache
         assert!(env.cache.var_map.contains_key(&a.uid()));
         assert!(env.cache.var_map.contains_key(&b.uid()));

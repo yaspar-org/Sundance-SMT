@@ -3,7 +3,6 @@ use std::{cmp::Ordering, fmt};
 
 use yaspar_ir::ast::Term;
 
-
 /// Keeps track of disequalities used between multiple terms
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DisequalTerm {
@@ -23,7 +22,6 @@ impl fmt::Display for DisequalTerm {
         )
     }
 }
-
 
 /// Represents a predecessor of a term
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -64,7 +62,7 @@ pub enum Assertion {
     Distinct {
         terms: Vec<u64>,
         level: usize,
-        hash: u64
+        hash: u64,
     },
     // ConstructorEquality {
     //     ctor_name: String,
@@ -83,7 +81,7 @@ pub enum Assertion {
     //     terms2: Vec<Term>,
     //     equality: Term,
     //     level: usize
-    // }, 
+    // },
     Tester {
         ctor_name: String,
         inner_term: Term,
@@ -93,14 +91,17 @@ pub enum Assertion {
     Other,
 }
 
-
 /// Represents a Datatype Type
 pub enum ConstructorType {
     Uninitialized,
     // NonDatatype,
-    Constructor {name: String, tester_term: Term, level: usize, hash: u64,}
+    Constructor {
+        name: String,
+        tester_term: Term,
+        level: usize,
+        hash: u64,
+    },
 }
-
 
 // TODO: the Level here is probalby not needed
 // since we are not adding fixed literals anywhere
@@ -119,13 +120,13 @@ pub struct Quantifier {
     pub id: u64,
     pub guard: Option<u64>, // term that is required in order to instantiate the quantifier
     pub polarity: Polarity, // keep track of whether it is a universal or existential quantifier
-    pub skolemized: bool, // keeps track if the quantifier has been skolemized yet
+    pub skolemized: bool,   // keeps track if the quantifier has been skolemized yet
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Polarity {
     Universal,
-    Existential
+    Existential,
 }
 
 /// An enum representing different states of a term

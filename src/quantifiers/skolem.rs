@@ -1,9 +1,9 @@
 //! Skolemization of existential quantifiers
 
 use std::collections::HashMap;
+use yaspar_ir::ast::ATerm::{Annotated, Exists, Forall};
 use yaspar_ir::ast::alg::QualifiedIdentifier;
 use yaspar_ir::ast::subst::{Substitute, Substitution};
-use yaspar_ir::ast::ATerm::{Annotated, Exists, Forall};
 use yaspar_ir::ast::{Context, FreshVar, Repr, Sort, Str, Term, TermAllocator};
 
 /// skolemize quantified terms with a given polarity

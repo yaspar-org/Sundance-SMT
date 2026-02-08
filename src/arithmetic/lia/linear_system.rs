@@ -400,15 +400,10 @@ impl<T> Rel<T> {
 
     /// Negate the relation, e.g. turn x > 0 into x <= 0
     pub fn negate(self) -> Option<Self> {
-        match self.constraint_type.negate() {
-            Some(negated_constraint) => {
-                  Some(Self {
-                    constraint_type: negated_constraint,
-                    ..self
-                })
-            },
-            None => None
-        }
+        self.constraint_type.negate().map(|negated_constraint| Self {
+                constraint_type: negated_constraint,
+                ..self
+            })
     }
 }
 
