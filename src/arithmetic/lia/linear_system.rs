@@ -7,13 +7,13 @@
 
 use dashu::base::{Abs, Gcd};
 use dashu::{Integer, Rational};
-use std::hash::{Hash, Hasher};
 // Note: num_traits feature in dashu must be enabled for the Integer/Rational impl of Zero to be
 // in scope.
 use num_traits::Zero;
 use std::collections::{HashMap, HashSet};
 use std::error;
 use std::fmt::{self, Debug};
+use std::hash::{Hash, Hasher};
 use std::ops;
 
 use crate::arithmetic::lia::bounds::Bounds;
@@ -31,7 +31,7 @@ pub struct LinearSystemError(String);
 type LinearSystemResult<T> = Result<T, LinearSystemError>;
 
 impl fmt::Display for LinearSystemError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "FrontendError: {}", self.0)
     }
 }
@@ -155,7 +155,7 @@ impl<T> Addend<T> {
     /// TODO: return an interator over terms?
     pub fn separate_addends(addends: &[Addend<T>]) -> (Vec<Mon<T>>, T)
     where
-        T: Clone + num_traits::Zero + for<'a> ops::Add<&'a T, Output = T>,
+        T: Clone + Zero + for<'a> ops::Add<&'a T, Output = T>,
     {
         let mut terms = Vec::new();
         let mut constant_sum = T::zero();
@@ -346,7 +346,7 @@ impl<T> Rel<T> {
     where
         // TODO: a lot of this is over-generalization given that we only care about Rational through the front end
         T: Clone
-            + num_traits::Zero
+            + Zero
             + for<'a> ops::Add<&'a T, Output = T>
             + ops::Neg<Output = T>
             + ops::Sub<Output = T>,
@@ -400,7 +400,9 @@ impl<T> Rel<T> {
 
     /// Negate the relation, e.g. turn x > 0 into x <= 0
     pub fn negate(self) -> Option<Self> {
-        self.constraint_type.negate().map(|negated_constraint| Self {
+        self.constraint_type
+            .negate()
+            .map(|negated_constraint| Self {
                 constraint_type: negated_constraint,
                 ..self
             })
@@ -737,7 +739,7 @@ mod tests {
         lra_solver::LRASolver,
         solver_result::SolverDecision,
         tableau_dense::TableauDense,
-        types::{Rational, rbig},
+        types::{rbig, Rational},
         variables::{Var, VarType},
     };
 
@@ -834,13 +836,13 @@ mod tests {
         assert!(rel.terms[0].coeff_neg());
         assert!(rel.terms[1].coeff_pos());
         assert!(rel.constant > Rational::ZERO);
-        assert!(rel.constraint_type == Constraint::Le);
+        assert_eq!(rel.constraint_type, Constraint::Le);
 
         rel.make_initial_term_positive(); // re-written to: -1 <= 5 x_0 - 3 x_1
         assert!(rel.terms[0].coeff_pos());
         assert!(rel.terms[1].coeff_neg());
         assert!(rel.constant < Rational::ZERO);
-        assert!(rel.constraint_type == Constraint::Ge);
+        assert_eq!(rel.constraint_type, Constraint::Ge);
 
         let expected_rel: Rel<Rational> = Rel::mk_ge(
             vec![Mon::new(5, Var::real(0)), Mon::new(-3, Var::real(1))],
@@ -1124,7 +1126,7 @@ mod tests {
         let level = solver.set_backtrack();
         assert_eq!(
             solver
-                .assert_upper(&x, &(1 as i32).into())
+                .assert_upper(&x, &1i32.into())
                 .expect("bound assertion failed"),
             Some(true)
         );
@@ -1141,7 +1143,7 @@ mod tests {
         solver.backtrack(level);
         assert_eq!(
             solver
-                .assert_upper(&x, &(-1 as i32).into())
+                .assert_upper(&x, &(-1i32).into())
                 .expect("bound assertion failed"),
             None
         );

@@ -12,6 +12,9 @@ use std::rc::Rc;
 use yaspar_ir::ast::{FunctionMeta, Sig, SortDef, Str};
 
 /// Main CDCL decision loop
+///
+/// todo: reduce the number of arguments
+#[allow(clippy::too_many_arguments)]
 pub fn cdcl_decision_procedure(
     egraph: &mut Egraph,
     clauses: Vec<Vec<i32>>,
@@ -76,7 +79,7 @@ pub fn cdcl_decision_procedure(
 
     debug_println!(2, 1, "All clauses added, starting solver");
 
-    let result = Some(solve(&mut solver));
+    let result = solve(&mut solver);
 
     // Disconnect the proof tracer before dropping the propagator
     solver.disconnect_proof_tracer1();
@@ -87,7 +90,7 @@ pub fn cdcl_decision_procedure(
 
     // Write proof to file if requested
     if let Some(p) = proof_file
-        && let cadical_sys::Status::UNSATISFIABLE = result.unwrap()
+        && result == Status::UNSATISFIABLE
     {
         if let Err(e) = std::fs::write(&p, edrat_proof) {
             debug_println!(
@@ -101,9 +104,9 @@ pub fn cdcl_decision_procedure(
             debug_println!(2, 0, "eDRAT proof written to: {}", p.display());
         }
     }
-    result.unwrap()
+    result
 }
 
-fn solve<'a>(solver: &mut CaDiCal) -> Status {
+fn solve(solver: &mut CaDiCal) -> Status {
     solver.solve()
 }

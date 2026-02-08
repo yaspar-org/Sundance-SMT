@@ -33,6 +33,12 @@ impl DatatypeInfo {
     }
 }
 
+impl Default for DatatypeInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Extract all datatype-related information from the given context.
 ///
 /// This function analyzes the context and collects:

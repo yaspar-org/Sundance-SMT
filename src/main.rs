@@ -1,4 +1,4 @@
-use sundance_smt::cnf::{SundanceCNFCache, SundanceCNFConversion, SundanceCNFEnv};
+use sundance_smt::cnf::{CNFCache, CNFConversion, SundanceCNFEnv};
 
 use cadical_sys::Status;
 use clap::Parser;
@@ -73,7 +73,7 @@ fn main() -> Result<(), String> {
     assertions.push(not_false_term);
 
     // Create Sundance CNF cache to replace yaspar-ir's cache
-    let sundance_cnf_cache = SundanceCNFCache::new();
+    let sundance_cnf_cache = CNFCache::new();
 
     // Convert to NNF (Negation Normal Form) using Sundance implementation
     let sundance_env = SundanceCNFEnv {
@@ -102,7 +102,7 @@ fn main() -> Result<(), String> {
 
         let skolemized_term = let_elim_term;
 
-        let nnf_term = skolemized_term.sundance_nnf(&mut egraph.cnfenv);
+        let nnf_term = skolemized_term.nnf(&mut egraph.cnfenv);
         debug_println!(
             12,
             0,
@@ -120,7 +120,7 @@ fn main() -> Result<(), String> {
         // Convert to CNF (Conjunctive Normal Form) using Sundance implementation
         // using tseitin transformation because if we have (and true b), we
         // want (and true b) <-> true \land b, not just the forwards direction
-        let cnf_formula = nnf_term.sundance_cnf_tseitin(&mut egraph.cnfenv);
+        let cnf_formula = nnf_term.cnf_tseitin(&mut egraph.cnfenv);
 
         debug_println!(4, 0, "We have the cnf formula {}", cnf_formula);
 

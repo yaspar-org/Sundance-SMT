@@ -3,9 +3,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::cnf::SundanceCNFConversion as _;
-// use crate::egraphs::congruence_closure::activate_bits;
-use crate::egraphs::datastructures::Polarity::*;
+use crate::cnf::CNFConversion as _;
+use crate::egraphs::datastructures::Polarity;
 use crate::egraphs::egraph::Egraph;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::proof_tracer::SMTProofTracker;
@@ -15,9 +14,7 @@ use yaspar_ir::ast::ATerm::{
     And, Annotated, App, Constant, Distinct, Eq, Exists, Forall, Global, Implies, Ite, Let, Local,
     Matching, Not, Or,
 };
-use yaspar_ir::ast::{
-    Attribute, FetchSort, HasArena, LetElim, Repr, Term, TermAllocator,
-};
+use yaspar_ir::ast::{Attribute, FetchSort, HasArena, LetElim, Repr, Term, TermAllocator};
 
 #[derive(Debug, Clone)]
 pub enum QuantifierInstance {
@@ -72,7 +69,7 @@ pub fn instantiate_quantifiers(
         // if an even number of these is true -> XOR false -> instantiate
         let quantifier_polarity = (quantifier_assignment > 0)
             ^ (quantifier_literal > 0)
-            ^ (quantifier.polarity == Existential);
+            ^ (quantifier.polarity == Polarity::Existential);
 
         // if the quantifier in a negative polarity or we doin g ddsmt optimizations, and we haven't skolemized it yet, then we skolemize it
         // todo: replace egraph.added_skolemizations. with the skolemized flag in the quantifier
@@ -93,11 +90,7 @@ pub fn instantiate_quantifiers(
             // let negated_term =
             //     if let Universal = quantifier.polarity {egraph.cnfenv.context.not(term)} else {term};
 
-            let polarity = if let Universal = quantifier.polarity {
-                false
-            } else {
-                true
-            };
+            let polarity = quantifier.polarity == Polarity::Universal;
 
             // todo: replace this with the skolemized flag in the quantifier
             if egraph.added_skolemizations.contains(&quantifier.id) {
@@ -112,7 +105,7 @@ pub fn instantiate_quantifiers(
             let skolemized_quantifier: Term =
                 skolemized_quantifier.let_elim(&mut egraph.cnfenv.context);
             // let (skolemized_quantifier, _) = skolemize(&skolemized_quantifier, egraph.cnfenv.context, &mut egraph.skolem_counter);
-            let skolemized_quantifier = skolemized_quantifier.sundance_nnf(&mut egraph.cnfenv);
+            let skolemized_quantifier = skolemized_quantifier.nnf(&mut egraph.cnfenv);
             let additional_constraints =
                 check_for_function_bool(&skolemized_quantifier, egraph, true);
             debug_println!(19, 0, "we are skolemizing {}", term);
@@ -127,12 +120,12 @@ pub fn instantiate_quantifiers(
 
             // note that from_quantifier is true here
             egraph.insert_predecessor(&skolemized_quantifier, None, None, true, None);
-            let clauses = skolemized_quantifier.sundance_cnf_tseitin(&mut egraph.cnfenv);
+            let clauses = skolemized_quantifier.cnf_tseitin(&mut egraph.cnfenv);
 
             // learning (not \forall P(x)) => P(c)
             // equivalent to \forall P(x) \/ P(c)
             // if it comes from existential, it becomes (not \exists P(x)) \/ P(c)
-            let quantifier_literal = if let Universal = quantifier.polarity {
+            let quantifier_literal = if quantifier.polarity == Polarity::Universal {
                 quantifier_literal
             } else {
                 -quantifier_literal
@@ -264,7 +257,7 @@ pub fn instantiate_quantifiers(
                 // if this came from a negated existential, we have to negate the term
 
                 // println!("original_t: {}", t);
-                let t = if let Existential = quantifier.polarity {
+                let t = if quantifier.polarity == Polarity::Existential {
                     egraph.cnfenv.context.not(t)
                 } else {
                     t
@@ -293,7 +286,7 @@ pub fn instantiate_quantifiers(
                     activation_depth
                 );
 
-                let nnf_term = let_elim_term.sundance_nnf(&mut egraph.cnfenv);
+                let nnf_term = let_elim_term.nnf(&mut egraph.cnfenv);
 
                 debug_println!(26, 4, "(assert {})", nnf_term.clone());
                 debug_println!(
@@ -318,7 +311,7 @@ pub fn instantiate_quantifiers(
                 // todo: also might be less efficient as well because we are losing structure from original formula in the egraph
                 egraph.insert_predecessor(&nnf_term, None, None, true, None);
 
-                let cnf_term = nnf_term.sundance_cnf_tseitin(&mut egraph.cnfenv);
+                let cnf_term = nnf_term.cnf_tseitin(&mut egraph.cnfenv);
                 debug_println!(7, 0, "We have the cnf term {:?}", cnf_term);
 
                 let mut clauses: Vec<_> = cnf_term
@@ -329,7 +322,7 @@ pub fn instantiate_quantifiers(
 
                 let quantifier_literal = egraph.get_lit_from_u64(quantifier.id);
 
-                let quantifier_literal = if let Universal = quantifier.polarity {
+                let quantifier_literal = if quantifier.polarity == Polarity::Universal {
                     -quantifier_literal
                 } else {
                     quantifier_literal

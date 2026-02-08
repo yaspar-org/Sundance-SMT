@@ -7,27 +7,33 @@ use yaspar_ir::traits::Repr;
 
 /// Extended CNF conversion trait that provides our own implementations
 /// while being compatible with yaspar-ir's CNFConversion trait
-pub trait SundanceCNFConversion<Env> {
+pub trait CNFConversion<Env> {
     /// Convert to CNF using Tseitin transformation (bidirectional encoding)
-    fn sundance_cnf_tseitin(&self, env: Env) -> Formula;
+    fn cnf_tseitin(&self, env: Env) -> Formula;
 
     /// Convert to Negative Normal Form (NNF)
-    fn sundance_nnf(&self, env: Env) -> Self;
+    fn nnf(&self, env: Env) -> Self;
 
     /// Convert to CNF using Plaisted-Greenbaum transformation
-    fn sundance_cnf(&self, env: Env) -> Formula;
+    fn cnf(&self, env: Env) -> Formula;
 }
 
 /// Cache structure for CNF and NNF transformations
 /// Reuses yaspar-ir's caching structure for compatibility
-pub struct SundanceCNFCache {
+pub struct CNFCache {
     pub var_map: HashMap<u64, i32>,
     pub var_map_reverse: HashMap<i32, u64>,
     pub next_var: i32,
     pub nnf_cache: HashMap<u64, [Option<Term>; 2]>,
 }
 
-impl SundanceCNFCache {
+impl Default for CNFCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CNFCache {
     pub fn new() -> Self {
         Self {
             var_map: HashMap::new(),
@@ -40,7 +46,7 @@ impl SundanceCNFCache {
 
 pub struct SundanceCNFEnv {
     pub context: Context,
-    pub cache: SundanceCNFCache,
+    pub cache: CNFCache,
 }
 
 impl SundanceCNFEnv {
@@ -55,14 +61,14 @@ impl SundanceCNFEnv {
 }
 
 /// Helper trait for internal CNF conversion implementations
-trait SundanceCNFConversionHelper<Env> {
-    fn sundance_nnf_impl(&self, env: Env, polarity: bool) -> Self;
-    fn sundance_cnf_nnf(&self, env: Env, formula: &mut Formula) -> i32;
-    fn sundance_cnf_nnf_tseitin(&self, env: Env, formula: &mut Formula) -> i32;
+trait CNFConversionHelper<Env> {
+    fn nnf_impl(&self, env: Env, polarity: bool) -> Self;
+    fn cnf_nnf(&self, env: Env, formula: &mut Formula) -> i32;
+    fn cnf_nnf_tseitin(&self, env: Env, formula: &mut Formula) -> i32;
 }
 
-impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
-    fn sundance_nnf_impl(&self, env: &mut SundanceCNFEnv, polarity: bool) -> Self {
+impl CNFConversionHelper<&mut SundanceCNFEnv> for Term {
+    fn nnf_impl(&self, env: &mut SundanceCNFEnv, polarity: bool) -> Self {
         // Index in the cache array
         let idx = if polarity { 1 } else { 0 };
 
@@ -77,7 +83,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
         }
 
         let r = match self.repr() {
-            ATerm::Annotated(t, _) => t.sundance_nnf_impl(env, polarity), // omit attributes
+            ATerm::Annotated(t, _) => t.nnf_impl(env, polarity), // omit attributes
             ATerm::Eq(a, b) => {
                 // Check if it's comparing two booleans
                 let bs = env.context.bool_sort();
@@ -99,7 +105,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                     let a_i_b = env.context.or(vec![not_a, b.clone()]);
                     let b_i_a = env.context.or(vec![not_b, a.clone()]);
                     let eqf = env.context.and(vec![a_i_b, b_i_a]);
-                    eqf.sundance_nnf_impl(env, polarity)
+                    eqf.nnf_impl(env, polarity)
                 }
             }
             ATerm::Distinct(ts) => {
@@ -121,9 +127,9 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                             // If there are two terms, then these two must be unequal
                             let eq = env.context.eq(ts[0].clone(), ts[1].clone());
                             let eqf = env.context.not(eq);
-                            eqf.sundance_nnf_impl(env, polarity)
+                            eqf.nnf_impl(env, polarity)
                         }
-                        _ => env.context.get_false().sundance_nnf_impl(env, polarity), // more than two distinct booleans are not possible
+                        _ => env.context.get_false().nnf_impl(env, polarity), // more than two distinct booleans are not possible
                     }
                 }
             }
@@ -136,12 +142,12 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
             }
             ATerm::And(ts) => {
                 match ts.len() {
-                    0 => env.context.get_true().sundance_nnf_impl(env, polarity),
+                    0 => env.context.get_true().nnf_impl(env, polarity),
                     // 1 => ts[0].sundance_nnf_impl(env, polarity),
                     _ => {
                         let nts = ts
                             .iter()
-                            .map(|t| t.sundance_nnf_impl(&mut *env, polarity))
+                            .map(|t| t.nnf_impl(&mut *env, polarity))
                             .collect::<Vec<_>>();
                         if polarity {
                             // env.context.flat_and(nts)
@@ -155,12 +161,12 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
             }
             ATerm::Or(ts) => {
                 match ts.len() {
-                    0 => env.context.get_false().sundance_nnf_impl(env, polarity),
+                    0 => env.context.get_false().nnf_impl(env, polarity),
                     // 1 => ts[0].sundance_nnf_impl(env, polarity),
                     _ => {
                         let nts = ts
                             .iter()
-                            .map(|t| t.sundance_nnf_impl(&mut *env, polarity))
+                            .map(|t| t.nnf_impl(&mut *env, polarity))
                             .collect::<Vec<_>>();
                         if polarity {
                             // env.context.flat_or(nts)
@@ -175,11 +181,8 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
             }
             ATerm::Implies(ts, b) => {
                 // notice `(=> a1 a2 ... an b)` is `(or (not a1) ... (not an) b)`
-                let mut nts: Vec<_> = ts
-                    .iter()
-                    .map(|t| t.sundance_nnf_impl(env, !polarity))
-                    .collect();
-                let nb = b.sundance_nnf_impl(env, polarity);
+                let mut nts: Vec<_> = ts.iter().map(|t| t.nnf_impl(env, !polarity)).collect();
+                let nb = b.nnf_impl(env, polarity);
                 nts.push(nb);
                 if polarity {
                     // env.context.flat_or(nts)
@@ -189,7 +192,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                     env.context.and(nts)
                 }
             }
-            ATerm::Not(t) => t.sundance_nnf_impl(env, !polarity),
+            ATerm::Not(t) => t.nnf_impl(env, !polarity),
             ATerm::Ite(b, t, e) => {
                 // notice `(ite b t e)` is `(or (and b t) (and (not b) e))`
                 let not_b = env.context.not(b.clone());
@@ -199,7 +202,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 let bt = env.context.and(vec![b.clone(), t.clone()]);
                 let not_b_e = env.context.and(vec![not_b, e.clone()]);
                 let eqf = env.context.or(vec![bt, not_b_e]);
-                eqf.sundance_nnf_impl(env, polarity)
+                eqf.nnf_impl(env, polarity)
             }
             _ => {
                 // all other cases are regarded as atoms
@@ -222,7 +225,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
     }
 
     /// Implements Plaisted-Greenbaum (PG) transformation
-    fn sundance_cnf_nnf(&self, env: &mut SundanceCNFEnv, formula: &mut Formula) -> i32 {
+    fn cnf_nnf(&self, env: &mut SundanceCNFEnv, formula: &mut Formula) -> i32 {
         // Cache lookup
         if let Some(i) = env.cache.var_map.get(&self.uid()) {
             return *i;
@@ -240,14 +243,11 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 }
             }
             ATerm::And(ts) => match ts.len() {
-                0 => env.context.get_true().sundance_cnf_nnf(env, formula),
+                0 => env.context.get_true().cnf_nnf(env, formula),
                 // 1 => ts[0].sundance_cnf_nnf(env, formula),
                 _ => {
                     let nv = env.new_var();
-                    let vs: Vec<_> = ts
-                        .iter()
-                        .map(|t| t.sundance_cnf_nnf(env, formula))
-                        .collect();
+                    let vs: Vec<_> = ts.iter().map(|t| t.cnf_nnf(env, formula)).collect();
                     for v in vs {
                         formula.add(Clause::new(vec![v, -nv]))
                     }
@@ -255,20 +255,17 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 }
             },
             ATerm::Or(ts) => match ts.len() {
-                0 => env.context.get_false().sundance_cnf_nnf(env, formula),
+                0 => env.context.get_false().cnf_nnf(env, formula),
                 // 1 => ts[0].sundance_cnf_nnf(env, formula),
                 _ => {
                     let nv = env.new_var();
-                    let mut vs: Vec<_> = ts
-                        .iter()
-                        .map(|t| t.sundance_cnf_nnf(env, formula))
-                        .collect();
+                    let mut vs: Vec<_> = ts.iter().map(|t| t.cnf_nnf(env, formula)).collect();
                     vs.push(-nv);
                     formula.add(Clause::new(vs));
                     nv
                 }
             },
-            ATerm::Not(t) => -t.sundance_cnf_nnf(env, formula),
+            ATerm::Not(t) => -t.cnf_nnf(env, formula),
             _ => env.new_var(),
         };
 
@@ -278,7 +275,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
     }
 
     /// Implements Tseitin transformation (bidirectional encoding)
-    fn sundance_cnf_nnf_tseitin(&self, env: &mut SundanceCNFEnv, formula: &mut Formula) -> i32 {
+    fn cnf_nnf_tseitin(&self, env: &mut SundanceCNFEnv, formula: &mut Formula) -> i32 {
         // Cache lookup
         if let Some(i) = env.cache.var_map.get(&self.uid()) {
             return *i;
@@ -296,17 +293,11 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 }
             }
             ATerm::And(ts) => match ts.len() {
-                0 => env
-                    .context
-                    .get_true()
-                    .sundance_cnf_nnf_tseitin(env, formula),
+                0 => env.context.get_true().cnf_nnf_tseitin(env, formula),
                 // 1 => ts[0].sundance_cnf_nnf_tseitin(env, formula),
                 _ => {
                     let nv = env.new_var();
-                    let vs: Vec<_> = ts
-                        .iter()
-                        .map(|t| t.sundance_cnf_nnf_tseitin(env, formula))
-                        .collect();
+                    let vs: Vec<_> = ts.iter().map(|t| t.cnf_nnf_tseitin(env, formula)).collect();
                     // Forward direction: x -> (a1 ∧ a2 ∧ ... ∧ an)
                     for v in vs.clone() {
                         formula.add(Clause::new(vec![v, -nv]))
@@ -319,17 +310,11 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                 }
             },
             ATerm::Or(ts) => match ts.len() {
-                0 => env
-                    .context
-                    .get_false()
-                    .sundance_cnf_nnf_tseitin(env, formula),
+                0 => env.context.get_false().cnf_nnf_tseitin(env, formula),
                 // 1 => ts[0].sundance_cnf_nnf_tseitin(env, formula),
                 _ => {
                     let nv = env.new_var();
-                    let vs: Vec<_> = ts
-                        .iter()
-                        .map(|t| t.sundance_cnf_nnf_tseitin(env, formula))
-                        .collect();
+                    let vs: Vec<_> = ts.iter().map(|t| t.cnf_nnf_tseitin(env, formula)).collect();
                     // Forward direction: x -> (a1 ∨ a2 ∨ ... ∨ an)
                     let mut forward_clause = vs.clone();
                     forward_clause.push(-nv);
@@ -341,7 +326,7 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
                     nv
                 }
             },
-            ATerm::Not(t) => -t.sundance_cnf_nnf_tseitin(env, formula),
+            ATerm::Not(t) => -t.cnf_nnf_tseitin(env, formula),
             _ => env.new_var(),
         };
 
@@ -351,37 +336,37 @@ impl SundanceCNFConversionHelper<&mut SundanceCNFEnv> for Term {
     }
 }
 
-impl SundanceCNFConversion<&mut SundanceCNFEnv> for Term {
-    fn sundance_cnf(&self, env: &mut SundanceCNFEnv) -> Formula {
-        // CNF conversion using Plaisted-Greenbaum transformation
-        let nnf = self.sundance_nnf(&mut *env);
-        let mut formula = Formula::empty();
-        let v = nnf.sundance_cnf_nnf(env, &mut formula);
-        formula.add(Clause::single(v));
-        formula
-    }
-
-    fn sundance_cnf_tseitin(&self, env: &mut SundanceCNFEnv) -> Formula {
+impl CNFConversion<&mut SundanceCNFEnv> for Term {
+    fn cnf_tseitin(&self, env: &mut SundanceCNFEnv) -> Formula {
         // CNF conversion using Tseitin transformation
-        let nnf = self.sundance_nnf(&mut *env);
+        let nnf = self.nnf(&mut *env);
         let mut formula = Formula::empty();
-        let v = nnf.sundance_cnf_nnf_tseitin(env, &mut formula);
+        let v = nnf.cnf_nnf_tseitin(env, &mut formula);
         formula.add(Clause::single(v));
         formula
     }
 
-    fn sundance_nnf(&self, env: &mut SundanceCNFEnv) -> Self {
-        self.sundance_nnf_impl(env, true)
+    fn nnf(&self, env: &mut SundanceCNFEnv) -> Self {
+        self.nnf_impl(env, true)
+    }
+
+    fn cnf(&self, env: &mut SundanceCNFEnv) -> Formula {
+        // CNF conversion using Plaisted-Greenbaum transformation
+        let nnf = self.nnf(&mut *env);
+        let mut formula = Formula::empty();
+        let v = nnf.cnf_nnf(env, &mut formula);
+        formula.add(Clause::single(v));
+        formula
     }
 }
 
-impl SundanceCNFConversion<&mut SundanceCNFEnv> for Vec<Term> {
-    fn sundance_cnf(&self, env: &mut SundanceCNFEnv) -> Formula {
+impl CNFConversion<&mut SundanceCNFEnv> for Vec<Term> {
+    fn cnf_tseitin(&self, env: &mut SundanceCNFEnv) -> Formula {
         let mut formula = Formula::empty();
-        let nnfs = self.sundance_nnf(&mut *env);
+        let nnfs = self.nnf(&mut *env);
         let lits = nnfs
             .iter()
-            .map(|t| t.sundance_cnf_nnf(env, &mut formula))
+            .map(|t| t.cnf_nnf_tseitin(env, &mut formula))
             .collect::<Vec<_>>();
         for l in lits {
             formula.add(Clause::single(l));
@@ -389,29 +374,29 @@ impl SundanceCNFConversion<&mut SundanceCNFEnv> for Vec<Term> {
         formula
     }
 
-    fn sundance_cnf_tseitin(&self, env: &mut SundanceCNFEnv) -> Formula {
-        let mut formula = Formula::empty();
-        let nnfs = self.sundance_nnf(&mut *env);
-        let lits = nnfs
-            .iter()
-            .map(|t| t.sundance_cnf_nnf_tseitin(env, &mut formula))
-            .collect::<Vec<_>>();
-        for l in lits {
-            formula.add(Clause::single(l));
-        }
-        formula
-    }
-
-    fn sundance_nnf(&self, env: &mut SundanceCNFEnv) -> Self {
+    fn nnf(&self, env: &mut SundanceCNFEnv) -> Self {
         self.iter()
             .flat_map(|t| {
-                let t = t.sundance_nnf(&mut *env);
+                let t = t.nnf(&mut *env);
                 match t.repr() {
                     ATerm::And(ts) => ts.clone(),
                     _ => vec![t],
                 }
             })
             .collect()
+    }
+
+    fn cnf(&self, env: &mut SundanceCNFEnv) -> Formula {
+        let mut formula = Formula::empty();
+        let nnfs = self.nnf(&mut *env);
+        let lits = nnfs
+            .iter()
+            .map(|t| t.cnf_nnf(env, &mut formula))
+            .collect::<Vec<_>>();
+        for l in lits {
+            formula.add(Clause::single(l));
+        }
+        formula
     }
 }
 
@@ -437,31 +422,25 @@ mod tests {
     #[test]
     fn test_sundance_nnf_false() {
         let context = Context::default();
-        let cache = SundanceCNFCache::new();
-        let mut env = SundanceCNFEnv {
-            context: context,
-            cache: cache,
-        };
+        let cache = CNFCache::new();
+        let mut env = SundanceCNFEnv { context, cache };
         let terms = vec![env.context.get_false()];
-        let nnf = terms.sundance_nnf(&mut env);
+        let nnf = terms.nnf(&mut env);
         assert_eq!(nnf, terms);
     }
 
     #[test]
     fn test_sundance_cnf_tseitin_conjunction() {
         let context = Context::default();
-        let cache = SundanceCNFCache::new();
-        let mut env = SundanceCNFEnv {
-            context: context,
-            cache: cache,
-        };
+        let cache = CNFCache::new();
+        let mut env = SundanceCNFEnv { context, cache };
 
         // Test: Simple conjunction (a ∧ b)
         let a = env.context.simple_symbol("a");
         let b = env.context.simple_symbol("b");
         let and_term = env.context.and(vec![a.clone(), b.clone()]);
 
-        let formula = and_term.sundance_cnf_tseitin(&mut env);
+        let formula = and_term.cnf_tseitin(&mut env);
 
         // Should have exactly 4 clauses for Tseitin transformation of (a ∧ b)
         assert_eq!(formula.0.len(), 4);

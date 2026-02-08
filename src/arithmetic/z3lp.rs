@@ -1,8 +1,8 @@
 use crate::egraphs::egraph::Egraph;
 use crate::{
     arithmetic::lp::{
-        ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
-        extract_linear_expression,
+        extract_linear_constraints, extract_linear_expression, ArithResult, Coefficient,
+        FunctionType::*,
     },
     egraphs::proofforest::ProofForestEdge,
     utils::{DeterministicHashMap, DeterministicHashSet},
@@ -10,8 +10,8 @@ use crate::{
 use dashu::integer::IBig;
 use std::collections::HashMap;
 use z3::{
-    Solver,
     ast::{Ast, Bool, Int},
+    Solver,
 };
 
 /// Checks if a conjunction of integer constraints is satisfiable using Z3
@@ -159,11 +159,8 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
             for (var, value) in roots {
                 // todo: I think I can do this just for the roots I saved earlier
                 let model_val = model.eval(&value, true).unwrap();
-                let model_val_i64 = model_val.as_i64().unwrap_or(i64::max_value());
-                model_hashmap
-                    .entry(model_val_i64)
-                    .or_default()
-                    .insert(var);
+                let model_val_i64 = model_val.as_i64().unwrap_or(i64::MAX);
+                model_hashmap.entry(model_val_i64).or_default().insert(var);
             }
             ArithResult::Sat(model_hashmap)
         }

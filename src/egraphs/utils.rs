@@ -30,8 +30,8 @@ pub fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
             if func_indices.is_empty() {
                 (func_id.get().clone(), items.iter().collect())
             } else {
-                assert!(*func_id.get() == "is".to_string());
-                assert!(func_indices.len() == 1);
+                assert_eq!(*func_id.get(), "is".to_string());
+                assert_eq!(func_indices.len(), 1);
                 let r = format!("(is {})", func_indices[0].clone());
                 (r, items.iter().collect())
             }

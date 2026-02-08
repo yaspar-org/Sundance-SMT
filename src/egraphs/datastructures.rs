@@ -34,13 +34,13 @@ pub struct Predecessor {
 
 impl Ord for Predecessor {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.level).cmp(&(other.level))
+        self.level.cmp(&(other.level))
     }
 }
 
 impl PartialOrd for Predecessor {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some((self.level).cmp(&(other.level)))
+        Some(self.level.cmp(&(other.level)))
     }
 }
 
@@ -83,6 +83,7 @@ pub enum Assertion {
     //     level: usize
     // },
     Tester {
+        // todo: change the following to Str
         ctor_name: String,
         inner_term: Term,
         term: Term,
@@ -123,7 +124,7 @@ pub struct Quantifier {
     pub skolemized: bool,   // keeps track if the quantifier has been skolemized yet
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Polarity {
     Universal,
     Existential,

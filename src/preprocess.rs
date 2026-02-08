@@ -5,7 +5,7 @@ use yaspar_ir::ast::alg::{Identifier, Index, QualifiedIdentifier};
 use yaspar_ir::ast::{ATerm::*, Attribute, TermAllocator};
 use yaspar_ir::ast::{FetchSort, HasArena, ObjectAllocatorExt, Repr, StrAllocator, Term};
 
-use crate::cnf::SundanceCNFConversion as _;
+use crate::cnf::CNFConversion as _;
 use crate::egraphs::datastructures::ConstructorType;
 use crate::egraphs::egraph::Egraph;
 use crate::utils::DeterministicHashSet;
@@ -23,10 +23,10 @@ pub fn check_for_function_bool(
 
     if let Ite(..) = term.repr() {
         let ite_axioms = process_ite(term, egraph);
-        let ite_axioms_nnf = ite_axioms.sundance_nnf(&mut egraph.cnfenv);
+        let ite_axioms_nnf = ite_axioms.nnf(&mut egraph.cnfenv);
         egraph.insert_predecessor(&ite_axioms_nnf, None, None, from_quantifier, None);
         let cnf_formula = ite_axioms_nnf
-            .sundance_cnf_tseitin(&mut egraph.cnfenv)
+            .cnf_tseitin(&mut egraph.cnfenv)
             .into_iter()
             .map(|x| x.0);
         vector.extend(cnf_formula);
@@ -37,9 +37,9 @@ pub fn check_for_function_bool(
     if sort == egraph.cnfenv.context.bool_sort() {
         // if a term is a bool, but not part of the cnf, we need to add it
         if !egraph.cnfenv.cache.var_map.contains_key(&term.uid()) {
-            let nnf_term = term.sundance_nnf(&mut egraph.cnfenv);
+            let nnf_term = term.nnf(&mut egraph.cnfenv);
             let cnf_formula = term
-                .sundance_cnf_tseitin(&mut egraph.cnfenv)
+                .cnf_tseitin(&mut egraph.cnfenv)
                 .into_iter()
                 .map(|x| x.0);
 
@@ -119,13 +119,13 @@ pub fn check_for_function_bool(
             // if we have a forall statement equivalent to false, it must be false (just an optimization to help with ddsmt)
             if egraph.ddsmt {
                 let var_binding_strings = var_bindings.iter().map(|x| x.0.get()).collect();
-                let nnf_t = t.sundance_nnf(&mut egraph.cnfenv); // kind've wasteful but necessary to get ddsmt to play nicely (todo: could eventually remove this)
+                let nnf_t = t.nnf(&mut egraph.cnfenv); // kind've wasteful but necessary to get ddsmt to play nicely (todo: could eventually remove this)
                 if !check_if_var_occurs_in_term(&nnf_t, &var_binding_strings, egraph) {
                     let equality = egraph.cnfenv.context.eq(term.clone(), t.clone());
-                    let nnf_term = equality.sundance_nnf(&mut egraph.cnfenv);
+                    let nnf_term = equality.nnf(&mut egraph.cnfenv);
                     egraph.insert_predecessor(&nnf_term, None, None, from_quantifier, None);
                     let cnf_formula = nnf_term
-                        .sundance_cnf_tseitin(&mut egraph.cnfenv)
+                        .cnf_tseitin(&mut egraph.cnfenv)
                         .into_iter()
                         .map(|x| x.into_iter().collect::<Vec<_>>());
                     let sub_formula = check_for_function_bool(&nnf_t, egraph, from_quantifier);
@@ -278,10 +278,10 @@ fn find_datatype_axioms(
         match term.repr() {
             App(f, _, _) | Global(f, _) if *f.id_str().get() == *ctor_name => {
                 debug_println!(12, 0, "TESTER Constructor CASE");
-                let tester_app_nnf = tester_app.sundance_nnf(&mut egraph.cnfenv);
+                let tester_app_nnf = tester_app.nnf(&mut egraph.cnfenv);
                 egraph.insert_predecessor(&tester_app_nnf, None, None, from_quantifier, None);
                 let tester_app_cnf = tester_app_nnf
-                    .sundance_cnf_tseitin(&mut egraph.cnfenv)
+                    .cnf_tseitin(&mut egraph.cnfenv)
                     .into_iter()
                     .map(|x| x.into_iter().collect::<Vec<_>>())
                     .collect::<Vec<_>>();
@@ -305,7 +305,7 @@ fn find_datatype_axioms(
     // Add the tester to CNF processing
     // let tester_cnf = &tester_app.cnf_tseitin(&mut *egraph);
     let tester_cnf = tester_or
-        .sundance_cnf_tseitin(&mut egraph.cnfenv)
+        .cnf_tseitin(&mut egraph.cnfenv)
         .into_iter()
         .map(|x| x.into_iter().collect::<Vec<_>>())
         .collect::<Vec<_>>();
@@ -369,8 +369,7 @@ fn find_datatype_axioms(
                 // include new constraints for subterms
                 let sort = selector_sorts[i].to_string();
                 if egraph.datatype_info.sorts.contains_key(&sort) {
-                    let additional_constraints =
-                        find_datatype_axioms(sel_app, sort, egraph, false);
+                    let additional_constraints = find_datatype_axioms(sel_app, sort, egraph, false);
                     vector.extend(additional_constraints.clone());
                 }
             }
@@ -378,9 +377,9 @@ fn find_datatype_axioms(
             let eq = egraph.cnfenv.context.eq(term.clone(), ctor_app);
             let imp = egraph.cnfenv.context.implies(vec![tester_app], eq);
             debug_println!(25, 10, "(assert {})", imp);
-            let imp_nnf = imp.sundance_nnf(&mut egraph.cnfenv);
+            let imp_nnf = imp.nnf(&mut egraph.cnfenv);
             egraph.insert_predecessor(&imp_nnf, None, None, false, None);
-            let imp_cnf = imp.sundance_cnf_tseitin(&mut egraph.cnfenv);
+            let imp_cnf = imp.cnf_tseitin(&mut egraph.cnfenv);
             let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
             vector.extend(clauses);
         }
@@ -427,9 +426,9 @@ fn find_datatype_axioms(
             let sel_eq = egraph.cnfenv.context.eq(sel_app.clone(), sel_term.clone());
             debug_println!(25, 10, "(assert {})", sel_eq);
             debug_println!(14 - 3, 0, "adding in {}", sel_eq);
-            let sel_eq_nnf = sel_eq.sundance_nnf(&mut egraph.cnfenv);
+            let sel_eq_nnf = sel_eq.nnf(&mut egraph.cnfenv);
             egraph.insert_predecessor(&sel_eq_nnf, None, None, false, None);
-            let sel_eq_cnf = sel_eq.sundance_cnf_tseitin(&mut egraph.cnfenv); // todo: do I need any more preprocessing
+            let sel_eq_cnf = sel_eq.cnf_tseitin(&mut egraph.cnfenv); // todo: do I need any more preprocessing
             //  debug_println!(13, 0, "We have sel_eq {} and sel_eq_cnf {}", sel_eq, sel_eq_cnf);
             // assert!(sel_eq_cnf.0.len() == 1);
             // let sel_eq_clause = sel_eq_cnf.0[0].0.clone();
@@ -514,7 +513,9 @@ fn check_if_var_occurs_in_term(
                     }
                 }
             }
-            items.iter().any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
+            items
+                .iter()
+                .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
         }
         Or(items) => {
             // for And and Or, if they contain a false or true respectively, not that we don't have to consider it
@@ -526,9 +527,13 @@ fn check_if_var_occurs_in_term(
                     }
                 }
             }
-            items.iter().any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
+            items
+                .iter()
+                .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
         }
-        App(_, items, _) | Distinct(items) => items.iter().any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph)),
+        App(_, items, _) | Distinct(items) => items
+            .iter()
+            .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph)),
         Annotated(t, _) | Not(t) => check_if_var_occurs_in_term(t, var_bindings, egraph),
         Eq(t1, t2) => {
             check_if_var_occurs_in_term(t1, var_bindings, egraph)
@@ -564,7 +569,6 @@ pub fn process_ite(term: &Term, egraph: &mut Egraph) -> Term {
         let not_b = egraph.cnfenv.context.not(b.clone());
         let imp2 = egraph.cnfenv.context.implies(vec![not_b], eq2);
 
-        
         egraph.cnfenv.context.and(vec![imp1, imp2])
     } else {
         panic!("Not an ite!")

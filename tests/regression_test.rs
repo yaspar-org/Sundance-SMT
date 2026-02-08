@@ -11,7 +11,7 @@ fn regression_test() {
     let smt_files_dir = Path::new("tests/regression/smt_files");
     let expected_results_path = Path::new("tests/regression/expected_results.json");
 
-    writeln!(io::stdout(), "Building release version...").unwrap();
+    println!("Building release version...");
     let build_result = Command::new("cargo")
         .args(["build", "--release"])
         .output()
@@ -23,7 +23,7 @@ fn regression_test() {
             String::from_utf8_lossy(&build_result.stderr)
         );
     }
-    writeln!(io::stdout(), "Release build completed successfully.").unwrap();
+    println!("Release build completed successfully.");
 
     // Read expected results
     let expected_results: serde_json::Value = serde_json::from_str(
@@ -65,7 +65,7 @@ fn regression_test() {
     // Process each subdirectory
     for subdir in subdirs {
         // continue;
-        writeln!(io::stdout(), "\nProcessing directory: {}", subdir.display()).unwrap();
+        println!("\nProcessing directory: {}", subdir.display());
 
         // Get all .smt2 files in the subdirectory
         let smt_files = fs::read_dir(&subdir)
@@ -90,13 +90,13 @@ fn regression_test() {
                 .to_str()
                 .expect("Failed to convert path to string");
 
-            write!(io::stdout(), "Testing file: {} ... ", relative_path).unwrap();
+            print!("Testing file: {} ... ", relative_path);
             io::stdout().flush().unwrap();
 
             // Get expected result
             let expected = expected_results[relative_path]
                 .as_str()
-                .expect(&format!("No expected result found for {}", relative_path));
+                .unwrap_or_else(|| panic!("No expected result found for {}", relative_path));
 
             // Run solver with timeout
             let child = Command::new("target/release/sundance_smt")
@@ -107,26 +107,20 @@ fn regression_test() {
                 .expect("Failed to execute solver");
 
             // Wait for the process with timeout
-            let _ = match wait_with_timeout(child, Duration::from_secs(10)) {
+            match wait_with_timeout(child, Duration::from_secs(10)) {
                 Ok(output) => {
                     let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
                     if actual == expected {
                         correct += 1;
-                        writeln!(io::stdout(), "\x1b[32m✓\x1b[0m").unwrap();
+                        println!("\x1b[32m✓\x1b[0m");
                     } else {
                         incorrect += 1;
-                        writeln!(
-                            io::stdout(),
-                            "\x1b[31m✗ (expected {}, got {})\x1b[0m",
-                            expected,
-                            actual
-                        )
-                        .unwrap();
+                        println!("\x1b[31m✗ (expected {}, got {})\x1b[0m", expected, actual);
                     }
                 }
                 Err(mut child) => {
                     timeout += 1;
-                    writeln!(io::stdout(), "\x1b[33m⏱ (timeout)\x1b[0m").unwrap();
+                    println!("\x1b[33m⏱ (timeout)\x1b[0m");
                     // Kill the process if it's still running
                     let _ = child.kill();
                 }
@@ -135,11 +129,11 @@ fn regression_test() {
     }
 
     // Print summary
-    writeln!(io::stdout(), "\nTest Summary:").unwrap();
-    writeln!(io::stdout(), "Total tests: {}", total).unwrap();
-    writeln!(io::stdout(), "Correct:     {}", correct).unwrap();
-    writeln!(io::stdout(), "Incorrect:   {}", incorrect).unwrap();
-    writeln!(io::stdout(), "Timeout:     {}", timeout).unwrap();
+    println!("\nTest Summary:");
+    println!("Total tests: {}", total);
+    println!("Correct:     {}", correct);
+    println!("Incorrect:   {}", incorrect);
+    println!("Timeout:     {}", timeout);
 
     // Fail the test if there were any incorrect results
     if incorrect > 0 {

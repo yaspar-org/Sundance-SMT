@@ -1,11 +1,11 @@
 //! Classic congruence closure algorithm
 
-use crate::cnf::SundanceCNFConversion as _;
+use crate::cnf::CNFConversion as _;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::preprocess::check_for_function_bool;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
-use yaspar_ir::ast::alg::QualifiedIdentifier;
-use yaspar_ir::ast::{FetchSort, Index, Repr, StrAllocator, Term, TermAllocator};
+use crate::utils::{fmt_termlist, DeterministicHashMap, DeterministicHashSet};
+use yaspar_ir::ast::alg::{CheckIdentifier, QualifiedIdentifier};
+use yaspar_ir::ast::{FetchSort, IdentifierKind, Repr, StrAllocator, Term, TermAllocator};
 
 use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
 use crate::egraphs::egraph::Egraph;
@@ -139,7 +139,7 @@ pub fn process_assignment(
                             egraph.cnfenv.context.or(vec![not_tester_term, not_term]);
                         egraph.insert_predecessor(&or_not_tester_not_term, None, None, false, None);
                         let tester_cnf = or_not_tester_not_term
-                            .sundance_cnf_tseitin(&mut egraph.cnfenv)
+                            .cnf_tseitin(&mut egraph.cnfenv)
                             .into_iter()
                             .map(|x| x.into_iter().collect::<Vec<_>>())
                             .collect();
@@ -212,16 +212,16 @@ pub fn process_assignment(
                         // }
                         // Some(additional_constraints)
 
-                        let eq_nnf = eq.sundance_nnf(&mut egraph.cnfenv);
+                        let eq_nnf = eq.nnf(&mut egraph.cnfenv);
                         debug_println!(14 - 3, 0, "adding in {}", eq_nnf);
                         egraph.insert_predecessor(&eq_nnf, None, None, true, None);
 
                         let mut additional_constraints =
                             check_for_function_bool(&eq_nnf, egraph, false);
-                        let eq_cnf = eq_nnf.sundance_cnf_tseitin(&mut egraph.cnfenv); // todo: do I need any more preprocessing
-                        assert!(eq_cnf.0.len() == 1);
+                        let eq_cnf = eq_nnf.cnf_tseitin(&mut egraph.cnfenv); // todo: do I need any more preprocessing
+                        assert_eq!(eq_cnf.0.len(), 1);
                         let eq_clause = eq_cnf.0[0].0.clone();
-                        assert!(eq_clause.len() == 1);
+                        assert_eq!(eq_clause.len(), 1);
                         let eq_lit = eq_clause[0];
                         debug_println!(25, 10, "(assert (=> {} {}))", term, eq);
 
@@ -380,12 +380,12 @@ pub fn process_assignment(
         debug_println!(7, 0, "{}", egraph);
 
         // Return negated model as the contradiction explanation
-        if let Some(mut constraints) = additional_constraints {
+        return if let Some(mut constraints) = additional_constraints {
             constraints.push(negated_model_terms);
-            return Some(constraints);
+            Some(constraints)
         } else {
-            return Some(vec![negated_model_terms]);
-        }
+            Some(vec![negated_model_terms])
+        };
     }
 
     debug_println!(
@@ -408,17 +408,17 @@ pub fn find_if_eq_diseq<'a>(
     let hash = if !fixed { egraph.predecessor_hash } else { 0 };
     match term.repr() {
         // todo: support both kinds of testers when we update Yaspar info
-        App(f, t, _) if *f.id_str().get() == "is".to_string() && f.0.indices.len() == 1 && sign => {
-            let ctor = f.0.indices[0].clone();
-            assert!(match ctor {
-                Index::Symbol(_) => true,
-                _ => false,
-            });
-            let ctor_name = ctor.to_string();
-            assert!(t.len() == 1);
+        App(f, t, _) if matches!(f.get_kind(), Some(IdentifierKind::Is(_))) && sign => {
+            assert_eq!(t.len(), 1);
+            // we have to do the following because if let guard is experimental, c.f. https://github.com/rust-lang/rust/issues/51114
+            let ctor_name = if let Some(IdentifierKind::Is(sym)) = f.get_kind() {
+                sym.clone()
+            } else {
+                panic!("we just tested it!");
+            };
             let inner_term = t[0].clone();
             Assertion::Tester {
-                ctor_name,
+                ctor_name: ctor_name.to_string(),
                 inner_term,
                 term: term.clone(),
             }
@@ -567,12 +567,7 @@ fn leastcommonancestor_helper(
     let mut final_proof = vec![];
     let mut proof_congruences = vec![];
 
-    debug_println!(
-        11,
-        indent + 1,
-        "We get the unprocessed proof {:?}",
-        proof
-    );
+    debug_println!(11, indent + 1, "We get the unprocessed proof {:?}", proof);
     debug_println!(16, indent + 1, "We have the proof:");
     // For each pair in the proof path
     for proof_term in proof {
@@ -603,7 +598,7 @@ fn leastcommonancestor_helper(
             }
             ProofForestEdge::Equality { term, .. } => {
                 if let Some((t1, t2)) = term {
-                    // if the term is None, then it comes from setting a term = annotated term and we do not need it for conflict
+                    // if the term is None, then it comes from setting a term = annotated term, and we do not need it for conflict
                     debug_println!(
                         20,
                         indent + 12,
@@ -746,7 +741,7 @@ pub fn get_child(proof_parent: &ProofForestEdge) -> u64 {
 /// and adding edge x -> y. Good for recovering proof at the end,
 /// but this could double/triple the max tree size at each iteration
 ///
-/// design decision: dont have eager updates for equivalence class and inverting tree
+/// design decision: don't have eager updates for equivalence class and inverting tree
 pub fn union(
     x: u64,
     y: u64,
@@ -776,9 +771,9 @@ pub fn union(
         proof_parent
     );
     debug_println!(11, 0, "{}", egraph);
-    assert!(
-        egraph.get_term(x).get_sort(&mut egraph.cnfenv.context)
-            == egraph.get_term(y).get_sort(&mut egraph.cnfenv.context),
+    assert_eq!(
+        egraph.get_term(x).get_sort(&mut egraph.cnfenv.context),
+        egraph.get_term(y).get_sort(&mut egraph.cnfenv.context),
         "We are comparing terms {} and {}",
         egraph.get_term(x),
         egraph.get_term(y)
@@ -832,11 +827,7 @@ pub fn union(
                 egraph.get_term(y_root)
             );
             assert!(
-                if let ProofForestEdge::Congruence { .. } = proof_parent_original {
-                    true
-                } else {
-                    false
-                },
+                matches!(proof_parent_original, ProofForestEdge::Congruence { .. }),
                 "Expected {} to be a Congruence",
                 proof_parent_original
             );
@@ -890,7 +881,7 @@ pub fn union(
 
             // we can have that we introduce a new equality via eclass option after a quantifier instantiation
             // this equality could be at level 0
-            // but then its possible that there are disequalities that get copied over such that one of the disequalities are at a level higher than 0
+            // but then it's possible that there are disequalities that get copied over such that one of the disequalities are at a level higher than 0
             let (diseq_level, diseq_hash) = if value.level > level {
                 (value.level, value.hash)
             } else {
@@ -1019,7 +1010,7 @@ fn make_root(vertex: u64, proof_parent: ProofForestEdge, egraph: &mut Egraph) {
             hash,
             children,
         } => {
-            assert!(child == vertex);
+            assert_eq!(child, vertex);
             make_root(
                 parent,
                 ProofForestEdge::Congruence {
@@ -1046,7 +1037,7 @@ fn make_root(vertex: u64, proof_parent: ProofForestEdge, egraph: &mut Egraph) {
             children,
             ..
         } => {
-            assert!(child == vertex);
+            assert_eq!(child, vertex);
             make_root(
                 parent,
                 ProofForestEdge::Equality {
@@ -1337,86 +1328,6 @@ fn union_predecessors(
     None
 }
 
-/// Checks if the boolean part of an ITE is merged to true/false
-/// and if so merges the ITE to its first/second branch
-// pub fn union_process_ite(term: &Term, egraph: &mut Egraph, level: usize, from_quantifier: bool) ->  Option<Vec<Vec<i32>>>{
-//     // assert!(egraph.find(egraph.true_term) != egraph.find(egraph.false_term)); -> I think this invariant should not always hold
-//     return None;
-//      debug_println!(6, 0, "We are in union_process_ite with term {}", term);
-//     if egraph.find(egraph.true_term) == egraph.find(egraph.false_term) {
-//         return None;
-//     }
-//     if let Ite(b, t1, t2) = term.repr() {
-//         // need to check if t1 is in terms_list for the case where union is created by `find_and_union_to_eclass`
-//         if egraph.find(b.uid()) == egraph.find(egraph.true_term) && !egraph.terms_list[t1.uid() as usize].is_none() {
-//              debug_println!(
-//                 16,
-//                 0,
-//                 "We are in union_process_ite ite true merge with term {} and term_num {} and t1 {} and true_term {}",
-//                 term,
-//                 term.uid(),
-//                 t1.uid(),
-//                 egraph.true_term
-//             );
-//             let proof_parent = ProofForestEdge::Congruence {
-//                 size: 0,
-//                 pairs: vec![((b.uid(), egraph.true_term))],
-//                 parent: 0,
-//                 child: 0,
-//                 disequalities: DeterministicHashMap::new(),
-//                 level,
-//                 hash: egraph.predecessor_hash,
-//                 children: DeterministicHashSet::new()
-//             };
-//             if let Some(negated_model) =
-//                 union(term.uid(), t1.uid(), egraph, proof_parent, level, false, from_quantifier)
-//             {
-//                  debug_println!(
-//                     11,
-//                     0,
-//                     "O. Contradiction found in union_process_ite, we have the following negated_model: {:?}",
-//                     negated_model
-//                 );
-//                 return Some(negated_model);
-//             }
-//         // need to check if t2 is in terms_list for the case where union is created by `find_and_union_to_eclass`
-//         } else if egraph.find(b.uid()) == egraph.find(egraph.false_term) && !egraph.terms_list[t2.uid() as usize].is_none() {
-//              debug_println!(
-//                 16,
-//                 0,
-//                 "We are in union_process_ite ite false merge with term {} and term.uid {} and t2 {} and false_term {}",
-//                 term,
-//                 term.uid(),
-//                 t2.uid(),
-//                 egraph.false_term
-//             );
-//             // doing this as congruence because if this arises due to a quantifier, we will want to
-//             let proof_parent = ProofForestEdge::Congruence {
-//                 size: 0,
-//                 pairs: vec![(b.uid(), egraph.false_term)],
-//                 parent: 0,
-//                 child: 0,
-//                 disequalities: DeterministicHashMap::new(),
-//                 level,
-//                 hash: egraph.predecessor_hash,
-//                 children: DeterministicHashSet::new()
-//             };
-//             if let Some(negated_model) =
-//                 union(term.uid(), t2.uid(), egraph, proof_parent, level, false, from_quantifier)
-//             {
-//                  debug_println!(
-//                     11,
-//                     0,
-//                     "P. Contradiction found in union_process_ite, we have the following negated_model: {:?}",
-//                     negated_model
-//                 );
-//                 return Some(negated_model);
-//             }
-//         }
-//     };
-//     None
-// }
-
 /// Helper function called by union_predecessors that represents a recursive call
 /// to union
 ///
@@ -1512,7 +1423,7 @@ pub fn proof_forest_backtrack(
     let parent = &get_parent(&equality);
     let parent_edge = egraph.proof_forest[*parent as usize].clone();
 
-    assert!(egraph.find(*child) == egraph.find(*parent));
+    assert_eq!(egraph.find(*child), egraph.find(*parent));
 
     debug_println!(
         16,
@@ -1544,9 +1455,9 @@ pub fn proof_forest_backtrack(
         // and the child is actually the parent
         debug_println!(6, 0, "we are reversing the edge");
         debug_println!(10, 0, "{}", egraph);
-        assert!(get_parent(&parent_edge) == get_child(&equality));
+        assert_eq!(get_parent(&parent_edge), get_child(&equality));
         debug_println!(6, 0, "after first assert");
-        assert!(get_child(&parent_edge) == get_parent(&equality));
+        assert_eq!(get_child(&parent_edge), get_parent(&equality));
         (parent, parent_edge, child, child_edge)
     } else {
         (child, child_edge, parent, parent_edge)

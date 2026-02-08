@@ -235,8 +235,9 @@ fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) 
         return String::new();
     }
 
-    assert!(
-        sigs.len() == 1,
+    assert_eq!(
+        sigs.len(),
+        1,
         "We only support one signature per symbol: {:?}",
         symbol_name
     );
@@ -315,14 +316,6 @@ impl SMTProofTracker {
         }
     }
 
-    /// Add a theory clause to the proof (call this when your theory solver learns a clause)
-    /// The caller must provide a closure to map each literal to (uid, Term)
-    // pub fn add_theory_clause(&mut self, clause: Vec<i32>, _theory_reason: String) {
-    //      debug_println!(11, 0, "theory clause {:?}", clause);
-    //     self.proof_steps
-    //         .push(ProofStepData::TheoryClause { clause });
-    // }
-
     /// Add a skolemization clause to the proof
     /// The caller must provide a closure to map each literal to (uid, Term)
     pub fn add_skolem_clause(&mut self, clause: Vec<i32>, skolem_vars: Option<Vec<(Str, Sort)>>) {
@@ -341,7 +334,7 @@ impl SMTProofTracker {
         let mut temp_output = String::new();
         for &lit in clause {
             debug_println!(12, 2, "Introducing the literal {}", lit);
-            if let Some((lit, id, term, polarity)) = get_lit_info(&mut self.terms_list, lit) {
+            if let Some((lit, id, term, polarity)) = get_lit_info(&self.terms_list, lit) {
                 debug_println!(9, 2, "The lit exists with term {}", term);
                 let lit = lit.abs();
                 let mut context = Context::new();

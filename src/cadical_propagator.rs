@@ -1,6 +1,6 @@
-use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
+use crate::arithmetic::lp::{check_integer_constraints_satisfiable, ArithResult, ArithSolver};
 use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
-use crate::cnf::SundanceCNFConversion as _;
+use crate::cnf::CNFConversion as _;
 use crate::egraphs::congruence_closure::{
     get_child, get_parent, process_assignment, proof_forest_backtrack,
 };
@@ -8,8 +8,8 @@ use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::proof::proof_tracer::SMTProofTracker;
-use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
+use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
@@ -20,7 +20,7 @@ use std::rc::Rc;
 /// Note: we are currently not adding fixed levels to backtracking
 /// We treat fixed literals at level >0 as unfixed and so we trust the SAT solver to just give us new assignments if it backtracks past a certain point
 fn keep_backtracking(
-    proof_forest_stack: &Vec<(usize, ProofForestEdge, u64, ProofForestEdge)>,
+    proof_forest_stack: &[(usize, ProofForestEdge, u64, ProofForestEdge)],
     level: usize,
 ) -> bool {
     if proof_forest_stack.is_empty() {
@@ -506,15 +506,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             (term, first)
                         };
 
-                        if let Some(term) =
-                            nelson_oppen_clause_pair(*pair.0, *pair.1, self.egraph)
+                        if let Some(term) = nelson_oppen_clause_pair(*pair.0, *pair.1, self.egraph)
                         {
                             debug_println!(25, 0, "adding in the nelson oppen term {}", term);
-                            let term_nnf = term.sundance_nnf(&mut self.egraph.cnfenv);
+                            let term_nnf = term.nnf(&mut self.egraph.cnfenv);
                             // println!("we have the term {:?}", term);
                             self.egraph
                                 .insert_predecessor(&term_nnf, None, None, true, None);
-                            let term_cnf = term.sundance_cnf_tseitin(&mut self.egraph.cnfenv);
+                            let term_cnf = term.cnf_tseitin(&mut self.egraph.cnfenv);
                             // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
                             for clause in term_cnf {
                                 for lit in &clause.0 {

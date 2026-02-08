@@ -12,7 +12,7 @@ homepage = "https://github.com/yaspar-org/Sundance-SMT"
 repository = "https://github.com/yaspar-org/Sundance-SMT"
 
 [dependencies]
-yaspar-ir = { version = "2.7", features = ["cnf"], path = "../yaspar-ir" }
+yaspar-ir = { version = "2.7", path = "../yaspar-ir" }
 sat-interface = { version = "0.1", path = "../sat-interface" }
 cadical-sys = { version = "0.7.0" }
 
