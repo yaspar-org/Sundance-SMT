@@ -1,0 +1,7 @@
+(declare-sort P 0)
+(declare-sort T 0)
+(declare-fun h (P T) Bool)
+(declare-const T T)
+;(assert (forall ((x P)) (! true :pattern ((h x T)))))
+(assert (= 0 1))
+(check-sat)

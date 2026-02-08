@@ -1,0 +1,8 @@
+(declare-sort P 0)
+(declare-const t P)
+(declare-fun v (P) P)
+(declare-fun s (P) P)
+(assert (forall ((a P)) (! (= (s t) (v (s a))) :pattern ((s a)))))
+(declare-const x P)
+(assert (or (not (= t (v (s x)))) (not (= (v (v (s x))) t))))
+(check-sat)

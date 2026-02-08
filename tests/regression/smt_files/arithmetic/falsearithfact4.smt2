@@ -1,0 +1,8 @@
+(declare-sort % 0)
+(declare-fun r (Int % Int) Bool)
+;(assert (forall ((v Int) (c %) (m Int)) (! (= (<= v v) (r v c v)) :pattern ((r v c m)))))
+(declare-const c %)
+(declare-const a Int)
+(assert (and (or (not (< 1 2)) (r a c a))))
+(assert (not (r a c a)))
+(check-sat)

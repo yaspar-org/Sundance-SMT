@@ -1,0 +1,6 @@
+(declare-sort P 0)
+(declare-sort c 0)
+(declare-const lc c)
+(declare-const m c)
+(assert (= m (ite false lc lc)))
+(check-sat)

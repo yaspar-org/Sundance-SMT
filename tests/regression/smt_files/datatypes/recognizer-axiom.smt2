@@ -1,0 +1,12 @@
+(declare-sort % 0)
+(declare-sort o 0)
+(declare-datatypes ((l 0)) (((i (li %) (b o)))))
+(declare-const k l)
+(declare-const y %)
+(declare-const z o)
+(assert ((_ is i) k))
+(assert (= (li k) y))
+(assert (= (b k) z))
+(assert (not (= (i y z) k)))
+
+(check-sat)

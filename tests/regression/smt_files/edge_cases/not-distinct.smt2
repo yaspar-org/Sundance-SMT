@@ -1,0 +1,7 @@
+(declare-sort S 0)
+(declare-const x S)
+(declare-const y S)
+(declare-const z S)
+(assert (or (= x y) (= y z) (= x z)))
+(assert (distinct x y z))
+(check-sat)

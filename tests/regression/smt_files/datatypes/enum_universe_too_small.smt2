@@ -1,0 +1,8 @@
+(declare-datatypes ((Enum 0)) (((A) (B))))
+(declare-const e Enum)
+(declare-const f Enum)
+(declare-const g Enum)
+(assert (not (= e f)))
+(assert (not (= e g)))
+(assert (not (= f g)))
+(check-sat)

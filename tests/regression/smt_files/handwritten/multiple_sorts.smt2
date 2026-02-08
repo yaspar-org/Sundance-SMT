@@ -1,0 +1,15 @@
+(set-logic QF_UF)
+(declare-sort T 0)
+(declare-sort S 0)
+(declare-fun x () T)
+(declare-fun y () S)
+(declare-fun z () T)
+(declare-fun w () T)
+(declare-fun f (S) T)
+(declare-fun g (T) S)
+(declare-fun h (T T) T)
+
+
+(assert (= x (f y)))
+(assert (not (= x (f y))))
+(check-sat)

@@ -1,0 +1,22 @@
+(declare-sort %% 0)
+(declare-sort P 0)
+(declare-fun % (P) Int)
+(declare-fun B (P) Bool)
+(declare-sort T 0)
+(declare-fun U () T)
+(declare-fun h (P) Bool)
+(declare-fun %% (%% P) P)
+(declare-fun r (Int Int) Bool)
+(declare-const c %%)
+(declare-const m Int)
+(declare-const a Int)
+(declare-fun %c (%% Int) Int)
+
+(assert (forall ((o Int) (ho %%)) (! (forall ((v P)) (! (or (not (B (%% ho v))) (not (< (% v) m))) :pattern ((%% ho v)))) :pattern ((%c ho o)))))
+
+(assert (exists ((a P)) (! (and (B (%% c a)) (< (% a) m)) :pattern ((%% c a)))))
+(assert (= 100 (%c c a)))
+(assert (r 1 0))
+(assert (or true (exists ((a P)) (! (and (B (%% c a)) (< (% a) m)) :pattern ((%% c a))))))
+
+(check-sat)

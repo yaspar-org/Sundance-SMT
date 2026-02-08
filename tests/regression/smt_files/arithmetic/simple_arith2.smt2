@@ -1,0 +1,6 @@
+(declare-sort i 0)
+;(declare-datatypes ((l 0)) (((t))))
+;(declare-fun l (l) i)
+;(assert (forall ((x l)) (! true :pattern ((l x)))))
+(assert (> 1 1))
+(check-sat)

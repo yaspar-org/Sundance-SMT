@@ -1,0 +1,25 @@
+(set-option :auto_config false)
+(set-option :smt.mbqi false)
+(set-option :smt.case_split 3)
+(set-option :smt.qi.eager_threshold 100.0)
+(set-option :smt.delay_units true)
+(set-option :smt.arith.solver 2)
+(set-option :smt.arith.nl false)
+(set-option :pi.enabled false)
+(set-option :rewriter.sort_disjunctions false)
+(declare-sort P 0)
+(declare-const x Bool)
+(declare-fun B (Bool) P)
+(declare-fun %B (P) Bool)
+(declare-fun h (P) Bool)
+(declare-const a1 P)
+(declare-const r P)
+; for the original query delete the instantiation and comment in the 3 other assertions
+; I don't know why this version is unsat
+;(assert (h a1))
+(assert (not (= (%B r) (%B (B x)))))
+;(assert (forall ((x P)) (! (= x (B (%B x))) :pattern ((h x)))))
+(assert (= a1 (B (%B a1)))) ; instantiation
+(assert (= r (B (%B (B x)))))
+;(assert (= a1 (B true))) ; interestingly sundance gives unsat if this is removed or true becomes
+(check-sat)

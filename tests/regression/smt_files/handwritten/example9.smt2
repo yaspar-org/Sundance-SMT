@@ -1,0 +1,23 @@
+(set-logic QF_UF)
+(declare-sort T 0)
+(declare-fun f (T T) T)
+(declare-const a T)
+(declare-const a1 T)
+(declare-const b1 T)
+(declare-const b2 T)
+(declare-const b3 T)
+(declare-const c1 T)
+(declare-const b T)
+(declare-const c T)
+; these 4 are the explanation we actually find
+(assert (= a b1))
+(assert (= b1 b2))
+(assert (= b2 b3))
+(assert (= b3 c))
+
+; these three represent the shortest explanation
+(assert (= (f a1 a1) a))
+(assert (= (f c1 c1) c))
+(assert (= a1 c1))
+(assert (not (= a c)))
+(check-sat)

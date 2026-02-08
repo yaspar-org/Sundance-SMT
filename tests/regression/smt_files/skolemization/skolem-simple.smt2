@@ -1,0 +1,6 @@
+(declare-sort T 0)
+(declare-fun l (T) Bool)
+(declare-fun m (T) Bool)
+(assert (exists ((s T)) (! (l s) :pattern ((l s)))))
+(assert (exists ((s T)) (! (not (l s)) :pattern ((l s)))))
+(check-sat)

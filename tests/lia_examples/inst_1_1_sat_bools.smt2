@@ -1,0 +1,8 @@
+(set-logic QF_LRA)
+(declare-const a Bool)
+(declare-const b Bool)
+(declare-fun x0 () Real)
+(assert (<= x0 0))
+(assert (! a :named a-bool-lit))
+(assert (not b))
+(check-sat)

@@ -1,0 +1,7 @@
+(declare-sort S1 0)
+(declare-sort S 0)
+(declare-sort S14 0)
+(declare-fun f1 (S1 S) Bool)
+(declare-fun f (S14 S S1 S1 S1) Bool)
+(assert (forall ((x S14) (x1 S) (x10 S1) (x8 S1) (x18 S1)) (! (and false (f1 x8 x1)) :pattern ((f x x1 x10 x8 x18)))))
+(check-sat)

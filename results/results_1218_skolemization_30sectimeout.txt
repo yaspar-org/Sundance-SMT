@@ -1,0 +1,89 @@
+Starting to process folder: /Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/20241211-verus
+Found 3763 files to process in '/Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/20241211-verus'
+Using 8 parallel processes
+------------------------------------------------------------
+[1/3763] verismo/tspec_e__array__array_e.7.smt2 -> UNSAT [7.54s]
+[2/3763] verismo/arch__rmp__def_s.1.smt2 -> UNSAT [7.55s]
+[3/3763] verismo/tspec_e__array__array_e.6.smt2 -> UNKNOWN [7.66s]
+[4/3763] verismo/tspec_e__array__sort.4.smt2 -> UNKNOWN [7.82s]
+[5/3763] verismo/tspec__seqlib__subseq.5.smt2 -> UNKNOWN [8.83s]
+[6/3763] verismo/tspec__range_set.5.smt2 -> UNKNOWN [9.02s]
+[7/3763] verismo/tspec__math__cond_bound.1.smt2 -> UNKNOWN [1.76s]
+[8/3763] verismo/tspec_e__array__sort.8.smt2 -> UNKNOWN [1.91s]
+[9/3763] verismo/tspec__seqlib__subseq.4.smt2 -> UNKNOWN [2.17s]
+[10/3763] verismo/snp__percpu__def_s.2.smt2 -> UNSAT [2.12s]
+[11/3763] verismo/trusted_hacl__hash_s.smt2 -> UNKNOWN [1.37s]
+[12/3763] verismo/arch__entities.2.smt2 -> UNKNOWN [1.64s]
+[13/3763] verismo/tspec__range_set.2.smt2 -> UNKNOWN [1.67s]
+[14/3763] verismo/tspec_e__array__sort.3.smt2 -> UNKNOWN [1.77s]
+[15/3763] verismo/arch__rmp__def_s.6.smt2 -> UNSAT [1.65s]
+[16/3763] verismo/tspec_e__math__minmax.1.smt2 -> UNKNOWN [1.49s]
+[17/3763] verismo/arch__reg.2.smt2 -> UNSAT [1.39s]
+[18/3763] verismo/tspec_e__array__array_e.10.smt2 -> UNSAT [1.58s]
+[19/3763] verismo/tspec__seqlib__subseq.3.smt2 -> UNKNOWN [1.92s]
+[20/3763] verismo/tspec__math__bits_p.1.smt2 -> UNSAT [3.00s]
+[21/3763] verismo/arch__addr_s__def_s.2.smt2 -> UNSAT [3.43s]
+[22/3763] verismo/tspec__seqlib__seq_multiset.1.smt2 -> UNSAT [1.63s]
+[23/3763] verismo/tspec__setlib.1.smt2 -> UNSAT [1.35s]
+[24/3763] verismo/tspec__map_lib.2.smt2 -> UNKNOWN [1.66s]
+[25/3763] verismo/tspec_e__array__sort.2.smt2 -> UNKNOWN [2.17s]
+[26/3763] verismo/tspec__range_set.3.smt2 -> UNSAT [1.56s]
+[27/3763] verismo/tspec_e__array__array_e.1.smt2 -> UNSAT [1.32s]
+[28/3763] verismo/arch__rmp__def_s.4.smt2 -> UNSAT [1.30s]
+[29/3763] verismo/tspec__map_lib.1.smt2 -> UNKNOWN [1.72s]
+[30/3763] verismo/tspec_e__array__array_e.2.smt2 -> UNSAT [1.47s]
+[31/3763] verismo/tspec_e__array__sort.1.smt2 -> UNKNOWN [3.26s]
+[32/3763] verismo/tspec__seqlib__subseq.1.smt2 -> UNKNOWN [1.64s]
+[33/3763] verismo/tspec_e__array__array_utils.1.smt2 -> UNSAT [6.10s]
+[34/3763] verismo/tspec_e__array__array_utils.2.smt2 -> UNKNOWN [2.74s]
+[35/3763] verismo/tspec__setlib.3.smt2 -> UNSAT [2.39s]
+[36/3763] verismo/tspec_e__array__array_utils.3.smt2 -> UNKNOWN [2.61s]
+[37/3763] verismo/arch__reg.1.smt2 -> UNSAT [1.83s]
+[38/3763] verismo/tspec_e__math__minmax.2.smt2 -> UNSAT [1.46s]
+[39/3763] verismo/tspec_e__array.smt2 -> UNSAT [1.92s]
+[40/3763] verismo/arch__entities.1.smt2 -> UNSAT [1.80s]
+[41/3763] verismo/tspec__setlib.2.smt2 -> UNKNOWN [6.00s]
+[42/3763] verismo/tspec_e__array__array_e.3.smt2 -> UNSAT [1.27s]
+[43/3763] verismo/arch__rmp__def_s.5.smt2 -> UNSAT [1.36s]
+[44/3763] verismo/tspec__range_set.1.smt2 -> UNKNOWN [2.53s]
+[45/3763] verismo/tspec__range_set.4.smt2 -> UNKNOWN [27.13s]
+[46/3763] verismo/tspec__math__cond_bound.2.smt2 -> UNKNOWN [1.68s]
+[47/3763] verismo/tspec__seqlib__seq_multiset.3.smt2 -> UNKNOWN [6.32s]
+[48/3763] verismo/arch__addr_s__def_s.1.smt2 -> UNSAT [3.35s]
+[49/3763] verismo/snp__percpu__def_s.1.smt2 -> UNSAT [1.64s]
+[50/3763] verismo/tspec__seqlib__seq_multiset.4.smt2 -> UNKNOWN [1.97s]
+[51/3763] verismo/tspec_e__array__array_utils.4.smt2 -> UNKNOWN [1.63s]
+[52/3763] verismo/tspec_e__array__sort.5.smt2 -> TIMEOUT [30.04s]
+[53/3763] verismo/tspec_e__array__array_e.8.smt2 -> UNSAT [1.69s]
+[54/3763] verismo/arch__rmp__def_s.2.smt2 -> UNSAT [2.03s]
+[55/3763] verismo/tspec__setlib.4.smt2 -> UNKNOWN [2.82s]
+[56/3763] verismo/tspec_e__array__array_e.4.smt2 -> UNSAT [1.83s]
+[57/3763] verismo/tspec_e__array__array_e.5.smt2 -> UNSAT [2.22s]
+[58/3763] verismo/arch__rmp__def_s.3.smt2 -> UNSAT [2.04s]
+[59/3763] verismo/tspec_e__array__array_e.9.smt2 -> UNSAT [1.37s]
+[60/3763] verismo/tspec_e__array__array_utils.5.smt2 -> UNKNOWN [1.58s]
+[61/3763] splinterdb/abstract_system__MsgHistory_v.4.smt2 -> UNSAT [1.88s]
+Process SpawnPoolWorker-7:
+Process SpawnPoolWorker-8:
+Traceback (most recent call last):
+  File "/Users/shaamarl/.local/share/mise/installs/python/3.12.10/lib/python3.12/multiprocessing/pool.py", line 856, in next
+    item = self._items.popleft()
+           ^^^^^^^^^^^^^^^^^^^^^
+IndexError: pop from an empty deque
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/run_set_membership.py", line 251, in <module>
+    main()
+  File "/Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/run_set_membership.py", line 234, in main
+    results = process_folder(folder_path, args.verbose, args.jobs)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/run_set_membership.py", line 138, in process_folder
+    for filepath, category, time_taken, stdout, stderr in pool.imap_unordered(process_single_file_wrapper, process_args):
+                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/shaamarl/.local/share/mise/installs/python/3.12.10/lib/python3.12/multiprocessing/pool.py", line 861, in next
+    self._cond.wait(timeout)
+  File "/Users/shaamarl/.local/share/mise/installs/python/3.12.10/lib/python3.12/threading.py", line 355, in wait
+    waiter.acquire()
+KeyboardInterrupt

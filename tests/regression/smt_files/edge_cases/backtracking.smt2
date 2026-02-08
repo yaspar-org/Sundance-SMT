@@ -1,0 +1,8 @@
+(declare-sort Z 0)
+(declare-fun f () Z)
+(declare-fun n () Z)
+(declare-fun f0 () Z)
+(assert (or (= f f0) (= f n)))
+(assert (or (= f f0) (= n f0)))
+(assert (not (= f0 f)))
+(check-sat)

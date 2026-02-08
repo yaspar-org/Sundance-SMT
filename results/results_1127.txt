@@ -1,0 +1,44 @@
+Starting to process folder: /Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/20241211-verus
+Found 3763 files to process in '/Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/20241211-verus'
+Using 8 parallel processes
+------------------------------------------------------------
+[1/3763] verismo/tspec_e__array__array_e.6.smt2 -> UNKNOWN
+[2/3763] verismo/tspec_e__array__sort.4.smt2 -> UNKNOWN
+[3/3763] verismo/tspec__seqlib__subseq.5.smt2 -> UNKNOWN
+[4/3763] verismo/arch__rmp__def_s.1.smt2 -> UNSAT
+[5/3763] verismo/tspec__range_set.5.smt2 -> UNKNOWN
+[6/3763] verismo/tspec__range_set.4.smt2 -> UNKNOWN
+[7/3763] verismo/tspec_e__array__array_e.7.smt2 -> UNSAT
+[8/3763] verismo/tspec__math__cond_bound.1.smt2 -> UNKNOWN
+[9/3763] verismo/tspec_e__array__sort.8.smt2 -> UNKNOWN
+[10/3763] verismo/tspec__seqlib__subseq.4.smt2 -> UNKNOWN
+Process SpawnPoolWorker-2:
+Process SpawnPoolWorker-3:
+Process SpawnPoolWorker-8:
+Process SpawnPoolWorker-7:
+Process SpawnPoolWorker-5:
+Process SpawnPoolWorker-6:
+Process SpawnPoolWorker-4:
+Process SpawnPoolWorker-1:
+Traceback (most recent call last):
+  File "/Users/shaamarl/.local/share/mise/installs/python/3.12.10/lib/python3.12/multiprocessing/pool.py", line 856, in next
+    item = self._items.popleft()
+           ^^^^^^^^^^^^^^^^^^^^^
+IndexError: pop from an empty deque
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/run_set_membership.py", line 237, in <module>
+    main()
+  File "/Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/run_set_membership.py", line 220, in main
+    results = process_folder(folder_path, args.verbose, args.jobs)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/shaamarl/Desktop/Projects/opensourceversions/Sundance-SMT/run_set_membership.py", line 124, in process_folder
+    for filepath, category, stdout, stderr in pool.imap_unordered(process_single_file_wrapper, process_args):
+                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/shaamarl/.local/share/mise/installs/python/3.12.10/lib/python3.12/multiprocessing/pool.py", line 861, in next
+    self._cond.wait(timeout)
+  File "/Users/shaamarl/.local/share/mise/installs/python/3.12.10/lib/python3.12/threading.py", line 355, in wait
+    waiter.acquire()
+KeyboardInterrupt

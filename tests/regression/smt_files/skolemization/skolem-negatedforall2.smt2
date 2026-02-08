@@ -1,0 +1,6 @@
+(declare-sort P 0)
+(declare-const c P)
+(declare-fun v (P) Bool)
+(assert (= false (forall ((a P)) (! true :pattern ((v a)) :pattern ((v a))))))
+(assert (= (v c) (v c)))
+(check-sat)

@@ -1,0 +1,8 @@
+(declare-sort T 0)
+(declare-fun x () T)
+(declare-fun y () T)
+(declare-fun g (T) T)
+(declare-fun h (T T) T)
+(assert (not (= x (g y))))
+(assert (= (h y y) x))
+(check-sat)

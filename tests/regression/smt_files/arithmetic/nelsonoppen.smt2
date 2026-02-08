@@ -1,0 +1,5 @@
+(declare-const x Int)
+(assert (not (= 1 x)))
+;(assert (or (< 1 x) (> 1 x) (= 1 x)))
+(assert (= x (+ 0 1)))
+(check-sat)

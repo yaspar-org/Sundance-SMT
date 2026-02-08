@@ -1,0 +1,7 @@
+(declare-sort I 0)
+(declare-fun u () I)
+(declare-fun o (I I) I)
+(declare-fun e () I)
+(assert (and (= e (o e u)) (or (= u (o u u)) (= u e))))
+(assert (not (= e (o e (o u u)))))
+(check-sat)

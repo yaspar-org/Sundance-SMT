@@ -1,0 +1,8 @@
+(declare-sort t 0)
+(declare-sort u 0)
+(declare-fun o (Bool t) u)
+(declare-fun y () t)
+(declare-fun p () Bool)
+(assert (= (= (o p y) (o false y)) p))
+(assert (not (= (o false y) (o true y))))
+(check-sat)

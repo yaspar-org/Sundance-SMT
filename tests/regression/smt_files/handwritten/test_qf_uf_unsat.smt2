@@ -1,0 +1,7 @@
+(declare-sort S 0)
+(declare-fun f (S) S)
+(declare-fun a () S)
+(declare-fun b () S)
+(assert (= a b))
+(assert (not (= (f a) (f b))))
+(check-sat)

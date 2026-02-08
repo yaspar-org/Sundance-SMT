@@ -1,0 +1,146 @@
+name: Build
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+
+      - uses: Swatinem/rust-cache@v1
+
+      - name: Run cargo check
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+
+  test:
+    name: Test Suite
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+        rust: [ stable ]
+        features:
+          - ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: ${{ matrix.rust }}
+          override: true
+
+      - name: Install build dependencies (Ubuntu)
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Install Homebrew dependencies (Mac)
+        if: ${{ matrix.os == 'macos-latest' }}
+        run: |
+          brew update
+          brew install cmake
+
+      - name: Sanitize feature name for cache key
+        id: cache-key
+        run: echo "features=$(echo '${{ matrix.features }}' | tr ',' '_')" >> $GITHUB_OUTPUT
+
+      - name: Cache solver builds
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/debug/build
+          key: ${{ runner.os }}-solver-${{ steps.cache-key.outputs.features }}-${{ hashFiles('lib/**') }}
+          restore-keys: |
+            ${{ runner.os }}-solver-${{ steps.cache-key.outputs.features }}-
+            ${{ runner.os }}-solver-
+
+      - name: Run tests
+        run: cargo test --no-default-features --features "${{ matrix.features }}"
+
+  lints:
+    name: Lints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+        with:
+          submodules: recursive
+
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v1
+
+      - name: Run cargo fmt
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+      - name: Run cargo clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-features --tests -- -D warnings
+
+      - name: Run rustdoc lints
+        uses: actions-rs/cargo@v1
+        env:
+          RUSTDOCFLAGS: ""
+        with:
+          command: doc
+          args: --workspace --all-features --no-deps --document-private-items
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake
+
+      - name: Build documentation
+        run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings

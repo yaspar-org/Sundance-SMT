@@ -1,0 +1,6 @@
+(declare-sort u 0)
+(declare-fun y () Bool)
+(declare-fun $ () u)
+(assert (= $ (ite y $ $)))
+(assert (not y))
+(check-sat)

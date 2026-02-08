@@ -1,0 +1,7 @@
+(declare-sort P 0)
+(declare-fun f (P) Int)
+(declare-const x P)
+(declare-const y P)
+(assert (= x y))
+(assert (< (f x) (f y)))
+(check-sat)

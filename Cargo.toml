@@ -1,0 +1,41 @@
+[package]
+name = "sundance-smt"
+version = "0.2.0"
+edition = "2024"
+readme = "README.md"
+license = "Apache-2.0"
+description = "An SMT solver for program verification"
+authors = ["the Amazon Trusted Solver team"]
+keywords = ["SMT", "solver", "logic"]
+categories = ["science"]
+homepage = "https://github.com/yaspar-org/Sundance-SMT"
+repository = "https://github.com/yaspar-org/Sundance-SMT"
+
+[dependencies]
+yaspar-ir = { version = "2.7", features = ["cnf"], path = "../yaspar-ir" }
+sat-interface = { version = "0.1", path = "../sat-interface" }
+cadical-sys = { version = "0.7.0" }
+
+array2d = "^0.3"
+clap = { version = "4.5.40", features = ["derive"] }
+dashu = { version = "^0.4", features = ["num-traits"] }
+env_logger = "^0.11"
+log = "^0.4"
+num-traits = "^0.2"
+serde_json = "1.0"
+slotmap = "^1.0"
+z3 = { version = "0.16" }
+num = "0.4.3"
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[[test]]
+name = "regression_test"
+harness = true
+
+[profile.release]
+debug = true
+
+[[bin]]
+name = "sundance-smt"
