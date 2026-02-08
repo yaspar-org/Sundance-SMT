@@ -67,7 +67,7 @@ fn extract_datatype_sorts(
             let params = datatype_dec
                 .params
                 .iter()
-                .map(|param| get_string_from_str(param))
+                .map(get_string_from_str)
                 .collect();
 
             info.sorts.insert(
@@ -149,7 +149,7 @@ fn get_string_from_str(str_val: &Str) -> String {
 pub fn check_for_inductive_datatypes_and_panic(context: &Context) -> DatatypeInfo {
     let datatype_info = extract_datatype_info(context);
 
-    for (sort_name, _) in &datatype_info.sorts {
+    for sort_name in datatype_info.sorts.keys() {
         if is_inductive_datatype(sort_name, &datatype_info) {
             panic!(
                 "Found inductive datatype: {}. Inductive datatypes are not supported!",
@@ -164,7 +164,7 @@ pub fn check_for_inductive_datatypes_and_panic(context: &Context) -> DatatypeInf
 // /// Check if a specific datatype is inductive by examining its constructors
 fn is_inductive_datatype(datatype_name: &str, info: &DatatypeInfo) -> bool {
     // A datatype is inductive if any of its constructors have fields that reference the datatype itself
-    for (_, constructor) in &info.constructors {
+    for constructor in info.constructors.values() {
         if constructor.datatype == datatype_name {
             // Check if any field of this constructor references the same datatype
             for field_sort in &constructor.field_sorts {
@@ -211,7 +211,7 @@ fn is_mutually_recursive(
     }
 
     // Check if this field_sort's constructors eventually lead back to target_datatype
-    for (_, constructor) in &info.constructors {
+    for constructor in info.constructors.values() {
         if constructor.datatype == field_sort.to_string() {
             for nested_field_sort in &constructor.field_sorts {
                 if nested_field_sort.to_string() == target_datatype {

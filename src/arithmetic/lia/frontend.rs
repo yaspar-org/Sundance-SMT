@@ -409,7 +409,11 @@ fn convert_arith_literal(
     term: &Term,
 ) -> FrontendResult<Option<Rel<Rational>>> {
     // println!("in convert arith_literal with {}", term);
-    let result = match term.get().repr() {
+    
+    // if let Ok(Some(t)) = result {
+    //     println!("(assert {})", t);
+    // };
+    match term.get().repr() {
         // ignore annotations
         ATerm::Annotated(t, _) => convert_relation(ctx, t),
         // handle arithmetic relations
@@ -427,11 +431,7 @@ fn convert_arith_literal(
         //     "expected arithmetic literal, but got: {:?}",
         //     term
         // ))),
-    };
-    // if let Ok(Some(t)) = result {
-    //     println!("(assert {})", t);
-    // };
-    result
+    }
 }
 
 /// Type-check and eliminate let bindings from all assertion commands in a script.

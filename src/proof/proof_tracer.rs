@@ -28,12 +28,12 @@ fn get_lit_info(
 ) -> Option<(i32, u64, Term, bool)> {
     if let Some((id, term, polarity)) = terms_list.get(&lit) {
         // todo: if we only check one time, then we can just .remove(&lit) here
-        return Some((lit, *id, term.clone(), *polarity));
+        Some((lit, *id, term.clone(), *polarity))
     } else if let Some((id, term, polarity)) = terms_list.get(&-lit) {
         // todo: if we only check one time, then we can just .remove(&-lit) here
-        return Some((-lit, *id, term.clone(), *polarity));
+        Some((-lit, *id, term.clone(), *polarity))
     } else {
-        return None;
+        None
     }
 }
 
@@ -163,8 +163,8 @@ fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> (String, HashSe
         }
     }
 
-    if sort_str.len() == 0 {
-        (format!(""), datatype_funs)
+    if sort_str.is_empty() {
+        (String::new(), datatype_funs)
     } else {
         (
             format!(
@@ -247,7 +247,7 @@ fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) 
             if sort_vars.is_empty() {
                 // Non-polymorphic function
                 if symbol_name.starts_with("is-") {
-                    return String::new()
+                    return String::new();
                 }
                 let input_sorts_str = input_sorts
                     .iter()

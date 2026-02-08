@@ -3,9 +3,7 @@
 //! ""tests/regression/smt_files/edge_cases/test_bool_ite.smt2"" for an example
 use yaspar_ir::ast::alg::{Identifier, Index, QualifiedIdentifier};
 use yaspar_ir::ast::{ATerm::*, Attribute, TermAllocator};
-use yaspar_ir::ast::{
-    FetchSort, HasArena, ObjectAllocatorExt, Repr, StrAllocator, Term,
-};
+use yaspar_ir::ast::{FetchSort, HasArena, ObjectAllocatorExt, Repr, StrAllocator, Term};
 
 use crate::cnf::SundanceCNFConversion as _;
 use crate::egraphs::datastructures::ConstructorType;
@@ -20,7 +18,7 @@ pub fn check_for_function_bool(
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     // todo: I added the from_quantifier flag because of the insert_predecessor calls. I think this is right
-   // println!("calling check for functino bool on {}", term);
+    // println!("calling check for functino bool on {}", term);
     let mut vector = vec![];
 
     if let Ite(..) = term.repr() {
@@ -38,12 +36,7 @@ pub fn check_for_function_bool(
     // checking if term is a bool
     if sort == egraph.cnfenv.context.bool_sort() {
         // if a term is a bool, but not part of the cnf, we need to add it
-        if !egraph
-            .cnfenv
-            .cache
-            .var_map
-            .contains_key(&term.uid())
-        {
+        if !egraph.cnfenv.cache.var_map.contains_key(&term.uid()) {
             let nnf_term = term.sundance_nnf(&mut egraph.cnfenv);
             let cnf_formula = term
                 .sundance_cnf_tseitin(&mut egraph.cnfenv)
@@ -52,7 +45,7 @@ pub fn check_for_function_bool(
 
             egraph.insert_predecessor(&nnf_term, None, None, from_quantifier, None); // todo: I think its right to have a from_quantifier here
 
-           // println!("We have the cnf_formula: {:?} for term {}", cnf_formula, term);
+            // println!("We have the cnf_formula: {:?} for term {}", cnf_formula, term);
 
             vector.extend(cnf_formula);
 
@@ -78,7 +71,7 @@ pub fn check_for_function_bool(
             vector.push(vec![-lit, *lit]);
         }
     } else {
-       // println!("not a bool {}", term)
+        // println!("not a bool {}", term)
     };
 
     // if a term has a datatype type, then create tester applications for each constructor
@@ -182,7 +175,7 @@ pub fn check_for_function_bool(
         Let(_, _) => panic!("We should have inlined lets by now"),
         Constant(..) | Global(..) | Local(..) => (), // todo: I think existentials should be handled separately when they get skolemized but not 100% sure about this
     };
-   // println!("returning {:?}", vector);
+    // println!("returning {:?}", vector);
     vector
 }
 
@@ -218,9 +211,11 @@ fn find_datatype_axioms(
             let tester_qid = QualifiedIdentifier(tester_identifier, None); // todo: not sure if I actually need a type here
             // Create the tester application: ((_ is ConstructorName) term)
             let bool_sort = egraph.cnfenv.context.bool_sort();
-            let tester_term = egraph
-                .cnfenv.context
-                .app(tester_qid, vec![term.clone()], Some(bool_sort));
+            let tester_term =
+                egraph
+                    .cnfenv
+                    .context
+                    .app(tester_qid, vec![term.clone()], Some(bool_sort));
             egraph.term_constructors.insert(
                 num,
                 ConstructorType::Constructor {
@@ -275,7 +270,8 @@ fn find_datatype_axioms(
         // Create the tester application: ((_ is ConstructorName) term)
         let tester_app =
             egraph
-                .cnfenv.context
+                .cnfenv
+                .context
                 .app(tester_qid, vec![term.clone()], Some(bool_sort.clone()));
 
         // adding the clause ((_ is ConstructorName) (ConstructorName ...)) if relevant
@@ -298,7 +294,11 @@ fn find_datatype_axioms(
         tester_apps.push(tester_app);
     }
 
-    let tester_or =  if tester_apps.len() == 1 { tester_apps[0].clone() } else {egraph.cnfenv.context.or(tester_apps)};
+    let tester_or = if tester_apps.len() == 1 {
+        tester_apps[0].clone()
+    } else {
+        egraph.cnfenv.context.or(tester_apps)
+    };
     debug_println!(12, 0, "TESTER OR CASE");
     debug_println!(25, 10, "(assert {})", tester_or);
     egraph.insert_predecessor(&tester_or, None, None, from_quantifier, None);
@@ -325,7 +325,8 @@ fn find_datatype_axioms(
             let tester_qid = QualifiedIdentifier(tester_identifier, None);
             let tester_app =
                 egraph
-                    .cnfenv.context
+                    .cnfenv
+                    .context
                     .app(tester_qid, vec![term.clone()], Some(bool_sort.clone()));
 
             let mut selectors_apps = vec![];
@@ -336,7 +337,7 @@ fn find_datatype_axioms(
                 .unwrap();
             let selector_sorts = &ctor_info.field_sorts.clone();
             for (i, field) in ctor_info.field_names.iter().enumerate() {
-                let sel_name = &egraph.cnfenv.context.allocate_symbol(&field);
+                let sel_name = &egraph.cnfenv.context.allocate_symbol(field);
                 let sel_app = egraph.cnfenv.context.app(
                     QualifiedIdentifier::simple(sel_name.clone()),
                     vec![term.clone()],
@@ -346,19 +347,21 @@ fn find_datatype_axioms(
             }
 
             // this needs to be a variable if ctor talks in no arguments
-            let ctor_app = if selectors_apps.len() == 0 {
+            let ctor_app = if selectors_apps.is_empty() {
                 let ctor_id = QualifiedIdentifier::simple_sorted(
                     ctor_symbol,
                     ctor_info.datatype_sort.clone(),
                 ); // todo: not sure if this is the right was to do it, gets printed out as (as ctor ctor) -> I think it doesnt make a difference
                 egraph
-                    .cnfenv.context
+                    .cnfenv
+                    .context
                     .global(ctor_id, Some(ctor_info.datatype_sort.clone())) //ctor_local, Some(ctor_sort))
             } else {
                 let ctor_id = QualifiedIdentifier::simple(ctor_symbol);
                 let ctor_sort = ctor_info.datatype_sort.clone();
                 egraph
-                    .cnfenv.context
+                    .cnfenv
+                    .context
                     .app(ctor_id, selectors_apps.clone(), Some(ctor_sort))
             };
 
@@ -367,7 +370,7 @@ fn find_datatype_axioms(
                 let sort = selector_sorts[i].to_string();
                 if egraph.datatype_info.sorts.contains_key(&sort) {
                     let additional_constraints =
-                        find_datatype_axioms(&sel_app, sort, egraph, false);
+                        find_datatype_axioms(sel_app, sort, egraph, false);
                     vector.extend(additional_constraints.clone());
                 }
             }
@@ -397,7 +400,7 @@ fn find_datatype_axioms(
             .unwrap();
         let mut selector_names = vec![];
         for field in &ctor_info.field_names {
-            let sym = &egraph.cnfenv.context.allocate_symbol(&field);
+            let sym = &egraph.cnfenv.context.allocate_symbol(field);
             selector_names.push(sym.clone());
         }
         // let selector_names = ctor_info.field_names.clone().into_iter().map(|s : String| &egraph.cnfenv.context.allocate_symbol(&s));
@@ -450,7 +453,7 @@ fn get_pattern_dt_constaints(
     let mut vector = vec![];
 
     // if the pattern does not occur in the term, we can treat it like a datatype
-    if !check_if_var_occurs_in_term(pattern, &vars, egraph) {
+    if !check_if_var_occurs_in_term(pattern, vars, egraph) {
         let sort = pattern.get_sort(egraph.cnfenv.context.arena());
         let s = sort.to_string();
         if egraph.datatype_info.sorts.contains_key(&s) {
@@ -511,9 +514,7 @@ fn check_if_var_occurs_in_term(
                     }
                 }
             }
-            items.iter().fold(false, |acc, t| {
-                acc || check_if_var_occurs_in_term(t, var_bindings, egraph)
-            })
+            items.iter().any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
         }
         Or(items) => {
             // for And and Or, if they contain a false or true respectively, not that we don't have to consider it
@@ -525,13 +526,9 @@ fn check_if_var_occurs_in_term(
                     }
                 }
             }
-            items.iter().fold(false, |acc, t| {
-                acc || check_if_var_occurs_in_term(t, var_bindings, egraph)
-            })
+            items.iter().any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
         }
-        App(_, items, _) | Distinct(items) => items.iter().fold(false, |acc, t| {
-            acc || check_if_var_occurs_in_term(t, var_bindings, egraph)
-        }),
+        App(_, items, _) | Distinct(items) => items.iter().any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph)),
         Annotated(t, _) | Not(t) => check_if_var_occurs_in_term(t, var_bindings, egraph),
         Eq(t1, t2) => {
             check_if_var_occurs_in_term(t1, var_bindings, egraph)
@@ -567,8 +564,8 @@ pub fn process_ite(term: &Term, egraph: &mut Egraph) -> Term {
         let not_b = egraph.cnfenv.context.not(b.clone());
         let imp2 = egraph.cnfenv.context.implies(vec![not_b], eq2);
 
-        let and = egraph.cnfenv.context.and(vec![imp1, imp2]);
-        and
+        
+        egraph.cnfenv.context.and(vec![imp1, imp2])
     } else {
         panic!("Not an ite!")
     }

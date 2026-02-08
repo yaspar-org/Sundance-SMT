@@ -1,29 +1,17 @@
-#[macro_use]
-mod utils;
-mod arithmetic;
-mod cadical_propagator;
-mod cdcl;
-mod cnf;
-mod config;
-mod datatypes;
-mod egraphs;
-mod preprocess;
-mod proof;
-mod quantifiers;
+use sundance_smt::cnf::{SundanceCNFCache, SundanceCNFConversion, SundanceCNFEnv};
 
-use crate::cnf::{SundanceCNFCache, SundanceCNFConversion, SundanceCNFEnv};
-
-use crate::config::Args;
-use crate::datatypes::process::check_for_inductive_datatypes_and_panic;
-use crate::preprocess::check_for_function_bool;
 use cadical_sys::Status;
-use cdcl::cdcl_decision_procedure;
 use clap::Parser;
-use egraphs::egraph::Egraph;
 use std::fs;
+use sundance_smt::cdcl::cdcl_decision_procedure;
+use sundance_smt::config::Args;
+use sundance_smt::datatypes::process::check_for_inductive_datatypes_and_panic;
+use sundance_smt::egraphs::egraph::Egraph;
+use sundance_smt::preprocess::check_for_function_bool;
+use sundance_smt::{debug_println, utils};
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::TermAllocator;
-use yaspar_ir::ast::{CNFConversion, Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
+use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
 use yaspar_ir::untyped::UntypedAst;
 
 fn main() -> Result<(), String> {
@@ -85,11 +73,11 @@ fn main() -> Result<(), String> {
     assertions.push(not_false_term);
 
     // Create Sundance CNF cache to replace yaspar-ir's cache
-    let mut sundance_cnf_cache = SundanceCNFCache::new();
+    let sundance_cnf_cache = SundanceCNFCache::new();
 
     // Convert to NNF (Negation Normal Form) using Sundance implementation
-    let mut sundance_env = SundanceCNFEnv {
-        context: context,
+    let sundance_env = SundanceCNFEnv {
+        context,
         cache: sundance_cnf_cache,
     };
 

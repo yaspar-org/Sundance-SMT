@@ -16,7 +16,7 @@ use yaspar_ir::ast::ATerm::{
     Matching, Not, Or,
 };
 use yaspar_ir::ast::{
-    Attribute, CNFConversion, FetchSort, HasArena, LetElim, Repr, Term, TermAllocator,
+    Attribute, FetchSort, HasArena, LetElim, Repr, Term, TermAllocator,
 };
 
 #[derive(Debug, Clone)]
@@ -109,7 +109,8 @@ pub fn instantiate_quantifiers(
 
             egraph.added_skolemizations.insert(quantifier.id);
 
-            let skolemized_quantifier: Term = skolemized_quantifier.let_elim(&mut egraph.cnfenv.context);
+            let skolemized_quantifier: Term =
+                skolemized_quantifier.let_elim(&mut egraph.cnfenv.context);
             // let (skolemized_quantifier, _) = skolemize(&skolemized_quantifier, egraph.cnfenv.context, &mut egraph.skolem_counter);
             let skolemized_quantifier = skolemized_quantifier.sundance_nnf(&mut egraph.cnfenv);
             let additional_constraints =
@@ -222,7 +223,7 @@ pub fn instantiate_quantifiers(
                 // we are doing a lot of redundant work. It would be nice to have something
                 // like semi-naive evaluation for datalog
                 if let Some(set) = egraph.added_instantiations.get(&quantifier.id)
-                    && set.contains(&subs)
+                    && set.contains(subs)
                 {
                     // println!("Skipping the instantiation {} for {}", t, egraph.get_term(quantifier.id));
                     continue;
@@ -373,7 +374,7 @@ fn substitute(
         Global(_, _) => term.clone(),
         Local(local) => {
             if let Some(v) = substitutions.get(&local.symbol.to_string()) {
-                return v.clone();
+                v.clone()
             } else {
                 term.clone()
             }
@@ -385,7 +386,8 @@ fn substitute(
                 .collect::<Vec<_>>();
 
             egraph
-                .cnfenv.context
+                .cnfenv
+                .context
                 .app(qualified_identifier.clone(), new_args, sort.clone())
         }
         And(items) => {
@@ -451,7 +453,10 @@ fn substitute(
                 assert!(!new_attrs.is_empty());
 
                 let new_middle_term = egraph.cnfenv.context.annotated(new_inner_term, new_attrs);
-                let new_term = egraph.cnfenv.context.forall(var_bindings.clone(), new_middle_term);
+                let new_term = egraph
+                    .cnfenv
+                    .context
+                    .forall(var_bindings.clone(), new_middle_term);
                 new_term.clone()
             } else {
                 panic!("We have a forall case that is not annotated");
@@ -484,7 +489,10 @@ fn substitute(
                 assert!(!new_attrs.is_empty());
 
                 let new_middle_term = egraph.cnfenv.context.annotated(new_inner_term, new_attrs);
-                let new_term = egraph.cnfenv.context.exists(var_bindings.clone(), new_middle_term); // I think this gets skolemized but when??
+                let new_term = egraph
+                    .cnfenv
+                    .context
+                    .exists(var_bindings.clone(), new_middle_term); // I think this gets skolemized but when??
                 new_term.clone()
             } else {
                 panic!(
@@ -654,7 +662,7 @@ pub fn match_term<'a>(
             debug_println!(6, 0, "We are matching app term {} with args:", trigger_term);
             debug_println!(6, 0, "before15");
             let func_name = func.id_str();
-            let args_ref = args.iter().map(|x| x).collect::<Vec<_>>();
+            let args_ref = args.iter().collect::<Vec<_>>();
             find_assignments_on_term(
                 term,
                 func_name,

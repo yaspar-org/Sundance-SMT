@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt;
 use yaspar_ir::ast::{ATerm::*, FetchSort, ObjectAllocatorExt};
-use yaspar_ir::ast::{Attribute, Context, Repr, Term, TermAllocator};
+use yaspar_ir::ast::{Attribute, Repr, Term, TermAllocator};
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -388,12 +388,7 @@ impl Egraph {
             debug_println!(6, 0, "before5");
             self.get_term(*num)
         } else {
-            let num = self
-                .cnfenv
-                .cache
-                .var_map_reverse
-                .get(&-lit)
-                .unwrap();
+            let num = self.cnfenv.cache.var_map_reverse.get(&-lit).unwrap();
             debug_println!(6, 0, "before6");
             self.cnfenv.context.not(self.get_term(*num))
         }
@@ -427,12 +422,7 @@ impl Egraph {
             term,
             num
         );
-        debug_println!(
-            11,
-            0,
-            "We have the var_map {:?}",
-            self.cnfenv.cache.var_map
-        );
+        debug_println!(11, 0, "We have the var_map {:?}", self.cnfenv.cache.var_map);
         *self.cnfenv.cache.var_map.get(&num).unwrap()
     }
 
@@ -533,11 +523,7 @@ impl Egraph {
         //     }
         // };
 
-        let new_disequalities = if let Some(d) = disequalities {
-            d
-        } else {
-            DeterministicHashMap::new()
-        };
+        let new_disequalities = disequalities.unwrap_or_default();
 
         self.proof_forest[num as usize] = ProofForestEdge::Root {
             size: 1,
@@ -1164,7 +1150,7 @@ impl Egraph {
             return (true, highest_level, highest_hash);
         }
 
-        return (false, 0, 0);
+        (false, 0, 0)
     }
 
     /// Adds a disequality between t1 and t2 to the egraph
@@ -1490,7 +1476,7 @@ fn check_quantifier_validity(triggers: &Vec<&Vec<Term>>, vars: &Vec<String>, ter
         }
         // println!("We have contains_var: {:?}", contains_var);
         for key in contains_var.keys() {
-            if contains_var[key] == false {
+            if !contains_var[key] {
                 panic!(
                     "We have variable {} that does not occur in multipattern {:?} for term {}",
                     key, multipattern, term
@@ -1500,9 +1486,9 @@ fn check_quantifier_validity(triggers: &Vec<&Vec<Term>>, vars: &Vec<String>, ter
     }
 }
 
-fn check_quantifier_validity_helper<'a>(
+fn check_quantifier_validity_helper(
     term: &Term,
-    contains_var: &'a mut DeterministicHashMap<String, bool>,
+    contains_var: &mut DeterministicHashMap<String, bool>,
 ) {
     // println!("Checking validity with term {} and contains_var {:?}", term, contains_var);
     match term.repr() {
@@ -1510,9 +1496,9 @@ fn check_quantifier_validity_helper<'a>(
         Local(local) => {
             let local_id = local.symbol.to_string();
             // println!("We have the local_id {}", local_id);
-            if contains_var.contains_key(&local_id) {
+            if let std::collections::btree_map::Entry::Occupied(mut e) = contains_var.entry(local_id) {
                 // println!("We are updating the local_id");
-                let _ = contains_var.insert(local_id, true);
+                let _ = Some(e.insert(true));
             }
         }
         App(_, items, _) | And(items) | Or(items) | Distinct(items) => {
@@ -1522,22 +1508,22 @@ fn check_quantifier_validity_helper<'a>(
                 .for_each(|item| check_quantifier_validity_helper(item, contains_var));
         }
         Eq(t1, t2) => {
-            let _ = check_quantifier_validity_helper(t1, contains_var);
-            let _ = check_quantifier_validity_helper(t2, contains_var);
+            check_quantifier_validity_helper(t1, contains_var);
+            check_quantifier_validity_helper(t2, contains_var);
         }
         Not(t) => {
-            let _ = check_quantifier_validity_helper(t, contains_var);
+            check_quantifier_validity_helper(t, contains_var);
         }
         Implies(items, t) => {
-            let _ = check_quantifier_validity_helper(t, contains_var);
-            let _ = items
+            check_quantifier_validity_helper(t, contains_var);
+            items
                 .iter()
                 .for_each(|item| check_quantifier_validity_helper(item, contains_var));
         }
         Ite(b, t1, t2) => {
-            let _ = check_quantifier_validity_helper(b, contains_var);
-            let _ = check_quantifier_validity_helper(t1, contains_var);
-            let _ = check_quantifier_validity_helper(t2, contains_var);
+            check_quantifier_validity_helper(b, contains_var);
+            check_quantifier_validity_helper(t1, contains_var);
+            check_quantifier_validity_helper(t2, contains_var);
         }
         Let(..) | Exists(..) | Forall(..) | Matching(..) | Annotated(..) => {
             panic!("we do not support patterns with {}", term);

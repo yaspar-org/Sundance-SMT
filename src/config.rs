@@ -27,13 +27,13 @@ pub struct Args {
     pub arithmetic: ArithSolver,
     /// Turns on lazy datatype instantiation for certain axioms
     #[arg(long, default_value_t = true)]
-    pub lazy_dt : bool,
+    pub lazy_dt: bool,
     /// Turns on certain (buggy) features to get ddsmt to properly shrink features (WARNING: do not use for real queries)
     #[arg(long, default_value_t = false)]
-    pub ddsmt : bool,
+    pub ddsmt: bool,
     /// Eagerly skolemize every quantifier
     #[arg(long, default_value_t = false)]
-    pub eager_skolem : bool,
+    pub eager_skolem: bool,
     /// Set timeout in seconds (0 means no timeout)
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,
