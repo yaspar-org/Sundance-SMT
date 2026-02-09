@@ -19,27 +19,11 @@ impl fmt::Display for Egraph {
         writeln!(f, "=== Egraph Summary ===")?;
 
         // Basic statistics
-        writeln!(
-            f,
-            "Active terms: {}",
-            self.terms_active.iter().filter(|&&x| x.is_some()).count()
-        )?;
         writeln!(f, "Proof forest entries: {}", self.proof_forest.len())?;
-        writeln!(f, "Equivalence classes: {}", self.equiv_class.len())?;
         writeln!(f, "Predecessor relationships: {}", self.predecessors.len())?;
         writeln!(f, "Assertions: {}", self.assertions.len())?;
         writeln!(f, "Quantifiers: {}", self.quantifiers.len())?;
         writeln!(f, "Function maps: {}", self.function_maps.len())?;
-
-        // Active terms
-        if !self.terms_active.is_empty() {
-            writeln!(f, "\n=== Active Terms ===")?;
-            for (i, &level) in self.terms_active.iter().enumerate() {
-                if level.is_some() {
-                    writeln!(f, "  Term {}: active at level {}", i, level.unwrap())?;
-                }
-            }
-        }
 
         // Proof forest structure
         if !self.proof_forest.is_empty() {
@@ -162,19 +146,6 @@ impl fmt::Display for Egraph {
             }
         }
 
-        // Equivalence classes
-        if !self.equiv_class.is_empty() {
-            writeln!(f, "\n=== Equivalence Classes ===")?;
-            let mut class_map: DeterministicHashMap<u64, Vec<u64>> =
-                DeterministicHashMap::default();
-            for (term, class) in self.equiv_class.iter().enumerate() {
-                class_map.entry(*class).or_default().push(term as u64);
-            }
-            for (class_rep, members) in class_map {
-                writeln!(f, "  Class {}: {:?}", class_rep, members)?;
-            }
-        }
-
         // Predecessor relationships
         if !self.predecessors.is_empty() {
             writeln!(f, "\n=== Predecessor Relationships ===")?;
@@ -235,9 +206,7 @@ impl fmt::Display for Egraph {
 pub struct Egraph {
     pub context: Context,
     /// map from u64 to Terms (default: all terms are None, two passes go from Uninitialized to Some, todo (amar): clean this up)
-    pub terms_list: Vec<TermOption>, // u64 -> Option<Term>
-    /// for each term, if 0 ~> not active, otherwise the level when it first became active (todo: this is depricated, delete)
-    pub terms_active: Vec<Option<usize>>,
+    pub terms_list: Vec<TermOption>,
     /// map from vertices (u64) -> ProofForestEdge
     pub proof_forest: Vec<ProofForestEdge>, // u64 -> ProofForestEdge [t <- ]
     /// keeps track of a stack of "edges" to backtrack on
@@ -245,8 +214,6 @@ pub struct Egraph {
     /// the set of terms that have been unioned to the eclass from a quantifier
     pub from_quantifier_backtrack_set:
         DeterministicHashMap<u64, (ProofForestEdge, ProofForestEdge, ProofForestEdge, u64)>, // String, Vec<u64>)>,
-    // todo: delete this
-    pub equiv_class: Vec<u64>, // may have to delete this, I am not really doing anything with it
     /// this is a map from terms (u64) -> (term in the same egraph, predecesssor of term in same egraph)
     pub predecessors: Vec<DeterministicHashMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
     /// number to keep track of the current hash
@@ -277,8 +244,6 @@ pub struct Egraph {
     pub union_to_eclass: DeterministicHashSet<(u64, String, Vec<u64>)>, // todo: use identifier instead of String
     /// remember pairs of terms for which we have learnt  x = y \/ x > y \/ x < y
     pub nelson_oppen_ineq_literals: HashSet<(u64, u64)>,
-    /// remember literals learnt  x = y \/ x > y \/ x < y (todo: maybe can delete this)
-    pub nelson_oppen_literals: HashSet<i32>,
     /// remember terms for which we have learnt datatype axioms
     pub datatype_axioms_applied: HashSet<u64>,
     /// user flag for whether to instantiate some datatype axioms lazily
@@ -301,7 +266,6 @@ impl Egraph {
         Egraph {
             context,
             terms_list: vec![TermOption::None],
-            terms_active: vec![None], // TODO: this should actuallly be None in the terms version
             proof_forest: vec![ProofForestEdge::Root {
                 size: 1000,
                 child: 0,
@@ -311,7 +275,6 @@ impl Egraph {
             // note: this is an option because if you are a subterm of a quantifier, you are not in the proof forest. TODO: maybe there is a better way to think about this
             proof_forest_backtrack_stack: Vec::new(),
             from_quantifier_backtrack_set: DeterministicHashMap::default(),
-            equiv_class: vec![0],
             predecessors: vec![DeterministicHashMap::new()],
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
@@ -327,7 +290,6 @@ impl Egraph {
             term_constructors: DeterministicHashMap::new(),
             union_to_eclass: DeterministicHashSet::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
-            nelson_oppen_literals: HashSet::new(),
             datatype_axioms_applied: HashSet::new(),
             lazy_dt,
             arithmetic_terms: vec![],
@@ -467,7 +429,6 @@ impl Egraph {
                     children: DeterministicHashSet::new(),
                 },
             );
-            self.equiv_class.resize(self.equiv_class.len() * 2, 0);
             self.predecessors
                 .resize(self.predecessors.len() * 2, DeterministicHashMap::new());
         }
@@ -543,9 +504,6 @@ impl Egraph {
             children: DeterministicHashSet::new(),
         };
         // }
-
-        // set the equivalence class of the term to itself (TODO: we are not actually doing anything with equiv_class right now)
-        self.equiv_class[num as usize] = num;
 
         // inserting the term into the list of functions
         if let App(func, subterms, ..) = term.repr() {
@@ -642,7 +600,6 @@ impl Egraph {
                     children: DeterministicHashSet::new(),
                 },
             );
-            self.equiv_class.resize(self.equiv_class.len() * 2, 0);
             self.predecessors
                 .resize(self.predecessors.len() * 2, DeterministicHashMap::new());
         }
