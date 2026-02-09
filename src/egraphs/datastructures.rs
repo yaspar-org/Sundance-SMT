@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Important datastructures that are used elsewhere
 use std::{cmp::Ordering, fmt};
 

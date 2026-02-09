@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Implementation of rationals with symbolic infinitesimal parameter
 //!
 //! Q_δ is the set of elements a + b δ where a, b are rational and δ is

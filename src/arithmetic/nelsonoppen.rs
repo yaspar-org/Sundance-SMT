@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::egraphs::egraph::Egraph;
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::FetchSort;

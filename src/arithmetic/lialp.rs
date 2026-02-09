@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Entry point for the LIA mixed integer arithmetic solver
 use crate::arithmetic::lia::{frontend, solver_result_api};
 use crate::egraphs::egraph::Egraph;

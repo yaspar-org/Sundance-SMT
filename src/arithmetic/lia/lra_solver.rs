@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Linear rational arithmetic solver
 //!
 //! The main object here is the [LRASolver] which manages solver state, implements

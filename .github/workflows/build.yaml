@@ -35,6 +35,11 @@ jobs:
         with:
           command: check
 
+      - name: Run copyright check
+        run: |
+          ./.github/copyright-check.sh src
+          ./.github/copyright-check.sh tests
+
   test:
     name: Test Suite
     strategy:

@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Preprocessing of linear relations; intended as an intermediate step between the
 //! SMT parser frontend and the LinearSystem representation.
 

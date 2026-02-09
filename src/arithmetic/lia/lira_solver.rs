@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Linear integer and real arithmetic solver
 //!
 //! The [LIRASolver] is a wrapper around [LRASolver] which manages solver state for mixed

@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! A Union Find implementation that is used for finding short conflict clauses from the egraph
 //! Once congruence closure discovers a conflict clause, we can sometimes shrink it further by
 //! running a new union find algorithm

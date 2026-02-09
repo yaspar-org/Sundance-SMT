@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use dashu::integer::IBig;
 // use z3::{ast::{Ast, Bool, Int}, Context, Solver};
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;

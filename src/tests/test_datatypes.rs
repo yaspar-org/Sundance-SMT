@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(test)]
 mod test_datatypes {
     use crate::datatypes::{extract_datatype_info, print_datatype_summary};

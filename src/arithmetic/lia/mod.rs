@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! LIA Arithmetic Solver
 //!
 //! TODO: more detailed Markdown documentation of the crate

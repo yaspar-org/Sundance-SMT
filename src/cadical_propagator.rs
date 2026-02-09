@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::arithmetic::lp::{check_integer_constraints_satisfiable, ArithResult, ArithSolver};
 use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;

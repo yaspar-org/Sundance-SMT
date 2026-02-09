@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Solver configuration and command line parsing
 
 use crate::arithmetic::lp::ArithSolver;

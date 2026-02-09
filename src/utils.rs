@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! A file containting functions that may be useful elswhere
 
 use std::collections::{BTreeMap, BTreeSet};

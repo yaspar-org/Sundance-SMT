@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use yaspar_ir::ast::alg::DatatypeDec;
 use yaspar_ir::ast::{Context, Sig, Sort, SortDef, Str};
 

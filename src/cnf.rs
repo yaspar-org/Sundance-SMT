@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use sat_interface::{Clause, Formula};
 use std::collections::HashMap;
 use yaspar_ir::ast::{

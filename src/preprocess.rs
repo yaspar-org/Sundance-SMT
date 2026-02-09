@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Preprocessing step for function/ITE that takes in boolean inputs.
 //! see for example "tests/regression/smt_files/edge_cases/test_bool.smt2" or
 //! ""tests/regression/smt_files/edge_cases/test_bool_ite.smt2"" for an example

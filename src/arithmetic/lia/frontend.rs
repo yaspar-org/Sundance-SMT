@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Conversion of SMT text to parser AST and then to [LinearSystem] relations
 //! and solver objects.
 

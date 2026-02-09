@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // This file tests the datatype processing functionality
 // Since this is a binary crate without lib.rs, we need to include the modules directly
 

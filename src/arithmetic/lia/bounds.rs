@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bounds for rational and integer variables over a generic num type (usually QDelta in
 //! practice).
 

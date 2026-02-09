@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Trait specifying common behavior for low-level tableaux
 
 use crate::arithmetic::lia::types::Rational;

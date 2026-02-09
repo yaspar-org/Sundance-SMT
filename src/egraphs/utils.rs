@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 // helper functions for the egraph and congruence closure
 
 use yaspar_ir::ast::ATerm::*;

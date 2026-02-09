@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Context tracked during SMT to [LinearSystem] conversion
 
 use std::collections::HashMap;

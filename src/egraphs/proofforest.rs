@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! datastructures for proof forest inside of the egraph
 use crate::egraphs::datastructures::DisequalTerm;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
