@@ -5,14 +5,13 @@
 //! SMT parser frontend and the LinearSystem representation.
 
 use crate::arithmetic::lia::context::ConvContext;
-use std::collections::HashSet;
-
 use crate::arithmetic::lia::variables::Var;
+use std::collections::HashSet;
 
 /// Preprocessing result
 ///
 /// Currently, preprocessing detects trivally Sat relations, trivially Sat/Unsat systems, and
-/// otherwise results in a non-trivial suitable for constructing an [LRASolver] instance from.
+/// otherwise results in a non-trivial suitable for constructing an [crate::arithmetic::lia::lra_solver::LRASolver] instance from.
 #[derive(Debug)]
 pub enum PreprocessResult {
     /// System has been pre-processed and it's satisfiability is unknown

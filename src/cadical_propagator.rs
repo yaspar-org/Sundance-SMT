@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::arithmetic::lp::{check_integer_constraints_satisfiable, ArithResult, ArithSolver};
+use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;
 use crate::egraphs::congruence_closure::{
@@ -11,8 +11,8 @@ use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::proof::proof_tracer::SMTProofTracker;
-use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
+use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;

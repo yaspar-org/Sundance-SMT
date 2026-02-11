@@ -1,27 +1,28 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! todo:
+//! Sparse matrix implementation
+//!
+//! Matrix representation:
+//!
+//! ```text
+//!                        basecol
+//!                           |
+//!                          ...
+//!                           ^
+//!                           |
+//! baserow  <    [ r | c |  up  ] <-- ...
+//!           \   [ value | left ]
+//!            \______________/
+//!
+//!                      ^
+//!                      |
+//!                     ...
+//! ```
 
 use num_traits::Zero;
 use slotmap;
 use std::error;
-/// Sparse matrix implementation
-///
-/// Matrix representation:
-///
-///                        basecol
-///                           |
-///                          ...
-///                           ^
-///                           |
-/// baserow  <    [ r | c |  up  ] <-- ...
-///           \   [ value | left ]
-///            \______________/
-///
-///                      ^
-///                      |
-///                     ...
 use std::fmt;
 
 /// Generic error type for spare matrix operations

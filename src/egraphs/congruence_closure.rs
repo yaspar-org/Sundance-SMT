@@ -6,7 +6,7 @@
 use crate::cnf::CNFConversion as _;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::preprocess::check_for_function_bool;
-use crate::utils::{fmt_termlist, DeterministicHashMap, DeterministicHashSet};
+use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
 use yaspar_ir::ast::alg::{CheckIdentifier, QualifiedIdentifier};
 use yaspar_ir::ast::{FetchSort, IdentifierKind, Repr, StrAllocator, Term, TermAllocator};
 
@@ -1099,7 +1099,7 @@ fn union_predecessors(
     let predecessors_u = egraph.predecessors[u as usize].clone();
     let predecessors_v = egraph.predecessors[v as usize].clone();
 
-    let mut canonical_forms_u: DeterministicHashMap<(String, Vec<u64>), Vec<(Vec<u64>, u64)>> =
+    let mut canonical_forms_u: DeterministicHashMap<_, Vec<(Vec<u64>, u64)>> =
         DeterministicHashMap::default();
 
     // BTreeMap already provides deterministic iteration order
@@ -1139,9 +1139,10 @@ fn union_predecessors(
         //     return Some(negated_model);
         // }
 
-        if let Some((original_subterms, canonical_form)) =
+        if let Some((original_subterms, func, roots)) =
             egraph.get_canonical_form(predecessor_u.predecessor, level)
         {
+            let canonical_form = (func, roots);
             debug_println!(
                 11,
                 4,
@@ -1247,7 +1248,8 @@ fn union_predecessors(
         //     return Some(negated_model);
         // }
 
-        if let Some((original_subterms, canonical_form)) = canonical_form_v {
+        if let Some((original_subterms, func, roots)) = canonical_form_v {
+            let canonical_form = (func, roots);
             debug_println!(
                 11,
                 6,

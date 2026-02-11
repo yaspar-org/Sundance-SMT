@@ -335,12 +335,15 @@ impl<T> Rel<T> {
         Self::mk(Constraint::Gt, terms, constant.into())
     }
 
-    /// Create a relation (terms <rel> constant) from a left-hand side list of addends, a relation type,
+    /// Create a relation (terms `<rel>` constant) from a left-hand side list of addends, a relation type,
     /// and a right-hand side.
     ///
-    /// For example: x0 - 3x1 + 4 <= 2 x0 - 5 --> -1 x0 - 2 x0 - 3 x1 <= -9
+    /// For example:
+    /// ```text
+    /// x0 - 3x1 + 4 <= 2 x0 - 5 --> -1 x0 - 2 x0 - 3 x1 <= -9
+    /// ```
     ///
-    /// Note: the left hand side of the resulting relation is not necessarily combined using [combine_terms].
+    /// Note: the left hand side of the resulting relation is not necessarily combined using [Self::combine_terms].
     pub fn from_addends_lhs_rhs(
         lhs: Vec<Addend<T>>,
         rel_type: Constraint,
@@ -742,7 +745,7 @@ mod tests {
         lra_solver::LRASolver,
         solver_result::SolverDecision,
         tableau_dense::TableauDense,
-        types::{rbig, Rational},
+        types::{Rational, rbig},
         variables::{Var, VarType},
     };
 

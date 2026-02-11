@@ -40,7 +40,7 @@ where
     ///
     /// `self` is modified by this method.
     ///
-    /// Returns Ok(()) if the pivot was successful (i.e. when tableau[row][col] != 0) and an
+    /// Returns Ok(()) if the pivot was successful (i.e. when `tableau[row][col] != 0`) and an
     /// error otherwise.
     fn pivot(&mut self, row: usize, col: usize) -> TableauResult<()>;
 

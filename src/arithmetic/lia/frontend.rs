@@ -412,7 +412,7 @@ fn convert_arith_literal(
     term: &Term,
 ) -> FrontendResult<Option<Rel<Rational>>> {
     // println!("in convert arith_literal with {}", term);
-    
+
     // if let Ok(Some(t)) = result {
     //     println!("(assert {})", t);
     // };

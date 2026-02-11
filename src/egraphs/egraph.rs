@@ -1284,7 +1284,7 @@ impl Egraph {
         &mut self,
         term_num: u64,
         _level: usize,
-    ) -> Option<(Vec<u64>, (String, Vec<u64>))> {
+    ) -> Option<(Vec<u64>, String, Vec<u64>)> {
         debug_println!(
             5,
             0,
@@ -1302,14 +1302,15 @@ impl Egraph {
                     .into_iter()
                     .map(|t| self.find(t))
                     .collect::<Vec<_>>();
-                Some((subterms_u64, (func.to_string(), canonical_subterms)))
+                Some((subterms_u64, func.to_string(), canonical_subterms))
             }
             Eq(left, right) => {
                 let canonical_left = self.find(left.uid());
                 let canonical_right = self.find(right.uid());
                 Some((
                     vec![left.uid(), right.uid()],
-                    ("=".to_string(), vec![canonical_left, canonical_right]),
+                    "=".to_string(),
+                    vec![canonical_left, canonical_right],
                 ))
             }
             Ite(b, t1, t2) => {
@@ -1318,10 +1319,8 @@ impl Egraph {
                 let canonical_right = self.find(t2.uid());
                 Some((
                     vec![b.uid(), t1.uid(), t2.uid()],
-                    (
-                        "ite".to_string(),
-                        vec![canonical_b, canonical_left, canonical_right],
-                    ),
+                    "ite".to_string(),
+                    vec![canonical_b, canonical_left, canonical_right],
                 ))
             }
             _ => None,

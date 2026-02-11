@@ -4,8 +4,8 @@
 use crate::egraphs::egraph::Egraph;
 use crate::{
     arithmetic::lp::{
-        extract_linear_constraints, extract_linear_expression, ArithResult, Coefficient,
-        FunctionType::*,
+        ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
+        extract_linear_expression,
     },
     egraphs::proofforest::ProofForestEdge,
     utils::{DeterministicHashMap, DeterministicHashSet},
@@ -13,8 +13,8 @@ use crate::{
 use dashu::integer::IBig;
 use std::collections::HashMap;
 use z3::{
-    ast::{Ast, Bool, Int},
     Solver,
+    ast::{Bool, Int},
 };
 
 /// Checks if a conjunction of integer constraints is satisfiable using Z3
@@ -22,7 +22,7 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
     let (constraints, arithmetic_literals) = extract_linear_constraints(terms, egraph);
 
     if constraints.is_empty() && arithmetic_literals.is_empty() {
-        return ArithResult::None; // No constraints means trivially satisfiable
+        return ArithResult::None; // No constraints mean trivially satisfiable
     }
 
     debug_println!(21, 4, "trying to solve with constraints: {:?}", constraints);
@@ -88,7 +88,7 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
                     right_expr += const_term;
                 }
             }
-            let constraint = Int::_eq(&left_expr, right_expr);
+            let constraint = Int::eq(&left_expr, right_expr);
 
             assumptions.push(constraint.clone());
             constraint_to_literals.insert(constraint, literals);
@@ -132,7 +132,7 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
                 non_strict_inequalities.push((left_expr.clone(), right_expr.clone(), lit));
                 Int::le(&left_expr, &right_expr)
             }
-            Eq => Int::_eq(&left_expr, &right_expr),
+            Eq => Int::eq(&left_expr, &right_expr),
             Lt => Int::lt(&left_expr, &right_expr),
         };
 

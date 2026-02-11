@@ -11,8 +11,8 @@ use sundance_smt::datatypes::process::check_for_inductive_datatypes_and_panic;
 use sundance_smt::egraphs::egraph::Egraph;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::{debug_println, utils};
-use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::TermAllocator;
+use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
 use yaspar_ir::untyped::UntypedAst;
 

@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::cnf::CNFConversion as _;
+use crate::cnf::CNFConversion;
 use crate::egraphs::datastructures::Polarity;
 use crate::egraphs::egraph::Egraph;
 use crate::preprocess::check_for_function_bool;
@@ -93,7 +93,7 @@ pub fn instantiate_quantifiers(
             // let negated_term =
             //     if let Universal = quantifier.polarity {egraph.context.not(term)} else {term};
 
-            let polarity = quantifier.polarity == Polarity::Universal;
+            let polarity = quantifier.polarity != Polarity::Universal;
 
             // todo: replace this with the skolemized flag in the quantifier
             if egraph.added_skolemizations.contains(&quantifier.id) {

@@ -33,7 +33,7 @@ pub type SolverResult<T> = Result<T, SolverError>;
 
 /// Variable assignments, returned after finding a solution
 ///
-/// T is the type representing arithmetic literals; typically either [Var] or [Term]
+/// T is the type representing arithmetic literals; typically either [Var] or [yaspar_ir::ast::Term]
 #[derive(Debug, PartialEq, Eq)]
 pub struct Assignment<T: Ord>(BTreeMap<T, Rational>);
 
@@ -60,7 +60,7 @@ impl<T: Ord + Eq> Assignment<T> {
 }
 
 impl Assignment<Var> {
-    /// Convert from a Vec<VarInfo<Rational>> to an Assignment
+    /// Convert from a `Vec<VarInfo<Rational>>` to an Assignment
     /// This is a helper method for backward compatibility during refactoring
     pub fn from_var_info(var_infos: Vec<VarInfo<Rational>>) -> Self {
         let mut assignments = BTreeMap::new();
@@ -118,7 +118,7 @@ impl<T: Ord + Clone> Conflict<T> {
         Conflict(set)
     }
 
-    /// Return an [Iter] over the conflict basic_vars
+    /// Return an [Iterator] over the conflict basic_vars
     pub fn iter(&self) -> ConflictIter<'_, T> {
         self.0.iter()
     }
@@ -188,21 +188,16 @@ impl<T: Ord> FromIterator<T> for Conflict<T> {
 }
 
 /// High level decision of the general simplex algorithm
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub enum SolverDecision {
     /// Simplex is in-progress
+    #[default]
     UNKNOWN,
     /// The original linear real arithmetic problem is sat
     /// TODO: make model construction lazy
     FEASIBLE(Assignment<Var>),
     /// The original linear real arithmetic problem is UNSAT
     INFEASIBLE(Conflict<Var>),
-}
-
-impl Default for SolverDecision {
-    fn default() -> Self {
-        Self::UNKNOWN
-    }
 }
 
 /// Return a default model for a set of variable id's

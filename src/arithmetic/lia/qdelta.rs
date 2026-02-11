@@ -297,7 +297,7 @@ impl ops::Mul<&Rational> for &QDelta {
 
 impl Bounds<Rational> {
     /// Inject bounds over Q into bounds over Q_δ. Unfortunately implementing
-    /// From<Bounds<Rational>> for Bounds<QDelta> isn't possible b/c of conflict
+    /// `From<Bounds<Rational>>` for `Bounds<QDelta>` isn't possible b/c of conflict
     /// with blanket impl from core.
     #[inline]
     pub fn inject_bounds(&self) -> Bounds<QDelta> {

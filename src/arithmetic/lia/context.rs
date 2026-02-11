@@ -1,45 +1,49 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Context tracked during SMT to [LinearSystem] conversion
+//! Context tracked during SMT to [crate::arithmetic::lia::linear_system::LinearSystem] conversion
 
 use std::collections::HashMap;
 
 use dashu::Rational;
 
-use yaspar_ir::ast::{self, Sort};
-
 use crate::arithmetic::lia::linear_system::Rel;
 use crate::arithmetic::lia::variables::{Var, VarType};
+use yaspar_ir::ast::{self, Sort};
 
-/// Context used during conversion from Linear relation ASTs to [LinExpr]
+/// Context used during conversion from Linear relation ASTs to `LinExpr`
 ///
-/// During conversion we have [Term]s converted to [Rel]ations and unique (slack) [Var]iables.
+/// During conversion, we have [ast::Term]s converted to [Rel]ations and unique (slack) [Var]iables.
 ///
+/// ```text
 /// t_i -> r_i
 ///     -> slack_i (become basic variables in the tableau)
+///```
 ///
-/// To build an [LRASolver], we need to know the association r_i -> slack_i and keep
+/// To build a [crate::arithmetic::lia::lra_solver::LRASolver], we need to know the association `r_i -> slack_i` and keep
 /// the relations and slack/basic variables in a fixed order. This is best done by
-/// keeping a pair of vectors (Vec<Rel>, Var<Var>) since we only need to iterate over
+/// keeping a pair of vectors `(Vec<Rel>, Var<Var>)` since we only need to iterate over
 /// them in the fixed order.
 ///
 /// After solving, we have return data. Either:
 ///
+/// ```text
 /// FEASIBLE(Var -> Rational)
 /// INFEASIBLE({Var}) (where all Var are basic variables)
+/// ```
 ///
 /// These need to be converted to:
 ///
+/// ```text
 /// FEASIBLE(Term -> Rational) (where only term variables are keys)
 /// INFEASIBLE({Terms}) (where all Terms are input arithmetic literals)
+/// ```
 ///
 /// Need to track associations:
 ///
+/// ```text
 /// Var -> Term
-///
-///
-///
+///```
 #[derive(Clone, Debug)]
 pub struct ConvContext {
     /// next fresh unique id
@@ -238,7 +242,7 @@ impl ConvContext {
         self.var_to_name.get(&var).map(|s| s.as_str())
     }
 
-    /// Return the [Term] <-> [Var] mappings
+    /// Return the [ast::Term] <-> [Var] mappings
     pub fn get_term_var_maps(&self) -> (HashMap<ast::Term, Var>, HashMap<Var, ast::Term>) {
         (self.term_to_var.clone(), self.var_to_term.clone())
     }

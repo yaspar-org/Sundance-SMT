@@ -14,20 +14,6 @@ fn regression_test() {
     let smt_files_dir = Path::new("tests/regression/smt_files");
     let expected_results_path = Path::new("tests/regression/expected_results.json");
 
-    println!("Building release version...");
-    let build_result = Command::new("cargo")
-        .args(["build", "--release"])
-        .output()
-        .expect("Failed to execute cargo build");
-
-    if !build_result.status.success() {
-        panic!(
-            "Failed to build release version for testing. Build stderr: {}",
-            String::from_utf8_lossy(&build_result.stderr)
-        );
-    }
-    println!("Release build completed successfully.");
-
     // Read expected results
     let expected_results: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(expected_results_path).expect("Failed to read expected results"),
@@ -102,7 +88,7 @@ fn regression_test() {
                 .unwrap_or_else(|| panic!("No expected result found for {}", relative_path));
 
             // Run solver with timeout
-            let child = Command::new("target/release/sundance_smt")
+            let child = Command::new("target/release/sundance-smt")
                 .args([path.to_str().unwrap()])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())

@@ -5,7 +5,7 @@ use crate::egraphs::egraph::Egraph;
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::FetchSort;
 use yaspar_ir::ast::{
-    alg::QualifiedIdentifier, ObjectAllocatorExt as _, Repr, StrAllocator, Term, TermAllocator,
+    ObjectAllocatorExt as _, Repr, StrAllocator, Term, TermAllocator, alg::QualifiedIdentifier,
 };
 
 pub fn nelson_oppen_clause(literal: i32, egraph: &mut Egraph) -> Option<Term> {
