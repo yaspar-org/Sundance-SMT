@@ -102,7 +102,7 @@ fn regression_test() {
                 .unwrap_or_else(|| panic!("No expected result found for {}", relative_path));
 
             // Run solver with timeout
-            let child = Command::new("target/release/sundance_smt")
+            let child = Command::new("target/release/sundance-smt")
                 .args([path.to_str().unwrap()])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())

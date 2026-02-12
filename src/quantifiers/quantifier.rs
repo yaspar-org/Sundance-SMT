@@ -93,7 +93,7 @@ pub fn instantiate_quantifiers(
             // let negated_term =
             //     if let Universal = quantifier.polarity {egraph.context.not(term)} else {term};
 
-            let polarity = quantifier.polarity == Polarity::Universal;
+            let polarity = quantifier.polarity == Polarity::Existential;
 
             // todo: replace this with the skolemized flag in the quantifier
             if egraph.added_skolemizations.contains(&quantifier.id) {
