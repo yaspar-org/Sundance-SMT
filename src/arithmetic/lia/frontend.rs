@@ -153,7 +153,7 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
     match term.get().repr() {
         ATerm::Constant(c, _) => Ok(LinExpr(vec![c.convert_constant()?])),
         // handle variables
-        ATerm::Global(smt_ast::alg::QualifiedIdentifier(id, sort), _) => {
+        ATerm::Global(smt_ast::alg::QualifiedIdentifier(id, _), sort) => {
             let name = id.symbol.get();
             let var_typ = match sort {
                 Some(hs) => {
@@ -171,8 +171,7 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                     }
                 }
                 None => {
-                    log::warn!("no sort information for {name}, assuming type is Real");
-                    VarType::Real
+                    panic!("no sort information for {name}")
                 }
             };
             let var = ctx.allocate_var_term(name, var_typ, term.clone());
@@ -663,7 +662,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "broken after merge"]
     fn test_convert_smt_var_types_converted() {
         let smt = r#"
             (set-logic QF_LIA)
@@ -685,7 +683,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "broken after merge"]
     fn test_constant_division() {
         let smt = r#"
             (set-logic QF_LIA)

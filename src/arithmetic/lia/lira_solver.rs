@@ -488,7 +488,6 @@ mod tests {
 
     // Repeat the manual test above but using the actual LIRA solver branch-and-bound implementation
     #[test]
-    #[ignore = "broken after merge"]
     fn branch_and_bound_triangle() {
         let _ = env_logger::builder().is_test(true).try_init();
         // If x, y are Real this problem is FEASBILE, ex. model {x := 1/3, y := 1/3}
@@ -509,7 +508,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "broken after merge"]
     fn unsat_2_sat_branch_and_bound() {
         let _ = env_logger::builder().is_test(true).try_init();
 
@@ -556,7 +554,6 @@ mod tests {
     ///
     /// The encoding in this unit test cost $2.61
     #[test]
-    #[ignore = "broken after merge"]
     fn unsat_3_sat_branch_and_bound() {
         let _ = env_logger::builder().is_test(true).try_init();
 
@@ -616,7 +613,6 @@ mod tests {
     ///
     /// https://www.desmos.com/calculator/y1wwdqoqle
     #[test]
-    #[ignore = "broken after merge"]
     fn grind_test_playground() {
         let smt1 = r#"
         (declare-const x Int)
