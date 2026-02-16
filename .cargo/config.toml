@@ -1,0 +1,2 @@
+[env]
+Z3_SYS_BUNDLED_DIR_OVERRIDE = { value = "z3", relative = true }

@@ -92,7 +92,7 @@ jobs:
             ${{ runner.os }}-solver-
 
       - name: Run tests
-        run: cargo test --release --no-default-features --features "${{ matrix.features }}"
+        run: cargo test --release --no-default-features --features "${{ matrix.features }}" -- --nocapture
 
   lints:
     name: Lints
