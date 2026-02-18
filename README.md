@@ -23,7 +23,13 @@ cargo run -- path/to/your/smt/file.smt2
 ## Testing 
 
 ```bash
-cargo test
+cargo test -- --skip regression_test
+```
+
+To run the regression tests requires a release build:
+
+```bash
+cargo test --release -- --nocapture
 ```
 
 ## Security
