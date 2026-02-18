@@ -7,6 +7,13 @@ An SMT solver for program verification with support for uninterpreted functions,
 - yaspar
 - yaspar-ir
 
+## Building
+
+```
+git submodule init && git submodule update
+cargo build
+```
+
 ## Usage
 
 ```bash
