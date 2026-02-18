@@ -181,7 +181,7 @@ impl ConvContext {
                 }
             }
             None => {
-                Var::real(new_id) // by default al slack variables will have type Real
+                Var::real(new_id) // by default all slack variables have type Real
             }
         };
         self.next_id += 1;
