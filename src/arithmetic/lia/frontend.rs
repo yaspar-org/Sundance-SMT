@@ -537,45 +537,34 @@ pub fn solve(arith_literals: &[Term]) -> FrontendResult<SolverDecisionApi> {
 
 fn solve_with_context(mut ctx: ConvContext) -> FrontendResult<SolverDecisionApi> {
     let (_, var_term_map) = ctx.get_term_var_maps(); // this is a clone
+    let decision = solve_ctx_raw(&mut ctx)?;
+    Ok(SolverDecisionApi::from_solver_decision(
+        &var_term_map,
+        decision,
+    )?)
+}
 
-    // preprocess the input relations, detect trivial cases, and otherwise return a [LinearSystem]
-    // from which to build a solver.
-    // println!("before preprocess");
-    let result = preprocess(&mut ctx);
-    // println!("after preprocess");
+/// Run the solver given the provided context and return the resulting SolverDecision.
+pub fn solve_ctx_raw(ctx: &mut ConvContext) -> FrontendResult<SolverDecision> {
+    let result = preprocess(ctx);
     let sys = match result {
         PreprocessResult::TriviallySat => {
-            let model = default_model(ctx.get_all_vars());
-            return Ok(SolverDecisionApi::from_solver_decision(
-                &var_term_map,
-                SolverDecision::FEASIBLE(model),
-            )?);
+            return Ok(SolverDecision::FEASIBLE(default_model(ctx.get_all_vars())));
         }
         PreprocessResult::TriviallyUnsat(v) => {
             let mut conflict = collections::BTreeSet::new();
             conflict.insert(v);
-            return Ok(SolverDecisionApi::from_solver_decision(
-                &var_term_map,
-                SolverDecision::INFEASIBLE(Conflict::from_set(conflict)),
-            )?);
+            return Ok(SolverDecision::INFEASIBLE(Conflict::from_set(conflict)));
         }
-        PreprocessResult::Unknown => LinearSystem::new(ctx),
+        PreprocessResult::Unknown => LinearSystem::new(ctx.clone()),
     };
-    // println!("after sys");
     let lra_solver = sys
         .to_lra_solver(true)
         .map_err(|e| FrontendError(format!("error building lra_solver: {}", e)))?;
-    // println!("after lar_solver");
     let mut lira_solver = LIRASolver::new(lra_solver);
-    // println!("after lira_solver");
-    let internal_decision = lira_solver
+    lira_solver
         .solve()
-        .map_err(|e| FrontendError(format!("error solving: {}", e)))?;
-    // println!("after internal_decision");
-    Ok(SolverDecisionApi::from_solver_decision(
-        &var_term_map,
-        internal_decision,
-    )?)
+        .map_err(|e| FrontendError(format!("error solving: {}", e)))
 }
 
 #[cfg(test)]
