@@ -60,7 +60,7 @@ impl From<LinearSystemError> for FrontendError {
 
 type FrontendResult<R> = Result<R, FrontendError>;
 
-/// Linear expression represented by a list of [Addends] implicitly added together
+/// Linear expression represented by a list of [Addend]s implicitly added together
 struct LinExpr(pub Vec<Addend<Rational>>);
 
 impl LinExpr {
@@ -139,7 +139,7 @@ const GT_SYMBOL: &str = ">";
 /// # Arguments
 /// * `term` - The SMT term to convert to a linear expression
 ///
-/// Note: [Term] is an `HConsed<RTerm>`, [RTerm] is a wrapper around `alg::raw::Term<...>`
+/// Note: [Term] is an `HConsed<RTerm>`, `RTerm` is a wrapper around `alg::raw::Term<...>`
 ///
 /// # Returns
 /// A `Result` containing either:
