@@ -39,9 +39,9 @@ pub fn check_integer_constraints_satisfiable_lia(
     for term_id in egraph.arithmetic_terms.clone() {
         if let ProofForestEdge::Root { .. } = &egraph.proof_forest[term_id as usize] {
             let (expr, _) = extract_linear_expression(term_id, egraph);
-            let root_var = *var_map
-                .entry(term_id)
-                .or_insert_with(|| ctx.allocate_var(&format!("var_{}", term_id), VarType::Int));
+            let root_var = *var_map.entry(term_id).or_insert_with(|| {
+                ctx.allocate_var(&format!("!ext_var_{}", term_id), VarType::Int)
+            });
             roots.push((term_id, root_var));
 
             // We have "root_var = expr," make it into "root_var - expr = 0"
@@ -49,7 +49,8 @@ pub fn check_integer_constraints_satisfiable_lia(
                 expr_to_monomials(&expr, -Rational::ONE, &mut var_map, &mut ctx);
             monomials.insert(0, Mon::new(Rational::ONE, root_var));
 
-            let slack = ctx.allocate_var(&format!("slack_var_root_{}", term_id), VarType::Real);
+            let slack =
+                ctx.allocate_var(&format!("!ext_slack_var_root_{}", term_id), VarType::Real);
             ctx.push_relation(Rel::mk_eq(monomials, constant), slack);
         }
     }
@@ -78,7 +79,7 @@ pub fn check_integer_constraints_satisfiable_lia(
         };
 
         let slack = ctx.allocate_var(
-            &format!("slack_constraint_{}", constraint_idx),
+            &format!("!ext_slack_constraint_{}", constraint_idx),
             VarType::Real,
         );
         ctx.push_relation(rel, slack);
@@ -132,7 +133,7 @@ fn expr_to_monomials(
             Coefficient::Term(id) => {
                 let v = *var_map
                     .entry(*id)
-                    .or_insert_with(|| ctx.allocate_var(&format!("var_{}", id), VarType::Int));
+                    .or_insert_with(|| ctx.allocate_var(&format!("!ext_var_{}", id), VarType::Int));
                 monomials.push(Mon::new(&sign * &rational_coeff, v));
             }
             Coefficient::Constant => constant = -&sign * rational_coeff,
