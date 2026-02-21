@@ -149,7 +149,6 @@ const GT_SYMBOL: &str = ">";
 /// TODO: add source metadata to conversion errors
 /// TODO: support left-associating -, +, *, /
 fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<LinExpr> {
-    // println!("converting the term {}", term);
     match term.get().repr() {
         ATerm::Constant(c, _) => Ok(LinExpr(vec![c.convert_constant()?])),
         // handle variables
@@ -166,7 +165,6 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                     } else if name == "Int" {
                         VarType::Int
                     } else {
-                        // println!("{}", term);
                         unreachable!() // unreachable assuming type checking and logic is set correctly
                     }
                 }
@@ -254,7 +252,6 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
             // we are treating ite as an uninterpreted function
             // don't know the sort so letting it be 0
             let sort = t1.get_sort(&mut Context::new());
-            // println!("we have ite {} with sort {}", term, sort);
             let var_t = ctx.allocate_term(term.clone(), None, Some(sort));
             Ok(LinExpr(vec![Addend::term(Rational::ONE, var_t)])) // Integer one as rational
         }
@@ -328,17 +325,14 @@ fn convert_constraint(symbol: &str) -> FrontendResult<Constraint> {
 /// Return type has the Option to return None when the term in question can be ignored, e.g.
 /// boolean literals from an implicant.
 fn convert_relation(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Option<Rel<Rational>>> {
-    // println!("in convert relation {}", term);
     match term.repr() {
         // handle =, >=, >, <=, <
         ATerm::App(smt_ast::alg::QualifiedIdentifier(rel_id, _op_sort), args, _app_sort) => {
-            // println!("in app {}", term);
             if *rel_id.symbol != ">="
                 && *rel_id.symbol != ">"
                 && *rel_id.symbol != "<="
                 && *rel_id.symbol != "<"
             {
-                // println!("returning ok(none)");
                 return Ok(None);
             }
             // TODO: support left-assoc (in)equality?
@@ -354,26 +348,7 @@ fn convert_relation(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Option
         }
         // handle term identifiers
         ATerm::Global(smt_ast::alg::QualifiedIdentifier(_id, _sort), _) => {
-            // The following is some validation, but we return Ok(None) anyway,
-            // having nothing to convert.
-            //
-            // let name = id.symbol.get();
-            // let sort_name = sort
-            //     .as_ref()
-            //     .ok_or(FrontendError(format!("missing sort for symbol {}", name)))?
-            //     .get()
-            //     .0
-            //     .0
-            //     .symbol
-            //     .get()
-            //     .as_str(); // behold the tower of dots
-            // if sort_name != BOOL_SORT {
-            //     return Err(FrontendError(format!(
-            //         "unsupported literal '{}', sort '{}'",
-            //         name, sort_name
-            //     )));
-            // }
-            // println!("returning ok(none)");
+            // Nothing to convert
             Ok(None)
         }
         // Equality is represented above the literal level
@@ -383,7 +358,6 @@ fn convert_relation(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Option
                 || (t2.get_sort(&mut Context::new()).sort_name().as_str() != "Real"
                     && t2.get_sort(&mut Context::new()).sort_name().as_str() != "Int")
             {
-                // println!("returning ok(none)");
                 return Ok(None);
             }
             let lhs = convert_linear_term(ctx, t1)?;
@@ -410,11 +384,6 @@ fn convert_arith_literal(
     ctx: &mut ConvContext,
     term: &Term,
 ) -> FrontendResult<Option<Rel<Rational>>> {
-    // println!("in convert arith_literal with {}", term);
-
-    // if let Ok(Some(t)) = result {
-    //     println!("(assert {})", t);
-    // };
     match term.get().repr() {
         // ignore annotations
         ATerm::Annotated(t, _) => convert_relation(ctx, t),
@@ -498,12 +467,10 @@ fn convert_terms(terms: &[Term]) -> FrontendResult<ConvContext> {
         if let Some(r) = convert_arith_literal(&mut ctx, t)? {
             // Allocate a slack variable associated with the term
             // Note: cloning `t` is cheap; it's a uid + arc ref
-            // println!("in convert terms with {}", t);
             let slack_t = ctx.allocate_term(t.clone(), None, None);
             ctx.push_relation(r, slack_t);
         }
     }
-    // println!("exiting convert_terms");
     Ok(ctx)
 }
 
@@ -546,6 +513,8 @@ fn solve_with_context(mut ctx: ConvContext) -> FrontendResult<SolverDecisionApi>
 
 /// Run the solver given the provided context and return the resulting SolverDecision.
 pub fn solve_ctx_raw(ctx: &mut ConvContext) -> FrontendResult<SolverDecision> {
+    // preprocess the input relations, detect trivial cases, and otherwise return a [LinearSystem]
+    // from which to build a solver.
     let result = preprocess(ctx);
     let sys = match result {
         PreprocessResult::TriviallySat => {

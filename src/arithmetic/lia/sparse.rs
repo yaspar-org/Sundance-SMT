@@ -253,8 +253,6 @@ impl<V: Zero + Default + fmt::Debug> Matrix<V> {
             let q_n = self.arena.get_mut(q).unwrap();
             q_n.left = k;
 
-            // DEBUG: println!("{:?}", self);
-
             // column traverse to fix links in col `col` and update `k`'s up pointer
             let mut q = self.basecols[col]; // previous node in left traversal
             let basecol_n = self.arena.get_mut(q).unwrap();
@@ -351,8 +349,6 @@ mod tests {
     fn from_tuples_3x3() {
         let m = Matrix::<i32>::from_tuples(3, 3, vec![(2, 0, -1), (1, 1, 0), (0, 2, 1)])
             .expect("failed to create matrix from tuples");
-        println!("DEBUG:");
-        println!("{m:?}");
         assert_eq!(m.get(2, 0), Some(&-1));
         assert_eq!(m.get(1, 1), Some(&0));
         assert_eq!(m.get(0, 2), Some(&1));
