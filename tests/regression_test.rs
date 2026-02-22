@@ -23,13 +23,6 @@ fn regression_test() {
     // Check if a specific subfolder is requested via environment variable
     let target_subfolder = env::var("TEST_SUBFOLDER").ok();
 
-    let arithmetic = if cfg!(feature = "z3-solver") {
-        "z3"
-    } else {
-        "internal"
-    };
-    println!("Using arithmetic solver: {}", arithmetic);
-
     // Get all subdirectories in smt_files
     let subdirs = fs::read_dir(smt_files_dir)
         .expect("Failed to read smt_files directory")
@@ -96,7 +89,7 @@ fn regression_test() {
 
             // Run solver with timeout
             let child = Command::new("target/release/sundance-smt")
-                .args([path.to_str().unwrap(), "--arithmetic", &arithmetic])
+                .args([path.to_str().unwrap()])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()

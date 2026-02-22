@@ -24,6 +24,7 @@ use yaspar_ir::ast::{
 #[derive(Debug, Clone, ValueEnum)]
 pub enum ArithSolver {
     Internal,
+    #[cfg(feature = "z3-solver")]
     Z3,
     None,
 }
@@ -32,6 +33,7 @@ impl Display for ArithSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ArithSolver::Internal => "internal".fmt(f),
+            #[cfg(feature = "z3-solver")]
             ArithSolver::Z3 => "z3".fmt(f),
             ArithSolver::None => "none".fmt(f),
         }
@@ -68,6 +70,7 @@ impl FromStr for ArithSolver {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "internal" => Ok(ArithSolver::Internal),
+            #[cfg(feature = "z3-solver")]
             "z3" => Ok(ArithSolver::Z3),
             "none" => Ok(ArithSolver::None),
             _ => Err(ArithSolverParseError {
@@ -87,8 +90,6 @@ pub fn check_integer_constraints_satisfiable(
         ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, egraph),
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, egraph),
-        #[cfg(not(feature = "z3-solver"))]
-        ArithSolver::Z3 => panic!("z3 arithmetic solver requires the 'z3-solver' feature"),
         ArithSolver::None => ArithResult::None,
     }
 }
