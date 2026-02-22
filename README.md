@@ -40,6 +40,12 @@ Z3 will be compiled from source by default, but you can use a local build for z3
 adding the `--no-default-features --features local-z3` flags with cargo. Make sure
 the `Z3_SYS_Z3_HEADER` environment flag points to the path to `z3.h`.
 
+To build without z3 entirely (using only the internal arithmetic solver):
+
+```bash
+cargo build --no-default-features
+```
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.

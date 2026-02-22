@@ -4,6 +4,7 @@
 use dashu::integer::IBig;
 // use z3::{ast::{Ast, Bool, Int}, Context, Solver};
 use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
+#[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
 use crate::egraphs::congruence_closure::leastcommonancestor;
 use crate::egraphs::egraph::Egraph;
@@ -84,7 +85,10 @@ pub fn check_integer_constraints_satisfiable(
 ) -> ArithResult {
     match arith_solver {
         ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, egraph),
+        #[cfg(feature = "z3-solver")]
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, egraph),
+        #[cfg(not(feature = "z3-solver"))]
+        ArithSolver::Z3 => panic!("z3 arithmetic solver requires the 'z3-solver' feature"),
         ArithSolver::None => ArithResult::None,
     }
 }
