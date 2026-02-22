@@ -3,6 +3,7 @@
 
 use dashu::integer::IBig;
 // use z3::{ast::{Ast, Bool, Int}, Context, Solver};
+use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
 use crate::egraphs::congruence_closure::leastcommonancestor;
 use crate::egraphs::egraph::Egraph;
@@ -82,7 +83,7 @@ pub fn check_integer_constraints_satisfiable(
     egraph: &mut Egraph,
 ) -> ArithResult {
     match arith_solver {
-        ArithSolver::Internal => todo!(), //check_integer_constraints_satisfiable_lia(terms, egraph), -> fix this so it returns arithsolver result
+        ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, egraph),
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, egraph),
         ArithSolver::None => ArithResult::None,
     }

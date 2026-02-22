@@ -60,7 +60,7 @@ impl From<LinearSystemError> for FrontendError {
 
 type FrontendResult<R> = Result<R, FrontendError>;
 
-/// Linear expression represented by a list of [Addends] implicitly added together
+/// Linear expression represented by a list of [Addend]s implicitly added together
 struct LinExpr(pub Vec<Addend<Rational>>);
 
 impl LinExpr {
@@ -139,7 +139,7 @@ const GT_SYMBOL: &str = ">";
 /// # Arguments
 /// * `term` - The SMT term to convert to a linear expression
 ///
-/// Note: [Term] is an `HConsed<RTerm>`, [RTerm] is a wrapper around `alg::raw::Term<...>`
+/// Note: [Term] is an `HConsed<RTerm>`, `RTerm` is a wrapper around `alg::raw::Term<...>`
 ///
 /// # Returns
 /// A `Result` containing either:
@@ -504,39 +504,36 @@ pub fn solve(arith_literals: &[Term]) -> FrontendResult<SolverDecisionApi> {
 
 fn solve_with_context(mut ctx: ConvContext) -> FrontendResult<SolverDecisionApi> {
     let (_, var_term_map) = ctx.get_term_var_maps(); // this is a clone
+    let decision = solve_ctx_raw(&mut ctx)?;
+    Ok(SolverDecisionApi::from_solver_decision(
+        &var_term_map,
+        decision,
+    )?)
+}
 
+/// Run the solver given the provided context and return the resulting SolverDecision.
+pub fn solve_ctx_raw(ctx: &mut ConvContext) -> FrontendResult<SolverDecision> {
     // preprocess the input relations, detect trivial cases, and otherwise return a [LinearSystem]
     // from which to build a solver.
-    let result = preprocess(&mut ctx);
+    let result = preprocess(ctx);
     let sys = match result {
         PreprocessResult::TriviallySat => {
-            let model = default_model(ctx.get_all_vars());
-            return Ok(SolverDecisionApi::from_solver_decision(
-                &var_term_map,
-                SolverDecision::FEASIBLE(model),
-            )?);
+            return Ok(SolverDecision::FEASIBLE(default_model(ctx.get_all_vars())));
         }
         PreprocessResult::TriviallyUnsat(v) => {
             let mut conflict = collections::BTreeSet::new();
             conflict.insert(v);
-            return Ok(SolverDecisionApi::from_solver_decision(
-                &var_term_map,
-                SolverDecision::INFEASIBLE(Conflict::from_set(conflict)),
-            )?);
+            return Ok(SolverDecision::INFEASIBLE(Conflict::from_set(conflict)));
         }
-        PreprocessResult::Unknown => LinearSystem::new(ctx),
+        PreprocessResult::Unknown => LinearSystem::new(ctx.clone()),
     };
     let lra_solver = sys
         .to_lra_solver(true)
         .map_err(|e| FrontendError(format!("error building lra_solver: {}", e)))?;
     let mut lira_solver = LIRASolver::new(lra_solver);
-    let internal_decision = lira_solver
+    lira_solver
         .solve()
-        .map_err(|e| FrontendError(format!("error solving: {}", e)))?;
-    Ok(SolverDecisionApi::from_solver_decision(
-        &var_term_map,
-        internal_decision,
-    )?)
+        .map_err(|e| FrontendError(format!("error solving: {}", e)))
 }
 
 #[cfg(test)]
