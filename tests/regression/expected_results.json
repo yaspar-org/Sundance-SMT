@@ -241,6 +241,7 @@
     "arithmetic/falsearithfact2.smt2": "unsat",
     "arithmetic/falsearithfact3.smt2": "unsat",
     "arithmetic/falsearithfact4.smt2": "unsat",
+    "arithmetic/issue33.smt2": "unsat",
     "arithmetic/nelsonoppen_advanced.smt2": "unsat",
     "arithmetic/nelsonoppen_advanced2.smt2": "unsat",
     "arithmetic/nelsonoppen.smt2": "unsat",
