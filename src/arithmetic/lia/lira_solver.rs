@@ -756,4 +756,29 @@ mod tests {
         let result = solve_smtlib(smt_conflict).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)),);
     }
+
+    // Regression test from https://github.com/yaspar-org/Sundance-SMT/issues/33
+    //
+    //  b <  0       {       b < 0
+    // -b <= 1  -->  { -1 <= b
+    // -b <  1       { -1 <  b
+    //
+    // The first and 3rd constraints are mutually UNSAT.
+    #[test]
+    fn regresssion_issue_33() {
+        let smt = r#"
+        (declare-const b Int)
+        (assert (< b 0))
+        (assert (<= (- b) 1))
+        (assert (< (- b) 1))
+        (check-sat)
+        "#;
+        let result = solve_smtlib(smt).expect("solver failed");
+        assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)),);
+        if let SolverDecisionApi::INFEASIBLE(conflict) = result {
+            assert_eq!(conflict.len(), 2);
+            // The terms printed here are correct by inspection
+            // println!("{conflict:#?}");
+        }
+    }
 }
