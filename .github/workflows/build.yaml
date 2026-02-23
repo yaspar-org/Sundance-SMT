@@ -50,6 +50,7 @@ jobs:
         rust: [ stable ]
         features:
           - 'default'
+          - ''
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read

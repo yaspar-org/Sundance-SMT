@@ -4,6 +4,7 @@
 use dashu::integer::IBig;
 // use z3::{ast::{Ast, Bool, Int}, Context, Solver};
 use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
+#[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
 use crate::egraphs::congruence_closure::leastcommonancestor;
 use crate::egraphs::egraph::Egraph;
@@ -23,6 +24,7 @@ use yaspar_ir::ast::{
 #[derive(Debug, Clone, ValueEnum)]
 pub enum ArithSolver {
     Internal,
+    #[cfg(feature = "z3-solver")]
     Z3,
     None,
 }
@@ -31,6 +33,7 @@ impl Display for ArithSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ArithSolver::Internal => "internal".fmt(f),
+            #[cfg(feature = "z3-solver")]
             ArithSolver::Z3 => "z3".fmt(f),
             ArithSolver::None => "none".fmt(f),
         }
@@ -67,6 +70,7 @@ impl FromStr for ArithSolver {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "internal" => Ok(ArithSolver::Internal),
+            #[cfg(feature = "z3-solver")]
             "z3" => Ok(ArithSolver::Z3),
             "none" => Ok(ArithSolver::None),
             _ => Err(ArithSolverParseError {
@@ -84,6 +88,7 @@ pub fn check_integer_constraints_satisfiable(
 ) -> ArithResult {
     match arith_solver {
         ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, egraph),
+        #[cfg(feature = "z3-solver")]
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, egraph),
         ArithSolver::None => ArithResult::None,
     }
