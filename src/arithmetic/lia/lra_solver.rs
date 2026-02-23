@@ -462,11 +462,16 @@ impl<T: Tableau> LRASolver<T> {
     ///   l_i <= x_i^rat + x_i^inf δ_0
     ///   0 <= (x_i^rat - l_i) + x_i^inf δ_0
     ///
-    /// If x_i^rat = l_i but x_i^inf < 0 the Q_δ inequality would be violated, so WLOG x_i^rat -
-    /// l_i > 0. If x_i^inf > 0 there is no constraint on δ_0 and finally if it's < 0 we can
-    /// choose:
+    /// By definition of <= on Q_δ, either a) 0 < x_i^rat - l_i or b) it is zero and 0 <= x_i^inf.
+    /// In the zero case, there is no constraint on δ_0 other than non-negativity. Otherwise, if
+    /// 0 <= x_i^inf there is again no constraint on δ_0. So finally, without loss of generality
+    /// assume 0 < (x_i^rat - l_i) and x_i^inf < 0:
     ///
-    ///   δ_0 <= (x_i^rat - l_i) / abs(x_i^inf)
+    ///   0 <= (x_i^rat - l_i) + x_i^inf δ_0
+    ///   -x_i^inf δ_0 <= (x_i^rat - l_i)
+    ///   δ_0 <= (x_i^rat - l_i)/abs(x_i^inf)
+    ///
+    /// The last step is justified by x_i^inf < 0.
     ///
     /// The upper bound case is similar.
     /// ```text
@@ -490,6 +495,9 @@ impl<T: Tableau> LRASolver<T> {
                 } else if l.inf().is_zero() && v.val.inf() < &Rational::ZERO {
                     // lower bound is non-strict, but assigned value is infinitesimally smaller
                     // than some rational value
+                    //
+                    // Note: `v.val.rat() - l.rat() >= 0` in this branch because the assignment to
+                    // `v` satisfies all bounds.
                     let d0 = (v.val.rat() - l.rat()) / v.val.inf().clone().abs();
                     delta_ub.push(d0);
                 }
@@ -509,12 +517,16 @@ impl<T: Tableau> LRASolver<T> {
                 } else if u.inf().is_zero() && v.val.inf() > &Rational::ZERO {
                     // upper bound is non-strict, but assigned value is infinitesimally greater
                     // than some rational value
-                    let d0 = (u.rat() - v.val.rat()) / v.val.inf().clone();
+                    //
+                    // Note: `u.rat() - v.val.rat() >= 0` in this branch because the assignment to
+                    // `v` satisfies all bounds.
+                    let d0 = (u.rat() - v.val.rat()) / v.val.inf().clone().abs();
                     delta_ub.push(d0);
                 }
             }
         }
         let d0 = delta_ub.into_iter().min().unwrap_or(Rational::ONE); // choose δ_0 = 1 if there are no positive upper bounds
+        debug_assert!(d0 >= Rational::ZERO);
         log::debug!("δ_0 = {d0}");
         d0
     }
