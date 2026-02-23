@@ -466,7 +466,7 @@ impl<T: Tableau> LRASolver<T> {
     /// l_i > 0. If x_i^inf > 0 there is no constraint on δ_0 and finally if it's < 0 we can
     /// choose:
     ///
-    ///   δ_0 <= (l_i - x_i^rat) / abs(x_i^inf)
+    ///   δ_0 <= (x_i^rat - l_i) / abs(x_i^inf)
     ///
     /// The upper bound case is similar.
     /// ```text
@@ -490,7 +490,7 @@ impl<T: Tableau> LRASolver<T> {
                 } else if l.inf().is_zero() && v.val.inf() < &Rational::ZERO {
                     // lower bound is non-strict, but assigned value is infinitesimally smaller
                     // than some rational value
-                    let d0 = (l.rat() - v.val.rat()) / v.val.inf().clone().abs();
+                    let d0 = (v.val.rat() - l.rat()) / v.val.inf().clone().abs();
                     delta_ub.push(d0);
                 }
             }
