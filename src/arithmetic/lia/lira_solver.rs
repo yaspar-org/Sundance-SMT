@@ -781,4 +781,20 @@ mod tests {
             // println!("{conflict:#?}");
         }
     }
+
+    #[test]
+    fn regression_issue_30() {
+        let smt = r#"
+        (set-logic QF_LRA)
+        (declare-const x Real)
+        (assert (= (* 2 x) 3))
+        (check-sat)
+        "#;
+        let result = solve_smtlib(smt).expect("solver failed");
+        assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)),);
+        if let SolverDecisionApi::FEASIBLE(assg) = result {
+            let (_, val) = assg.iter().next().unwrap();
+            assert_eq!(Rational::from(2) * val, Rational::from(3));
+        }
+    }
 }
