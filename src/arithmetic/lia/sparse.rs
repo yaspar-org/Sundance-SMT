@@ -22,11 +22,12 @@
 
 use num_traits::Zero;
 use slotmap;
+use std::collections::{HashMap, HashSet};
 use std::error;
 use std::fmt;
 
 /// Generic error type for spare matrix operations
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct SparseError(pub String);
 impl fmt::Display for SparseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -83,7 +84,7 @@ impl<V: fmt::Debug> fmt::Debug for Matrix<V> {
     }
 }
 
-impl<V: Zero + Default + fmt::Debug> Matrix<V> {
+impl<V: Zero + fmt::Debug> Matrix<V> {
     /// Create a new sparse matrix from a vector of tuples (row, col, value).
     ///
     /// The matrix dimensions are explicitly specified by nrows and ncols.
@@ -96,9 +97,10 @@ impl<V: Zero + Default + fmt::Debug> Matrix<V> {
         // Create a new matrix with the specified dimensions
         let mut matrix = Self::new(nrows, ncols)?;
 
-        // Insert each tuple into the matrix, validating bounds
+        // Insert each tuple into the matrix, validating bounds. Zero values are not
+        // inserted into the matrix.
         for (row, col, value) in t {
-            if matrix.update_or_insert(row, col, value).is_none() {
+            if !value.is_zero() && matrix.update_or_insert(row, col, value).is_none() {
                 return Err(SparseError(format!(
                     "tuple ({}, {}) is out of bounds for matrix with dimensions {} x {}",
                     row, col, nrows, ncols
@@ -109,21 +111,44 @@ impl<V: Zero + Default + fmt::Debug> Matrix<V> {
         Ok(matrix)
     }
 
-    /// Create a new sparse matrix of nrows x ncols where all entries are Zero, i.e.
-    /// there are no nodes in the matrix representation except for the base rows and columns.
+    /// Create a new sparse zero matrix of nrows x ncols, i.e. there are no nodes in the matrix
+    /// representation except for the base rows and columns.
+    ///
+    /// Zero Matrix representation:
+    ///
+    /// ```text
+    /// For a 3x3 matrix (nrows=3, ncols=3):
+    ///
+    ///    basecol[0]  basecol[1]  basecol[2]
+    ///         ↓          ↓          ↓
+    ///    ┌─────────┬─────────┬─────────┐
+    ///    │ r:None  │ r:None  │ r:None  │
+    ///    │ c:0     │ c:1     │ c:2     │
+    ///  ┌─┼─left: ←─┼─left: ←─┼─left:   │←┐
+    ///  │ │ up:─┐   │ up:─┐   │ up:─┐   │ │
+    ///  │ └─────┼───┴─────┼───┴─────┼───┘ │
+    ///  │    │  ↓      │  ↓      │  ↓     │
+    ///  │    │  │      │  │      │  │     │
+    ///  │    └──┘      └──┘      └──┘     │
+    ///  └─────────────────────────────────┘
+    ///
+    /// ```
+    ///
+    ///  and similarly for the baserows but they are arranged in a single column at the left.
+    ///
     pub fn new(nrows: usize, ncols: usize) -> SparseResult<Self> {
-        let mut arena = slotmap::SlotMap::new();
-        let mut baserows = Vec::with_capacity(nrows);
-        let mut basecols = Vec::with_capacity(ncols);
         if nrows == 0 || ncols == 0 {
             return Err(SparseError("nrows and ncols must be > 0".to_string()));
         }
+        let mut arena = slotmap::SlotMap::new();
+        let mut baserows = Vec::with_capacity(nrows);
+        let mut basecols = Vec::with_capacity(ncols);
 
         for r in 0..nrows {
             let mk_baserow_node = |k| Node {
                 row: Some(r),
                 col: None,
-                value: V::default(),
+                value: V::zero(),
                 left: k,
                 up: k,
             };
@@ -148,7 +173,7 @@ impl<V: Zero + Default + fmt::Debug> Matrix<V> {
             let mk_basecol_node = |k| Node {
                 row: None,
                 col: Some(c),
-                value: V::default(),
+                value: V::zero(),
                 left: k,
                 up: k,
             };
@@ -179,15 +204,16 @@ impl<V: Zero + Default + fmt::Debug> Matrix<V> {
 
     /// Get the value of an element in the matrix
     ///
-    /// Returns Zero if the element coordinates are in-bounds but the node
-    /// doesn't exist in the sparse matrix representation.
+    /// Returns Some(&Zero) if the element coordinates are in-bounds but the node
+    /// doesn't exist in the sparse matrix representation. Return None if the indices
+    /// are out of bounds.
     pub fn get(&self, row: usize, col: usize) -> Option<&V> {
         if row >= self.baserows.len() || col >= self.basecols.len() {
             return None;
         }
         // traverse left from the baserow[row] to find the right column to get
         let baserow_n = self.arena.get(self.baserows[row]).unwrap();
-        let mut p = baserow_n.left; // current node in left traversal
+        let mut p = baserow_n.left; // pointer to the current node in left traversal
         let mut p_n = self.arena.get(p).unwrap();
         while let Some(pcol) = p_n.col
             && pcol > col
@@ -289,11 +315,263 @@ impl<V: Zero + Default + fmt::Debug> Matrix<V> {
             }
         }
     }
+
+    /// Delete a node at the specified row and column from the sparse matrix.
+    ///
+    /// Updates the linked list pointers to maintain matrix integrity.
+    /// Returns Ok(true) if an in-bounds node was found and deleted, or Ok(false)
+    /// if no node was present to delete. Return Err if the row, col are out of bounds.
+    /// (row, col) is out of bounds.
+    fn delete_node(&mut self, row: usize, col: usize) -> SparseResult<bool> {
+        if row >= self.baserows.len() || col >= self.basecols.len() {
+            return Err(SparseError(format!(
+                "({row}, {col}) are out of bounds for matrix of size {}x{}",
+                self.baserows.len(),
+                self.basecols.len(),
+            )));
+        }
+
+        // Traverse left from baserow to find the node and its predecessor
+        let mut q = self.baserows[row]; // predecessor in row traversal
+        let baserow_n = self.arena.get(q).unwrap();
+        let mut p = baserow_n.left; // current pointer in row traversal
+
+        loop {
+            let p_n = self.arena.get(p).unwrap();
+            if let Some(pcol) = p_n.col {
+                if pcol == col {
+                    // Found the node to delete
+                    let node_to_delete = p;
+                    let left_ptr = p_n.left;
+                    let up_ptr = p_n.up;
+
+                    // Update row links: q.left = p.left
+                    let q_n = self.arena.get_mut(q).unwrap();
+                    q_n.left = left_ptr;
+
+                    // Traverse up from basecol to find predecessor in column
+                    let mut q_col = self.basecols[col];
+                    let basecol_n = self.arena.get(q_col).unwrap();
+                    let mut p_col = basecol_n.up;
+
+                    loop {
+                        let p_col_n = self.arena.get(p_col).unwrap();
+                        if let Some(prow) = p_col_n.row {
+                            if prow == row {
+                                // Found the node in column traversal
+                                // Update column links: q_col.up = p.up
+                                let q_col_n = self.arena.get_mut(q_col).unwrap();
+                                q_col_n.up = up_ptr;
+                                break;
+                            }
+                            q_col = p_col;
+                            let p_col_n = self.arena.get(p_col).unwrap();
+                            p_col = p_col_n.up;
+                        } else {
+                            // Reached basecol without finding node - cannot happen since we've
+                            // already found the node
+                            unreachable!()
+                        }
+                    }
+
+                    // Remove from arena
+                    self.arena.remove(node_to_delete);
+                    // TODO: sparse::delete: doesn't make sense to return the key if we delete from the arena
+                    return Ok(true);
+                } else if pcol < col {
+                    // Passed where the node would be, it doesn't exist
+                    return Ok(false);
+                }
+                q = p;
+                let p_n = self.arena.get(p).unwrap();
+                p = p_n.left;
+            } else {
+                // Reached baserow without finding node
+                return Ok(false);
+            }
+        }
+    }
+
+    /// Perform a pivot operation on the matrix at the specified row and column.
+    ///
+    /// The pivot transforms matrix elements according to:
+    ///
+    /// - Pivot element: a → 1/a
+    /// - Pivot row (non-pivot): b → b/a
+    /// - Pivot column (non-pivot): c → -c/a
+    /// - Other elements: d → d - b*c/a (where b is pivot row element, c is pivot column element)
+    ///
+    /// Nodes that become zero are deleted from the sparse representation.
+    ///
+    /// TODO: sparse::pivot: the current implementation uses `get` and `delete_node` as helper
+    /// functions in a few places. This introduces some extra row/col traversals which can be
+    /// eliminated by combining with traversals in the pivot.
+    pub fn pivot(&mut self, row: usize, col: usize) -> SparseResult<()>
+    where
+        V: Clone
+            + std::ops::Div<Output = V>
+            + std::ops::Mul<Output = V>
+            + std::ops::Sub<Output = V>
+            + std::ops::Neg<Output = V>
+            + From<i32>,
+    {
+        // Validate bounds
+        if row >= self.baserows.len() || col >= self.basecols.len() {
+            return Err(SparseError(format!(
+                "pivot position ({}, {}) is out of bounds for matrix with dimensions {} x {}",
+                row,
+                col,
+                self.baserows.len(),
+                self.basecols.len()
+            )));
+        }
+
+        // Get pivot element and check it's non-zero
+        let pivot_value = match self.get(row, col) {
+            Some(v) if !v.is_zero() => v.clone(),
+            Some(_) => return Err(SparseError("pivot element is zero".to_string())),
+            None => return Err(SparseError("pivot position is out of bounds".to_string())),
+        };
+
+        // Calculate inverse of pivot
+        let inv_pivot = V::from(1) / pivot_value.clone();
+
+        // Cache pivot row values in a HashMap for efficient lookup in later passes
+        let mut pivot_row_map = HashMap::new(); // HashMap<col, value>
+        // Update pivot row: a -> 1/a for pivot elt., b → b/a for non-pivot elements
+        let baserow_k = self.baserows[row];
+        let baserow_n = self.arena.get(baserow_k).unwrap();
+        let mut p = baserow_n.left;
+        loop {
+            let p_n = self.arena.get_mut(p).unwrap();
+            if let Some(pcol) = p_n.col {
+                pivot_row_map.insert(pcol, p_n.value.clone());
+                if pcol == col {
+                    // a -> 1/a
+                    p_n.value = inv_pivot.clone();
+                } else {
+                    // b -> b/a
+                    p_n.value = p_n.value.clone() * inv_pivot.clone();
+                }
+                p = p_n.left;
+            } else {
+                // Reached baserow node, stop
+                break;
+            }
+        }
+
+        // Update pivot column: c → -c/a for non-pivot rows
+        // Cache the pivot column values 'c' for later use in the general d -> d - b*c/a case
+        let mut pivot_col_values = HashMap::new();
+        let basecol_k = self.basecols[col];
+        let basecol_n = self.arena.get(basecol_k).unwrap();
+        let mut p = basecol_n.up;
+        loop {
+            let p_n = self.arena.get_mut(p).unwrap();
+            if let Some(prow) = p_n.row {
+                if prow != row {
+                    let old_value = &p_n.value;
+                    pivot_col_values.insert(prow, old_value.clone());
+                    p_n.value = -(old_value.clone() / pivot_value.clone());
+                }
+                p = p_n.up;
+            } else {
+                // Reached basecol node, stop
+                break;
+            }
+        }
+
+        // TODO: sparse::pivot: in the for { ... loop { ... } } code blocks below, efficiency can be improved by
+        // maintaining an array of column pointers as in Knuth 2.2.6 Algorithm S
+
+        // Update non-pivot rows: d → d - b*c/a
+        for r in 0..self.baserows.len() {
+            if r == row {
+                continue; // Skip pivot row
+            }
+
+            // Get pivot column value for this row (c) from cached values
+            let c_val = match pivot_col_values.get(&r).cloned() {
+                Some(v) if !v.is_zero() => v, // Note: guard is true by construction, but we're being defensive
+                _ => continue, // If c is zero (implicit or explicit), no updates needed for this row: d -> d - b*c/a = d
+            };
+
+            // Track which columns we've already seen/updated in this row
+            let mut updated_cols = HashSet::new();
+
+            // Collect nodes to update/delete in this row
+            let mut updates = Vec::new(); // Vec<(col, new_value)>
+            let baserow_k = self.baserows[r];
+            let baserow_n = self.arena.get(baserow_k).unwrap();
+            let mut p = baserow_n.left;
+
+            loop {
+                let p_n = self.arena.get(p).unwrap();
+                if let Some(pcol) = p_n.col {
+                    updated_cols.insert(pcol); // Mark this column as seen
+                    if pcol != col {
+                        // Get pivot row value b at (row, pcol) from the cached HashMap
+                        let b_val = pivot_row_map
+                            .get(&pcol)
+                            .cloned()
+                            .unwrap_or_else(|| V::zero());
+
+                        // Calculate new value: d - b*c/a
+                        let d_val = p_n.value.clone();
+                        let new_val = d_val - b_val * c_val.clone() * inv_pivot.clone();
+
+                        updates.push((pcol, new_val));
+                    }
+                    p = p_n.left;
+                } else {
+                    break;
+                }
+            }
+
+            // Apply updates to existing nodes
+            for (pcol, new_val) in updates {
+                if new_val.is_zero() {
+                    self.delete_node(r, pcol)?;
+                } else {
+                    let baserow_k = self.baserows[r];
+                    let baserow_n = self.arena.get(baserow_k).unwrap();
+                    let mut p = baserow_n.left;
+                    loop {
+                        let p_n = self.arena.get_mut(p).unwrap();
+                        if let Some(c) = p_n.col {
+                            if c == pcol {
+                                p_n.value = new_val;
+                                break;
+                            }
+                            p = p_n.left;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Handle column positions that were zero initially, but for which the corresponding
+            // pivot row and column values are non-zero, i.e. d=0, but b, c != 0.
+            for (pcol, b_val) in pivot_row_map.iter() {
+                if *pcol != col && !updated_cols.contains(pcol) {
+                    // d=0, calculate 0 - b*c/a = -b*c/a
+                    let new_val = -b_val.clone() * c_val.clone() * inv_pivot.clone();
+                    if !new_val.is_zero() {
+                        self.update_or_insert(r, *pcol, new_val);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arithmetic::lia::types::{Rational, rbig};
 
     #[test]
     ///
@@ -358,5 +636,243 @@ mod tests {
         assert_eq!(m.get(0, 1), Some(&0));
         assert_eq!(m.get(1, 0), Some(&0));
         assert_eq!(m.get(2, 2), Some(&0));
+    }
+
+    #[test]
+    fn test_pivot_validation() {
+        let mut m = Matrix::<Rational>::from_tuples(2, 2, vec![(0, 0, rbig!(2)), (0, 1, rbig!(4))])
+            .expect("failed to create matrix");
+
+        // Valid pivot should not error on validation
+        assert!(m.pivot(0, 0).is_ok());
+
+        // Out of bounds
+        assert!(m.pivot(2, 0).is_err());
+        assert!(m.pivot(0, 2).is_err());
+
+        // Zero pivot element
+        let mut m2 = Matrix::<Rational>::new(2, 2).expect("failed to create matrix");
+        assert!(m2.pivot(0, 0).is_err());
+    }
+
+    #[test]
+    fn test_delete_node() {
+        // [ 1   2   0 ]
+        // [ 0   3   0 ]
+        // [ 0   0   0 ]
+        let mut m = Matrix::<Rational>::from_tuples(
+            3,
+            3,
+            vec![(0, 0, rbig!(1)), (0, 1, rbig!(2)), (1, 1, rbig!(3))],
+        )
+        .expect("failed to create matrix");
+
+        // Delete existing node
+        assert_eq!(m.delete_node(0, 1), Ok(true));
+        assert_eq!(m.get(0, 1), Some(&rbig!(0)));
+
+        // Delete non-existent node
+        assert_eq!(m.delete_node(2, 2), Ok(false));
+
+        // Verify other nodes still exist
+        assert_eq!(m.get(0, 0), Some(&rbig!(1)));
+        assert_eq!(m.get(1, 1), Some(&rbig!(3)));
+    }
+
+    #[test]
+    fn test_delete_node_skipping() {
+        // [ 1   2   0 ]  deletion traversal must skip values 2 and 4 to fix up links
+        // [ 0   3   0 ]
+        // [ 4   0   0 ]
+        let mut m = Matrix::<Rational>::from_tuples(
+            3,
+            3,
+            vec![
+                (0, 0, rbig!(1)),
+                (0, 1, rbig!(2)),
+                (1, 1, rbig!(3)),
+                (2, 0, rbig!(4)),
+            ],
+        )
+        .expect("failed to create matrix");
+
+        // Delete existing node
+        assert_eq!(m.delete_node(0, 0), Ok(true));
+        assert_eq!(m.get(0, 0), Some(&rbig!(0)));
+        // Verify nodes that were skipped over still exist
+        assert_eq!(m.get(0, 1), Some(&rbig!(2)));
+        assert_eq!(m.get(2, 0), Some(&rbig!(4)));
+    }
+
+    #[test]
+    fn test_pivot_3x3() {
+        // Starting matrix:
+        // [ 2   4   6 ]
+        // [ 1   3   5 ]
+        // [ 3   6   9 ]
+        let mut m = Matrix::<Rational>::from_tuples(
+            3,
+            3,
+            vec![
+                (0, 0, rbig!(2)),
+                (0, 1, rbig!(4)),
+                (0, 2, rbig!(6)),
+                (1, 0, rbig!(1)),
+                (1, 1, rbig!(3)),
+                (1, 2, rbig!(5)),
+                (2, 0, rbig!(3)),
+                (2, 1, rbig!(6)),
+                (2, 2, rbig!(9)),
+            ],
+        )
+        .expect("failed to create matrix");
+
+        // Pivot on (0, 0) with value 2
+        assert!(m.pivot(0, 0).is_ok());
+
+        // Expected result:
+        // [ 2   4   6 ]    [ 0.5   2    3 ]
+        // [ 1   3   5 ] -> [-0.5   1    2 ]
+        // [ 3   6   9 ]    [-1.5   0    0 ]
+
+        // Check pivot element: 2 → 1/2
+        assert_eq!(m.get(0, 0), Some(&rbig!(1 / 2)));
+
+        // Check rest of the pivot row: b -> b/a
+        assert_eq!(m.get(0, 1), Some(&rbig!(2)));
+        assert_eq!(m.get(0, 2), Some(&rbig!(3)));
+
+        // Check pivot column: c → -c/2
+        assert_eq!(m.get(1, 0), Some(&rbig!(-1 / 2)));
+        assert_eq!(m.get(2, 0), Some(&rbig!(-3 / 2)));
+
+        // Check other elements: d - b*c/2
+        // (1,1): 3 - 4*1/2 = 3 - 2 = 1
+        assert_eq!(m.get(1, 1), Some(&rbig!(1)));
+        // (1,2): 5 - 6*1/2 = 5 - 3 = 2
+        assert_eq!(m.get(1, 2), Some(&rbig!(2)));
+        // (2,1): 6 - 4*3/2 = 6 - 6 = 0 (should be deleted)
+        assert_eq!(m.get(2, 1), Some(&rbig!(0)));
+        // (2,2): 9 - 6*3/2 = 9 - 9 = 0 (should be deleted)
+        assert_eq!(m.get(2, 2), Some(&rbig!(0)));
+    }
+
+    #[test]
+    fn test_pivot_sparse_matrix() {
+        // Sparse matrix with many zeros
+        // [ 5   0   0 ]
+        // [ 0   2   0 ]
+        // [ 0   0   1 ]
+        let mut m = Matrix::<Rational>::from_tuples(
+            3,
+            3,
+            vec![(0, 0, rbig!(5)), (1, 1, rbig!(2)), (2, 2, rbig!(1))],
+        )
+        .expect("failed to create matrix");
+
+        // Pivot on (0, 0)
+        assert!(m.pivot(0, 0).is_ok());
+
+        // Expected:
+        // [ 1/5  0   0 ]
+        // [ 0    2   0 ]
+        // [ 0    0   1 ]
+        assert_eq!(m.get(0, 0), Some(&rbig!(1 / 5)));
+        assert_eq!(m.get(1, 1), Some(&rbig!(2)));
+        assert_eq!(m.get(2, 2), Some(&rbig!(1)));
+    }
+
+    #[test]
+    fn test_pivot_creates_zeros() {
+        // Matrix where pivot creates zeros
+        // [ 2   4 ]
+        // [ 1   2 ]
+        let mut m = Matrix::<Rational>::from_tuples(
+            2,
+            2,
+            vec![
+                (0, 0, rbig!(2)),
+                (0, 1, rbig!(4)),
+                (1, 0, rbig!(1)),
+                (1, 1, rbig!(2)),
+            ],
+        )
+        .expect("failed to create matrix");
+
+        // Pivot on (0, 0)
+        assert!(m.pivot(0, 0).is_ok());
+
+        // Expected:
+        // [ 1/2   2 ]  (0,1) = 4/2 = 2
+        // [-1/2   0 ]  (1,1) = 2 - 4*1/2 = 2 - 2 = 0
+        assert_eq!(m.get(0, 0), Some(&rbig!(1 / 2)));
+        assert_eq!(m.get(0, 1), Some(&rbig!(2)));
+        assert_eq!(m.get(1, 0), Some(&rbig!(-1 / 2)));
+        assert_eq!(m.get(1, 1), Some(&rbig!(0)));
+    }
+
+    #[test]
+    fn test_multiple_pivots() {
+        // Test sequential pivots
+        let mut m = Matrix::<Rational>::from_tuples(
+            2,
+            2,
+            vec![
+                (0, 0, rbig!(3)),
+                (0, 1, rbig!(6)),
+                (1, 0, rbig!(2)),
+                (1, 1, rbig!(5)),
+            ],
+        )
+        .expect("failed to create matrix");
+
+        // First pivot on (0, 0)
+        assert!(m.pivot(0, 0).is_ok());
+
+        // After first pivot:
+        // [ 1/3   2 ]  (0,1) = 6/3 = 2
+        // [-2/3   1 ]  (1,1) = 5 - 2*2/3 = 5 - 4 = 1
+        assert_eq!(m.get(0, 0), Some(&rbig!(1 / 3)));
+        assert_eq!(m.get(0, 1), Some(&rbig!(2)));
+        assert_eq!(m.get(1, 0), Some(&rbig!(-2 / 3)));
+        assert_eq!(m.get(1, 1), Some(&rbig!(1)));
+
+        // Second pivot on (1, 1)
+        assert!(m.pivot(1, 1).is_ok());
+
+        // After second pivot:
+        // [ 5/3  -2 ]  (0,0) -> 1/3 - (-2/3)*2/1 = 1/3 + 4/3 = 5/3
+        // [-2/3   1 ]
+        assert_eq!(m.get(0, 0), Some(&rbig!(5 / 3)));
+        assert_eq!(m.get(0, 1), Some(&rbig!(-2)));
+        assert_eq!(m.get(1, 0), Some(&rbig!(-2 / 3)));
+        assert_eq!(m.get(1, 1), Some(&rbig!(1)));
+    }
+
+    #[test]
+    fn test_pivot_zero_to_nonzero() {
+        let mut m = Matrix::<Rational>::from_tuples(
+            2,
+            2,
+            vec![
+                (0, 0, rbig!(2)),
+                (0, 1, rbig!(1)),
+                (1, 0, rbig!(1)),
+                (1, 1, rbig!(0)),
+            ],
+        )
+        .expect("failed to create matrix");
+        // Before pivot:
+        // [ 2  1 ]
+        // [ 1  0 ]
+        assert!(m.pivot(0, 0).is_ok());
+
+        // After pivot:
+        // [ 1/2   1/2 ]
+        // [-1/2  -1/2 ] (1,1) entry goes from zero to non-zero --> 0 - 1*1/2 = -1/2
+        assert_eq!(m.get(0, 0), Some(&rbig!(1 / 2)));
+        assert_eq!(m.get(0, 1), Some(&rbig!(1 / 2)));
+        assert_eq!(m.get(1, 0), Some(&rbig!(-1 / 2)));
+        assert_eq!(m.get(1, 1), Some(&rbig!(-1 / 2)));
     }
 }
