@@ -265,13 +265,13 @@ impl<V: Zero + fmt::Debug> Matrix<V> {
         let mut q = self.baserows[row]; // previous node in left traversal
         let baserow_n = self.arena.get_mut(q).unwrap();
         let mut p = baserow_n.left;
-        let p_n = self.arena.get(p).unwrap();
+        let mut p_n = self.arena.get(p).unwrap();
         while let Some(pcol) = p_n.col
             && pcol > col
         {
             q = p;
-            let p_n = self.arena.get(p).unwrap();
             p = p_n.left;
+            p_n = self.arena.get(p).unwrap();
         }
         if let Some(pcol) = p_n.col
             && pcol == col
@@ -939,5 +939,45 @@ mod tests {
         assert_eq!(m.get(0, 0), Some(&rbig!(1 / 3)));
         m.pivot(0, 0).expect("second pivot failed");
         assert_eq!(m.get(0, 0), Some(&rbig!(3)));
+    }
+
+    #[test]
+    fn test_pivot_0_0_20diag_plus_row_plus_col() {
+        let mut tuples: Vec<(usize, usize, Rational)> = (0..20)
+            .map(|i| {
+                let row = i;
+                let col = i;
+                let value = Rational::from(i as i64 + 2); // values >= 2
+                (row, col, value)
+            })
+            .collect();
+        // add 5 non-zero entries to the pivot row
+        tuples.extend(
+            (0..5)
+                .map(|i| {
+                    let row = 0;
+                    let col = (4 * i + 2) % 20;
+                    let value = Rational::from(10 * i as i64 + 2);
+                    (row, col, value)
+                })
+                .collect::<Vec<_>>(),
+        );
+        // add 5 non-zero entries to the pivot col
+        tuples.extend(
+            (0..5)
+                .map(|i| {
+                    let row = (4 * i + 3) % 20;
+                    let col = 0;
+                    let value = Rational::from(100 * i as i64 + 2);
+                    (row, col, value)
+                })
+                .collect::<Vec<_>>(),
+        );
+        let mut m = Matrix::from_tuples(20, 20, tuples).expect("Failed to create matrix");
+
+        m.pivot(0, 0).expect("first pivot failed");
+        assert_eq!(m.get(0, 0), Some(&rbig!(1 / 2)));
+        m.pivot(0, 0).expect("second pivot failed");
+        assert_eq!(m.get(0, 0), Some(&rbig!(2)));
     }
 }
