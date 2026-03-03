@@ -8,7 +8,7 @@ use crate::egraphs::proofforest::ProofForestEdge;
 use crate::preprocess::check_for_function_bool;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
 use yaspar_ir::ast::alg::{CheckIdentifier, QualifiedIdentifier};
-use yaspar_ir::ast::{FetchSort, IdentifierKind, Repr, StrAllocator, Term, TermAllocator};
+use yaspar_ir::ast::{CheckedApi, FetchSort, IdentifierKind, Repr, Term, TermAllocator};
 
 use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
 use crate::egraphs::egraph::Egraph;
@@ -115,6 +115,7 @@ pub fn process_assignment(
             term,
         } => {
             // need to add isC(n) => n = C(C^1(n),..., C^m(n))
+            let dt_sort = inner_term.get_sort(egraph);
             let term_lit = egraph.get_lit_from_term(&term);
             debug_println!(19, 0, "trying to get for the term {}", inner_term);
             match egraph.term_constructors.get(&inner_term.uid()).unwrap() {
@@ -136,15 +137,14 @@ pub fn process_assignment(
                         None // don't need to add anything
                     } else {
                         debug_println!(11, 2, "name != ctor_name");
-                        let not_tester_term = egraph.context.not(tester_term.clone());
-                        let not_term = egraph.context.not(term);
-                        let or_not_tester_not_term =
-                            egraph.context.or(vec![not_tester_term, not_term]);
+                        let not_tester_term = egraph.not(tester_term.clone());
+                        let not_term = egraph.not(term);
+                        let or_not_tester_not_term = egraph.or(vec![not_tester_term, not_term]);
                         egraph.insert_predecessor(&or_not_tester_not_term, None, None, false, None);
                         let tester_cnf = or_not_tester_not_term
                             .cnf_tseitin(egraph)
                             .into_iter()
-                            .map(|x| x.into_iter().collect::<Vec<_>>())
+                            .map(|x| x.0)
                             .collect();
                         debug_println!(25, 10, "(assert {})", or_not_tester_not_term,);
                         debug_println!(12, 2, "This gives us {:?}", tester_cnf);
@@ -160,56 +160,33 @@ pub fn process_assignment(
                             level,
                             hash: egraph.predecessor_hash,
                         },
-                    ); // todo: don't need to clone the term
+                    );
 
                     if egraph.lazy_dt {
-                        let ctor_info = egraph.datatype_info.constructors.get(&ctor_name).unwrap();
-                        let selector_names = &ctor_info.field_names;
-                        let selector_sorts = &ctor_info.field_sorts;
-                        let selector_name_sorts = selector_names.iter().zip(selector_sorts);
+                        let dt_name = egraph.datatype_info.constructors.get(&ctor_name).unwrap();
+                        let dt_dec = egraph.datatype_info.datatypes.get(dt_name).unwrap();
+                        let ctor = dt_dec
+                            .constructors
+                            .iter()
+                            .find(|ctor| ctor.ctor == ctor_name)
+                            .expect("type checking invariance violation: datatypes");
                         let mut selector_apps = vec![];
-                        for (sel, sort) in selector_name_sorts {
-                            let sym = &egraph.context.allocate_symbol(sel);
-                            let sel_id = QualifiedIdentifier::simple(sym.clone()); // todo: maybe just store this in egraph, so I don't have to recompute
-                            let sel_app = egraph.context.app(
-                                sel_id,
-                                vec![inner_term.clone()],
-                                Some(sort.clone()),
-                            ); // todo: not sure if I should give the sort here
+                        for sel in &ctor.args {
+                            let sel_app = egraph
+                                .context
+                                .typed_simp_app(sel.0.clone(), vec![inner_term.clone()])
+                                .expect("type checking invariance violation: constructors");
                             selector_apps.push(sel_app);
                         }
-                        let ctor_sym = &egraph.context.allocate_symbol(&ctor_name);
 
                         // have the simple_sorted id for the global case and the simple id for the appp case
+                        let ctor_id = QualifiedIdentifier::simple(ctor_name);
                         let ctor_app = if selector_apps.is_empty() {
-                            let ctor_id = QualifiedIdentifier::simple_sorted(
-                                ctor_sym.clone(),
-                                ctor_info.datatype_sort.clone(),
-                            ); // todo: not sure if this is the right was to do it, gets printed out as (as ctor ctor) -> I think it doesnt make a difference
-                            egraph
-                                .context
-                                .global(ctor_id, Some(ctor_info.datatype_sort.clone())) //ctor_local, Some(ctor_sort))
+                            egraph.global(ctor_id, Some(dt_sort.clone()))
                         } else {
-                            let ctor_id = QualifiedIdentifier::simple(ctor_sym.clone());
-                            let ctor_sort = ctor_info.datatype_sort.clone();
-                            egraph.context.app(ctor_id, selector_apps, Some(ctor_sort))
+                            egraph.app(ctor_id, selector_apps, Some(dt_sort))
                         };
-                        let eq = egraph.context.eq(inner_term, ctor_app);
-
-                        // note Can't do it this way and need to do it the below way otherwise tests/regression/smt_files/edge_cases_quantifiers/predecessor_backtrack_insert5.smt2, etc are wrong
-                        // need to investigate why
-
-                        // let imp = egraph.context.implies(vec![term], eq);
-                        // let imp_nnf = imp.sundance_nnf(&mut *egraph.context);
-                        // debug_println!(24,8, "(assert {})", imp);
-                        // egraph.insert_predecessor(&imp_nnf, None, None, true, None);
-                        // let mut additional_constraints = check_for_function_bool(&imp_nnf, egraph, false);
-                        // let imp_cnf = imp_nnf.cnf_tseitin(&mut *egraph.context); // todo: do I need any more preprocessing
-
-                        // for clause in imp_cnf {
-                        //     additional_constraints.push(clause.0);
-                        // }
-                        // Some(additional_constraints)
+                        let eq = egraph.eq(inner_term, ctor_app);
 
                         let eq_nnf = eq.nnf(egraph);
                         debug_println!(14 - 3, 0, "adding in {}", eq_nnf);
@@ -417,7 +394,7 @@ pub fn find_if_eq_diseq<'a>(
             };
             let inner_term = t[0].clone();
             Assertion::Tester {
-                ctor_name: ctor_name.to_string(),
+                ctor_name,
                 inner_term,
                 term: term.clone(),
             }
@@ -771,8 +748,8 @@ pub fn union(
     );
     debug_println!(11, 0, "{}", egraph);
     assert_eq!(
-        egraph.get_term(x).get_sort(&mut egraph.context),
-        egraph.get_term(y).get_sort(&mut egraph.context),
+        egraph.get_term(x).get_sort(egraph),
+        egraph.get_term(y).get_sort(egraph),
         "We are comparing terms {} and {}",
         egraph.get_term(x),
         egraph.get_term(y)
@@ -1343,7 +1320,7 @@ fn union_process_assignment(
     from_quantifier: bool,
 ) -> Option<Vec<Vec<i32>>> {
     debug_println!(6, 0, "before4");
-    let new_assignment = egraph.context.eq(egraph.get_term(x), egraph.get_term(y));
+    let new_assignment = egraph.eq(egraph.get_term(x), egraph.get_term(y));
     // if there is a new assignment, we need to check if the equality term exists, if it does we need to work on that
     // otherwise we can just consider the union of these two terms
     if let Some(new_assignment_lit) = egraph.cnf_cache.var_map.get(&new_assignment.uid()) {

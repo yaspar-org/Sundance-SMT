@@ -7,7 +7,6 @@ use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
-use sundance_smt::datatypes::process::check_for_inductive_datatypes_and_panic;
 use sundance_smt::egraphs::egraph::Egraph;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::{debug_println, utils};
@@ -81,8 +80,11 @@ fn main() -> Result<(), String> {
 
     // checking if we have any inductive datatypes -> if we do panic!
     // gets the info about our datatypes
-    let datatype_info = check_for_inductive_datatypes_and_panic(&egraph.context);
-    egraph.datatype_info = datatype_info;
+    if let Some(dt) = egraph.check_for_recursive_datatypes() {
+        return Err(format!(
+            "Sundance does not support recursive datatype {dt}!"
+        ));
+    }
 
     let mut nnf_terms = vec![];
     for assert in assertions {

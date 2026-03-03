@@ -14,7 +14,7 @@ use sat_interface::Formula;
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt;
-use yaspar_ir::ast::{ATerm::*, Context, FetchSort, ObjectAllocatorExt};
+use yaspar_ir::ast::{ATerm::*, Arena, Context, FetchSort, HasArena, ObjectAllocatorExt, Str};
 use yaspar_ir::ast::{Attribute, Repr, Term, TermAllocator};
 
 impl fmt::Display for Egraph {
@@ -265,6 +265,7 @@ impl Egraph {
     pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
         let tru = context.get_true();
         let fal = context.get_false();
+        let datatype_info = DatatypeInfo::from_context(&context);
 
         Egraph {
             context,
@@ -289,7 +290,7 @@ impl Egraph {
             added_instantiations: HashMap::default(),
             added_skolemizations: DeterministicHashSet::default(),
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
-            datatype_info: DatatypeInfo::new(),
+            datatype_info,
             term_constructors: DeterministicHashMap::new(),
             union_to_eclass: DeterministicHashSet::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
@@ -1418,6 +1419,18 @@ impl Egraph {
                 new_pred_hash
             );
         }
+    }
+
+    pub fn check_for_recursive_datatypes(&self) -> Option<Str> {
+        self.datatype_info
+            .contains_recursive_datatype(&self.context)
+    }
+}
+
+impl HasArena for Egraph {
+    #[inline]
+    fn arena(&mut self) -> &mut Arena {
+        self.context.arena()
     }
 }
 
