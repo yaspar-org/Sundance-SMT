@@ -78,8 +78,7 @@ pub fn check_for_function_bool(
     }
 
     match term.repr() {
-        App(_, items, _) | And(items) | Or(items) | Distinct(items) => {
-            // println!("{:?}", term);
+        App(_, items, _) | And(items) | Or(items) | Xor(items) | Distinct(items) => {
             vector.extend(
                 items
                     .iter()
@@ -494,9 +493,9 @@ fn check_if_var_occurs_in_term(
         Constant(_, _) => false,
         Global(_, _) => false,
         Local(local) => var_bindings.contains(local.symbol.get()),
+        // for And and Or, if they contain a false or true respectively, not that we don't have to consider it
+        // this is a ddsmt optimization (dont produce sound proofs for this)
         And(items) => {
-            // for And and Or, if they contain a false or true respectively, not that we don't have to consider it
-            // this is a ddsmt optimization (dont produce sound proofs for this)
             if egraph.ddsmt {
                 for item in items {
                     if item == &egraph.context.get_false() {
@@ -509,8 +508,6 @@ fn check_if_var_occurs_in_term(
                 .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
         }
         Or(items) => {
-            // for And and Or, if they contain a false or true respectively, not that we don't have to consider it
-            // this is a ddsmt optimization (dont produce sound proofs for this)
             if egraph.ddsmt {
                 for item in items {
                     if item == &egraph.context.get_true() {
@@ -522,6 +519,9 @@ fn check_if_var_occurs_in_term(
                 .iter()
                 .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
         }
+        Xor(items) => items
+            .iter()
+            .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph)),
         App(_, items, _) | Distinct(items) => items
             .iter()
             .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph)),

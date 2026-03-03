@@ -1486,8 +1486,7 @@ fn check_quantifier_validity_helper(
                 let _ = Some(e.insert(true));
             }
         }
-        App(_, items, _) | And(items) | Or(items) | Distinct(items) => {
-            // println!("We are in app case with items {:?}", items);
+        App(_, items, _) | And(items) | Or(items) | Xor(items) | Distinct(items) => {
             items
                 .iter()
                 .for_each(|item| check_quantifier_validity_helper(item, contains_var));
