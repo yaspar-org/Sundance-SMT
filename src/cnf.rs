@@ -203,6 +203,16 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                 let eqf = env.context.or(vec![bt, not_b_e]);
                 eqf.nnf_impl(env, polarity)
             }
+            ATerm::Xor(ts) => {
+                // `(xor a b)` is `(= (not a) b)`. Do a left-fold over the terms,
+                // so that e.g. `(xor a1 a2 a3)` becomes `(= (not (= (not a1) a2)) a3)`
+                let mut acc = ts[0].clone();
+                for t in &ts[1..] {
+                    let not_acc = env.context.not(acc.clone());
+                    acc = env.context.eq(not_acc, t.clone());
+                }
+                acc.nnf_impl(env, polarity)
+            }
             _ => {
                 // all other cases are regarded as atoms
                 if polarity {
