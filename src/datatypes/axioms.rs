@@ -177,7 +177,7 @@ fn learn_exactly_one_tester_clause(egraph: &mut Egraph, term: &Term, datatype_co
         .map(|x| x.into_iter().collect::<Vec<_>>())
         .collect::<Vec<_>>();
     vector.extend(tester_cnf.clone());  
-    return vector
+    vector
 }
 
 /// For a term of datatype sort, learn the clause (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f
@@ -253,7 +253,7 @@ fn learn_ctor_selector_clause(egraph: &mut Egraph, term: &Term, datatype_constru
         let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
         vector.extend(clauses);
     }
-    return vector
+    vector
 }
 
 
@@ -297,5 +297,5 @@ fn learn_selector_ctor_clause( egraph: &mut Egraph, term: &Term, f: String, subt
         vector.extend(clauses) 
     }
 
-    return vector
+    vector
 }
