@@ -13,11 +13,10 @@ use crate::preprocess::check_for_function_bool;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::skolem::skolemize;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
-use yaspar_ir::ast::ATerm::{
-    And, Annotated, App, Constant, Distinct, Eq, Exists, Forall, Global, Implies, Ite, Let, Local,
-    Matching, Not, Or,
+
+use yaspar_ir::ast::{
+    ATerm, FetchSort, HasArena, LetElim, Repr, Substitute, Substitution, Term, TermAllocator,
 };
-use yaspar_ir::ast::{Attribute, FetchSort, HasArena, LetElim, Repr, Term, TermAllocator};
 
 #[derive(Debug, Clone)]
 pub enum QuantifierInstance {
@@ -235,7 +234,12 @@ pub fn instantiate_quantifiers(
                     debug_println!(22, 4, "{} |-> {}", sub.0, sub.1)
                 }
                 debug_println!(6, 0, "before12");
-                let substituted_term = substitute(&egraph.get_term(body), subs, egraph);
+                let term = egraph.get_term(body);
+                let substitution = Substitution::new(
+                    subs.iter().map(|(s, t)| (s, t.clone())),
+                    &mut egraph.context,
+                );
+                let substituted_term = term.subst(&substitution, &mut egraph.context);
                 substitutions.push((substituted_term, activation_depth, subs));
             }
 
@@ -355,170 +359,12 @@ pub fn instantiate_quantifiers(
     instantiations
 }
 
-/// Given a term and a list of substitutions, substitutes variables into term
-///
-/// TODO: it might be more efficient to take in a Term instead of a i32
-/// TODO: dont need to return new term
-fn substitute(
-    term: &Term,
-    substitutions: &DeterministicHashMap<String, Term>,
-    egraph: &mut Egraph,
-) -> Term {
-    match term.repr() {
-        Constant(..) => term.clone(),
-        Global(_, _) => term.clone(),
-        Local(local) => {
-            if let Some(v) = substitutions.get(&local.symbol.to_string()) {
-                v.clone()
-            } else {
-                term.clone()
-            }
-        }
-        App(qualified_identifier, args, sort) => {
-            let new_args = args
-                .iter()
-                .map(|arg| substitute(arg, substitutions, egraph))
-                .collect::<Vec<_>>();
-
-            egraph
-                .context
-                .app(qualified_identifier.clone(), new_args, sort.clone())
-        }
-        And(items) => {
-            let new_items = items
-                .iter()
-                .map(|item| substitute(item, substitutions, egraph))
-                .collect::<Vec<_>>();
-            egraph.context.and(new_items)
-        }
-        Or(items) => {
-            let new_items = items
-                .iter()
-                .map(|item| substitute(item, substitutions, egraph))
-                .collect::<Vec<_>>();
-            egraph.context.or(new_items)
-        }
-        Eq(a, b) => {
-            let (new_a, new_b) = (
-                substitute(a, substitutions, egraph),
-                substitute(b, substitutions, egraph),
-            );
-            egraph.context.eq(new_a, new_b)
-        }
-        Not(t) => {
-            let new_t = substitute(t, substitutions, egraph);
-            egraph.context.not(new_t)
-        }
-        Implies(items, implicant) => {
-            // assert!(items.len() == 1);
-            let new_items = items
-                .iter()
-                .map(|item| substitute(item, substitutions, egraph))
-                .collect();
-            let new_implicant = substitute(implicant, substitutions, egraph);
-
-            egraph.context.implies(new_items, new_implicant)
-        }
-        Forall(var_bindings, middle_term) => {
-            // TODO: I don't know if this is actually correct. Will have to investigate the nested forall case further
-            if let Annotated(inner_term, attrs) = middle_term.repr() {
-                // I need to remove the variables from the substitution that are bound inside
-                let mut substitutions = substitutions.clone();
-                for s in var_bindings.iter() {
-                    substitutions.remove(&s.0.to_string());
-                }
-
-                let new_inner_term = substitute(inner_term, &substitutions, egraph);
-
-                let mut new_attrs = vec![];
-                for attr in attrs.iter() {
-                    if let Attribute::Pattern(s_exprs) = &attr {
-                        let new_s_exprs = s_exprs
-                            .iter()
-                            .map(|x| substitute(x, &substitutions, egraph))
-                            .collect::<Vec<_>>();
-                        new_attrs.push(Attribute::Pattern(new_s_exprs));
-                    }
-                    // else {
-                    //     panic!("We have a forall case that is not annotated with a pattern: {} and attrs {:?}", term_rep, attrs);
-                    // }
-                }
-
-                assert!(!new_attrs.is_empty());
-
-                let new_middle_term = egraph.context.annotated(new_inner_term, new_attrs);
-                let new_term = egraph.context.forall(var_bindings.clone(), new_middle_term);
-                new_term.clone()
-            } else {
-                panic!("We have a forall case that is not annotated");
-            }
-        }
-        Exists(var_bindings, middle_term) => {
-            // I need to remove the variables from the substitution that are bound inside
-            if let Annotated(inner_term, attrs) = middle_term.repr() {
-                let mut substitutions = substitutions.clone();
-                for s in var_bindings.iter() {
-                    substitutions.remove(&s.0.to_string());
-                }
-
-                let new_inner_term = substitute(inner_term, &substitutions, egraph);
-
-                let mut new_attrs = vec![];
-                for attr in attrs.iter() {
-                    if let Attribute::Pattern(s_exprs) = &attr {
-                        let new_s_exprs = s_exprs
-                            .iter()
-                            .map(|x| substitute(x, &substitutions, egraph))
-                            .collect::<Vec<_>>();
-                        new_attrs.push(Attribute::Pattern(new_s_exprs));
-                    }
-                    // else {
-                    //     panic!("We have a forall case that is not annotated with a pattern: {} and attrs {:?}", term_rep, attrs);
-                    // }
-                }
-
-                assert!(!new_attrs.is_empty());
-
-                let new_middle_term = egraph.context.annotated(new_inner_term, new_attrs);
-                let new_term = egraph.context.exists(var_bindings.clone(), new_middle_term); // I think this gets skolemized but when??
-                new_term.clone()
-            } else {
-                panic!(
-                    "We have a forall exists where inner exists has no pattern {}",
-                    term
-                );
-            }
-        }
-        Ite(cond, t1, t2) => {
-            let (new_cond, new_t1, new_t2) = (
-                substitute(cond, substitutions, egraph),
-                substitute(t1, substitutions, egraph),
-                substitute(t2, substitutions, egraph),
-            );
-            egraph.context.ite(new_cond, new_t1, new_t2)
-        }
-        Annotated(t, anns) => {
-            let new_t = substitute(t, substitutions, egraph);
-            egraph.context.annotated(new_t, anns.clone())
-        }
-        Distinct(args) => {
-            let new_args = args
-                .iter()
-                .map(|t| substitute(t, substitutions, egraph))
-                .collect();
-            egraph.context.distinct(new_args)
-        }
-        // _ => term.clone() // todo: actually need to implement these extra cases
-        Let(..) => todo!(),
-        Matching(..) => todo!(),
-    }
-}
-
 /// The simplify algorithm for matching patterns, iteratively
 /// building a list of assignments for the free variables in the pattern
 /// see https://mmoskal.github.io/smt/e-matching.pdf
 ///
-/// Returing assignments as DeterministicHashMap<u64, u64> and DeterministicHashMap<string, u64>,
+/// todo: @Amar the following comment is out of date
+/// Returning assignments as DeterministicHashMap<u64, u64> and DeterministicHashMap<string, u64>,
 /// since then it is easier to substitute things when you have a nested forall case
 ///
 /// TODO: I might need to think about writing this tail recursively eventually
@@ -558,7 +404,7 @@ pub fn match_term<'a>(
         );
     }
     match trigger_term.repr() {
-        Global(_, _) => {
+        ATerm::Global(_, _) => {
             debug_println!(
                 6,
                 0,
@@ -573,7 +419,7 @@ pub fn match_term<'a>(
                 vec![]
             }
         }
-        Constant(..) => {
+        ATerm::Constant(..) => {
             debug_println!(
                 6,
                 0,
@@ -588,7 +434,7 @@ pub fn match_term<'a>(
                 vec![]
             }
         }
-        Local(local) => {
+        ATerm::Local(local) => {
             debug_println!(
                 6,
                 0,
@@ -646,7 +492,7 @@ pub fn match_term<'a>(
                 }
             }
         }
-        App(func, args, _) => {
+        ATerm::App(func, args, _) => {
             debug_println!(6, 0, "We are matching app term {} with args:", trigger_term);
             debug_println!(6, 0, "before15");
             let func_name = func.id_str();
@@ -660,7 +506,7 @@ pub fn match_term<'a>(
                 egraph,
             )
         }
-        Ite(b, t1, t2) => find_assignments_on_term(
+        ATerm::Ite(b, t1, t2) => find_assignments_on_term(
             term,
             &"ite".to_string(),
             vec![b, t1, t2],

@@ -26,6 +26,7 @@ pub fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
         Distinct(items) => ("distinct".to_string(), items.iter().collect()),
         And(items) => ("and".to_string(), items.iter().collect()),
         Or(items) => ("or".to_string(), items.iter().collect()),
+        Xor(items) => ("xor".to_string(), items.iter().collect()),
         App(func, items, _) => {
             debug_println!(10, 0, "We have the func {:?}", func);
             let func_indices = &func.0.indices;
