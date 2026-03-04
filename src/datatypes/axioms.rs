@@ -64,7 +64,7 @@ pub fn find_datatype_axioms(
     if let App(f, terms, _) = term.repr()
         && egraph.datatype_info.constructors.contains_key(f.id_str())
     {
-        let selector_ctor_clauses = learn_selector_ctor_clause(egraph, term, f.id_str(),&terms, &dt_dec);
+        let selector_ctor_clauses = learn_selector_ctor_clause(egraph, term, f.id_str(),terms, &dt_dec);
         vector.extend(selector_ctor_clauses);
     }
     vector
