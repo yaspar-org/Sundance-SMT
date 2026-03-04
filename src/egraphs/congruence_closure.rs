@@ -3,12 +3,11 @@
 
 //! Classic congruence closure algorithm
 
-use crate::cnf::CNFConversion as _;
+use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::egraphs::proofforest::ProofForestEdge;
-use crate::preprocess::check_for_function_bool;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
-use yaspar_ir::ast::alg::{CheckIdentifier, QualifiedIdentifier};
-use yaspar_ir::ast::{CheckedApi, FetchSort, IdentifierKind, Repr, Term, TermAllocator};
+use yaspar_ir::ast::alg::CheckIdentifier;
+use yaspar_ir::ast::{FetchSort, IdentifierKind, Repr, Term, TermAllocator};
 
 use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
 use crate::egraphs::egraph::Egraph;
@@ -30,7 +29,7 @@ pub fn process_assignment(
     // note this basically assumes the postive polarity is always in the map from i32->u64
     // this should be true based on how we do
     let term = egraph.get_term_from_lit(lit.abs());
-    debug_println!(1, 1, "Term: {}", term);
+    debug_println!(25, 1, "Term: {}", term);
     let assertion = find_if_eq_diseq(&term, sign, egraph, level, fixed);
 
     let mut tracker = ProofTracker::new();
@@ -116,7 +115,7 @@ pub fn process_assignment(
         } => {
             // need to add isC(n) => n = C(C^1(n),..., C^m(n))
             let dt_sort = inner_term.get_sort(egraph);
-            let term_lit = egraph.get_lit_from_term(&term);
+            let _term_lit = egraph.get_lit_from_term(&term);
             debug_println!(19, 0, "trying to get for the term {}", inner_term);
             match egraph.term_constructors.get(&inner_term.uid()).unwrap() {
                 Constructor {
@@ -137,17 +136,11 @@ pub fn process_assignment(
                         None // don't need to add anything
                     } else {
                         debug_println!(11, 2, "name != ctor_name");
-                        let not_tester_term = egraph.not(tester_term.clone());
-                        let not_term = egraph.not(term);
-                        let or_not_tester_not_term = egraph.or(vec![not_tester_term, not_term]);
-                        egraph.insert_predecessor(&or_not_tester_not_term, None, None, false, None);
-                        let tester_cnf = or_not_tester_not_term
-                            .cnf_tseitin(egraph)
-                            .into_iter()
-                            .map(|x| x.0)
-                            .collect();
-                        debug_println!(25, 10, "(assert {})", or_not_tester_not_term,);
-                        debug_println!(12, 2, "This gives us {:?}", tester_cnf);
+                        let tester_cnf = learn_or_not_term_tester_term(
+                            egraph,
+                            tester_term.clone(),
+                            term.clone(),
+                        );
                         Some(tester_cnf)
                     }
                 }
@@ -165,49 +158,21 @@ pub fn process_assignment(
                     if egraph.lazy_dt {
                         let dt_name = egraph.datatype_info.constructors.get(&ctor_name).unwrap();
                         let dt_dec = egraph.datatype_info.datatypes.get(dt_name).unwrap();
+
                         let ctor = dt_dec
                             .constructors
                             .iter()
                             .find(|ctor| ctor.ctor == ctor_name)
-                            .expect("type checking invariance violation: datatypes");
-                        let mut selector_apps = vec![];
-                        for sel in &ctor.args {
-                            let sel_app = egraph
-                                .context
-                                .typed_simp_app(sel.0.clone(), vec![inner_term.clone()])
-                                .expect("type checking invariance violation: constructors");
-                            selector_apps.push(sel_app);
-                        }
+                            .expect("type checking invariance violation: datatypes")
+                            .clone();
 
-                        // have the simple_sorted id for the global case and the simple id for the appp case
-                        let ctor_id = QualifiedIdentifier::simple(ctor_name);
-                        let ctor_app = if selector_apps.is_empty() {
-                            egraph.global(ctor_id, Some(dt_sort.clone()))
-                        } else {
-                            egraph.app(ctor_id, selector_apps, Some(dt_sort))
-                        };
-                        let eq = egraph.eq(inner_term, ctor_app);
+                        // note that the from_quantifier is important here
+                        // it essentially says that this is a term that we learn not necessarily at level 0
+                        // but we want to retain this term even after we backtrack
+                        let ctor_selector_clauses: Vec<Vec<i32>> =
+                            learn_ctor_selector_clauses(egraph, &inner_term, &ctor, &dt_sort, true);
 
-                        let eq_nnf = eq.nnf(egraph);
-                        debug_println!(14 - 3, 0, "adding in {}", eq_nnf);
-                        egraph.insert_predecessor(&eq_nnf, None, None, true, None);
-
-                        let mut additional_constraints =
-                            check_for_function_bool(&eq_nnf, egraph, false);
-                        let eq_cnf = eq_nnf.cnf_tseitin(egraph); // todo: do I need any more preprocessing
-                        assert_eq!(eq_cnf.0.len(), 1);
-                        let eq_clause = eq_cnf.0[0].0.clone();
-                        assert_eq!(eq_clause.len(), 1);
-                        let eq_lit = eq_clause[0];
-                        debug_println!(25, 10, "(assert (=> {} {}))", term, eq);
-
-                        additional_constraints.push(vec![-term_lit, eq_lit]);
-
-                        // note we don't actually want to add -term_lit as a condition on the additional constraints
-                        // for constraint in &mut additional_constraints {
-                        //     constraint.push(-term_lit);
-                        // }
-                        Some(additional_constraints)
+                        Some(ctor_selector_clauses)
                     } else {
                         None
                     }

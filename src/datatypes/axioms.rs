@@ -3,7 +3,7 @@
 
 use std::vec;
 
-use yaspar_ir::ast::alg::{DatatypeDec, Identifier, Index, QualifiedIdentifier};
+use yaspar_ir::ast::alg::{ConstructorDec, DatatypeDec, Identifier, Index, QualifiedIdentifier};
 use yaspar_ir::ast::{ATerm::*, FetchSort, Sort, Str, TermAllocator};
 use yaspar_ir::ast::{ObjectAllocatorExt, Repr, StrAllocator, Term};
 
@@ -56,7 +56,7 @@ pub fn find_datatype_axioms(
     // Step 2.5. Learn the constraint (is-f t) => t = f(f^0(t) ... f^m(t))
     // as long as we are not doing lazy datatypes
     if !egraph.lazy_dt {
-        let ctor_selector_clauses = learn_ctor_selector_clause(egraph, term, sort, &dt_dec);
+        let ctor_selector_clauses = learn_ctors_selector_clauses(egraph, term, sort, &dt_dec);
         vector.extend(ctor_selector_clauses);
     }
 
@@ -150,7 +150,7 @@ fn learn_exactly_one_tester_clause(
                 let tester_app_nnf = tester_app.nnf(egraph);
                 egraph.insert_predecessor(&tester_app_nnf, None, None, from_quantifier, None);
                 let tester_app_cnf = tester_app_nnf.cnf_tseitin(egraph).into_iter().map(|x| x.0);
-                debug_println!(25, 10, "(assert {})", tester_app);
+                debug_println!(25, 10, "1(assert {})", tester_app);
                 vector.extend(tester_app_cnf);
             }
             _ => {}
@@ -165,7 +165,7 @@ fn learn_exactly_one_tester_clause(
         egraph.or(tester_apps)
     };
     debug_println!(12, 0, "TESTER OR CASE");
-    debug_println!(25, 10, "(assert {})", tester_or);
+    debug_println!(25, 10, "2(assert {})", tester_or);
     egraph.insert_predecessor(&tester_or, None, None, from_quantifier, None);
     let tester_cnf = tester_or.cnf_tseitin(egraph).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
@@ -173,62 +173,77 @@ fn learn_exactly_one_tester_clause(
 }
 
 /// For a term of datatype sort, learn the clause (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f
-fn learn_ctor_selector_clause(
+fn learn_ctors_selector_clauses(
     egraph: &mut Egraph,
     term: &Term,
     sort: &Sort,
     dt_dec: &DatatypeDec<Str, Sort>,
 ) -> Vec<Vec<i32>> {
     let mut vector = vec![];
+
+    for ctor in &dt_dec.constructors {
+        let ctor_selector_clauses = learn_ctor_selector_clauses(egraph, term, ctor, sort, false);
+        vector.extend(ctor_selector_clauses);
+    }
+    vector
+}
+
+/// For a term of datatype sort, learn the clause (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m for a specific constructor f are the selectors of f
+pub fn learn_ctor_selector_clauses(
+    egraph: &mut Egraph,
+    term: &Term,
+    ctor: &ConstructorDec<Str, Sort>,
+    sort: &Sort,
+    from_quantifier: bool,
+) -> Vec<Vec<i32>> {
+    let mut vector = vec![];
     let is_symbol = egraph.allocate_symbol("is");
     let bool_sort = egraph.bool_sort();
-    for ctor in &dt_dec.constructors {
-        let ctor_name = &ctor.ctor;
-        // todo: repeating from last for loop, can probably combine stuff
-        let tester_identifier = Identifier {
-            symbol: is_symbol.clone(),
-            indices: vec![Index::Symbol(ctor_name.clone())],
-        };
-        let tester_app = egraph.app(
-            tester_identifier.into(),
+
+    let ctor_name = &ctor.ctor;
+    // todo: repeating from last for loop, can probably combine stuff
+    let tester_identifier = Identifier {
+        symbol: is_symbol.clone(),
+        indices: vec![Index::Symbol(ctor_name.clone())],
+    };
+    let tester_app = egraph.app(
+        tester_identifier.into(),
+        vec![term.clone()],
+        Some(bool_sort.clone()),
+    );
+    let mut selectors_apps = vec![];
+    for sel in &ctor.args {
+        let sel_sort = sel.2.clone();
+        let sel_app = egraph.app(
+            QualifiedIdentifier::simple(sel.0.clone()),
             vec![term.clone()],
-            Some(bool_sort.clone()),
+            Some(sel_sort.clone()),
         );
 
-        let mut selectors_apps = vec![];
-        for sel in &ctor.args {
-            let sel_app = egraph.app(
-                QualifiedIdentifier::simple(sel.0.clone()),
-                vec![term.clone()],
-                Some(sel.2.clone()),
-            );
+        // include new constraints for subterms
+        let additional_constraints = find_datatype_axioms(&sel_app, &sel_sort, egraph, false);
+        vector.extend(additional_constraints.clone());
 
-            // include new constraints for subterms
-            let additional_constraints = find_datatype_axioms(&sel_app, sort, egraph, false);
-            vector.extend(additional_constraints.clone());
-
-            selectors_apps.push(sel_app);
-        }
-
-        // this needs to be a variable if ctor talks in no arguments
-        let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
-        let ctor_app = if selectors_apps.is_empty() {
-            // we directly use sort becasue we will be using equality
-            egraph.global(ctor_id, Some(sort.clone()))
-        } else {
-            egraph.app(ctor_id, selectors_apps, Some(sort.clone()))
-        };
-
-        let eq = egraph.eq(term.clone(), ctor_app);
-        let imp = egraph.implies(vec![tester_app], eq);
-        debug_println!(25, 10, "(assert {})", imp);
-        let imp_nnf = imp.nnf(egraph);
-        egraph.insert_predecessor(&imp_nnf, None, None, false, None);
-        let imp_cnf = imp.cnf_tseitin(egraph);
-        let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
-        vector.extend(clauses);
+        selectors_apps.push(sel_app);
     }
 
+    // this needs to be a variable if ctor talks in no arguments
+    let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
+    let ctor_app = if selectors_apps.is_empty() {
+        // we directly use sort because we will be using equality
+        egraph.global(ctor_id, Some(sort.clone()))
+    } else {
+        egraph.app(ctor_id, selectors_apps, Some(sort.clone()))
+    };
+
+    let eq = egraph.eq(term.clone(), ctor_app);
+    let imp = egraph.implies(vec![tester_app], eq);
+    debug_println!(25, 10, "option 1 (assert {}) with sort {}", imp, sort);
+    let imp_nnf = imp.nnf(egraph);
+    egraph.insert_predecessor(&imp_nnf, None, None, from_quantifier, None);
+    let imp_cnf = imp.cnf_tseitin(egraph);
+    let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
+    vector.extend(clauses);
     vector
 }
 
@@ -259,7 +274,7 @@ fn learn_selector_ctor_clause(
             Some(so),
         );
         let sel_eq = egraph.eq(sel_app.clone(), sel_term.clone());
-        debug_println!(25, 10, "(assert {})", sel_eq);
+        debug_println!(25, 10, "3(assert {})", sel_eq);
         let sel_eq_nnf = sel_eq.nnf(egraph);
         egraph.insert_predecessor(&sel_eq_nnf, None, None, false, None);
         let sel_eq_cnf = sel_eq.cnf_tseitin(egraph);
@@ -267,4 +282,25 @@ fn learn_selector_ctor_clause(
         vector.extend(clauses)
     }
     vector
+}
+
+/// Learn the clause ~isCi(t) \/ ~isCj(t) for each pair of distinct constructors Ci and Cj of the datatype based on the assignment in term_constructors
+/// This is called lazily during the congruence_closure algorithm
+pub fn learn_or_not_term_tester_term(
+    egraph: &mut Egraph,
+    term: Term,
+    tester_term: Term,
+) -> Vec<Vec<i32>> {
+    let not_tester_term = egraph.not(tester_term.clone());
+    let not_term = egraph.not(term);
+    let or_not_tester_not_term = egraph.or(vec![not_tester_term, not_term]);
+    egraph.insert_predecessor(&or_not_tester_not_term, None, None, false, None);
+    let tester_cnf = or_not_tester_not_term
+        .cnf_tseitin(egraph)
+        .into_iter()
+        .map(|x| x.0)
+        .collect();
+    debug_println!(25, 10, "4(assert {})", or_not_tester_not_term,);
+    debug_println!(12, 2, "This gives us {:?}", tester_cnf);
+    tester_cnf
 }
