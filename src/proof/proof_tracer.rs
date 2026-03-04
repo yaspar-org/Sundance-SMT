@@ -132,36 +132,16 @@ fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> (String, HashSe
         match sort_def {
             SortDef::Opaque(..) | SortDef::Transparent { .. } => {}
             SortDef::Datatype(data) => {
-                sort_str.push(format!("({} 0)", sort_name));
+                sort_str.push(format!("({} {})", sort_name, data.params.len()));
 
-                let mut ctors_list = vec![];
                 for ctor in &data.constructors {
-                    let ctor_str = ctor.to_string();
                     datatype_funs.insert(&ctor.ctor);
                     for sel in &ctor.args {
                         datatype_funs.insert(&sel.0);
                     }
-
-                    ctors_list.push(ctor_str);
                 }
 
-                ctor_strs.push(format!(
-                    "({})",
-                    &data
-                        .constructors
-                        .iter()
-                        .map(|c| c.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ));
-                // TODO: support datatypes in proof
-                // assert!(data.params.len() == 0); // do not support polymorphic datatypes
-                // let mut ctors_str = vec![];
-                // for ctor in &data.constructors {
-                //     ctors_str.push(ctor.to_string());
-                // }
-                // let ctors_str = ctors_str.join(" ");
-                // format!("(declare-datatypes (({} 0)) ({}))\n", sort_name, ctors_str)
+                ctor_strs.push(data.to_string());
             }
         }
     }
@@ -263,9 +243,10 @@ fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) 
                     symbol_name, input_sorts_str, output_sort
                 )
             } else {
-                // Polymorphic function - we'll skip these for now as they're more complex
-                // and typically not needed in basic eDRAT proofs
-                panic!("Polymorphic functions are not supported");
+                // Polymorphic function - we don't support non-ADT polymorphic functions right now
+                // since they are not in SMTLib
+                // ADT polymorphic functions are handled by the datatype declaration
+                String::new()
             }
         }
         Sig::VarLenFunc(input_sort, min_args, output_sort) => {
