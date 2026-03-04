@@ -1,7 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-
 use std::vec;
 
 use yaspar_ir::ast::alg::{DatatypeDec, Identifier, Index, QualifiedIdentifier};
@@ -64,56 +63,61 @@ pub fn find_datatype_axioms(
     if let App(f, terms, _) = term.repr()
         && egraph.datatype_info.constructors.contains_key(f.id_str())
     {
-        let selector_ctor_clauses = learn_selector_ctor_clause(egraph, term, f.id_str(),terms, &dt_dec);
+        let selector_ctor_clauses =
+            learn_selector_ctor_clause(egraph, term, f.id_str(), terms, &dt_dec);
         vector.extend(selector_ctor_clauses);
     }
     vector
 }
 
-/// Adds a term to term_constructors which keeps track of the correct constructor of each term. 
+/// Adds a term to term_constructors which keeps track of the correct constructor of each term.
 /// Note that the axiom `~isCi(t) \/ ~isCj(t)` is added lazily based on the assignment in term_constructors
 /// if the term is of the form C(t1, ..., tm) where C is a constructor, we add it as a Constructor with the tester term (_ is C) t
-/// otherwise, we add it as Uninitialized and we will update it later if we learn that 
+/// otherwise, we add it as Uninitialized and we will update it later if we learn that
 fn add_to_term_constructors(egraph: &mut Egraph, term: &Term) {
     let num = term.uid();
     // todo: missing Global case?
     if let App(f, _, _) = term.repr()
-            && egraph.datatype_info.constructors.contains_key(f.id_str())
-        {
-            let bool_sort = egraph.bool_sort();
-            let is_symbol = egraph.allocate_symbol("is");
+        && egraph.datatype_info.constructors.contains_key(f.id_str())
+    {
+        let bool_sort = egraph.bool_sort();
+        let is_symbol = egraph.allocate_symbol("is");
 
-            let tester_identifier = Identifier {
-                symbol: is_symbol.clone(),
-                indices: vec![Index::Symbol(f.id_str().clone())],
-            };
-            // insert (_ is X)
-            let tester_term = egraph.app(
-                tester_identifier.into(),
-                vec![term.clone()],
-                Some(bool_sort.clone()),
-            );
-            // todo: we are not handling is-X here
-            egraph.term_constructors.insert(
-                num,
-                ConstructorType::Constructor {
-                    name: f.id_str().clone(),
-                    tester_term,
-                    hash: 0,
-                    level: 0,
-                },
-            );
-        } else {
-            egraph
-                .term_constructors
-                .insert(num, ConstructorType::Uninitialized);
-        }
+        let tester_identifier = Identifier {
+            symbol: is_symbol.clone(),
+            indices: vec![Index::Symbol(f.id_str().clone())],
+        };
+        // insert (_ is X)
+        let tester_term = egraph.app(
+            tester_identifier.into(),
+            vec![term.clone()],
+            Some(bool_sort.clone()),
+        );
+        // todo: we are not handling is-X here
+        egraph.term_constructors.insert(
+            num,
+            ConstructorType::Constructor {
+                name: f.id_str().clone(),
+                tester_term,
+                hash: 0,
+                level: 0,
+            },
+        );
+    } else {
+        egraph
+            .term_constructors
+            .insert(num, ConstructorType::Uninitialized);
+    }
 }
-
 
 /// For a term of datatype sort, learn the clause isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
 /// if the term is of the form C(t1, ..., tm) where C is a constructor, we also add the clause (isC1(t) \/ ... \/ isCm(t)) /\ isC(t) where C is the constructor of the term
-fn learn_exactly_one_tester_clause(egraph: &mut Egraph, term: &Term, dt_dec: &DatatypeDec<Str, Sort>, from_quantifier: bool) -> Vec<Vec<i32>> {
+fn learn_exactly_one_tester_clause(
+    egraph: &mut Egraph,
+    term: &Term,
+    dt_dec: &DatatypeDec<Str, Sort>,
+    from_quantifier: bool,
+) -> Vec<Vec<i32>> {
     // Collect all constructors for this datatype sort
     let is_symbol = egraph.allocate_symbol("is");
     let bool_sort = egraph.bool_sort();
@@ -168,7 +172,12 @@ fn learn_exactly_one_tester_clause(egraph: &mut Egraph, term: &Term, dt_dec: &Da
 }
 
 /// For a term of datatype sort, learn the clause (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f
-fn learn_ctor_selector_clause(egraph: &mut Egraph, term: &Term, sort: &Sort, dt_dec: &DatatypeDec<Str, Sort>) -> Vec<Vec<i32>> {
+fn learn_ctor_selector_clause(
+    egraph: &mut Egraph,
+    term: &Term,
+    sort: &Sort,
+    dt_dec: &DatatypeDec<Str, Sort>,
+) -> Vec<Vec<i32>> {
     let mut vector = vec![];
     let is_symbol = egraph.allocate_symbol("is");
     let bool_sort = egraph.bool_sort();
@@ -217,7 +226,7 @@ fn learn_ctor_selector_clause(egraph: &mut Egraph, term: &Term, sort: &Sort, dt_
         let imp_cnf = imp.cnf_tseitin(egraph);
         let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
         vector.extend(clauses);
-    };
+    }
 
     vector
 }
@@ -225,7 +234,13 @@ fn learn_ctor_selector_clause(egraph: &mut Egraph, term: &Term, sort: &Sort, dt_
 /// We are learning the clause /\_i=1^k f_i(f(t1, ... tk)) = t_i
 /// for term = f(t1, ..., tk) where f is a constructor with selectors f_1, ..., f_k and subterms t1, ..., tk.
 /// Note that we also need to include the datatype axioms for the selectors if they are of datatype sort, so we call find_datatype_axioms on each selector application as well
-fn learn_selector_ctor_clause( egraph: &mut Egraph, term: &Term, f: &Str, subterms: &Vec<Term>, dt_dec: &DatatypeDec<Str, Sort>) -> Vec<Vec<i32>> {
+fn learn_selector_ctor_clause(
+    egraph: &mut Egraph,
+    term: &Term,
+    f: &Str,
+    subterms: &Vec<Term>,
+    dt_dec: &DatatypeDec<Str, Sort>,
+) -> Vec<Vec<i32>> {
     let mut vector = vec![];
     let ctor = dt_dec
         .constructors

@@ -160,7 +160,6 @@ pub fn check_for_function_bool(
     vector
 }
 
-
 /// gets datatype constraints from a pattern
 fn get_pattern_dt_constraints(
     pattern: &Term,
