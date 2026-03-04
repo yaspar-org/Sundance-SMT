@@ -8,7 +8,7 @@ use crate::utils::DeterministicHashMap;
 
 #[derive(Debug, Clone)]
 pub struct DatatypeInfo {
-    /// Map datatype names to their lists of constructors
+    /// Map datatype names to their datatype definitions
     pub datatypes: DeterministicHashMap<Str, DatatypeDec>,
     /// Map constructor names to their datatypes
     pub constructors: DeterministicHashMap<Str, Str>,
@@ -71,12 +71,9 @@ fn check_sort_contains_recursive_datatype(
     sort: &Sort,
     visiting: &mut HashSet<Str>,
 ) -> bool {
-    if check_is_recursive_datatype(context, sort.sort_name(), visiting) {
-        return true;
-    }
-    sort.1
-        .iter()
-        .any(|s| check_sort_contains_recursive_datatype(context, s, visiting))
+    check_is_recursive_datatype(context, sort.sort_name(), visiting)
+    // we do not need to look into sort.1 because we know datatype recursion can only occur as the
+    // top symbol as per the standard.
 }
 
 /// Check whether a given name refers to a recursive datatype
@@ -93,11 +90,41 @@ fn check_is_recursive_datatype(context: &Context, name: &Str, visiting: &mut Has
                 .iter()
                 .any(|arg| check_sort_contains_recursive_datatype(context, &arg.2, visiting))
         });
-        if recursive {
-            visiting.remove(name);
-            return true;
-        }
+        visiting.remove(name);
+        return recursive;
     }
     visiting.remove(name);
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yaspar_ir::ast::{StrAllocator, Typecheck};
+    use yaspar_ir::untyped::UntypedAst;
+
+    #[test]
+    fn test_recursive_test() {
+        let smt_input = r#"
+            (declare-datatypes ((Option 1)) ((par (T) ((None) (Some (value T))))))
+        "#;
+        let cmd = UntypedAst.parse_command_str(smt_input).unwrap();
+        let mut context = Context::default();
+        context.ensure_logic();
+        cmd.type_check(&mut context).unwrap();
+        let dt_info = DatatypeInfo::from_context(&context);
+        assert!(dt_info.contains_recursive_datatype(&context).is_none());
+
+        let smt_input2 = r#"
+            (declare-datatypes ((List 1)) ((par (T) ((Nil) (Cons (head T) (tail (List T)))))))
+        "#;
+        let cmd2 = UntypedAst.parse_command_str(smt_input2).unwrap();
+        cmd2.type_check(&mut context).unwrap();
+        let dt_info2 = DatatypeInfo::from_context(&context);
+        let list_sym = context.allocate_symbol("List");
+        assert_eq!(
+            dt_info2.contains_recursive_datatype(&context),
+            Some(list_sym)
+        );
+    }
 }

@@ -14,10 +14,11 @@ use crate::egraphs::egraph::Egraph;
 /// For a term of datatype sort, we want to learn the following axioms:
 /// 1. isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
 /// 2. (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the   datatype where f^0, ..., f^m are the selectors of f
-/// 2.5. (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f (by default we add this lazily based on the assignment in term_constructors)
-/// 3. /\_i=1^k f_i(f(t1, ... tk)) = t_i for term = f(t1, ..., tk) where f is a constructor with selectors f_1, ..., f_k and subterms t1, ..., tk.
-/// (done lazily) 4. We also need to ~isCi(t) \/ ~isCj(t) for each pair of distinct constructors Ci and Cj of the datatype (we do this lazily based on the assignment in term_constructors)
-/// Note that we also need to include the datatype axioms for the selectors if they are of datatype sort, so we need to recursively call find_datatype_axioms on the selector applications as well.
+/// 3. (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f (by default we add this lazily based on the assignment in term_constructors)
+/// 4. /\_i=1^k f_i(f(t1, ... tk)) = t_i for term = f(t1, ..., tk) where f is a constructor with selectors f_1, ..., f_k and subterms t1, ..., tk.
+///    (done lazily)
+/// 5. We also need to ~isCi(t) \/ ~isCj(t) for each pair of distinct constructors Ci and Cj of the datatype (we do this lazily based on the assignment in term_constructors)
+///    Note that we also need to include the datatype axioms for the selectors if they are of datatype sort, so we need to recursively call find_datatype_axioms on the selector applications as well.
 pub fn find_datatype_axioms(
     term: &Term, // must be a datatype term
     sort: &Sort, // the sort of the given term
@@ -159,7 +160,7 @@ fn learn_exactly_one_tester_clause(
     }
 
     let tester_or = if tester_apps.len() == 1 {
-        tester_apps[0].clone()
+        tester_apps.pop().unwrap()
     } else {
         egraph.or(tester_apps)
     };
@@ -238,7 +239,7 @@ fn learn_selector_ctor_clause(
     egraph: &mut Egraph,
     term: &Term,
     f: &Str,
-    subterms: &Vec<Term>,
+    subterms: &[Term],
     dt_dec: &DatatypeDec<Str, Sort>,
 ) -> Vec<Vec<i32>> {
     let mut vector = vec![];
@@ -262,7 +263,7 @@ fn learn_selector_ctor_clause(
         let sel_eq_nnf = sel_eq.nnf(egraph);
         egraph.insert_predecessor(&sel_eq_nnf, None, None, false, None);
         let sel_eq_cnf = sel_eq.cnf_tseitin(egraph);
-        let clauses = sel_eq_cnf.0.iter().map(|c| c.0.clone());
+        let clauses = sel_eq_cnf.into_iter().map(|c| c.0);
         vector.extend(clauses)
     }
     vector
