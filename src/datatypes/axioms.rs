@@ -4,7 +4,7 @@
 use std::vec;
 
 use yaspar_ir::ast::alg::{ConstructorDec, DatatypeDec, Identifier, Index, QualifiedIdentifier};
-use yaspar_ir::ast::{ATerm::*, FetchSort, Sort, Str, TermAllocator};
+use yaspar_ir::ast::{ATerm::*, CheckedApi, FetchSort, Sort, Str, TermAllocator};
 use yaspar_ir::ast::{ObjectAllocatorExt, Repr, StrAllocator, Term};
 
 use crate::cnf::CNFConversion as _;
@@ -213,12 +213,11 @@ pub fn learn_ctor_selector_clauses(
     );
     let mut selectors_apps = vec![];
     for sel in &ctor.args {
-        let sel_sort = sel.2.clone();
-        let sel_app = egraph.app(
-            QualifiedIdentifier::simple(sel.0.clone()),
-            vec![term.clone()],
-            Some(sel_sort.clone()),
-        );
+        let sel_app = egraph
+            .context
+            .typed_simp_app(sel.0.clone(), vec![term.clone()])
+            .expect("type checking invariant violation");
+        let sel_sort = sel_app.get_sort(egraph);
 
         // include new constraints for subterms
         debug_println!(
