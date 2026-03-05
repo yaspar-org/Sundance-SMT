@@ -65,7 +65,7 @@ pub fn find_datatype_axioms(
         && egraph.datatype_info.constructors.contains_key(f.id_str())
     {
         let selector_ctor_clauses =
-            learn_selector_ctor_clause(egraph, term, f.id_str(), terms, &dt_dec);
+            learn_selector_ctor_clause(egraph, term, f.id_str(), terms, &dt_dec, from_quantifier);
         vector.extend(selector_ctor_clauses);
     }
     vector
@@ -221,6 +221,13 @@ pub fn learn_ctor_selector_clauses(
         );
 
         // include new constraints for subterms
+        debug_println!(
+            24,
+            0,
+            "adding datatype axioms for selector application {} of term {}",
+            sel_app,
+            term
+        );
         let additional_constraints = find_datatype_axioms(&sel_app, &sel_sort, egraph, false);
         vector.extend(additional_constraints.clone());
 
@@ -256,6 +263,7 @@ fn learn_selector_ctor_clause(
     f: &Str,
     subterms: &[Term],
     dt_dec: &DatatypeDec<Str, Sort>,
+    from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     let mut vector = vec![];
     let ctor = dt_dec
@@ -276,7 +284,7 @@ fn learn_selector_ctor_clause(
         let sel_eq = egraph.eq(sel_app.clone(), sel_term.clone());
         debug_println!(25, 10, "3(assert {})", sel_eq);
         let sel_eq_nnf = sel_eq.nnf(egraph);
-        egraph.insert_predecessor(&sel_eq_nnf, None, None, false, None);
+        egraph.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier, None);
         let sel_eq_cnf = sel_eq.cnf_tseitin(egraph);
         let clauses = sel_eq_cnf.into_iter().map(|c| c.0);
         vector.extend(clauses)
@@ -290,11 +298,12 @@ pub fn learn_or_not_term_tester_term(
     egraph: &mut Egraph,
     term: Term,
     tester_term: Term,
+    from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     let not_tester_term = egraph.not(tester_term.clone());
     let not_term = egraph.not(term);
     let or_not_tester_not_term = egraph.or(vec![not_tester_term, not_term]);
-    egraph.insert_predecessor(&or_not_tester_not_term, None, None, false, None);
+    egraph.insert_predecessor(&or_not_tester_not_term, None, None, from_quantifier, None);
     let tester_cnf = or_not_tester_not_term
         .cnf_tseitin(egraph)
         .into_iter()

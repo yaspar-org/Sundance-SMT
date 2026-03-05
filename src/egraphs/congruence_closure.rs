@@ -3,11 +3,13 @@
 
 //! Classic congruence closure algorithm
 
-use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
+use crate::cnf::CNFConversion as _;
+use crate::datatypes::axioms::learn_or_not_term_tester_term;
 use crate::egraphs::proofforest::ProofForestEdge;
+use crate::preprocess::check_for_function_bool;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
-use yaspar_ir::ast::alg::CheckIdentifier;
-use yaspar_ir::ast::{FetchSort, IdentifierKind, Repr, Term, TermAllocator};
+use yaspar_ir::ast::alg::{CheckIdentifier, QualifiedIdentifier};
+use yaspar_ir::ast::{CheckedApi, FetchSort, IdentifierKind, Repr, Term, TermAllocator};
 
 use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
 use crate::egraphs::egraph::Egraph;
@@ -115,7 +117,7 @@ pub fn process_assignment(
         } => {
             // need to add isC(n) => n = C(C^1(n),..., C^m(n))
             let dt_sort = inner_term.get_sort(egraph);
-            let _term_lit = egraph.get_lit_from_term(&term);
+            let term_lit = egraph.get_lit_from_term(&term);
             debug_println!(19, 0, "trying to get for the term {}", inner_term);
             match egraph.term_constructors.get(&inner_term.uid()).unwrap() {
                 Constructor {
@@ -140,6 +142,7 @@ pub fn process_assignment(
                             egraph,
                             tester_term.clone(),
                             term.clone(),
+                            true,
                         );
                         Some(tester_cnf)
                     }
@@ -166,13 +169,55 @@ pub fn process_assignment(
                             .expect("type checking invariance violation: datatypes")
                             .clone();
 
+                        // todo: we want do this by calling this helper function but it currently
                         // note that the from_quantifier is important here
                         // it essentially says that this is a term that we learn not necessarily at level 0
                         // but we want to retain this term even after we backtrack
-                        let ctor_selector_clauses: Vec<Vec<i32>> =
-                            learn_ctor_selector_clauses(egraph, &inner_term, &ctor, &dt_sort, true);
+                        // let ctor_selector_clauses: Vec<Vec<i32>> = learn_ctor_selector_clauses(egraph, &inner_term, &ctor, &dt_sort, true);
+                        // Some(ctor_selector_clauses)
 
-                        Some(ctor_selector_clauses)
+                        let mut selector_apps = vec![];
+                        for sel in &ctor.args {
+                            let sel_app = egraph
+                                .context
+                                .typed_simp_app(sel.0.clone(), vec![inner_term.clone()])
+                                .expect("type checking invariance violation: constructors");
+                            selector_apps.push(sel_app);
+                        }
+
+                        // have the simple_sorted id for the global case and the simple id for the appp case
+                        let ctor_id = QualifiedIdentifier::simple(ctor_name);
+                        let ctor_app = if selector_apps.is_empty() {
+                            egraph.global(ctor_id, Some(dt_sort.clone()))
+                        } else {
+                            egraph.app(ctor_id, selector_apps, Some(dt_sort))
+                        };
+                        let eq = egraph.eq(inner_term, ctor_app);
+
+                        let eq_nnf = eq.nnf(egraph);
+                        debug_println!(14 - 3, 0, "adding in {}", eq_nnf);
+                        egraph.insert_predecessor(&eq_nnf, None, None, true, None);
+
+                        // note that additioanl constraints are needed for `datatypes/ctor_sel_term_additional_dt_constraints3.smt2`
+                        let mut additional_constraints =
+                            check_for_function_bool(&eq_nnf, egraph, false);
+                        let eq_cnf = eq_nnf.cnf_tseitin(egraph); // todo: do I need any more preprocessing
+                        assert_eq!(eq_cnf.0.len(), 1);
+                        let eq_clause = eq_cnf.0[0].0.clone();
+                        assert_eq!(eq_clause.len(), 1);
+                        let eq_lit = eq_clause[0];
+                        debug_println!(25, 10, "option 2: (assert (=> {} {}))", term, eq);
+
+                        additional_constraints.push(vec![-term_lit, eq_lit]);
+                        // let additional_constraints: Vec<Vec<i32>> = vec![vec![-term_lit, eq_lit]];
+
+                        debug_println!(
+                            24,
+                            0,
+                            "additional constraints are {:?}",
+                            additional_constraints
+                        );
+                        Some(additional_constraints)
                     } else {
                         None
                     }
