@@ -1,13 +1,27 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! A sparse tableaux implementation for use in the lia simplex algorithm
+//! This module implements a sparse tableaux for use in the linear real arithmetic simplex
+//! algorithm.
+//!
+//! The idea is that when the underlying tableau matrix has a very small number of non-zero
+//! entries, a sparse matrix is much more efficient at doing critical operations like pivoting
+//! which the simplex solver performs on every step.
+//!
+//! The intuition is that most arithmetic problems arising in SMT, and in program verification in
+//! particular, have very few non-zero coefficients compared to the number of variables and
+//! relations. In some examples the density of non-zero entries is ~5-10%. Simple benchmarking
+//! shows for some specific problems with ~5% density the sparse implementation is >20x faster than
+//! the dense one.
+//!
+//! The tradeoff is that the spare implementation is considerably more complicated and harder to
+//! debug. See [crate::arithmetic::lia::sparse].
 
 use crate::arithmetic::lia::sparse;
 use crate::arithmetic::lia::tableau::{Tableau, TableauError, TableauResult};
 use crate::arithmetic::lia::types::Rational;
 
-/// TableauSparse wraps a sparse matrix over the [Rational]s and implements
+/// [TableauSparse] wraps a sparse matrix over the [Rational]s and implements
 /// the [Tableau] interface.
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -54,6 +68,7 @@ mod tests {
     use super::*;
     use crate::arithmetic::lia::types::rbig;
 
+    // Validate construction of a 3x2 sparse tableau from tuples
     #[test]
     fn from_tuples_3x2() {
         let tuples = vec![
