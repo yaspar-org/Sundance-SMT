@@ -199,6 +199,16 @@ impl<V: Zero + fmt::Debug> Matrix<V> {
         })
     }
 
+    /// Return the number of rows in the matrix
+    pub fn nrows(&self) -> usize {
+        self.baserows.len()
+    }
+
+    /// Return the number of columns in the matrix
+    pub fn ncols(&self) -> usize {
+        self.basecols.len()
+    }
+
     /// Get the value of an element in the matrix
     ///
     /// Returns Some(&Zero) if the element coordinates are in-bounds but the node

@@ -35,6 +35,31 @@ impl TableauDense {
         })
     }
 
+    /// Make a new Tableau from a vector of tuples (row, col, value).
+    pub fn from_tuples(
+        nrows: usize,
+        ncols: usize,
+        t: Vec<(usize, usize, Rational)>,
+    ) -> TableauResult<Self> {
+        if nrows == 0 || ncols == 0 {
+            return Err(TableauError(
+                "tableau dimensions must be non-zero".to_string(),
+            ));
+        }
+        let mut data = Array2D::filled_with(Rational::from(0), nrows, ncols);
+        for (row, col, value) in t {
+            if row >= nrows || col >= ncols {
+                return Err(TableauError("tuple index out of bounds".to_string()));
+            }
+            data[(row, col)] = value;
+        }
+        Ok(TableauDense {
+            nrows,
+            ncols,
+            data: Box::new(data),
+        })
+    }
+
     /// Return the number of rows in the tableau (= number of basic variables)
     pub fn nrows(&self) -> usize {
         self.data.num_rows()
@@ -171,6 +196,27 @@ mod tests {
             vec![rbig!(-1), rbig!(-1)],
             vec![rbig!(0), rbig!(1)],
             vec![rbig!(-1), rbig!(-1)],
+        ];
+        let expected_tab = TableauDense::from_rows(&expected_data).unwrap();
+        assert_eq!(tab, expected_tab);
+    }
+
+    #[test]
+    fn from_tuples_3x2() {
+        let tuples = vec![
+            (0, 0, rbig!(1)),
+            (0, 1, rbig!(1)),
+            (1, 0, rbig!(2)),
+            (1, 1, rbig!(-1)),
+            (2, 0, rbig!(-1)),
+            (2, 1, rbig!(2)),
+        ];
+        let tab = TableauDense::from_tuples(3, 2, tuples).unwrap();
+
+        let expected_data = [
+            vec![rbig!(1), rbig!(1)],
+            vec![rbig!(2), rbig!(-1)],
+            vec![rbig!(-1), rbig!(2)],
         ];
         let expected_tab = TableauDense::from_rows(&expected_data).unwrap();
         assert_eq!(tab, expected_tab);
