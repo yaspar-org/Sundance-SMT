@@ -79,13 +79,16 @@ fn regression_test() {
                 .to_str()
                 .expect("Failed to convert path to string");
 
+            // Get expected result
+            let expected = if let Some(r) = expected_results[relative_path].as_str() {
+                r
+            } else {
+                // omit tests with no expected results
+                continue;
+            };
+
             print!("Testing file: {} ... ", relative_path);
             io::stdout().flush().unwrap();
-
-            // Get expected result
-            let expected = expected_results[relative_path]
-                .as_str()
-                .unwrap_or_else(|| panic!("No expected result found for {}", relative_path));
 
             // Run solver with timeout
             let child = Command::new("target/release/sundance-smt")

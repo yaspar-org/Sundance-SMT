@@ -4,7 +4,7 @@
 //! Important datastructures that are used elsewhere
 use std::{cmp::Ordering, fmt};
 
-use yaspar_ir::ast::Term;
+use yaspar_ir::ast::{Str, Term};
 
 /// Keeps track of disequalities used between multiple terms
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -87,10 +87,9 @@ pub enum Assertion {
     // },
     Tester {
         // todo: change the following to Str
-        ctor_name: String,
+        ctor_name: Str,
         inner_term: Term,
         term: Term,
-        // sort: Option<Sort>
     },
     Other,
 }
@@ -100,7 +99,7 @@ pub enum ConstructorType {
     Uninitialized,
     // NonDatatype,
     Constructor {
-        name: String,
+        name: Str,
         tester_term: Term,
         level: usize,
         hash: u64,
