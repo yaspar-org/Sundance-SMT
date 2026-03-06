@@ -36,6 +36,15 @@ To run the regression tests requires a release build:
 cargo test --release -- --nocapture
 ```
 
+## Benchmarking
+
+To run the micro-benchmarks using Criterion, run
+
+```bash
+cargo bench
+```
+
+
 ## Using z3 as an arithmetic solver
 
 Sundance allows users to call z3 as an arithmetic solver instead of its own default solver.

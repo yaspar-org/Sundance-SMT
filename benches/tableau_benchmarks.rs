@@ -1,3 +1,7 @@
+//! Micro-benchmarks for the arithmetic solver's tableau implementations.
+//!
+//! To run the benchmarks, use `cargo bench`.
+
 use criterion::{Criterion, criterion_group, criterion_main};
 use sundance_smt::arithmetic::lia::tableau::Tableau;
 use sundance_smt::arithmetic::lia::tableau_dense::TableauDense;
