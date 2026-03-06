@@ -787,14 +787,15 @@ pub fn union(
 
     if !fixed {
         // not adding fixed levels to backtracking based on what Armin said
-        if !from_quantifier {
+        if true {
             debug_println!(
                 16,
                 0,
-                "BACKTTRACK STACK: adding equalitity between {} and {} with y_root: {}",
+                "BACKTTRACK STACK: adding equalitity between {} and {} with y_root: {} at level {}",
                 egraph.get_term(x),
                 egraph.get_term(y),
-                egraph.get_term(y_root)
+                egraph.get_term(y_root),
+                level
             );
             egraph.proof_forest_backtrack_stack.push((
                 level,

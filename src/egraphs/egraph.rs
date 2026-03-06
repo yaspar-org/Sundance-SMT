@@ -259,6 +259,8 @@ pub struct Egraph {
     pub eager_skolem: bool,
     /// store CNF cache
     pub cnf_cache: CNFCache,
+    /// the current level which we are at
+    pub decision_level: usize,
 }
 
 impl Egraph {
@@ -300,6 +302,7 @@ impl Egraph {
             ddsmt,
             eager_skolem,
             cnf_cache: Default::default(),
+            decision_level: 0,
         }
     }
 
@@ -751,7 +754,7 @@ impl Egraph {
                         equality
                     );
                     // having fixed as true here since these get backtracked on in the special case using from_quantifier_backtrack_set
-                    union(term_num, *pred_key, self, equality, max_level, false, true);
+                    union(term_num, *pred_key, self, equality, self.decision_level, false, true);
                     break;
                 }
             }
