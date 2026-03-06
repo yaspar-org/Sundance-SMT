@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 //! Micro-benchmarks for the arithmetic solver's tableau implementations.
 //!
 //! To run the benchmarks, use `cargo bench`.

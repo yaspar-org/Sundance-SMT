@@ -38,7 +38,7 @@ cargo test --release -- --nocapture
 
 ## Benchmarking
 
-To run the micro-benchmarks using Criterion, run
+To run the micro-benchmarks using [criterion](https://crates.io/crates/criterion), run
 
 ```bash
 cargo bench
