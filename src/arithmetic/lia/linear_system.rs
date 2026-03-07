@@ -23,7 +23,7 @@ use crate::arithmetic::lia::bounds::Bounds;
 use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::qdelta::QDelta;
-use crate::arithmetic::lia::tableau_dense::TableauDense;
+use crate::arithmetic::lia::tableau::TableauKind;
 use crate::arithmetic::lia::utils;
 use crate::arithmetic::lia::variables::{Owner, Var, VarInfo};
 use crate::debug_println;
@@ -661,7 +661,8 @@ impl LinearSystem {
     pub fn to_lra_solver(
         self,
         relation_bounds: bool,
-    ) -> LinearSystemResult<LRASolver<TableauDense>> {
+        tableau_kind: TableauKind,
+    ) -> LinearSystemResult<LRASolver> {
         // original variable id's
         let var_set = self.var_id_set();
         let mut var_ids: Vec<Var> = var_set.iter().copied().collect();
@@ -741,7 +742,7 @@ impl LinearSystem {
             equations.len(),
             num_non_zero
         );
-        LRASolver::from_eqs(basic, non_basic, equations, self.ctx)
+        LRASolver::from_eqs(basic, non_basic, equations, self.ctx, tableau_kind)
             .map_err(|e| LinearSystemError(format!("error building tableau: {}", e)))
     }
 }
@@ -755,7 +756,7 @@ mod tests {
         linear_system::{LinearSystem, Mon, Rel},
         lra_solver::LRASolver,
         solver_result::SolverDecision,
-        tableau_dense::TableauDense,
+        tableau::TableauKind,
         types::{Rational, rbig},
         variables::{Var, VarType},
     };
@@ -1094,8 +1095,20 @@ mod tests {
         let _s2 = ctx.allocate_relation(Rel::mk_ge(vec![Mon::new(2, x), Mon::new(-1, y)], 0));
         let _s3 = ctx.allocate_relation(Rel::mk_ge(vec![Mon::new(-1, x), Mon::new(2, y)], 1));
 
+        let sys = LinearSystem::new(ctx.clone());
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Dense)
+            .expect("failed to build solver");
+
+        assert!(solver.is_valid());
+        let result = solver.solve().expect("simplex failed");
+        assert!(matches!(result, SolverDecision::FEASIBLE(_)));
+
+        // Same test but with sparse tableau
         let sys = LinearSystem::new(ctx);
-        let mut solver = sys.to_lra_solver(true).expect("failed to build solver");
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Sparse)
+            .expect("failed to build solver");
 
         assert!(solver.is_valid());
         let result = solver.solve().expect("simplex failed");
@@ -1123,7 +1136,9 @@ mod tests {
         let _s2 = ctx.allocate_relation(Rel::mk_ge(vec![Mon::new(2, x), Mon::new(-1, y)], 0));
 
         let sys = LinearSystem::new(ctx);
-        let mut solver = sys.to_lra_solver(false).expect("failed to build solver");
+        let mut solver = sys
+            .to_lra_solver(false, TableauKind::Dense)
+            .expect("failed to build solver");
 
         assert!(solver.is_valid());
         let result = solver.solve().expect("simplex failed");
@@ -1184,7 +1199,9 @@ mod tests {
         let _r3 = ctx.allocate_relation(Rel::mk_ge(vec![Mon::new(1, x1), Mon::new(1, x0)], 1));
 
         let sys = LinearSystem::new(ctx);
-        let mut solver = sys.to_lra_solver(true).expect("failed to build solver");
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Dense)
+            .expect("failed to build solver");
         assert!(solver.is_valid());
         assert!(matches!(
             solver.solve().expect("simplex failed"),
@@ -1253,8 +1270,10 @@ mod tests {
         let _r14 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, x70)], 4));
         let _r15 = ctx.allocate_relation(Rel::mk_gt(vec![Mon::new(1, x59)], 0));
 
-        let sys = LinearSystem::new(ctx);
-        let mut solver = sys.to_lra_solver(true).expect("failed to build solver");
+        let sys = LinearSystem::new(ctx.clone());
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Dense)
+            .expect("failed to build solver");
         assert!(solver.is_valid());
         let result = solver.solve().expect("simplex failed");
         // validate the assignment
@@ -1266,6 +1285,16 @@ mod tests {
                 "expected strictly positive solution"
             );
         }
+
+        // same test but with sparse tableau
+        let sys = LinearSystem::new(ctx);
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Sparse)
+            .expect("failed to build solver");
+        assert!(solver.is_valid());
+        let result = solver.solve().expect("simplex failed");
+        // validate the assignment
+        assert!(matches!(result, SolverDecision::FEASIBLE(_)));
     }
 
     /// Solve an UNSAT 3-SAT problem
@@ -1325,8 +1354,10 @@ mod tests {
             Rational::from(-2),
         ));
 
-        let sys = LinearSystem::new(ctx);
-        let mut solver = sys.to_lra_solver(true).expect("failed to build solver");
+        let sys = LinearSystem::new(ctx.clone());
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Dense)
+            .expect("failed to build solver");
         assert!(solver.is_valid());
         let result = solver.solve().expect("simplex failed");
         // validate the assignment
@@ -1341,6 +1372,16 @@ mod tests {
         } else {
             unreachable!("unexpected result");
         }
+
+        // same test but with sparse tableau
+        let sys = LinearSystem::new(ctx);
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Sparse)
+            .expect("failed to build solver");
+        assert!(solver.is_valid());
+        let result = solver.solve().expect("simplex failed");
+        // validate the assignment
+        assert!(matches!(result, SolverDecision::FEASIBLE(_)));
     }
 
     /// System is infeasible:
@@ -1356,7 +1397,9 @@ mod tests {
         let _r2 = ctx.allocate_relation(Rel::mk_gt(vec![Mon::new(1, x0), Mon::new(1, x1)], 1));
 
         let sys = LinearSystem::new(ctx);
-        let mut solver = sys.to_lra_solver(true).expect("failed to build solver");
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Dense)
+            .expect("failed to build solver");
 
         assert!(solver.is_valid());
         let result = solver.solve().expect("simplex failed");
@@ -1374,7 +1417,7 @@ mod tests {
     /// s2 |     1 |            s2 <= 2/3 - δ
     /// s3 |  1    | 1/3 + δ <= s3
     ///
-    fn open_polytope_in_unit_cube() -> (LRASolver<TableauDense>, Var, Var) {
+    fn open_polytope_in_unit_cube() -> (LRASolver, Var, Var) {
         let mut ctx = ConvContext::new();
         let x = ctx.allocate_var("x", VarType::Real);
         let y = ctx.allocate_var("y", VarType::Real);
@@ -1383,7 +1426,9 @@ mod tests {
         let _r3 = ctx.allocate_relation(Rel::mk_gt(vec![Mon::new(1, x)], rbig!(1 / 3)));
 
         let sys = LinearSystem::new(ctx);
-        let solver = sys.to_lra_solver(true).expect("failed to build solver");
+        let solver = sys
+            .to_lra_solver(true, TableauKind::Dense)
+            .expect("failed to build solver");
         assert!(solver.is_valid());
         (solver, x, y)
     }
@@ -1525,7 +1570,7 @@ mod tests {
         let _r3 = ctx.allocate_relation(Rel::mk_ge(vec![Mon::new(1, x)], rbig!(1 / 3)));
 
         let sys = LinearSystem::new(ctx);
-        let mut solver = sys.to_lra_solver(true).unwrap();
+        let mut solver = sys.to_lra_solver(true, TableauKind::Dense).unwrap();
 
         let result = solver.solve().unwrap();
         if let SolverDecision::FEASIBLE(assg) = result {
@@ -1552,7 +1597,7 @@ mod tests {
         let _r4 = ctx.allocate_relation(Rel::mk_le(vec![Mon::new(1, x)], rbig!(0))); // new bound x <= 0
 
         let sys = LinearSystem::new(ctx);
-        let mut solver = sys.to_lra_solver(true).unwrap();
+        let mut solver = sys.to_lra_solver(true, TableauKind::Dense).unwrap();
         assert!(matches!(
             solver.solve().unwrap(),
             SolverDecision::INFEASIBLE(_)
@@ -1568,7 +1613,7 @@ mod tests {
         let _r4 = ctx.allocate_relation(Rel::mk_ge(vec![Mon::new(1, y)], rbig!(1))); // new bound y >= 1
 
         let sys = LinearSystem::new(ctx);
-        let mut solver = sys.to_lra_solver(true).unwrap();
+        let mut solver = sys.to_lra_solver(true, TableauKind::Dense).unwrap();
         assert!(matches!(
             solver.solve().unwrap(),
             SolverDecision::INFEASIBLE(_)
@@ -1604,7 +1649,9 @@ mod tests {
         );
 
         // Verify that the system is still solvable
-        let mut solver = sys.to_lra_solver(true).expect("failed to build tableau");
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Dense)
+            .expect("failed to build tableau");
         assert!(solver.is_valid());
         let result = solver.solve().expect("simplex failed");
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
@@ -1631,7 +1678,9 @@ mod tests {
         assert_eq!(sys.num_relations(), 2, "Expected 2 relations");
 
         // Verify that the system is infeasible
-        let mut solver = sys.to_lra_solver(true).expect("failed to build solver");
+        let mut solver = sys
+            .to_lra_solver(true, TableauKind::Dense)
+            .expect("failed to build solver");
         let result = solver.solve().expect("solver failed");
         assert!(matches!(result, SolverDecision::INFEASIBLE(_)));
     }

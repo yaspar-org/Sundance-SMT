@@ -71,6 +71,14 @@ impl TableauDense {
 }
 
 impl Tableau for TableauDense {
+    fn from_tuples(
+        nrows: usize,
+        ncols: usize,
+        t: Vec<(usize, usize, Rational)>,
+    ) -> TableauResult<Self> {
+        TableauDense::from_tuples(nrows, ncols, t)
+    }
+
     fn pivot(&mut self, row: usize, col: usize) -> TableauResult<()> {
         let a_row_col = &self.data[(row, col)];
         if a_row_col.is_zero() {
@@ -125,6 +133,14 @@ impl Tableau for TableauDense {
         self.data
             .get(row, col)
             .ok_or(TableauError("dense tableau get out of bounds".to_string()))
+    }
+
+    fn nrows(&self) -> usize {
+        self.data.num_rows()
+    }
+
+    fn ncols(&self) -> usize {
+        self.data.num_columns()
     }
 }
 

@@ -6,9 +6,6 @@
 //! The [LIRASolver] is a wrapper around [LRASolver] which manages solver state for mixed
 //! integer and real arithmetic problems.
 
-use std::fmt;
-
-use crate::debug_println;
 use dashu::{Integer, Rational};
 use slotmap;
 
@@ -16,8 +13,8 @@ use crate::arithmetic::lia::bounds::Bounds;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::solver_result::{Conflict, SolverDecision, SolverResult};
-use crate::arithmetic::lia::tableau::Tableau;
 use crate::arithmetic::lia::variables::{Var, VarType};
+use crate::debug_println;
 
 // ---- New Implementation
 
@@ -177,16 +174,16 @@ impl BrtExplorer {
 
 /// Linear integer and real arithmetic solver
 #[derive(Debug)]
-pub struct LIRASolver<T: Tableau + fmt::Debug> {
+pub struct LIRASolver {
     /// The underlying LRA solver
-    lra_solver: LRASolver<T>,
+    lra_solver: LRASolver,
     /// Stack of variable bounds for tracking during solving
     explorer: BrtExplorer,
 }
 
-impl<T: Tableau + fmt::Debug> LIRASolver<T> {
+impl LIRASolver {
     /// Create a new LIRASolver with the given LRASolver
-    pub fn new(lra_solver: LRASolver<T>) -> Self {
+    pub fn new(lra_solver: LRASolver) -> Self {
         let root = BrtNode {
             level: Some(0usize),
             state: BrtNodeState::Active(BrtAction::NoOp),
@@ -421,12 +418,12 @@ impl<T: Tableau + fmt::Debug> LIRASolver<T> {
     }
 
     /// Get a reference to the underlying LRASolver
-    pub fn lra_solver(&self) -> &LRASolver<T> {
+    pub fn lra_solver(&self) -> &LRASolver {
         &self.lra_solver
     }
 
     /// Get a mutable reference to the underlying LRASolver
-    pub fn lra_solver_mut(&mut self) -> &mut LRASolver<T> {
+    pub fn lra_solver_mut(&mut self) -> &mut LRASolver {
         &mut self.lra_solver
     }
 
