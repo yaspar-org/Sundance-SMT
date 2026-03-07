@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! datastructures for proof forest inside of the egraph
+use crate::debug;
 use crate::egraphs::datastructures::DisequalTerm;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use std::fmt;
@@ -263,23 +264,17 @@ impl ProofForestEdge {
         // or if the hash is outdated (i.e. we have already backtracked on this disequality)
         if let Some(disequality) = disequalities.get(&key) {
             if disequality.hash != hash_level_map[disequality.level] && disequality.hash != 0 {
-                debug_println!(
+                debug!(
                     5,
-                    0,
-                    "We are inserting a disequality {:?} with key {}",
-                    t,
-                    key
+                    0, "We are inserting a disequality {:?} with key {}", t, key
                 );
                 // should only insert if the key hash is outdated (i.e. we have backtracked on this)
                 disequalities.insert(key, t);
             }
         } else {
-            debug_println!(
+            debug!(
                 5,
-                0,
-                "We are inserting a disequality {:?} with key {}",
-                t,
-                key
+                0, "We are inserting a disequality {:?} with key {}", t, key
             );
             // should only insert if there is not a value for key
             disequalities.insert(key, t);

@@ -4,6 +4,7 @@
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;
+use crate::debug;
 use crate::egraphs::congruence_closure::{
     get_child, get_parent, process_assignment, proof_forest_backtrack,
 };
@@ -52,14 +53,13 @@ impl<'a> CustomExternalPropagator<'a> {
         if self.proof_tracker.borrow().terms_list.contains_key(&lit)
         // || self.proof_tracker.borrow().terms_list.contains_key(&-lit)
         {
-            debug_println!(
+            debug!(
                 19,
-                0,
-                "We have already added literal {lit} to the proof tracker"
+                0, "We have already added literal {lit} to the proof tracker"
             );
             return;
         }
-        debug_println!(
+        debug!(
             19,
             0,
             "Adding literal {lit} i.e. {} to proof tracker with uid {}",
@@ -87,11 +87,9 @@ impl<'a> CustomExternalPropagator<'a> {
     /// Add a literal as an observed variable to the solver
     fn add_observed_variable(&mut self, lit: i32) {
         let abs_lit = lit.abs();
-        debug_println!(
+        debug!(
             7,
-            0,
-            "Adding literal {} as observed variable to solver",
-            abs_lit
+            0, "Adding literal {} as observed variable to solver", abs_lit
         );
         unsafe {
             (*self.solver).add_observed_var(abs_lit);
@@ -101,16 +99,13 @@ impl<'a> CustomExternalPropagator<'a> {
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_assignment(&mut self, lits: &[i32]) {
-        debug_println!(
+        debug!(
             7,
-            0,
-            "PROPAGATOR: Processing assignments (level {}): {:?}",
-            self.decision_level,
-            lits
+            0, "PROPAGATOR: Processing assignments (level {}): {:?}", self.decision_level, lits
         );
-        debug_println!(6, 0, "{}", self.egraph);
+        debug!(6, 0, "{}", self.egraph);
         for lit in lits {
-            debug_println!(
+            debug!(
                 7,
                 0,
                 "Assigning the literal {:?} (level {}) which is {}",
@@ -129,7 +124,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 ((self.decision_level + 1) as i32) * lit_sign;
 
             if self.fixed_literals.contains(lit) {
-                debug_println!(6, 0, "Skipping literal {lit} because it is fixed");
+                debug!(6, 0, "Skipping literal {lit} because it is fixed");
                 continue;
             }
 
@@ -145,14 +140,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     // todo: deleting this ordering thing -> just for debuggin
                     let mut constraint_ordered = constraint.clone();
                     constraint_ordered.sort();
-                    debug_println!(
+                    debug!(
                         16,
                         0,
                         "[in notify_assignment] We have the following constraint: {:?}",
                         constraint_ordered
                     );
                     for lit in constraint.clone() {
-                        debug_println!(12, 4, "{}", self.egraph.get_term_from_lit(lit));
+                        debug!(12, 4, "{}", self.egraph.get_term_from_lit(lit));
                     }
                     let mut shrunk_constraint = vec![];
                     let mut already_considered = DeterministicHashSet::default();
@@ -160,7 +155,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         if already_considered.contains(&lit) {
                             // TODO: we are checking for repeats here, but we should fix this at the conflict clause level so that we never get repeats
                             // the repeats are coming from (= x y) and true being merged and x and y being merged
-                            debug_println!(
+                            debug!(
                                 2,
                                 0,
                                 "Skipping literal {lit} from negated model because it is repeated"
@@ -173,24 +168,24 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     // todo: deleting this ordering thing -> just for debuggin
                     let mut shrunk_constraint_ordered = shrunk_constraint.clone();
                     shrunk_constraint_ordered.sort();
-                    debug_println!(
+                    debug!(
                         16,
                         1,
                         "After shrinking [ in notify_assignment]: {:?}",
                         shrunk_constraint_ordered
                     );
-                    debug_println!(11, 1, "This corresponds to ");
+                    debug!(11, 1, "This corresponds to ");
                     for lit in shrunk_constraint.iter() {
                         self.add_lit_to_proof_tracker(*lit);
                         self.add_observed_variable(*lit);
-                        debug_println!(11, 1, "  {}", self.egraph.get_term_from_lit(*lit));
+                        debug!(11, 1, "  {}", self.egraph.get_term_from_lit(*lit));
                     }
 
                     // Store the theory lemma with its proof steps
                     // TODO: I am not doing proof step stuff right now, but I need to add it back in
                     // let proof_steps = self.egraph.get_proof_steps_for_lemma(&shrunk_constraint);
 
-                    debug_println!(
+                    debug!(
                         14 - 3,
                         0,
                         "In case 1 currently disequalities: {:?}",
@@ -208,7 +203,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     //     .add_theory_clause(shrunk_constraint.clone(), theory_reason);
 
                     self.disequalities.borrow_mut().push(shrunk_constraint);
-                    debug_println!(
+                    debug!(
                         14 - 3,
                         0,
                         "We have the following disequalities: {:?}",
@@ -220,7 +215,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn notify_new_decision_level(&mut self) {
-        debug_println!(
+        debug!(
             11,
             0,
             "PROPAGATOR: New decision level {} -> {}",
@@ -228,7 +223,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level + 1
         );
         if self.decision_level + 2 >= self.egraph.predecessor_level.len() {
-            debug_println!(
+            debug!(
                 2,
                 2,
                 "Resizing predecessor level array to {}",
@@ -239,7 +234,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .resize(2 * self.egraph.predecessor_level.len(), 0);
         }
         self.decision_level += 1;
-        debug_println!(
+        debug!(
             4,
             0,
             "Setting predecessor level for level {} to {}",
@@ -250,18 +245,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn notify_backtrack(&mut self, level: usize) {
-        debug_println!(
+        debug!(
             23,
-            0,
-            "PROPAGATOR: Backtracking from level {} to level {}",
-            self.decision_level,
-            level
+            0, "PROPAGATOR: Backtracking from level {} to level {}", self.decision_level, level
         );
-        debug_println!(
+        debug!(
             4,
-            1,
-            "Current backtrack stack: {:?}",
-            self.egraph.proof_forest_backtrack_stack
+            1, "Current backtrack stack: {:?}", self.egraph.proof_forest_backtrack_stack
         );
 
         self.egraph.predecessor_hash += 1;
@@ -269,7 +259,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // resetting the assignments to 0 for all levels greater than the current level
         for i in 1..self.assignments.len() {
             if self.assignments[i].abs() > (level + 1) as i32 {
-                debug_println!(7, 0, "We are backtracking on assignment {}", i);
+                debug!(7, 0, "We are backtracking on assignment {}", i);
                 self.assignments[i] = 0;
             }
         }
@@ -278,7 +268,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // deactivate_bits(level, self.egraph);
 
         for i in level + 1..self.decision_level + 1 {
-            debug_println!(
+            debug!(
                 4,
                 1,
                 "We are updating level {} from {} to {}",
@@ -291,7 +281,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         self.decision_level = level;
 
-        debug_println!(
+        debug!(
             7,
             0,
             "Before backtracking we hav the stack: {:?}",
@@ -312,11 +302,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         while keep_backtracking(&self.egraph.proof_forest_backtrack_stack, level) {
             let (_, backtrack_equality, y, y_root) =
                 self.egraph.proof_forest_backtrack_stack.pop().unwrap();
-            debug_println!(16, 1, "Backtracking equality: {:?}", backtrack_equality);
+            debug!(16, 1, "Backtracking equality: {:?}", backtrack_equality);
             proof_forest_backtrack(backtrack_equality, y, y_root, self.egraph)
         }
 
-        debug_println!(
+        debug!(
             7,
             0,
             "After backtracking we have the stack: {:?}",
@@ -346,7 +336,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             for (p1, p2) in congruence_pairs.iter() {
                 if self.egraph.find(*p1) != self.egraph.find(*p2) {
                     // remove the equality from egraph
-                    debug_println!(
+                    debug!(
                         16,
                         0,
                         "[QUANTIFIER_BACKTRACK] We are backtracking on the equality {:?}",
@@ -359,7 +349,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         self.egraph,
                     );
                     // remove from backtracking list
-                    debug_println!(
+                    debug!(
                         16,
                         0,
                         "We are removing the equality between {} and {} at level {} [{:?}] from the backtracking list because of failed equality between {} and {}",
@@ -370,7 +360,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         self.egraph.get_term(*p1),
                         self.egraph.get_term(*p2)
                     );
-                    debug_println!(11, 0, "{}", self.egraph);
+                    debug!(11, 0, "{}", self.egraph);
                     self.egraph.from_quantifier_backtrack_set.remove(term_num);
                     break;
                 }
@@ -385,7 +375,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             // }
 
             for parent in parents {
-                debug_println!(
+                debug!(
                     11,
                     0,
                     "We are updating the predecessor of {} [ancestor of {}] to {} at level: {}; hash: {}",
@@ -403,14 +393,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 };
                 self.egraph.predecessors[current_ancestor as usize].insert(*parent, predecessor);
 
-                debug_println!(
+                debug!(
                     11,
                     0,
                     "We have the predecessors of {}",
                     self.egraph.get_term(current_ancestor)
                 );
                 for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
-                    debug_println!(
+                    debug!(
                         11,
                         4,
                         "{} with level {} and hash {}",
@@ -438,11 +428,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.egraph.union_to_eclass = DeterministicHashSet::new();
         }
 
-        debug_println!(11, 0, "{}", self.egraph);
+        debug!(11, 0, "{}", self.egraph);
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
-        debug_println!(
+        debug!(
             24,
             0,
             "PROPAGATOR: Checking model: {:?} [{:?}]",
@@ -458,17 +448,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // }
 
         if !self.disequalities.borrow_mut().is_empty() {
-            debug_println!(
+            debug!(
                 7,
-                0,
-                "Trying to check model when the disequalities are not empty"
+                0, "Trying to check model when the disequalities are not empty"
             );
             return false;
         }
 
         for term in model {
             let (u64_val, polarity) = self.egraph.get_u64_from_lit_with_polarity(*term);
-            debug_println!(
+            debug!(
                 24,
                 4,
                 "{} [lit: {}] [u64: {} with polarity {}]",
@@ -478,15 +467,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 polarity
             );
         }
-        debug_println!(16, 0, "{}", self.egraph);
+        debug!(16, 0, "{}", self.egraph);
 
         // Check arithmetic consistency before instantiating quantifiers
-        debug_println!(21, 0, "Starting arithmetic check",);
+        debug!(21, 0, "Starting arithmetic check",);
 
         match check_integer_constraints_satisfiable(&self.arithmetic, model, self.egraph) {
             ArithResult::Unsat(arithmetic_literals) => {
                 {
-                    debug_println!(
+                    debug!(
                         21,
                         0,
                         "PROPAGATOR: Arithmetic inconsistency detected: {:?}",
@@ -511,7 +500,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
                         if let Some(term) = nelson_oppen_clause_pair(*pair.0, *pair.1, self.egraph)
                         {
-                            debug_println!(25, 0, "adding in the nelson oppen term {}", term);
+                            debug!(25, 0, "adding in the nelson oppen term {}", term);
                             let term_nnf = term.nnf(self.egraph);
                             // println!("we have the term {:?}", term);
                             self.egraph
@@ -582,22 +571,20 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
-        debug_println!(11, 0, "Starting quantifier instantiations");
+        debug!(11, 0, "Starting quantifier instantiations");
         let quantifier_instantiations = instantiate_quantifiers(
             self.egraph,
             &self.proof_tracker,
             &self.assignments,
             self.decision_level,
         );
-        debug_println!(
+        debug!(
             11,
-            0,
-            "Found quantifier instantiations {:?}",
-            quantifier_instantiations
+            0, "Found quantifier instantiations {:?}", quantifier_instantiations
         );
 
         if quantifier_instantiations.is_empty() {
-            debug_println!(10, 0, "{}", self.egraph);
+            debug!(10, 0, "{}", self.egraph);
             assert!(self.disequalities.borrow().is_empty());
 
             return true;
@@ -628,29 +615,27 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
-        debug_println!(4, 0, "Returning false in cb_check_found_model");
+        debug!(4, 0, "Returning false in cb_check_found_model");
         false
     }
 
     fn cb_decide(&mut self) -> i32 {
-        debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
+        debug!(7, 0, "PROPAGATOR: Decision callback invoked");
         // always no decision
         0
     }
 
     fn cb_propagate(&mut self) -> i32 {
-        debug_println!(7, 0, "PROPAGATOR: Propagation callback invoked");
+        debug!(7, 0, "PROPAGATOR: Propagation callback invoked");
         // For now, no propagation
         // This could deduce new assignments
         0
     }
 
     fn cb_add_reason_clause_lit(&mut self, _propagated_lit: i32) -> i32 {
-        debug_println!(
+        debug!(
             7,
-            0,
-            "PROPAGATOR: Adding reason clause for literal {}",
-            _propagated_lit
+            0, "PROPAGATOR: Adding reason clause for literal {}", _propagated_lit
         );
         // For now, no reason clauses
         // This could explain propagations
@@ -658,11 +643,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_has_external_clause(&mut self, is_forgettable: &mut bool) -> bool {
-        debug_println!(
+        debug!(
             7,
-            0,
-            "PROPAGATOR: Checking for external clauses (forgettable: {})",
-            is_forgettable
+            0, "PROPAGATOR: Checking for external clauses (forgettable: {})", is_forgettable
         );
         // For now, no external clauses
         if (*self.disequalities.borrow_mut()).is_empty() {
@@ -670,7 +653,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         } else {
             // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
-            debug_println!(
+            debug!(
                 4,
                 0,
                 "In cb_has_external_clause: We have the following disequalities: {:?}",
@@ -684,9 +667,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // For now, no external clauses
         let mut v = self.disequalities.borrow_mut();
         assert!(!v.is_empty());
-        debug_println!(4, 0, "We start with the following disequalities: {:?}", v);
+        debug!(4, 0, "We start with the following disequalities: {:?}", v);
         let last_index = v.len() - 1;
-        debug_println!(11, 0, "We have the next clause {:?}", v[last_index]);
+        debug!(11, 0, "We have the next clause {:?}", v[last_index]);
         let literal = if v[last_index].is_empty() {
             v.pop();
             0
@@ -698,7 +681,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.add_lit_to_proof_tracker(literal);
         }
         if let Some(term) = self.egraph.get_term_from_lit_safe(literal) {
-            debug_println!(
+            debug!(
                 11,
                 0,
                 "PROPAGATOR: Adding external clause literal (might be negated) {} which is term {}",
@@ -706,10 +689,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 term
             );
         } else {
-            debug_println!(11, 0, "END OF CLAUSE");
+            debug!(11, 0, "END OF CLAUSE");
             assert!(literal == 0);
         }
-        debug_println!(4, 0, "{}", self.egraph);
+        debug!(4, 0, "{}", self.egraph);
         literal
     }
 }

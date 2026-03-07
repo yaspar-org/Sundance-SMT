@@ -11,6 +11,7 @@ use yaspar_ir::ast::{FetchSort, ObjectAllocatorExt, Repr, Term};
 
 use crate::cnf::CNFConversion as _;
 use crate::datatypes::axioms::find_datatype_axioms;
+use crate::debug;
 use crate::egraphs::egraph::Egraph;
 use crate::utils::DeterministicHashSet;
 
@@ -110,18 +111,14 @@ pub fn check_for_function_bool(
                         .into_iter()
                         .map(|x| x.into_iter().collect::<Vec<_>>());
                     let sub_formula = check_for_function_bool(&nnf_t, egraph, from_quantifier);
-                    debug_println!(
+                    debug!(
                         19,
-                        0,
-                        "We have the additional cnf_formula {:?}",
-                        cnf_formula
+                        0, "We have the additional cnf_formula {:?}", cnf_formula
                     );
                     vector.extend(cnf_formula);
-                    debug_println!(
+                    debug!(
                         19,
-                        0,
-                        "We have the additional sub_formula {:?}",
-                        sub_formula
+                        0, "We have the additional sub_formula {:?}", sub_formula
                     );
                     vector.extend(sub_formula)
                 }
@@ -140,7 +137,7 @@ pub fn check_for_function_bool(
                                     egraph,
                                     from_quantifier,
                                 );
-                                debug_println!(
+                                debug!(
                                     19,
                                     0,
                                     "We have the additional constraints {:?}",
@@ -224,12 +221,9 @@ fn check_if_var_occurs_in_term(
     var_bindings: &DeterministicHashSet<&String>,
     egraph: &mut Egraph,
 ) -> bool {
-    debug_println!(
+    debug!(
         19,
-        0,
-        "checking if var {:?} occurs in term {}",
-        var_bindings,
-        term
+        0, "checking if var {:?} occurs in term {}", var_bindings, term
     );
     match term.repr() {
         Constant(_, _) => false,
