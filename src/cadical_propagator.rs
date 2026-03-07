@@ -146,8 +146,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         "[in notify_assignment] We have the following constraint: {:?}",
                         constraint_ordered
                     );
-                    for lit in constraint.clone() {
-                        debug!(12, 4, "{}", self.egraph.get_term_from_lit(lit));
+                    if crate::log::is_important(12) {
+                        for lit in constraint.clone() {
+                            debug!(12, 4, "{}", self.egraph.get_term_from_lit(lit));
+                        }
                     }
                     let mut shrunk_constraint = vec![];
                     let mut already_considered = DeterministicHashSet::default();
@@ -399,15 +401,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     "We have the predecessors of {}",
                     self.egraph.get_term(current_ancestor)
                 );
-                for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
-                    debug!(
-                        11,
-                        4,
-                        "{} with level {} and hash {}",
-                        self.egraph.get_term(pred.1.predecessor),
-                        pred.1.level,
-                        pred.1.hash
-                    )
+                if crate::log::is_important(11) {
+                    for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
+                        debug!(
+                            11,
+                            4,
+                            "{} with level {} and hash {}",
+                            self.egraph.get_term(pred.1.predecessor),
+                            pred.1.level,
+                            pred.1.hash
+                        )
+                    }
                 }
             }
         }
