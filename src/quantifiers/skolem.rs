@@ -3,6 +3,7 @@
 
 //! Skolemization of existential quantifiers
 
+use crate::debug;
 use std::collections::HashMap;
 use yaspar_ir::ast::ATerm::{Annotated, Exists, Forall};
 use yaspar_ir::ast::alg::QualifiedIdentifier;
@@ -24,14 +25,14 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                 );
             } else {
                 // Create a fresh skolem variable for each existentially quantified variable
-                debug_println!(6, 0, "We are skolemizing the term {}", term);
+                debug!(6, 0, "We are skolemizing the term {}", term);
                 let mut skolem_substitutions = HashMap::new();
 
                 let mut skolem_variables = vec![];
 
                 for var_binding in var_bindings {
                     let skolem_symbol = context.fresh_var("skolem-variable");
-                    debug_println!(
+                    debug!(
                         26,
                         0,
                         "(declare-const {} {})",
@@ -74,14 +75,14 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                 );
             } else {
                 // Create a fresh skolem variable for each existentially quantified variable
-                debug_println!(6, 0, "We are skolemizing the term {}", term);
+                debug!(6, 0, "We are skolemizing the term {}", term);
                 let mut skolem_substitutions = HashMap::new();
 
                 let mut skolem_variables = vec![];
 
                 for var_binding in var_bindings {
                     let skolem_symbol = context.fresh_var("skolem-variable");
-                    debug_println!(
+                    debug!(
                         26,
                         0,
                         "(declare-const {} {})",

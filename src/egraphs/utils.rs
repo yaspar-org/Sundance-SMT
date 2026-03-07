@@ -3,6 +3,7 @@
 
 // helper functions for the egraph and congruence closure
 
+use crate::debug;
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::Attribute;
 use yaspar_ir::ast::Repr;
@@ -13,11 +14,9 @@ pub fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     match term.repr() {
         Annotated(term, _) => {
             let (func, mut subterms) = get_subterms(term);
-            debug_println!(
+            debug!(
                 6,
-                0,
-                "We are adding the subterm of a annotated term {:?}",
-                subterms
+                0, "We are adding the subterm of a annotated term {:?}", subterms
             );
             subterms.push(term);
             (func, subterms)
@@ -28,7 +27,7 @@ pub fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
         Or(items) => ("or".to_string(), items.iter().collect()),
         Xor(items) => ("xor".to_string(), items.iter().collect()),
         App(func, items, _) => {
-            debug_println!(10, 0, "We have the func {:?}", func);
+            debug!(10, 0, "We have the func {:?}", func);
             let func_indices = &func.0.indices;
             let func_id = func.id_str();
             if func_indices.is_empty() {

@@ -12,6 +12,7 @@ use crate::arithmetic::lp::{
     ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
     extract_linear_expression,
 };
+use crate::debug;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -28,8 +29,8 @@ pub fn check_integer_constraints_satisfiable_lia(
         return ArithResult::None; // No constraints mean trivially satisfiable
     }
 
-    debug_println!(21, 4, "trying to solve with constraints: {:?}", constraints);
-    debug_println!(21, 4, "and arithmetic literals {:?}", arithmetic_literals);
+    debug!(21, 4, "trying to solve with constraints: {:?}", constraints);
+    debug!(21, 4, "and arithmetic literals {:?}", arithmetic_literals);
 
     let mut var_map = DeterministicHashMap::new();
 
@@ -59,7 +60,7 @@ pub fn check_integer_constraints_satisfiable_lia(
     let mut constraint_slack_vars: DeterministicHashMap<Var, usize> = DeterministicHashMap::new();
 
     for (constraint_idx, constraint) in constraints.iter().enumerate() {
-        debug_println!(4, 0, "WE ARE IN ARITH CHECK: Constraint: {:?}", constraint);
+        debug!(4, 0, "WE ARE IN ARITH CHECK: Constraint: {:?}", constraint);
         // We have  "left_expr REL right_expr," make it into "(left_expr - right_expr) REL 0"
         let (mut constr_monomials, mut constant) =
             expr_to_monomials(&constraint.left_expr, Rational::ONE, &mut var_map, &mut ctx);
@@ -108,7 +109,7 @@ pub fn check_integer_constraints_satisfiable_lia(
                 .filter_map(|var| constraint_slack_vars.get(var))
                 .flat_map(|&idx| constraint_literals[idx].iter().copied())
                 .collect();
-            debug_println!(21, 4, "LIA: Unsat core literals: {:?}", unsat_core_literals);
+            debug!(21, 4, "LIA: Unsat core literals: {:?}", unsat_core_literals);
             ArithResult::Unsat(unsat_core_literals)
         }
         Ok(SolverDecision::UNKNOWN) => ArithResult::None,
