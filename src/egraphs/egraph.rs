@@ -632,7 +632,7 @@ impl Egraph {
         let subterm_num = subterms[0];
         let subterm_root = self.find(subterm_num);
         debug_println!(
-            11,
+            16,
             0,
             "TRYING ECLASS: with term_num {}, term {}, function {}, subterm {}, subterm_root {}",
             term_num,
@@ -666,14 +666,34 @@ impl Egraph {
         let subterm_root_predecessor = &self.predecessors[subterm_root as usize].clone(); // need to clone here because I mutably borrow later
         // let mut subterm_root_predecessor_vec = subterm_root_predecessor.iter().collect::<Vec<_>>();
         // subterm_root_predecessor_vec.sort();
+        debug_println!(
+            16,
+            0,
+            "We have the predecessors of the subterm root {} with term {} as",
+            subterm_root,
+            self.get_term(subterm_root),
+        );
+        for pred_key in subterm_root_predecessor.keys() {
+            debug_println!(16, 4, "{}", self.get_term(*pred_key),);
+        }
+
         for (pred_key, pred) in subterm_root_predecessor {
             debug_println!(6, 0, "before9");
             if !self.valid_hash(pred.hash, pred.level) {
                 self.predecessors[subterm_root as usize].remove(pred_key);
+                debug_println!(
+                    16,
+                    1,
+                    "We removed predecessor {} with inner term {} because of invalid hash {} at level {}",
+                    self.get_term(*pred_key),
+                    self.get_term(pred.inner_term),
+                    pred.hash,
+                    pred.level
+                );
                 continue;
             }
             debug_println!(
-                11,
+                16,
                 0,
                 "We have subterm_root_predecessor {} with inner_term {}",
                 self.get_term(*pred_key),
@@ -702,7 +722,7 @@ impl Egraph {
                     let (subterm_equal, subterm_level, subterm_hash) =
                         self.check_equal(pred_subterm_uid, subterm_uid);
                     debug_println!(
-                        11,
+                        16,
                         4,
                         "We are checking the equality of {} and {}, we get equal {} at level {} and hash {}",
                         self.get_term(pred_subterm_uid),
@@ -754,8 +774,16 @@ impl Egraph {
                         equality
                     );
                     // having fixed as true here since these get backtracked on in the special case using from_quantifier_backtrack_set
-                    union(term_num, *pred_key, self, equality, self.decision_level, false, true);
-                    break;
+                    union(
+                        term_num,
+                        *pred_key,
+                        self,
+                        equality,
+                        self.decision_level,
+                        false,
+                        true,
+                    );
+                    // break;
                 }
             }
         }

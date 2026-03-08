@@ -102,7 +102,7 @@ impl<'a> CustomExternalPropagator<'a> {
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_assignment(&mut self, lits: &[i32]) {
         debug_println!(
-            16,
+            22,
             0,
             "PROPAGATOR: Processing assignments (level {}): {:?}",
             self.decision_level,
@@ -331,7 +331,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
 
         // TODO: have to clone here which is really bad
-        for (term_num, (equality, term_parent_original, new_equality, original_y)) in
+        for (term_num, (_equality, term_parent_original, new_equality, original_y)) in
             self.egraph.from_quantifier_backtrack_set.clone().iter()
         {
             // let congruence_pairs = if let ProofForestEdge::Congruence { pairs, .. } = equality {
@@ -348,28 +348,28 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             //             "[QUANTIFIER_BACKTRACK] We are backtracking on the equality {:?}",
             //             equality
             //         );
-                    proof_forest_backtrack(
-                        new_equality.clone(),
-                        *original_y, //*term_num,
-                        term_parent_original.clone(),
-                        self.egraph,
-                    );
-                //     // remove from backtracking list
-                //     debug_println!(
-                //         16,
-                //         0,
-                //         "We are removing the equality between {} and {} at level {} [{:?}] from the backtracking list because of failed equality between {} and {}",
-                //         self.egraph.get_term(equality.get_parent()),
-                //         self.egraph.get_term(equality.get_child()),
-                //         self.decision_level,
-                //         equality,
-                //         self.egraph.get_term(*p1),
-                //         self.egraph.get_term(*p2)
-                //     );
-                //     debug_println!(11, 0, "{}", self.egraph);
-                    self.egraph.from_quantifier_backtrack_set.remove(term_num);
-                //     break;
-                // }
+            proof_forest_backtrack(
+                new_equality.clone(),
+                *original_y, //*term_num,
+                term_parent_original.clone(),
+                self.egraph,
+            );
+            //     // remove from backtracking list
+            //     debug_println!(
+            //         16,
+            //         0,
+            //         "We are removing the equality between {} and {} at level {} [{:?}] from the backtracking list because of failed equality between {} and {}",
+            //         self.egraph.get_term(equality.get_parent()),
+            //         self.egraph.get_term(equality.get_child()),
+            //         self.decision_level,
+            //         equality,
+            //         self.egraph.get_term(*p1),
+            //         self.egraph.get_term(*p2)
+            //     );
+            //     debug_println!(11, 0, "{}", self.egraph);
+            self.egraph.from_quantifier_backtrack_set.remove(term_num);
+            //     break;
+            // }
             // }
         }
 
@@ -382,7 +382,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             for parent in parents {
                 debug_println!(
-                    11,
+                    16,
                     0,
                     "We are updating the predecessor of {} [ancestor of {}] to {} at level: {}; hash: {}",
                     self.egraph.get_term(current_ancestor),
@@ -405,16 +405,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     "We have the predecessors of {}",
                     self.egraph.get_term(current_ancestor)
                 );
-                for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
-                    debug_println!(
-                        11,
-                        4,
-                        "{} with level {} and hash {}",
-                        self.egraph.get_term(pred.1.predecessor),
-                        pred.1.level,
-                        pred.1.hash
-                    )
-                }
+                // for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
+                //     debug_println!(
+                //         11,
+                //         4,
+                //         "{} with level {} and hash {}",
+                //         self.egraph.get_term(pred.1.predecessor),
+                //         pred.1.level,
+                //         pred.1.hash
+                //     )
+                // }
             }
         }
 
@@ -426,6 +426,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // redoing the union_to_eclass stuff
         let union_to_eclass_info = self.egraph.union_to_eclass.clone();
         for (term, func, subterms) in union_to_eclass_info {
+            debug_println!(
+                16,
+                0,
+                "Reunioning term {} with function {} and subterms {:?}",
+                self.egraph.get_term(term),
+                func,
+                subterms
+                    .iter()
+                    .map(|x| self.egraph.get_term(*x))
+                    .collect::<Vec<_>>()
+            );
             self.egraph.find_and_union_to_eclass(term, func, subterms);
         }
 
@@ -477,7 +488,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 polarity
             );
         }
-        debug_println!(16, 0, "{}", self.egraph);
+        debug_println!(24, 0, "{}", self.egraph);
 
         // Check arithmetic consistency before instantiating quantifiers
         debug_println!(21, 0, "Starting arithmetic check",);
