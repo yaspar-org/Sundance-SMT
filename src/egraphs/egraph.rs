@@ -624,10 +624,12 @@ impl Egraph {
         }
     }
 
-    /// This function checks takens in a term_num which corresponds to the term with
-    /// func applied to the subterms
-    ///  all of the predecessors of subterms[0]
-    /// if any of its predecessors are equivalent to term_num, then
+    /// This function takes in a term_num, func, subterms
+    /// term_num corresponds to the term with
+    /// func applied to subterms
+    /// if any of the predecessors of first element in subterms are equivalent (i.e. has the same function
+    /// and all of its subterms are equal to the subterms of term_num), then
+    /// we union term_num with that predecessors
     /// Used when a term is learned at level > 0 because of quantifier instantiation or datatype axiom
     pub fn find_and_union_to_eclass(&mut self, term_num: u64, func: String, subterms: Vec<u64>) {
         let subterm_num = subterms[0];
@@ -656,8 +658,10 @@ impl Egraph {
             debug_println!(16, 4, "{}", self.get_term(*pred_key),);
         }
 
+        // enumerate through all of the predecessors of the root of the first subterm, and see if any of them are equivalent to term_num, and if so, union them
         for (pred_key, pred) in subterm_root_predecessor {
             debug_println!(6, 0, "before9");
+            // if the predecessor is not valid, then we can remove it from the predecessors list (this can happen because of backtracking) and continue
             if !self.valid_hash(pred.hash, pred.level) {
                 self.predecessors[subterm_root as usize].remove(pred_key);
                 debug_println!(
@@ -679,19 +683,13 @@ impl Egraph {
                 self.get_term(pred.inner_term)
             );
             let pred_term = self.get_term(*pred_key);
-            debug_println!(6, 1, "We have the pred_term {}", pred_term);
             let (pred_func, pred_subterms) = get_subterms(&pred_term);
-            debug_println!(
-                6,
-                1,
-                "We have the pred_func {} and pred_subterms {:?}",
-                pred_func,
-                pred_subterms
-            );
+            // we can see if the predecessors has the same function name and the same number of subterms
+            // if it does we can check if all of the subterms are equal.
             if func == pred_func && pred_subterms.len() == subterms.len() {
                 let mut equal = true;
-                let mut completely_equal = true;
                 let mut congruence_pairs = vec![];
+                // check if all of the subterms are equal. If they are, then we can union term_num with the predecessor
                 for (pred_subterm, subterm) in pred_subterms.iter().zip(subterms.iter()) {
                     let (pred_subterm_uid, subterm_uid) = (pred_subterm.uid(), *subterm);
                     let (subterm_equal, subterm_level, subterm_hash) =
@@ -711,20 +709,9 @@ impl Egraph {
                         break;
                     }
 
-                    if pred_subterm_uid != subterm_uid {
-                        completely_equal = false;
-                    }
                     congruence_pairs.push((pred_subterm_uid, subterm_uid));
                 }
-                if equal && !completely_equal {
-                    // todo: I got rid of this because it was erroring, but not sure how to prevent redundancies otherwise
-                    // if self.from_quantifier_backtrack_set.contains_key(&term_num) {
-                    //     panic!(
-                    //         "we should not be considering a term that already exists {} and func {}",
-                    //         self.get_term(term_num),
-                    //         func
-                    //     );
-                    // }
+                if equal {
                     let equality = ProofForestEdge::Congruence {
                         pairs: congruence_pairs.clone(),
                         size: 0,
