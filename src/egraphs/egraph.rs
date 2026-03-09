@@ -3,7 +3,7 @@
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::process::DatatypeInfo;
-use crate::debug;
+use crate::debug_println;
 use crate::egraphs::congruence_closure::union;
 use crate::egraphs::datastructures::{
     Assertion, ConstructorType, DisequalTerm, Polarity::*, Predecessor, Quantifier, TermOption,
@@ -326,14 +326,14 @@ impl Egraph {
     }
 
     pub fn get_lit_from_u64(&self, num: u64) -> i32 {
-        debug!(
+        debug_println!(
             6,
             0,
             "We are in get_lit_from_u64 with num {} and var_map {:?}",
             num,
             self.cnf_cache.var_map
         );
-        debug!(5, 0, "We have the term {}", self.get_term(num));
+        debug_println!(5, 0, "We have the term {}", self.get_term(num));
         *self.cnf_cache.var_map.get(&num).unwrap()
     }
 
@@ -342,7 +342,7 @@ impl Egraph {
     }
 
     pub fn get_term(&self, num: u64) -> Term {
-        debug!(6, 0, "here3 with {}", num);
+        debug_println!(6, 0, "here3 with {}", num);
         self.terms_list[num as usize].clone().unwrap()
     }
 
@@ -355,7 +355,7 @@ impl Egraph {
     }
 
     pub fn get_term_from_lit(&mut self, lit: i32) -> Term {
-        debug!(
+        debug_println!(
             5,
             0,
             "We are in get_term_from_lit with lit {} and var_map_reverse {:?}",
@@ -363,17 +363,17 @@ impl Egraph {
             self.cnf_cache.var_map_reverse
         );
         if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
-            debug!(6, 0, "before5");
+            debug_println!(6, 0, "before5");
             self.get_term(*num)
         } else {
             let num = self.cnf_cache.var_map_reverse.get(&-lit).unwrap();
-            debug!(6, 0, "before6");
+            debug_println!(6, 0, "before6");
             self.context.not(self.get_term(*num))
         }
     }
 
     pub fn get_term_from_lit_safe(&mut self, lit: i32) -> Option<Term> {
-        debug!(
+        debug_println!(
             7,
             0,
             "We are in get_term_from_lit with lit {} and var_map_reverse {:?}",
@@ -381,10 +381,10 @@ impl Egraph {
             self.cnf_cache.var_map_reverse
         );
         if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
-            debug!(6, 0, "before7");
+            debug_println!(6, 0, "before7");
             Some(self.get_term(*num))
         } else if let Some(num) = self.cnf_cache.var_map_reverse.get(&-lit) {
-            debug!(6, 0, "before8");
+            debug_println!(6, 0, "before8");
             Some(self.context.not(self.get_term(*num)))
         } else {
             None
@@ -393,11 +393,14 @@ impl Egraph {
 
     pub fn get_lit_from_term(&self, term: &Term) -> i32 {
         let num = term.uid();
-        debug!(
+        debug_println!(
             11,
-            0, "We are in get_lit_from_term with term {} and num {}", term, num
+            0,
+            "We are in get_lit_from_term with term {} and num {}",
+            term,
+            num
         );
-        debug!(11, 0, "We have the var_map {:?}", self.cnf_cache.var_map);
+        debug_println!(11, 0, "We have the var_map {:?}", self.cnf_cache.var_map);
         *self.cnf_cache.var_map.get(&num).unwrap()
     }
 
@@ -409,7 +412,7 @@ impl Egraph {
         disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
     ) -> bool {
         // returns a vector of literals which do not occur in the propositional skeleton
-        debug!(
+        debug_println!(
             11,
             0,
             "We are in get_or_insert with term {} adn term id {}",
@@ -438,7 +441,7 @@ impl Egraph {
         // if this has already been inserted, then we don't need to do anything
         // TODO: need to add this for non-pattern based stuff
         if let TermOption::Some(i) = &self.terms_list[num as usize] {
-            debug!(
+            debug_println!(
                 22,
                 0,
                 "We are in get_or_insert with term {} and num {} and the term is already in the terms list {}",
@@ -450,7 +453,7 @@ impl Egraph {
         }
 
         // otherwise, we can add the term
-        debug!(22, 0, "Adding {} into with num {} terms list", term, num);
+        debug_println!(22, 0, "Adding {} into with num {} terms list", term, num);
         self.terms_list[num as usize] = TermOption::Some(term.clone());
 
         // if the term is an ITE where the boolean is true or false, then we need to merge immediately
@@ -509,9 +512,12 @@ impl Egraph {
 
         // inserting the term into the list of functions
         if let App(func, subterms, ..) = term.repr() {
-            debug!(
+            debug_println!(
                 22,
-                0, "We are adding the function {} with subterms {:?}", func, subterms
+                0,
+                "We are adding the function {} with subterms {:?}",
+                func,
+                subterms
             );
             let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
             self.function_maps
@@ -523,7 +529,7 @@ impl Egraph {
         // inserting the ite term into the list of functions
         if let Ite(b, t1, t2) = term.repr() {
             let subterms = vec![b, t1, t2];
-            debug!(5, 0, "We are adding the ite subterms {:?}", subterms);
+            debug_println!(5, 0, "We are adding the ite subterms {:?}", subterms);
             let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
             self.function_maps
                 .entry("ite".to_string())
@@ -535,7 +541,7 @@ impl Egraph {
         // TODO: there is a weird issue where quantifiers dont get added normally
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
             if let Some(g) = guard {
-                debug!(
+                debug_println!(
                     6,
                     0,
                     "We are adding the guard {} for quantifier {}",
@@ -623,7 +629,7 @@ impl Egraph {
     pub fn find_and_union_to_eclass(&mut self, term_num: u64, func: String, subterms: Vec<u64>) {
         let subterm_num = subterms[0];
         let subterm_root = self.find(subterm_num);
-        debug!(
+        debug_println!(
             11,
             0,
             "TRYING ECLASS: with term_num {}, term {}, function {}, subterm {}, subterm_root {}",
@@ -659,12 +665,12 @@ impl Egraph {
         // let mut subterm_root_predecessor_vec = subterm_root_predecessor.iter().collect::<Vec<_>>();
         // subterm_root_predecessor_vec.sort();
         for (pred_key, pred) in subterm_root_predecessor {
-            debug!(6, 0, "before9");
+            debug_println!(6, 0, "before9");
             if !self.valid_hash(pred.hash, pred.level) {
                 self.predecessors[subterm_root as usize].remove(pred_key);
                 continue;
             }
-            debug!(
+            debug_println!(
                 11,
                 0,
                 "We have subterm_root_predecessor {} with inner_term {}",
@@ -672,11 +678,14 @@ impl Egraph {
                 self.get_term(pred.inner_term)
             );
             let pred_term = self.get_term(*pred_key);
-            debug!(6, 1, "We have the pred_term {}", pred_term);
+            debug_println!(6, 1, "We have the pred_term {}", pred_term);
             let (pred_func, pred_subterms) = get_subterms(&pred_term);
-            debug!(
+            debug_println!(
                 6,
-                1, "We have the pred_func {} and pred_subterms {:?}", pred_func, pred_subterms
+                1,
+                "We have the pred_func {} and pred_subterms {:?}",
+                pred_func,
+                pred_subterms
             );
             if func == pred_func && pred_subterms.len() == subterms.len() {
                 let mut equal = true;
@@ -690,7 +699,7 @@ impl Egraph {
                     // let (subterm_root, subterm_level, subterm_hash) = self.find_with_level(subterm_uid, 0, 0);
                     let (subterm_equal, subterm_level, subterm_hash) =
                         self.check_equal(pred_subterm_uid, subterm_uid);
-                    debug!(
+                    debug_println!(
                         11,
                         4,
                         "We are checking the equality of {} and {}, we get equal {} at level {} and hash {}",
@@ -734,7 +743,7 @@ impl Egraph {
                         hash: max_hash,
                         children: DeterministicHashSet::new(),
                     };
-                    debug!(
+                    debug_println!(
                         16,
                         0,
                         "In eclass: We are unioning {} and {} with equality {:?}",
@@ -760,7 +769,7 @@ impl Egraph {
         from_quantifier: bool,
         disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
     ) {
-        debug!(
+        debug_println!(
             22,
             0,
             "We are in insert_predecessor with {} [{}] and from_quantifier {}",
@@ -831,7 +840,7 @@ impl Egraph {
         // for forall  and Exists terms, we need to add the subterms to the terms_list but not to any of the other data structures
         if let Exists(_, _) | Forall(_, _) = term.repr() {
             for subterm in subterms {
-                debug!(
+                debug_println!(
                     22,
                     0,
                     "We are adding the subterm of a forall/exists term {} to the terms list",
@@ -842,7 +851,7 @@ impl Egraph {
             // println!("returning");
             return;
         } else {
-            debug!(22, 0, "not a forall/exists term {}", term);
+            debug_println!(22, 0, "not a forall/exists term {}", term);
         }
 
         // // if a Datatype, we store its constructor
@@ -911,7 +920,7 @@ impl Egraph {
         // if we don't hit on either of the two previous cases
 
         for subterm in &subterms {
-            debug!(
+            debug_println!(
                 22,
                 4,
                 "We are adding the subterm {} of {} to the terms list (and other things)",
@@ -1135,7 +1144,7 @@ impl Egraph {
             hash,
             original_disequality: (t1, t2),
         };
-        debug!(
+        debug_println!(
             12,
             0,
             "Adding a disequality between {} and {} at level {} and hash {}",
@@ -1163,14 +1172,14 @@ impl Egraph {
     /// Checks if term t is equal to itself
     pub fn check_self_disequality(&self, t: u64) -> Option<DisequalTerm> {
         assert!(t == self.find(t));
-        debug!(
+        debug_println!(
             19,
             1,
             "We are in check_self_disequality with t {}",
             self.get_term(t)
         );
         let t_disequalities = &self.proof_forest[t as usize].disequalities();
-        debug!(19, 2, "We have t_disequalities {:?}", t_disequalities);
+        debug_println!(19, 2, "We have t_disequalities {:?}", t_disequalities);
 
         // TODO: should not need to sort disequalities here if we are using a deterministic hashmap
         let sorted_disequalities: Vec<_> = t_disequalities.iter().collect();
@@ -1178,7 +1187,7 @@ impl Egraph {
 
         for (key, disequality) in sorted_disequalities {
             if !self.valid_hash(disequality.hash, disequality.level) {
-                debug!(
+                debug_println!(
                     19,
                     0,
                     "We are skipping disequality with {}, disequality: {:?} because it is not at the same level does not have key {}",
@@ -1190,7 +1199,7 @@ impl Egraph {
             }
             assert!(*key == disequality.term);
             let root = self.find(*key);
-            debug!(
+            debug_println!(
                 19,
                 3,
                 "We are in check_self_disequality with {} [{}] and root {} [{}] and original term {}",
@@ -1201,7 +1210,7 @@ impl Egraph {
                 self.get_term(disequality.term)
             );
             if root == t {
-                debug!(
+                debug_println!(
                     19,
                     4,
                     "We have found a key {} [{}], disequality {:?} with root: {}, t: {}, disequality.term {} and original_disequality {} != {}",
@@ -1223,12 +1232,12 @@ impl Egraph {
 
     /// Set the terms corresponding to x and y equal in egraph
     pub fn make_eq(&mut self, x: u64, y: u64) -> i32 {
-        debug!(5, 0, "We are in make_eq with x {} and y {}", x, y);
+        debug_println!(5, 0, "We are in make_eq with x {} and y {}", x, y);
 
         if (x == self.false_term && y == self.true_term)
             || (x == self.true_term && y == self.false_term)
         {
-            debug!(
+            debug_println!(
                 5,
                 0,
                 "We are in make_eq with x [{}] false and y [{}] true or x [{}] true and y [{}] false",
@@ -1241,7 +1250,7 @@ impl Egraph {
         } else if (x == self.true_term && y == self.true_term)
             || (x == self.false_term && y == self.false_term)
         {
-            debug!(
+            debug_println!(
                 5,
                 0,
                 "We are in make_eq with x [{}] true and y [{}] true or x [{}] false and y [{}] false",
@@ -1252,19 +1261,19 @@ impl Egraph {
             );
             self.get_lit_from_u64(self.true_term)
         } else if x == self.true_term {
-            debug!(5, 0, "We are in make_eq with x true and y {}", y);
+            debug_println!(5, 0, "We are in make_eq with x true and y {}", y);
             self.get_lit_from_u64(y)
         } else if y == self.true_term {
-            debug!(5, 0, "We are in make_eq with y true and x {}", x);
+            debug_println!(5, 0, "We are in make_eq with y true and x {}", x);
             self.get_lit_from_u64(x)
         } else if x == self.false_term {
-            debug!(5, 0, "We are in make_eq with x false and y {}", y);
+            debug_println!(5, 0, "We are in make_eq with x false and y {}", y);
             -self.get_lit_from_u64(y)
         } else if y == self.false_term {
-            debug!(5, 0, "We are in make_eq with y false and x {}", x);
+            debug_println!(5, 0, "We are in make_eq with y false and x {}", x);
             -self.get_lit_from_u64(x)
         } else {
-            debug!(6, 0, "before10");
+            debug_println!(6, 0, "before10");
             let eq_term_class = self.context.eq(self.get_term(x), self.get_term(y));
             self.get_lit_from_term(&eq_term_class)
         }
@@ -1278,14 +1287,14 @@ impl Egraph {
         term_num: u64,
         _level: usize,
     ) -> Option<(Vec<u64>, String, Vec<u64>)> {
-        debug!(
+        debug_println!(
             5,
             0,
             "We are in get_canonical_form with term_num {} and term {}",
             term_num,
             self.get_term(term_num)
         );
-        debug!(6, 0, "before11");
+        debug_println!(6, 0, "before11");
         let term = self.get_term(term_num);
         match term.repr() {
             App(func, subterms, ..) => {
@@ -1322,9 +1331,12 @@ impl Egraph {
 
     /// Checks if the hash is still valid at the given level
     pub fn valid_hash(&self, hash: u64, level: usize) -> bool {
-        debug!(
+        debug_println!(
             5,
-            0, "We are in valid_hash with hash {} and level {}", hash, level
+            0,
+            "We are in valid_hash with hash {} and level {}",
+            hash,
+            level
         );
         hash >= self.predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
     }
@@ -1334,7 +1346,7 @@ impl Egraph {
     /// TODO: right now this is preferring the smallest level, but this might not always be
     /// correct depending on the invariants
     pub fn add_predecessor(&mut self, term: u64, new_pred_key: u64, new_pred: Predecessor) {
-        debug!(
+        debug_println!(
             5,
             0,
             "We are in add_predecessor with term {} and new_pred_key {} and new_pred {:?}",
@@ -1384,7 +1396,7 @@ impl Egraph {
                 // if the old predecessor was valid, we want to keep it
                 self.predecessors[term as usize].insert(new_pred_key, original_pred);
             } else {
-                debug!(
+                debug_println!(
                     11,
                     0,
                     "For term {}, we are replacing the predecessor {} [level {}, hash {}] with predecessor {} [level {}, hash {}]",
@@ -1398,7 +1410,7 @@ impl Egraph {
                 );
             }
         } else {
-            debug!(
+            debug_println!(
                 11,
                 0,
                 "For term {}, we are adding the predecessor {} [level {}, hash {}]",

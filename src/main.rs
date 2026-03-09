@@ -9,7 +9,7 @@ use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::egraphs::egraph::Egraph;
 use sundance_smt::preprocess::check_for_function_bool;
-use sundance_smt::{debug, log};
+use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::TermAllocator;
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
@@ -21,7 +21,7 @@ fn main() -> Result<(), String> {
     // Parse debug flag and level
     if args.debug > 0 {
         log::set_debug_level(args.debug);
-        debug!(
+        debug_println!(
             2,
             0,
             "Debug mode enabled (level {})",
@@ -33,7 +33,7 @@ fn main() -> Result<(), String> {
 
     // Enable debug output for proof tracking if proof file is specified
     if args.proof.is_some() {
-        debug!(2, 0, "Proof tracking enabled - will generate eDRAT proof");
+        debug_println!(2, 0, "Proof tracking enabled - will generate eDRAT proof");
     }
 
     // Read the SMT file
@@ -88,35 +88,38 @@ fn main() -> Result<(), String> {
 
     let mut nnf_terms = vec![];
     for assert in assertions {
-        debug!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
+        debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
 
         // inline the let bindings
         let let_elim_term = assert.let_elim(&mut egraph.context);
-        debug!(10, 0, "Let_elim form: {}", let_elim_term);
+        debug_println!(10, 0, "Let_elim form: {}", let_elim_term);
         // todo: for some reason not inling define-fun
 
         let skolemized_term = let_elim_term;
 
         let nnf_term = skolemized_term.nnf(&mut egraph);
-        debug!(
+        debug_println!(
             12,
-            0, "NNF form: {} with hash {}", nnf_term, egraph.predecessor_hash
+            0,
+            "NNF form: {} with hash {}",
+            nnf_term,
+            egraph.predecessor_hash
         );
 
         nnf_terms.push(nnf_term.clone());
 
         egraph.insert_predecessor(&nnf_term, None, None, false, None);
 
-        debug!(4, 0, "We have the nnf term {}", nnf_term);
+        debug_println!(4, 0, "We have the nnf term {}", nnf_term);
 
         // Convert to CNF (Conjunctive Normal Form) using Sundance implementation
         // using tseitin transformation because if we have (and true b), we
         // want (and true b) <-> true \land b, not just the forwards direction
         let cnf_formula = nnf_term.cnf_tseitin(&mut egraph);
 
-        debug!(4, 0, "We have the cnf formula {}", cnf_formula);
+        debug_println!(4, 0, "We have the cnf formula {}", cnf_formula);
 
-        debug!(4, 0, "CNF formula: {:?}", cnf_formula);
+        debug_println!(4, 0, "CNF formula: {:?}", cnf_formula);
 
         prop_skeleton.extend(
             cnf_formula
@@ -130,9 +133,11 @@ fn main() -> Result<(), String> {
     let sorts = egraph.context.expose_sorts().clone();
     let symbol_table = egraph.context.expose_symbol_table().clone();
 
-    debug!(
+    debug_println!(
         6,
-        0, "before BOOL: We have the var_map {:?}", egraph.cnf_cache.var_map
+        0,
+        "before BOOL: We have the var_map {:?}",
+        egraph.cnf_cache.var_map
     );
 
     let mut boolean_dt_constraints = vec![];
@@ -151,12 +156,14 @@ fn main() -> Result<(), String> {
         .filter(|list| !(list.len() == 2 && list[0] == -list[1]))
         .collect::<Vec<_>>();
 
-    debug!(
+    debug_println!(
         22,
-        0, "We have the prop_skeleton {:?}", prop_skeleton_filtered
+        0,
+        "We have the prop_skeleton {:?}",
+        prop_skeleton_filtered
     );
 
-    debug!(
+    debug_println!(
         24,
         0,
         "We have the prop_skeleton in terms: {:?}",

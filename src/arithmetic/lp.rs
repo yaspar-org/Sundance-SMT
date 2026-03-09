@@ -6,7 +6,7 @@ use dashu::integer::IBig;
 use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
 #[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
-use crate::debug;
+use crate::debug_println;
 use crate::egraphs::congruence_closure::leastcommonancestor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::unionfind::ProofTracker;
@@ -150,7 +150,7 @@ pub fn extract_linear_constraints(
     for &lit in terms {
         let (term_id, polarity) = egraph.get_u64_from_lit_with_polarity(lit);
         if let Some(constraint) = extract_constraint_from_term(term_id, polarity, egraph) {
-            debug!(21, 4, "We get the constraint {:?}", constraint);
+            debug_println!(21, 4, "We get the constraint {:?}", constraint);
             constraints.push(constraint);
             arithmetic_literals.push(-lit);
         }
@@ -166,9 +166,11 @@ fn extract_constraint_from_term(
     egraph: &mut crate::egraphs::egraph::Egraph,
 ) -> Option<LinearConstraint> {
     let term = egraph.get_term(term_id);
-    debug!(
+    debug_println!(
         21,
-        6, "[ARITH CHECK] Extracting linear constraint for term {}", term
+        6,
+        "[ARITH CHECK] Extracting linear constraint for term {}",
+        term
     );
 
     // flip the polarity if the term is a negation
@@ -179,9 +181,11 @@ fn extract_constraint_from_term(
 
     match term.repr() {
         App(identifier, args, _) if !polarity => {
-            debug!(
+            debug_println!(
                 2,
-                0, "[ARITH CHECK] Extracting linear constraint for NOT APP term {}", term
+                0,
+                "[ARITH CHECK] Extracting linear constraint for NOT APP term {}",
+                term
             );
             if args.len() != 2 {
                 return None;
@@ -235,9 +239,11 @@ fn extract_constraint_from_term(
             }
         }
         App(identifier, args, _) if polarity => {
-            debug!(
+            debug_println!(
                 2,
-                0, "[ARITH CHECK] Extracting linear constraint for APP term {}", term
+                0,
+                "[ARITH CHECK] Extracting linear constraint for APP term {}",
+                term
             );
             if args.len() != 2 {
                 return None;
@@ -279,9 +285,11 @@ fn extract_constraint_from_term(
             }
         }
         Eq(a, b) if polarity => {
-            debug!(
+            debug_println!(
                 2,
-                0, "[ARITH CHECK] Extracting linear constraint for EQ term {}", term
+                0,
+                "[ARITH CHECK] Extracting linear constraint for EQ term {}",
+                term
             );
             let (left_expr, additional_constraint_l) = extract_linear_expression(a.uid(), egraph);
             let (right_expr, additional_constraint_r) = extract_linear_expression(b.uid(), egraph);
@@ -308,7 +316,7 @@ pub fn extract_linear_expression(
     term_id: u64,
     egraph: &mut crate::egraphs::egraph::Egraph,
 ) -> (DeterministicHashMap<Coefficient, Integer>, Vec<i32>) {
-    debug!(
+    debug_println!(
         21,
         8,
         "[ARITH CHECK] Extracting linear expression for term {:?}",
@@ -420,7 +428,7 @@ pub fn extract_linear_expression(
                             .collect();
 
                         // For other operations, we treat as uninterpreted expr
-                        debug!(
+                        debug_println!(
                             21,
                             10,
                             "[ARITH CHECK] Uninterpreted expr: var_{} for term {}",
@@ -444,9 +452,12 @@ pub fn extract_linear_expression(
                     .collect();
 
                 // For other operations, we treat as uninterpreted expr
-                debug!(
+                debug_println!(
                     21,
-                    10, "[ARITH CHECK] Uninterpreted expr: var_{} for term {}", root_id, term
+                    10,
+                    "[ARITH CHECK] Uninterpreted expr: var_{} for term {}",
+                    root_id,
+                    term
                 );
                 additional_constraints.extend(model_terms);
                 expr.insert(Coefficient::Term(root_id), IBig::from(1));

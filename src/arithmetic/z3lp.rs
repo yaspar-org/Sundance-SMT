@@ -7,7 +7,7 @@ use crate::{
         ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
         extract_linear_expression,
     },
-    debug,
+    debug_println,
     egraphs::proofforest::ProofForestEdge,
     utils::{DeterministicHashMap, DeterministicHashSet},
 };
@@ -26,8 +26,8 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
         return ArithResult::None; // No constraints mean trivially satisfiable
     }
 
-    debug!(21, 4, "trying to solve with constraints: {:?}", constraints);
-    debug!(21, 4, "and arithmetic literals {:?}", arithmetic_literals);
+    debug_println!(21, 4, "trying to solve with constraints: {:?}", constraints);
+    debug_println!(21, 4, "and arithmetic literals {:?}", arithmetic_literals);
 
     // Create Z3 solver;
     let solver = Solver::new();
@@ -97,7 +97,7 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
     }
 
     for (constraint_idx, constraint) in constraints.iter().enumerate() {
-        debug!(4, 0, "WE ARE IN ARITH CHECK: Constraint: {:?}", constraint);
+        debug_println!(4, 0, "WE ARE IN ARITH CHECK: Constraint: {:?}", constraint);
 
         let mut left_expr = Int::from_i64(0);
         for (var_name, coeff) in &constraint.left_expr {
@@ -137,9 +137,11 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
             Lt => Int::lt(&left_expr, &right_expr),
         };
 
-        debug!(
+        debug_println!(
             4,
-            0, "WE ARE IN ARITH CHECK: Adding the constraint {}", constraint_ast
+            0,
+            "WE ARE IN ARITH CHECK: Adding the constraint {}",
+            constraint_ast
         );
 
         // Convert to boolean assumption - constraint_ast is already a Bool AST
@@ -169,11 +171,13 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
         z3::SatResult::Unsat => {
             // Unsatisfiable - return the arithmetic literals that caused the conflict
             let unsat_core = solver.get_unsat_core();
-            debug!(
+            debug_println!(
                 4,
-                0, "WE ARE IN ARITH CHECK: Arithmetic literals: {:?}", arithmetic_literals
+                0,
+                "WE ARE IN ARITH CHECK: Arithmetic literals: {:?}",
+                arithmetic_literals
             );
-            debug!(21, 4, "WE ARE IN ARITH CHECK: Unsat core: {:?}", unsat_core);
+            debug_println!(21, 4, "WE ARE IN ARITH CHECK: Unsat core: {:?}", unsat_core);
             let unsat_core_literals = unsat_core
                 .iter()
                 .flat_map(|ast| constraint_to_literals.get(ast).unwrap().clone())

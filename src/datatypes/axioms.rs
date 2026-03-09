@@ -8,7 +8,7 @@ use yaspar_ir::ast::{ATerm::*, CheckedApi, FetchSort, Sort, Str, TermAllocator};
 use yaspar_ir::ast::{ObjectAllocatorExt, Repr, StrAllocator, Term};
 
 use crate::cnf::CNFConversion as _;
-use crate::debug;
+use crate::debug_println;
 use crate::egraphs::datastructures::ConstructorType;
 use crate::egraphs::egraph::Egraph;
 
@@ -147,11 +147,11 @@ fn learn_exactly_one_tester_clause(
         // adding the clause ((_ is ConstructorName) (ConstructorName ...)) if relevant
         match term.repr() {
             App(f, _, _) | Global(f, _) if *f.id_str() == *ctor_name => {
-                debug!(12, 0, "TESTER Constructor CASE");
+                debug_println!(12, 0, "TESTER Constructor CASE");
                 let tester_app_nnf = tester_app.nnf(egraph);
                 egraph.insert_predecessor(&tester_app_nnf, None, None, from_quantifier, None);
                 let tester_app_cnf = tester_app_nnf.cnf_tseitin(egraph).into_iter().map(|x| x.0);
-                debug!(25, 10, "1(assert {})", tester_app);
+                debug_println!(25, 10, "1(assert {})", tester_app);
                 vector.extend(tester_app_cnf);
             }
             _ => {}
@@ -165,8 +165,8 @@ fn learn_exactly_one_tester_clause(
     } else {
         egraph.or(tester_apps)
     };
-    debug!(12, 0, "TESTER OR CASE");
-    debug!(25, 10, "2(assert {})", tester_or);
+    debug_println!(12, 0, "TESTER OR CASE");
+    debug_println!(25, 10, "2(assert {})", tester_or);
     egraph.insert_predecessor(&tester_or, None, None, from_quantifier, None);
     let tester_cnf = tester_or.cnf_tseitin(egraph).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
@@ -221,9 +221,12 @@ pub fn learn_ctor_selector_clauses(
         let sel_sort = sel_app.get_sort(egraph);
 
         // include new constraints for subterms
-        debug!(
+        debug_println!(
             24,
-            0, "adding datatype axioms for selector application {} of term {}", sel_app, term
+            0,
+            "adding datatype axioms for selector application {} of term {}",
+            sel_app,
+            term
         );
         let additional_constraints = find_datatype_axioms(&sel_app, &sel_sort, egraph, false);
         vector.extend(additional_constraints.clone());
@@ -242,7 +245,7 @@ pub fn learn_ctor_selector_clauses(
 
     let eq = egraph.eq(term.clone(), ctor_app);
     let imp = egraph.implies(vec![tester_app], eq);
-    debug!(25, 10, "option 1 (assert {}) with sort {}", imp, sort);
+    debug_println!(25, 10, "option 1 (assert {}) with sort {}", imp, sort);
     let imp_nnf = imp.nnf(egraph);
     egraph.insert_predecessor(&imp_nnf, None, None, from_quantifier, None);
     let imp_cnf = imp.cnf_tseitin(egraph);
@@ -279,7 +282,7 @@ fn learn_selector_ctor_clause(
             Some(so),
         );
         let sel_eq = egraph.eq(sel_app.clone(), sel_term.clone());
-        debug!(25, 10, "3(assert {})", sel_eq);
+        debug_println!(25, 10, "3(assert {})", sel_eq);
         let sel_eq_nnf = sel_eq.nnf(egraph);
         egraph.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier, None);
         let sel_eq_cnf = sel_eq.cnf_tseitin(egraph);
@@ -306,7 +309,7 @@ pub fn learn_or_not_term_tester_term(
         .into_iter()
         .map(|x| x.0)
         .collect();
-    debug!(25, 10, "4(assert {})", or_not_tester_not_term,);
-    debug!(12, 2, "This gives us {:?}", tester_cnf);
+    debug_println!(25, 10, "4(assert {})", or_not_tester_not_term,);
+    debug_println!(12, 2, "This gives us {:?}", tester_cnf);
     tester_cnf
 }

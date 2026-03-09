@@ -14,7 +14,7 @@ use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::skolem::skolemize;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
-use crate::debug;
+use crate::debug_println;
 use crate::log::is_important;
 use yaspar_ir::ast::{
     ATerm, FetchSort, HasArena, LetElim, Repr, Substitute, Substitution, Term, TermAllocator,
@@ -38,9 +38,9 @@ pub fn instantiate_quantifiers(
 ) -> Vec<QuantifierInstance> {
     let quantifiers = &egraph.quantifiers.clone();
     let mut instantiations = vec![];
-    debug!(24, 0, "Starting a matching round");
+    debug_println!(24, 0, "Starting a matching round");
     for quantifier in quantifiers {
-        debug!(
+        debug_println!(
             19,
             0,
             "We have the quantifier {}",
@@ -56,8 +56,8 @@ pub fn instantiate_quantifiers(
         // || (quantifier_assignment > 0 && quantifier_literal < 0)
         // || (quantifier_assignment < 0 && quantifier_literal > 0)
         {
-            debug!(12, 0, "after4");
-            debug!(
+            debug_println!(12, 0, "after4");
+            debug_println!(
                 6,
                 0,
                 "We are skipping the quantifier {} with quantifier_literal {} and quantifier_assignment {} | assignments {:?}",
@@ -80,7 +80,7 @@ pub fn instantiate_quantifiers(
         if (quantifier_polarity || egraph.eager_skolem)
             && !egraph.added_skolemizations.contains(&quantifier.id)
         {
-            debug!(
+            debug_println!(
                 6,
                 0,
                 "We are skolemizing the quantifier {} with quantifier_literal {} and quantifier_assignment {} | assignments {:?}",
@@ -111,9 +111,9 @@ pub fn instantiate_quantifiers(
             let skolemized_quantifier = skolemized_quantifier.nnf(egraph);
             let additional_constraints =
                 check_for_function_bool(&skolemized_quantifier, egraph, true);
-            debug!(19, 0, "we are skolemizing {}", term);
-            debug!(26, 0, "(assert {})", skolemized_quantifier);
-            debug!(
+            debug_println!(19, 0, "we are skolemizing {}", term);
+            debug_println!(26, 0, "(assert {})", skolemized_quantifier);
+            debug_println!(
                 24,
                 8,
                 "from quantifier {} [{}]",
@@ -175,7 +175,7 @@ pub fn instantiate_quantifiers(
             continue;
         }
 
-        debug!(
+        debug_println!(
             19,
             0,
             "instantiating the quantifier {}",
@@ -188,19 +188,19 @@ pub fn instantiate_quantifiers(
             let trigger_term_pairs = multipattern.iter().map(|t| (*t, None)).collect::<Vec<_>>();
 
             let mut assignments = DeterministicHashMap::default();
-            debug!(12, 0, "after8");
-            debug!(
+            debug_println!(12, 0, "after8");
+            debug_println!(
                 19,
                 0,
                 "About to match quantifier body {} with trigger {:?}",
                 egraph.get_term(body),
                 trigger_term_pairs
             );
-            debug!(12, 0, "after9");
+            debug_println!(12, 0, "after9");
             let list_assignments = match_term(&mut assignments, trigger_term_pairs, egraph);
 
             if list_assignments.is_empty() {
-                debug!(
+                debug_println!(
                     24,
                     0,
                     "No substitutions for {}",
@@ -208,7 +208,7 @@ pub fn instantiate_quantifiers(
                 );
             }
 
-            debug!(7, 0, "We have the following list of assignments:");
+            debug_println!(7, 0, "We have the following list of assignments:");
             let mut substitutions = vec![];
             for (subs, activation_depth) in list_assignments.iter() {
                 // todo: maybe need to come up with a more efficient representation than adding in subs
@@ -230,14 +230,14 @@ pub fn instantiate_quantifiers(
                     .or_default()
                     .insert(subs.clone());
 
-                if crate::log::is_important(22) {
-                    debug!(22, 0, "The body is {}", body);
-                    debug!(22, 0, "The assignment is");
+                if is_important(22) {
+                    debug_println!(22, 0, "The body is {}", body);
+                    debug_println!(22, 0, "The assignment is");
                     for sub in subs {
-                        debug!(22, 4, "{} |-> {}", sub.0, sub.1)
+                        debug_println!(22, 4, "{} |-> {}", sub.0, sub.1)
                     }
                 }
-                debug!(6, 0, "before12");
+                debug_println!(6, 0, "before12");
                 let term = egraph.get_term(body);
                 let substitution = Substitution::new(
                     subs.iter().map(|(s, t)| (s, t.clone())),
@@ -248,7 +248,7 @@ pub fn instantiate_quantifiers(
             }
 
             if substitutions.is_empty() {
-                debug!(
+                debug_println!(
                     6,
                     0,
                     "We are skipping the quantifier {} because it has no substitutions",
@@ -257,8 +257,8 @@ pub fn instantiate_quantifiers(
                 continue;
             }
 
-            debug!(6, 0, "Starting to look at substitutions");
-            debug!(6, 0, "{}", egraph);
+            debug_println!(6, 0, "Starting to look at substitutions");
+            debug_println!(6, 0, "{}", egraph);
             for (t, &activation_depth, _) in substitutions {
                 // skipping instantiations that have already been added
                 // TODO: need to come up with a more efficient way to do this
@@ -273,7 +273,7 @@ pub fn instantiate_quantifiers(
                     t
                 };
 
-                debug!(
+                debug_println!(
                     22,
                     0,
                     "We are adding the instantiation {} for quantifier {} at level {}",
@@ -282,12 +282,12 @@ pub fn instantiate_quantifiers(
                     level
                 );
 
-                debug!(4, 0, "We have the term {} with id {}", t, t.uid());
+                debug_println!(4, 0, "We have the term {} with id {}", t, t.uid());
 
                 // eliminating lets
                 let let_elim_term = t.let_elim(&mut egraph.context);
 
-                debug!(
+                debug_println!(
                     8,
                     0,
                     "{} is an instantiation of {} at depth {}",
@@ -298,8 +298,8 @@ pub fn instantiate_quantifiers(
 
                 let nnf_term = let_elim_term.nnf(egraph);
 
-                debug!(26, 4, "(assert {})", nnf_term.clone());
-                debug!(
+                debug_println!(26, 4, "(assert {})", nnf_term.clone());
+                debug_println!(
                     24,
                     8,
                     "from quantifier {} [{}]",
@@ -307,7 +307,7 @@ pub fn instantiate_quantifiers(
                     quantifier.id
                 );
 
-                debug!(
+                debug_println!(
                     7,
                     0,
                     "We have the nnf term {} with id {}",
@@ -322,7 +322,7 @@ pub fn instantiate_quantifiers(
                 egraph.insert_predecessor(&nnf_term, None, None, true, None);
 
                 let cnf_term = nnf_term.cnf_tseitin(egraph);
-                debug!(7, 0, "We have the cnf term {:?}", cnf_term);
+                debug_println!(7, 0, "We have the cnf term {:?}", cnf_term);
 
                 let mut clauses: Vec<_> = cnf_term
                     .clone()
@@ -378,18 +378,20 @@ pub fn match_term<'a>(
     egraph: &'a mut Egraph,
 ) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
     if trigger_term_pairs.is_empty() {
-        debug!(
+        debug_println!(
             6,
-            0, "We have reached the bottom case with assignment {:?}", assignment
+            0,
+            "We have reached the bottom case with assignment {:?}",
+            assignment
         );
         return vec![(assignment.clone(), 0)];
     }
     let (trigger, term) = trigger_term_pairs[0];
-    debug!(6, 0, "before13");
+    debug_println!(6, 0, "before13");
     let trigger_term = &egraph.get_term(trigger);
     if is_important(6) {
         if let Some(t) = term {
-            debug!(
+            debug_println!(
                 6,
                 0,
                 "We are matching trigger {} with term {} and assignment {:?}",
@@ -398,7 +400,7 @@ pub fn match_term<'a>(
                 assignment
             );
         } else {
-            debug!(
+            debug_println!(
                 6,
                 0,
                 "We are matching trigger {} with term None and assignment {:?}",
@@ -409,7 +411,7 @@ pub fn match_term<'a>(
     }
     match trigger_term.repr() {
         ATerm::Global(_, _) => {
-            debug!(
+            debug_println!(
                 6,
                 0,
                 "We are matching global term {} with trigger {} to the term {}",
@@ -424,7 +426,7 @@ pub fn match_term<'a>(
             }
         }
         ATerm::Constant(..) => {
-            debug!(
+            debug_println!(
                 6,
                 0,
                 "We are matching constant term {} with term {} and assignment {:?}",
@@ -439,7 +441,7 @@ pub fn match_term<'a>(
             }
         }
         ATerm::Local(local) => {
-            debug!(
+            debug_println!(
                 6,
                 0,
                 "We are matching local term {} with term {} and assignment {:?}",
@@ -449,8 +451,8 @@ pub fn match_term<'a>(
             );
             match assignment.get(&local.symbol.to_string()) {
                 Option::None => {
-                    debug!(6, 0, "We are inserting the local term into the assignment");
-                    debug!(6, 0, "before14");
+                    debug_println!(6, 0, "We are inserting the local term into the assignment");
+                    debug_println!(6, 0, "before14");
                     assert!(
                         *local.sort.as_ref().unwrap()
                             == egraph
@@ -481,22 +483,24 @@ pub fn match_term<'a>(
                         .collect::<Vec<_>>()
                 }
                 Some(v) if egraph.find(v.uid()) == egraph.find(term.unwrap()) => {
-                    debug!(6, 0, "The local term matches the assignment");
+                    debug_println!(6, 0, "The local term matches the assignment");
                     match_term(assignment, trigger_term_pairs[1..].to_vec(), egraph)
                 }
                 Some(assignment_term) => {
-                    debug!(
+                    debug_println!(
                         6,
-                        0, "The local term does not match the assignment term {}", assignment_term
+                        0,
+                        "The local term does not match the assignment term {}",
+                        assignment_term
                     );
-                    debug!(6, 0, "{}", egraph);
+                    debug_println!(6, 0, "{}", egraph);
                     vec![]
                 }
             }
         }
         ATerm::App(func, args, _) => {
-            debug!(6, 0, "We are matching app term {} with args:", trigger_term);
-            debug!(6, 0, "before15");
+            debug_println!(6, 0, "We are matching app term {} with args:", trigger_term);
+            debug_println!(6, 0, "before15");
             let func_name = func.id_str();
             let args_ref = args.iter().collect::<Vec<_>>();
             find_assignments_on_term(
@@ -534,7 +538,7 @@ fn find_assignments_on_term(
 ) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
     let _ = args
         .iter()
-        .map(|a| debug!(6, 0, "{}", egraph.get_term(a.uid())))
+        .map(|a| debug_println!(6, 0, "{}", egraph.get_term(a.uid())))
         .collect::<Vec<_>>();
     let mut list_assignments = Vec::new();
 
@@ -542,7 +546,7 @@ fn find_assignments_on_term(
     let function_terms = egraph.function_maps.get(func_name);
     // if there are no terms of this function, then we cannot do a specific instantiation
     if function_terms.is_none() {
-        debug!(5, 0, "Function term not found: {}", func_name);
+        debug_println!(5, 0, "Function term not found: {}", func_name);
         return vec![];
     }
 
@@ -553,9 +557,9 @@ fn find_assignments_on_term(
     // note that we need to get the root of the term here,
     // because the input to the function is not necessarily a root
     let term_root = term.map(|t| egraph.find(t));
-    debug!(16, 0, "For the function {} we have the terms:", func_name);
+    debug_println!(16, 0, "For the function {} we have the terms:", func_name);
     for (i, subterms) in function_terms {
-        debug!(16, 4, "{}", egraph.get_term(i));
+        debug_println!(16, 4, "{}", egraph.get_term(i));
         // TODO: the number of terms could potentially grow
         // TODO: this could actually be made more efficient, by maybe considering an egraph with only active terms
 
@@ -568,7 +572,7 @@ fn find_assignments_on_term(
             let subterms_canonical = subterms.iter().map(|s| egraph.find(*s)).collect::<Vec<_>>();
 
             if considered_function_terms.contains(&subterms_canonical) {
-                debug!(
+                debug_println!(
                     6,
                     0,
                     "We are skipping the term {} because it is already considered",
@@ -587,19 +591,21 @@ fn find_assignments_on_term(
                 .map(|(a, s)| (a.uid(), Some(*s)))
                 .collect::<Vec<_>>();
             new_pairs.extend(trigger_term_pairs[1..].to_vec());
-            debug!(6, 0, "We have the new pairs {:?}", new_pairs);
+            debug_println!(6, 0, "We have the new pairs {:?}", new_pairs);
             // note we need to clone the assignment here because each subcase should have its own assignment, TODO: is there a more efficient way to do this? I think not
             let new_assignments = match_term(&mut assignment.clone(), new_pairs, egraph);
-            debug!(6, 0, "We have the new assignments {:?}", new_assignments);
+            debug_println!(6, 0, "We have the new assignments {:?}", new_assignments);
 
             list_assignments.extend(
                 new_assignments.iter().map(|(a, _)| (a.clone(), 0)), // todo the 0 here comes from activation depth, we can get rid of it
             );
         }
     }
-    debug!(
+    debug_println!(
         6,
-        0, "We have the list of assignments {:?}", list_assignments
+        0,
+        "We have the list of assignments {:?}",
+        list_assignments
     );
     list_assignments
 }

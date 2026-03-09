@@ -11,10 +11,11 @@ use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
 use yaspar_ir::ast::alg::{CheckIdentifier, QualifiedIdentifier};
 use yaspar_ir::ast::{CheckedApi, FetchSort, IdentifierKind, Repr, Term, TermAllocator};
 
-use crate::debug;
+use crate::debug_println;
 use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::unionfind::ProofTracker;
+use crate::log::is_important;
 use yaspar_ir::ast::ATerm::*;
 
 // todo might be able to get rid fo reason now
@@ -26,13 +27,13 @@ pub fn process_assignment(
     from_quantifier: bool,
     reason: Option<ProofForestEdge>,
 ) -> Option<Vec<Vec<i32>>> {
-    debug!(2, 0, "Processing literal {:} at level {}", lit, level);
+    debug_println!(2, 0, "Processing literal {:} at level {}", lit, level);
     let sign = lit > 0;
 
     // note this basically assumes the postive polarity is always in the map from i32->u64
     // this should be true based on how we do
     let term = egraph.get_term_from_lit(lit.abs());
-    debug!(25, 1, "Term: {}", term);
+    debug_println!(25, 1, "Term: {}", term);
     let assertion = find_if_eq_diseq(&term, sign, egraph, level, fixed);
 
     let mut tracker = ProofTracker::new();
@@ -52,7 +53,7 @@ pub fn process_assignment(
                 children: DeterministicHashSet::new(),
             }
         };
-        debug!(
+        debug_println!(
             16,
             0,
             "We are in process_assignment, unioning with true for lit {} and t {} and true_term {}",
@@ -88,7 +89,7 @@ pub fn process_assignment(
                 children: DeterministicHashSet::new(),
             }
         };
-        debug!(
+        debug_println!(
             16,
             0,
             "We are in process_assignment, unioning with false for lit {} and t {} and false_term {}",
@@ -109,7 +110,7 @@ pub fn process_assignment(
         };
     }
 
-    debug!("Finished union to True/False");
+    debug_println!("Finished union to True/False");
     let additional_constraints = match assertion {
         Assertion::Tester {
             ctor_name,
@@ -119,7 +120,7 @@ pub fn process_assignment(
             // need to add isC(n) => n = C(C^1(n),..., C^m(n))
             let dt_sort = inner_term.get_sort(egraph);
             let term_lit = egraph.get_lit_from_term(&term);
-            debug!(19, 0, "trying to get for the term {}", inner_term);
+            debug_println!(19, 0, "trying to get for the term {}", inner_term);
             match egraph.term_constructors.get(&inner_term.uid()).unwrap() {
                 Constructor {
                     name,
@@ -127,7 +128,7 @@ pub fn process_assignment(
                     hash,
                     level,
                 } if egraph.valid_hash(*hash, *level) => {
-                    debug!(
+                    debug_println!(
                         11,
                         2,
                         "We have a valid prior constructor with name {} (our tester name is {})",
@@ -135,10 +136,10 @@ pub fn process_assignment(
                         ctor_name
                     );
                     if *name == ctor_name {
-                        debug!(11, 2, "name == ctor_name");
+                        debug_println!(11, 2, "name == ctor_name");
                         None // don't need to add anything
                     } else {
-                        debug!(11, 2, "name != ctor_name");
+                        debug_println!(11, 2, "name != ctor_name");
                         let tester_cnf = learn_or_not_term_tester_term(
                             egraph,
                             tester_term.clone(),
@@ -196,7 +197,7 @@ pub fn process_assignment(
                         let eq = egraph.eq(inner_term, ctor_app);
 
                         let eq_nnf = eq.nnf(egraph);
-                        debug!(14 - 3, 0, "adding in {}", eq_nnf);
+                        debug_println!(14 - 3, 0, "adding in {}", eq_nnf);
                         egraph.insert_predecessor(&eq_nnf, None, None, true, None);
 
                         // note that additioanl constraints are needed for `datatypes/ctor_sel_term_additional_dt_constraints3.smt2`
@@ -207,14 +208,16 @@ pub fn process_assignment(
                         let eq_clause = eq_cnf.0[0].0.clone();
                         assert_eq!(eq_clause.len(), 1);
                         let eq_lit = eq_clause[0];
-                        debug!(25, 10, "option 2: (assert (=> {} {}))", term, eq);
+                        debug_println!(25, 10, "option 2: (assert (=> {} {}))", term, eq);
 
                         additional_constraints.push(vec![-term_lit, eq_lit]);
                         // let additional_constraints: Vec<Vec<i32>> = vec![vec![-term_lit, eq_lit]];
 
-                        debug!(
+                        debug_println!(
                             24,
-                            0, "additional constraints are {:?}", additional_constraints
+                            0,
+                            "additional constraints are {:?}",
+                            additional_constraints
                         );
                         Some(additional_constraints)
                     } else {
@@ -224,7 +227,7 @@ pub fn process_assignment(
             }
         }
         Assertion::Equality { t1, t2, level, .. } => {
-            debug!(
+            debug_println!(
                 16,
                 0,
                 "Merging: {} = {}",
@@ -254,7 +257,7 @@ pub fn process_assignment(
             level,
             hash,
         } => {
-            debug!(
+            debug_println!(
                 16,
                 0,
                 "Adding disequality {} ≠ {} to stack at level {:?} and hash {}",
@@ -263,7 +266,7 @@ pub fn process_assignment(
                 level,
                 hash
             );
-            debug!(10, 0, "{}", egraph);
+            debug_println!(10, 0, "{}", egraph);
 
             if let Some(negated_model) =
                 leastcommonancestor(t1, t2, egraph, &mut ProofTracker::new())
@@ -273,7 +276,7 @@ pub fn process_assignment(
                     .map(|x| -egraph.make_eq(x.0, x.1))
                     .collect();
                 model_terms.push(egraph.make_eq(t1, t2));
-                debug!(
+                debug_println!(
                     16,
                     1,
                     "Contradiction found [1]: {:?} [{:?}]",
@@ -292,7 +295,7 @@ pub fn process_assignment(
             for i in 0..terms.len() {
                 for j in i + 1..terms.len() {
                     let (t1, t2) = (terms[i], terms[j]);
-                    debug!(
+                    debug_println!(
                         12,
                         0,
                         "Asserting {} and {} are not equal at level {} with hash {}",
@@ -309,7 +312,7 @@ pub fn process_assignment(
                             .map(|x| -egraph.make_eq(x.0, x.1))
                             .collect();
                         model_terms.push(-lit);
-                        debug!(
+                        debug_println!(
                             7,
                             1,
                             "Contradiction found [1]: {:?} [{:?}]",
@@ -319,11 +322,11 @@ pub fn process_assignment(
                                 .collect::<Vec<_>>(),
                             model_terms
                         );
-                        debug!(16, 0, "returning negated model {:?}", model_terms);
+                        debug_println!(16, 0, "returning negated model {:?}", model_terms);
                         return Some(vec![model_terms]); // Return negated model as the contradiction explanation
                     }
                     egraph.add_disequality(t1, t2, lit, level, hash);
-                    debug!(11, 0, "{}", egraph);
+                    debug_println!(11, 0, "{}", egraph);
                 }
             }
             None
@@ -331,7 +334,7 @@ pub fn process_assignment(
         Assertion::Other => None,
     };
 
-    debug!(
+    debug_println!(
         4,
         0,
         "We are in process_assignment, checking for contradiction with true_term {} and false_term {}",
@@ -339,7 +342,7 @@ pub fn process_assignment(
         egraph.false_term
     );
     //  debug_println!(4, 0, "{}", egraph);
-    debug!(10, 0, "Checking if true = false {}", egraph);
+    debug_println!(10, 0, "Checking if true = false {}", egraph);
     if let Some(negated_model) =
         leastcommonancestor(egraph.true_term, egraph.false_term, egraph, &mut tracker)
     {
@@ -349,7 +352,7 @@ pub fn process_assignment(
             .collect();
         // negated_model_terms.push(egraph.make_eq(egraph.true_term, egraph.false_term));
         // todo : we never seem to get an early contradction here, but we should in theory always get one
-        debug!(
+        debug_println!(
             24,
             1,
             "Contradiction found [2] (setting true = false): {:?} [{:?}]",
@@ -359,12 +362,12 @@ pub fn process_assignment(
                 .collect::<Vec<_>>(),
             negated_model_terms
         );
-        if crate::log::is_important(7) {
+        if is_important(7) {
             for lit in negated_model_terms.clone() {
-                debug!(7, 4, "{}", egraph.get_term_from_lit(lit));
+                debug_println!(7, 4, "{}", egraph.get_term_from_lit(lit));
             }
         }
-        debug!(7, 0, "{}", egraph);
+        debug_println!(7, 0, "{}", egraph);
 
         // Return negated model as the contradiction explanation
         return if let Some(mut constraints) = additional_constraints {
@@ -375,9 +378,11 @@ pub fn process_assignment(
         };
     }
 
-    debug!(
+    debug_println!(
         24,
-        0, "We have the additional constraints {:?}", additional_constraints
+        0,
+        "We have the additional constraints {:?}",
+        additional_constraints
     );
     additional_constraints
 }
@@ -410,7 +415,7 @@ pub fn find_if_eq_diseq<'a>(
         }
         Eq(left, right) => {
             if sign {
-                debug!(1, 2, "Creating equality assertion");
+                debug_println!(1, 2, "Creating equality assertion");
                 Assertion::Equality {
                     t1: left.uid(),
                     t2: right.uid(),
@@ -418,7 +423,7 @@ pub fn find_if_eq_diseq<'a>(
                     hash,
                 }
             } else {
-                debug!(1, 2, "Creating disequality assertion");
+                debug_println!(1, 2, "Creating disequality assertion");
                 Assertion::Disequality {
                     t1: left.uid(),
                     t2: right.uid(),
@@ -429,7 +434,7 @@ pub fn find_if_eq_diseq<'a>(
         }
         Distinct(terms) => {
             if sign {
-                debug!(1, 2, "Creating equality assertion");
+                debug_println!(1, 2, "Creating equality assertion");
                 Assertion::Distinct {
                     terms: terms.iter().map(|x| x.uid()).collect(),
                     level,
@@ -441,7 +446,7 @@ pub fn find_if_eq_diseq<'a>(
         }
         Not(inner) => match inner.repr() {
             Eq(left, right) => {
-                debug!(1, 2, "Creating disequality assertion");
+                debug_println!(1, 2, "Creating disequality assertion");
                 assert!(sign); // sign must be positive
                 Assertion::Disequality {
                     t1: left.uid(),
@@ -454,13 +459,13 @@ pub fn find_if_eq_diseq<'a>(
                 panic!("We do not currently support the negation of a distinct")
             }
             _ => {
-                debug!(0, 2, "Found negation, treating as Other");
+                debug_println!(0, 2, "Found negation, treating as Other");
                 Assertion::Other
             }
         },
         _ => {
             // TODO: does this actually matter anymore?
-            debug!(
+            debug_println!(
                 0,
                 2,
                 "Found unsupported operator: {:?}, treating as Other",
@@ -478,7 +483,7 @@ fn leastcommonancestor_helper(
     tracker: &mut ProofTracker,
     indent: usize,
 ) -> Option<Vec<(u64, u64)>> {
-    debug!(
+    debug_println!(
         20,
         indent,
         "checking the equality of {} and {}",
@@ -492,7 +497,7 @@ fn leastcommonancestor_helper(
     let mut curr = u;
 
     if indent > 100 {
-        debug!(11, 0, "We have the proof forest :{}", egraph);
+        debug_println!(11, 0, "We have the proof forest :{}", egraph);
         panic!("Should not have this many recusive calls to LCH");
     }
     loop {
@@ -552,8 +557,8 @@ fn leastcommonancestor_helper(
     let mut final_proof = vec![];
     let mut proof_congruences = vec![];
 
-    debug!(11, indent + 1, "We get the unprocessed proof {:?}", proof);
-    debug!(16, indent + 1, "We have the proof:");
+    debug_println!(11, indent + 1, "We get the unprocessed proof {:?}", proof);
+    debug_println!(16, indent + 1, "We have the proof:");
     // For each pair in the proof path
     for proof_term in proof {
         match proof_term {
@@ -567,10 +572,10 @@ fn leastcommonancestor_helper(
                 std::process::exit(1);
             }
             ProofForestEdge::Congruence { pairs, .. } => {
-                if crate::log::is_important(20) {
-                    debug!(20, indent + 12, "Congruence ");
+                if is_important(20) {
+                    debug_println!(20, indent + 12, "Congruence ");
                     for (t1, t2) in pairs.clone() {
-                        debug!(
+                        debug_println!(
                             20,
                             indent + 12,
                             "{} [{}] ~ {} [{}] ",
@@ -586,7 +591,7 @@ fn leastcommonancestor_helper(
             ProofForestEdge::Equality { term, .. } => {
                 if let Some((t1, t2)) = term {
                     // if the term is None, then it comes from setting a term = annotated term, and we do not need it for conflict
-                    debug!(
+                    debug_println!(
                         20,
                         indent + 12,
                         "Equality {} [{}] = {} [{}]",
@@ -598,9 +603,11 @@ fn leastcommonancestor_helper(
                     if tracker.union(t1, t2) {
                         final_proof.push((t1, t2));
                     }
-                    debug!(
+                    debug_println!(
                         11,
-                        1, "We have the current final proof is: {:?}", final_proof
+                        1,
+                        "We have the current final proof is: {:?}",
+                        final_proof
                     )
                 }
             }
@@ -626,7 +633,7 @@ pub fn leastcommonancestor(
     egraph: &Egraph,
     tracker: &mut ProofTracker,
 ) -> Option<Vec<(u64, u64)>> {
-    debug!(
+    debug_println!(
         11,
         1,
         "Finding least common ancestor for {} and {}",
@@ -688,7 +695,7 @@ pub fn add_parent(
 }
 
 pub fn get_parent(proof_parent: &ProofForestEdge) -> u64 {
-    debug!(6, 0, "We are getting the parent of {:?}", proof_parent);
+    debug_println!(6, 0, "We are getting the parent of {:?}", proof_parent);
     match proof_parent {
         ProofForestEdge::Root { .. } => {
             panic!("ERROR: We are trying to add a parent to a root2");
@@ -738,9 +745,9 @@ pub fn union(
 ) -> Option<Vec<Vec<i32>>> {
     let x_root = egraph.find(x);
     let y_root = egraph.find(y);
-    debug!(6, 1, "{}", egraph);
-    debug!(6, 0, "before1");
-    debug!(
+    debug_println!(6, 1, "{}", egraph);
+    debug_println!(6, 0, "before1");
+    debug_println!(
         22,
         1,
         "Unioning vertices [{}] {}  and [{}] {}  (roots: {} [{}] and {} [{}]) at level {} with {}",
@@ -755,7 +762,7 @@ pub fn union(
         level,
         proof_parent
     );
-    debug!(11, 0, "{}", egraph);
+    debug_println!(11, 0, "{}", egraph);
     assert_eq!(
         egraph.get_term(x).get_sort(egraph),
         egraph.get_term(y).get_sort(egraph),
@@ -765,7 +772,7 @@ pub fn union(
     );
 
     if x_root == y_root {
-        debug!(
+        debug_println!(
             16,
             2,
             "{} and {} are already in the same equivalence class",
@@ -787,7 +794,7 @@ pub fn union(
     if !fixed {
         // not adding fixed levels to backtracking based on what Armin said
         if !from_quantifier {
-            debug!(
+            debug_println!(
                 16,
                 0,
                 "BACKTTRACK STACK: adding equalitity between {} and {} with y_root: {}",
@@ -803,7 +810,7 @@ pub fn union(
             ));
             // this gets give to proof forest_patrack with inputs (proof_parent, y_root, y_root_parent, egraph)
         } else {
-            debug!(
+            debug_println!(
                 11,
                 0,
                 "QUANTIFIER STACK: adding equalitity between {} and {} with y_root: {}",
@@ -831,7 +838,7 @@ pub fn union(
         }
     }
 
-    debug!(
+    debug_println!(
         16,
         2,
         "Making {} the root of its equivalence class [previously was {}]",
@@ -888,7 +895,7 @@ pub fn union(
                 && (x_disequality.hash >= egraph.predecessor_level[x_disequality.level]
                     || x_disequality.hash == 0)
             {
-                debug!(
+                debug_println!(
                     12,
                     0,
                     "Skipping disequality {} : {} to {} at level {}",
@@ -900,9 +907,14 @@ pub fn union(
                 continue;
             }
 
-            debug!(
+            debug_println!(
                 12,
-                0, "Adding disequality {} : {} to {} at level {}", key, new_value, x_root, level
+                0,
+                "Adding disequality {} : {} to {} at level {}",
+                key,
+                new_value,
+                x_root,
+                level
             );
             x_root_disequalities.insert(*key, new_value);
         }
@@ -911,7 +923,7 @@ pub fn union(
     // basically checking if the current equality that we just added violated any earlier disequalities and if it did, we learn a conflict clause
     // TODO: now I am actually not sure if disequality checking is really necessary
     // kind've a weird way to do it since we have already unioned, we are just checking if two things are unequal to themselves
-    debug!(
+    debug_println!(
         5,
         0,
         "A. Checking the equality {} = {} with disequalities {:?}",
@@ -920,7 +932,7 @@ pub fn union(
         egraph.proof_forest[x as usize].disequalities()
     );
     if let Some(disequality) = egraph.check_self_disequality(x_root).clone() {
-        debug!(
+        debug_println!(
             11,
             0,
             "B. Checking the equality {} = {} with disequality {} != {}",
@@ -942,7 +954,7 @@ pub fn union(
                 .map(|x| -egraph.make_eq(x.0, x.1))
                 .collect();
             model_terms.push(-disequality.diseq_lit);
-            debug!(
+            debug_println!(
                 7,
                 1,
                 "Contradiction found [3]: {:?} [{:?}]",
@@ -954,7 +966,7 @@ pub fn union(
             );
             return Some(vec![model_terms]); // Return negated model as the contradiction explanation (todo: ideally would want to have a way to specify this is a model to the thing we pass to, but this is not possible at least with our current setup)
         } else {
-            debug!(16, 0, "{}", egraph);
+            debug_println!(16, 0, "{}", egraph);
             panic!(
                 "Should have found a equality between {} [root: {}] and {} [root: {}]",
                 egraph.get_term(disequality.original_disequality.0),
@@ -970,7 +982,7 @@ pub fn union(
 
 /// Make vertex the root of its tree
 fn make_root(vertex: u64, proof_parent: ProofForestEdge, egraph: &mut Egraph) {
-    debug!(
+    debug_println!(
         16,
         0,
         "Making {} the root with proof_parent {}",
@@ -1055,7 +1067,7 @@ fn union_predecessors(
     fixed: bool,
     from_quantifier: bool,
 ) -> Option<Vec<Vec<i32>>> {
-    debug!(
+    debug_println!(
         11,
         1,
         "Unioning predecessors of {} [{}, Predecessors: {}] and {} [{}, Predecessors: {}]",
@@ -1086,7 +1098,7 @@ fn union_predecessors(
     // BTreeMap already provides deterministic iteration order
     for (pred_u_key, predecessor_u) in predecessors_u.iter() {
         if !egraph.valid_hash(predecessor_u.hash, predecessor_u.level) {
-            debug!(
+            debug_println!(
                 11,
                 2,
                 "CANONICAL_FORMS_U: Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
@@ -1100,7 +1112,7 @@ fn union_predecessors(
             egraph.predecessors[u as usize].remove(pred_u_key);
             continue;
         }
-        debug!(
+        debug_println!(
             11,
             2,
             "1.We are in union_predecessors trying to get term for {}",
@@ -1124,9 +1136,11 @@ fn union_predecessors(
             egraph.get_canonical_form(predecessor_u.predecessor, level)
         {
             let canonical_form = (func, roots);
-            debug!(
+            debug_println!(
                 11,
-                4, "We are adding in the canonical_form {:?}", canonical_form
+                4,
+                "We are adding in the canonical_form {:?}",
+                canonical_form
             );
             if let Some(forms) = canonical_forms_u.get_mut(&canonical_form) {
                 forms.push((original_subterms, predecessor_u.predecessor))
@@ -1139,9 +1153,11 @@ fn union_predecessors(
         }
     }
 
-    debug!(
+    debug_println!(
         11,
-        4, "2.We have the canonical_forms_u {:?}", canonical_forms_u
+        4,
+        "2.We have the canonical_forms_u {:?}",
+        canonical_forms_u
     );
 
     // basically the issue was that in `union_predecessors` when you create a `canonical_term_u`,
@@ -1161,7 +1177,7 @@ fn union_predecessors(
 
     // moving predecessors from v to u
     for (pred_key, pred_val) in predecessors_v.clone() {
-        debug!(
+        debug_println!(
             11,
             0,
             "We are are adding predecessor {} (of  {}) to {} [level: {}, hash: {}]",
@@ -1182,7 +1198,7 @@ fn union_predecessors(
 
     for (pred_v_key, predecessor_v, canonical_form_v) in predecessor_v_canonical_forms {
         if !egraph.valid_hash(predecessor_v.hash, predecessor_v.level) {
-            debug!(
+            debug_println!(
                 11,
                 5,
                 "Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
@@ -1193,14 +1209,17 @@ fn union_predecessors(
                 predecessor_v.level,
                 egraph.predecessor_level[predecessor_v.level]
             );
-            debug!(
+            debug_println!(
                 11,
-                5, "The current level is {} and hash is {}", level, egraph.predecessor_hash
+                5,
+                "The current level is {} and hash is {}",
+                level,
+                egraph.predecessor_hash
             );
             egraph.predecessors[v as usize].remove(pred_v_key);
             continue;
         }
-        debug!(
+        debug_println!(
             11,
             3,
             "L. We are in union_predecessors trying to get term for {}",
@@ -1224,7 +1243,7 @@ fn union_predecessors(
 
         if let Some((original_subterms, func, roots)) = canonical_form_v {
             let canonical_form = (func, roots);
-            debug!(
+            debug_println!(
                 11,
                 6,
                 "3. We are in union_predecessors for v and have canonical form {:?} for {}",
@@ -1232,23 +1251,23 @@ fn union_predecessors(
                 egraph.get_term(predecessor_v.predecessor)
             );
             if let Some(u_forms) = canonical_forms_u.get(&canonical_form) {
-                debug!(5, 0, "We have the following u_forms {:?}", u_forms);
+                debug_println!(5, 0, "We have the following u_forms {:?}", u_forms);
                 for (u_original_subterms, canonical_form_u) in u_forms {
-                    debug!(
+                    debug_println!(
                         16,
                         0,
                         "We are actually merging the two predecessors {} and {}",
                         egraph.get_term(*canonical_form_u),
                         egraph.get_term(predecessor_v.predecessor)
                     );
-                    if crate::log::is_important(16) {
-                        debug!(16, 0, "We have u_original_subterms: ");
+                    if is_important(16) {
+                        debug_println!(16, 0, "We have u_original_subterms: ");
                         for term in u_original_subterms {
-                            debug!(16, 4, "{}", egraph.get_term(*term));
+                            debug_println!(16, 4, "{}", egraph.get_term(*term));
                         }
-                        debug!(16, 0, "We have original_subterms: ");
+                        debug_println!(16, 0, "We have original_subterms: ");
                         for term in original_subterms.clone() {
-                            debug!(16, 4, "{}", egraph.get_term(term));
+                            debug_println!(16, 4, "{}", egraph.get_term(term));
                         }
                     }
 
@@ -1280,7 +1299,7 @@ fn union_predecessors(
                         fixed,
                         from_quantifier,
                     ) {
-                        debug!(
+                        debug_println!(
                             11,
                             5,
                             "[exiting union_pred] of {} and {} In union_predecessors, we have the following negated_model: {:?}",
@@ -1294,7 +1313,7 @@ fn union_predecessors(
             }
         }
     }
-    debug!(
+    debug_println!(
         11,
         0,
         "[exiting union_pred] of {} and {} with None",
@@ -1317,14 +1336,14 @@ fn union_process_assignment(
     fixed: bool,
     from_quantifier: bool,
 ) -> Option<Vec<Vec<i32>>> {
-    debug!(6, 0, "before4");
+    debug_println!(6, 0, "before4");
     let new_assignment = egraph.eq(egraph.get_term(x), egraph.get_term(y));
     // if there is a new assignment, we need to check if the equality term exists, if it does we need to work on that
     // otherwise we can just consider the union of these two terms
     if let Some(new_assignment_lit) = egraph.cnf_cache.var_map.get(&new_assignment.uid()) {
         // note we don't want reason to be the above thing because the explanation is still the same as teh explanation before
         let reason = proof_parent;
-        debug!(
+        debug_println!(
             16,
             0,
             "We are in union_process_assignment trying to process assignment for x: {} [{}] and y: {} [{}] and fixed {}",
@@ -1359,14 +1378,16 @@ fn union_process_assignment(
         );
         // assert!(additional_constraints_opt.is_none()); // this should be done becaue right now we only get new constraints for a datatype literal
         if let Some(negated_model) = negated_model_additional_constraints_opt {
-            debug!(
+            debug_println!(
                 6,
-                0, "We have the following negated_model: {:?}", negated_model
+                0,
+                "We have the following negated_model: {:?}",
+                negated_model
             );
             return Some(negated_model);
         };
     } else {
-        debug!(
+        debug_println!(
             16,
             0,
             "We are in union_process_assignment trying to union {} and {} with fixed {}",
@@ -1396,7 +1417,7 @@ pub fn proof_forest_backtrack(
 
     assert_eq!(egraph.find(*child), egraph.find(*parent));
 
-    debug!(
+    debug_println!(
         16,
         0,
         "Backtracking on {} with child {} and parent {} and y_term {}",
@@ -1406,12 +1427,14 @@ pub fn proof_forest_backtrack(
         egraph.get_term(y)
     );
 
-    debug!(
+    debug_println!(
         6,
-        0, "We are in proof_forest_backtrack trying to get term for {:?}", child
+        0,
+        "We are in proof_forest_backtrack trying to get term for {:?}",
+        child
     );
 
-    debug!(
+    debug_println!(
         6,
         0,
         "We have child_edge {:?}, parent_edge {:?} and equality {:?}",
@@ -1422,17 +1445,17 @@ pub fn proof_forest_backtrack(
     let (child, child_edge, _parent, _parent_edge) = if child_edge != equality {
         // if this is the case, the edge has been reversed at some point
         // and the child is actually the parent
-        debug!(6, 0, "we are reversing the edge");
-        debug!(10, 0, "{}", egraph);
+        debug_println!(6, 0, "we are reversing the edge");
+        debug_println!(10, 0, "{}", egraph);
         assert_eq!(get_parent(&parent_edge), get_child(&equality));
-        debug!(6, 0, "after first assert");
+        debug_println!(6, 0, "after first assert");
         assert_eq!(get_child(&parent_edge), get_parent(&equality));
         (parent, parent_edge, child, child_edge)
     } else {
         (child, child_edge, parent, parent_edge)
     };
 
-    debug!(
+    debug_println!(
         6,
         0,
         "We are setting the predecessors of the child {} to {:?}",
@@ -1446,12 +1469,16 @@ pub fn proof_forest_backtrack(
     let mut new_disequalities = DeterministicHashMap::new();
     for (k, v) in child_edge.disequalities().iter() {
         if egraph.valid_hash(v.hash, v.level) {
-            debug!(11, 0, "Keeping disequality {}: {} in {}", k, v, child);
+            debug_println!(11, 0, "Keeping disequality {}: {} in {}", k, v, child);
             new_disequalities.insert(*k, v.clone());
         } else {
-            debug!(
+            debug_println!(
                 11,
-                0, "Removing disequality {}: {} from {}", k, v, child_edge
+                0,
+                "Removing disequality {}: {} from {}",
+                k,
+                v,
+                child_edge
             );
         }
     }
@@ -1467,7 +1494,7 @@ pub fn proof_forest_backtrack(
     egraph.proof_forest[*child as usize] = child_root;
 
     // when backtracking undo the make_root from union
-    debug!(
+    debug_println!(
         16,
         0,
         "Making {} the root on a backtrack",
