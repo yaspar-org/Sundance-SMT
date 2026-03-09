@@ -3,6 +3,7 @@
 
 //! Skolemization of existential quantifiers
 
+use crate::debug_println;
 use std::collections::HashMap;
 use yaspar_ir::ast::ATerm::{Annotated, Exists, Forall};
 use yaspar_ir::ast::alg::QualifiedIdentifier;

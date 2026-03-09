@@ -12,6 +12,7 @@ use crate::arithmetic::lp::{
     ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
     extract_linear_expression,
 };
+use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};

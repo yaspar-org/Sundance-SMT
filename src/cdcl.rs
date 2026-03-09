@@ -4,6 +4,7 @@
 //! Main CDCL decision loop
 use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::CustomExternalPropagator;
+use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::utils::DeterministicHashSet;

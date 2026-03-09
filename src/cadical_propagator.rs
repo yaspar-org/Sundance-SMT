@@ -4,12 +4,14 @@
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;
+use crate::debug_println;
 use crate::egraphs::congruence_closure::{
     get_child, get_parent, process_assignment, proof_forest_backtrack,
 };
 use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
+use crate::log::is_important;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
@@ -151,8 +153,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         "[in notify_assignment] We have the following constraint: {:?}",
                         constraint_ordered
                     );
-                    for lit in constraint.clone() {
-                        debug_println!(12, 4, "{}", self.egraph.get_term_from_lit(lit));
+                    if is_important(12) {
+                        for lit in constraint.clone() {
+                            debug_println!(12, 4, "{}", self.egraph.get_term_from_lit(lit));
+                        }
                     }
                     let mut shrunk_constraint = vec![];
                     let mut already_considered = DeterministicHashSet::default();
@@ -362,15 +366,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     "We have the predecessors of {}",
                     self.egraph.get_term(current_ancestor)
                 );
-                for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
-                    debug_println!(
-                        11,
-                        4,
-                        "{} with level {} and hash {}",
-                        self.egraph.get_term(pred.1.predecessor),
-                        pred.1.level,
-                        pred.1.hash
-                    )
+                if is_important(11) {
+                    for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
+                        debug_println!(
+                            11,
+                            4,
+                            "{} with level {} and hash {}",
+                            self.egraph.get_term(pred.1.predecessor),
+                            pred.1.level,
+                            pred.1.hash
+                        )
+                    }
                 }
             }
         }

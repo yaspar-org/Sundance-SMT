@@ -9,7 +9,7 @@ use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::egraphs::egraph::Egraph;
 use sundance_smt::preprocess::check_for_function_bool;
-use sundance_smt::{debug_println, utils};
+use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::TermAllocator;
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
@@ -20,15 +20,15 @@ fn main() -> Result<(), String> {
 
     // Parse debug flag and level
     if args.debug > 0 {
-        utils::DEBUG_LEVEL.store(args.debug, std::sync::atomic::Ordering::Relaxed);
+        log::set_debug_level(args.debug);
         debug_println!(
             2,
             0,
             "Debug mode enabled (level {})",
-            utils::DEBUG_LEVEL.load(std::sync::atomic::Ordering::Relaxed)
+            log::get_debug_level()
         );
     } else {
-        utils::DEBUG_LEVEL.store(30, std::sync::atomic::Ordering::Relaxed);
+        log::set_debug_level(30);
     }
 
     // Enable debug output for proof tracking if proof file is specified

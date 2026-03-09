@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! datastructures for proof forest inside of the egraph
+use crate::debug_println;
 use crate::egraphs::datastructures::DisequalTerm;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use std::fmt;

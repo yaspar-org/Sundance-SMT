@@ -11,9 +11,11 @@ use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
 use yaspar_ir::ast::alg::{CheckIdentifier, QualifiedIdentifier};
 use yaspar_ir::ast::{CheckedApi, FetchSort, IdentifierKind, Repr, Term, TermAllocator};
 
+use crate::debug_println;
 use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::unionfind::ProofTracker;
+use crate::log::is_important;
 use yaspar_ir::ast::ATerm::*;
 
 // todo might be able to get rid fo reason now
@@ -360,8 +362,10 @@ pub fn process_assignment(
                 .collect::<Vec<_>>(),
             negated_model_terms
         );
-        for lit in negated_model_terms.clone() {
-            debug_println!(7, 4, "{}", egraph.get_term_from_lit(lit));
+        if is_important(7) {
+            for lit in negated_model_terms.clone() {
+                debug_println!(7, 4, "{}", egraph.get_term_from_lit(lit));
+            }
         }
         debug_println!(7, 0, "{}", egraph);
 
@@ -568,17 +572,19 @@ fn leastcommonancestor_helper(
                 std::process::exit(1);
             }
             ProofForestEdge::Congruence { pairs, .. } => {
-                debug_println!(20, indent + 12, "Congruence ");
-                for (t1, t2) in pairs.clone() {
-                    debug_println!(
-                        20,
-                        indent + 12,
-                        "{} [{}] ~ {} [{}] ",
-                        egraph.get_term(t1),
-                        t1,
-                        egraph.get_term(t2),
-                        t2
-                    );
+                if is_important(20) {
+                    debug_println!(20, indent + 12, "Congruence ");
+                    for (t1, t2) in pairs.clone() {
+                        debug_println!(
+                            20,
+                            indent + 12,
+                            "{} [{}] ~ {} [{}] ",
+                            egraph.get_term(t1),
+                            t1,
+                            egraph.get_term(t2),
+                            t2
+                        );
+                    }
                 }
                 proof_congruences.push(pairs);
             }
@@ -1226,14 +1232,15 @@ fn union_predecessors(
                         egraph.get_term(*canonical_form_u),
                         egraph.get_term(predecessor_v.predecessor)
                     );
-                    debug_println!(16, 0, "We have u_original_subterms: ");
-                    for term in u_original_subterms {
-                        debug_println!(16, 4, "{}", egraph.get_term(*term));
-                    }
-
-                    debug_println!(16, 0, "We have original_subterms: ");
-                    for term in original_subterms.clone() {
-                        debug_println!(16, 4, "{}", egraph.get_term(term));
+                    if is_important(16) {
+                        debug_println!(16, 0, "We have u_original_subterms: ");
+                        for term in u_original_subterms {
+                            debug_println!(16, 4, "{}", egraph.get_term(*term));
+                        }
+                        debug_println!(16, 0, "We have original_subterms: ");
+                        for term in original_subterms.clone() {
+                            debug_println!(16, 4, "{}", egraph.get_term(term));
+                        }
                     }
 
                     let terms_pairwise = u_original_subterms

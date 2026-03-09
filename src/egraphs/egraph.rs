@@ -3,6 +3,7 @@
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::process::DatatypeInfo;
+use crate::debug_println;
 use crate::egraphs::congruence_closure::union;
 use crate::egraphs::datastructures::{
     Assertion, ConstructorType, DisequalTerm, Polarity::*, Predecessor, Quantifier, TermOption,

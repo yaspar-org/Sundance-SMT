@@ -14,6 +14,8 @@ use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::skolem::skolemize;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
+use crate::debug_println;
+use crate::log::is_important;
 use yaspar_ir::ast::{
     ATerm, FetchSort, HasArena, LetElim, Repr, Substitute, Substitution, Term, TermAllocator,
 };
@@ -228,10 +230,12 @@ pub fn instantiate_quantifiers(
                     .or_default()
                     .insert(subs.clone());
 
-                debug_println!(22, 0, "The body is {}", body);
-                debug_println!(22, 0, "The assignment is");
-                for sub in subs {
-                    debug_println!(22, 4, "{} |-> {}", sub.0, sub.1)
+                if is_important(22) {
+                    debug_println!(22, 0, "The body is {}", body);
+                    debug_println!(22, 0, "The assignment is");
+                    for sub in subs {
+                        debug_println!(22, 4, "{} |-> {}", sub.0, sub.1)
+                    }
                 }
                 debug_println!(6, 0, "before12");
                 let term = egraph.get_term(body);
@@ -385,23 +389,25 @@ pub fn match_term<'a>(
     let (trigger, term) = trigger_term_pairs[0];
     debug_println!(6, 0, "before13");
     let trigger_term = &egraph.get_term(trigger);
-    if let Some(t) = term {
-        debug_println!(
-            6,
-            0,
-            "We are matching trigger {} with term {} and assignment {:?}",
-            trigger_term,
-            egraph.get_term(t),
-            assignment
-        );
-    } else {
-        debug_println!(
-            6,
-            0,
-            "We are matching trigger {} with term None and assignment {:?}",
-            trigger_term,
-            assignment
-        );
+    if is_important(6) {
+        if let Some(t) = term {
+            debug_println!(
+                6,
+                0,
+                "We are matching trigger {} with term {} and assignment {:?}",
+                trigger_term,
+                egraph.get_term(t),
+                assignment
+            );
+        } else {
+            debug_println!(
+                6,
+                0,
+                "We are matching trigger {} with term None and assignment {:?}",
+                trigger_term,
+                assignment
+            );
+        }
     }
     match trigger_term.repr() {
         ATerm::Global(_, _) => {

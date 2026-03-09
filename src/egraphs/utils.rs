@@ -3,6 +3,7 @@
 
 // helper functions for the egraph and congruence closure
 
+use crate::debug_println;
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::Attribute;
 use yaspar_ir::ast::Repr;

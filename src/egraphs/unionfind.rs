@@ -4,6 +4,7 @@
 //! A Union Find implementation that is used for finding short conflict clauses from the egraph
 //! Once congruence closure discovers a conflict clause, we can sometimes shrink it further by
 //! running a new union find algorithm
+use crate::debug_println;
 use std::collections::HashMap;
 
 /// Value keeps of if a node is a root or what its parent is
