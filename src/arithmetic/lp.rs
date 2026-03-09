@@ -310,7 +310,8 @@ fn extract_constraint_from_term(
 }
 
 /// Extracts a linear expression from an SMT term
-/// Returns a DeterministicHashMap mapping variable names to coefficients
+/// Returns a DeterministicHashMap mapping variable names to coefficients,
+/// along with negated equality literals corresponding to term->representative merges.
 /// TODO: simplify this, we might not need DeterministicHashMap representation for z3
 pub fn extract_linear_expression(
     term_id: u64,
