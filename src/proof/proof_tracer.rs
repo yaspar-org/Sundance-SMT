@@ -3,7 +3,7 @@
 
 //! Keeps track of the eDRAT proof
 //!
-use crate::debug;
+use crate::debug_println;
 use cadical_sys::ProofTracer;
 use core::panic;
 use std::collections::{HashMap, HashSet};
@@ -318,16 +318,19 @@ impl SMTProofTracker {
     fn introduce_literals(&mut self, clause: &Vec<i32>, out: &mut String) {
         let mut temp_output = String::new();
         for &lit in clause {
-            debug!(12, 2, "Introducing the literal {}", lit);
+            debug_println!(12, 2, "Introducing the literal {}", lit);
             if let Some((lit, id, term, polarity)) = get_lit_info(&self.terms_list, lit) {
-                debug!(9, 2, "The lit exists with term {}", term);
+                debug_println!(9, 2, "The lit exists with term {}", term);
                 let lit = lit.abs();
                 let mut context = Context::new();
                 let polarized_term = polarize_term(&term, polarity);
 
-                debug!(
+                debug_println!(
                     19,
-                    2, "we go from term {} to polarized_term {}", term, polarized_term
+                    2,
+                    "we go from term {} to polarized_term {}",
+                    term,
+                    polarized_term
                 );
 
                 let output = replace_quantifier_constants(
@@ -437,7 +440,7 @@ impl ProofTracer for SMTProofTracker {
                 clause: clause.to_vec(),
             });
         } else {
-            debug!(19, 0, "We are adding the theory clause {:?}", clause);
+            debug_println!(19, 0, "We are adding the theory clause {:?}", clause);
             self.proof_steps.push(ProofStepData::TheoryClause {
                 clause: clause.to_vec(),
             });
@@ -451,11 +454,11 @@ impl ProofTracer for SMTProofTracker {
         clause: &[i32],
         antecedents: &[u64],
     ) {
-        debug!(6, 0, "*** SAT SOLVER CONFLICT CLAUSE LEARNED ***");
-        debug!(6, 0, "Clause ID: {}", id);
-        debug!(6, 0, "Conflict clause: {:?}", clause);
-        debug!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
-        debug!(6, 0, "Clause size: {}", clause.len());
+        debug_println!(6, 0, "*** SAT SOLVER CONFLICT CLAUSE LEARNED ***");
+        debug_println!(6, 0, "Clause ID: {}", id);
+        debug_println!(6, 0, "Conflict clause: {:?}", clause);
+        debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
+        debug_println!(6, 0, "Clause size: {}", clause.len());
 
         self.proof_steps.push(ProofStepData::SATClause {
             clause: clause.to_vec(),

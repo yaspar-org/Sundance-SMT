@@ -1,3 +1,6 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Global debug level - controls which debug messages are printed
@@ -17,7 +20,7 @@ pub fn is_important(importance: u8) -> bool {
 
 /// Debug macro -> used to print debug statements
 #[macro_export]
-macro_rules! debug {
+macro_rules! debug_println {
     // Version with importance level and indentation
     ($importance:expr, $indent:expr, $($arg:tt)*) => {{
         let importance: u8 = $importance;
@@ -41,6 +44,6 @@ macro_rules! debug {
 
     // Backward compatibility - default importance 1, no indent
     ($($arg:tt)*) => {
-        $crate::debug!(1, 0, $($arg)*)
+        $crate::debug_println!(1, 0, $($arg)*)
     };
 }

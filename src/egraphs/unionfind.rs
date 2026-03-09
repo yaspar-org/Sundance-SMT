@@ -4,7 +4,7 @@
 //! A Union Find implementation that is used for finding short conflict clauses from the egraph
 //! Once congruence closure discovers a conflict clause, we can sometimes shrink it further by
 //! running a new union find algorithm
-use crate::debug;
+use crate::debug_println;
 use std::collections::HashMap;
 
 /// Value keeps of if a node is a root or what its parent is
@@ -28,17 +28,21 @@ impl ProofTracker {
 
     /// unioning terms x and y
     pub fn union(&mut self, x: u64, y: u64) -> bool {
-        debug!(
+        debug_println!(
             5,
-            2, "START OF PROCESS: We have the forest {:?} and x {} and y {}", self.forest, x, y
+            2,
+            "START OF PROCESS: We have the forest {:?} and x {} and y {}",
+            self.forest,
+            x,
+            y
         );
         let x_root = self.find(x);
         let y_root = self.find(y);
         if x_root == y_root {
-            debug!(4, 3, "Pair ({}, {}) already in same set", x, y);
+            debug_println!(4, 3, "Pair ({}, {}) already in same set", x, y);
             return false;
         }
-        debug!(4, 2, "Processing pair ({}, {})", x, y);
+        debug_println!(4, 2, "Processing pair ({}, {})", x, y);
         // this is safe because x_root and y_root get set in find
         let x_root_val = self.forest[&x_root].clone();
         let y_root_val = self.forest[&y_root].clone();
@@ -56,7 +60,7 @@ impl ProofTracker {
             }
         };
 
-        debug!(
+        debug_println!(
             4,
             2,
             "x_root: {}, x_root_val: {:?}, y_root: {}, y_root_val: {:?}",
@@ -66,11 +70,11 @@ impl ProofTracker {
             y_root_val
         );
 
-        debug!(4, 2, "PRE-UNION We have the forest {:?}", self.forest);
+        debug_println!(4, 2, "PRE-UNION We have the forest {:?}", self.forest);
 
         // picking the smaller root to be the head
         if x_root_size < y_root_size {
-            debug!(
+            debug_println!(
                 4,
                 2,
                 "Making {} have value {} and {} have value {}",
@@ -88,7 +92,7 @@ impl ProofTracker {
                 },
             );
         } else {
-            debug!(
+            debug_println!(
                 4,
                 2,
                 "Making {} have value {} and {} have value {}",
@@ -106,24 +110,27 @@ impl ProofTracker {
                 },
             );
         }
-        debug!(4, 2, "POST-UNION We have the forest {:?}", self.forest);
+        debug_println!(4, 2, "POST-UNION We have the forest {:?}", self.forest);
         true
     }
 
     fn find(&mut self, x: u64) -> u64 {
-        debug!(
+        debug_println!(
             5,
-            0, "We are in find with x {} and forest {:?}", x, self.forest
+            0,
+            "We are in find with x {} and forest {:?}",
+            x,
+            self.forest
         );
         let next = self.forest.get(&x);
         if let Some(next) = next {
-            debug!(0, 3, "Following path {} -> {:?} in proof tracker", x, next);
+            debug_println!(0, 3, "Following path {} -> {:?} in proof tracker", x, next);
             match next {
                 ProofTrackerValue::Root { size: _ } => x,
                 ProofTrackerValue::Parent { parent } => self.find(*parent),
             }
         } else {
-            debug!(0, 3, "Found root {} in proof tracker", x);
+            debug_println!(0, 3, "Found root {} in proof tracker", x);
             self.forest.insert(x, ProofTrackerValue::Root { size: 1 });
             x
         }

@@ -4,7 +4,7 @@
 //! Main CDCL decision loop
 use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::CustomExternalPropagator;
-use crate::debug;
+use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::utils::DeterministicHashSet;
@@ -53,17 +53,17 @@ pub fn cdcl_decision_procedure(
     // note: not using a fixed listenere anymore
     // solver.connect_fixed_listener(&mut propagator);
 
-    debug!(2, 0, "CDCL: Starting CDCL solver");
-    debug!(1, 1, "Adding {} clauses to solver", clauses.len());
+    debug_println!(2, 0, "CDCL: Starting CDCL solver");
+    debug_println!(1, 1, "Adding {} clauses to solver", clauses.len());
 
     // Add all clauses to the solver
     for (i, clause) in clauses.iter().enumerate() {
-        debug!(11, 2, "Adding clause #{}: {:?}", i + 1, clause);
+        debug_println!(11, 2, "Adding clause #{}: {:?}", i + 1, clause);
         solver.clause6(clause); // there are function clause1 ... clause5 for adding in smaller clauses, might be more efficient
         for lit in clause {
             // kind've annoying that I have to do this, but I don't thnk there is a better way
             solver.add_observed_var(i32::abs(*lit));
-            debug!(0, 2, "Added observed variable: {}", i32::abs(*lit));
+            debug_println!(0, 2, "Added observed variable: {}", i32::abs(*lit));
         }
     }
 
@@ -77,11 +77,11 @@ pub fn cdcl_decision_procedure(
             // kind've annoying that I have to do this, but I don't thnk there is a better way
             solver.add_observed_var(i32::abs(*lit));
             propagator.add_lit_to_proof_tracker(*lit); // todo: calling this in too many places, need to cut down
-            debug!(0, 2, "Added observed variable: {}", i32::abs(*lit));
+            debug_println!(0, 2, "Added observed variable: {}", i32::abs(*lit));
         }
     }
 
-    debug!(2, 1, "All clauses added, starting solver");
+    debug_println!(2, 1, "All clauses added, starting solver");
 
     let result = solve(&mut solver);
 
@@ -97,7 +97,7 @@ pub fn cdcl_decision_procedure(
         && result == Status::UNSATISFIABLE
     {
         if let Err(e) = std::fs::write(&p, edrat_proof) {
-            debug!(
+            debug_println!(
                 2,
                 0,
                 "Failed to write eDRAT proof to {}: {}",
@@ -105,7 +105,7 @@ pub fn cdcl_decision_procedure(
                 e
             );
         } else {
-            debug!(2, 0, "eDRAT proof written to: {}", p.display());
+            debug_println!(2, 0, "eDRAT proof written to: {}", p.display());
         }
     }
     result
