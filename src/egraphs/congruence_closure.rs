@@ -777,7 +777,7 @@ pub fn union(
     }
 
     // keep track of original proof_parent
-    let proof_parent_original = proof_parent.clone();
+    let _proof_parent_original = proof_parent.clone();
 
     // making x the parent of y ~> could also do this based on relative depth of x and y tree
     let proof_parent: ProofForestEdge =
@@ -787,50 +787,21 @@ pub fn union(
 
     if !fixed {
         // not adding fixed levels to backtracking based on what Armin said
-        if true {
-            debug_println!(
-                16,
-                0,
-                "BACKTTRACK STACK: adding equalitity between {} and {} with y_root: {} at level {}",
-                egraph.get_term(x),
-                egraph.get_term(y),
-                egraph.get_term(y_root),
-                level
-            );
-            egraph.proof_forest_backtrack_stack.push((
-                level,
-                proof_parent.clone(),
-                y_root,
-                y_root_parent.clone(),
-            ));
-            // this gets give to proof forest_patrack with inputs (proof_parent, y_root, y_root_parent, egraph)
-        } else {
-            debug_println!(
-                11,
-                0,
-                "QUANTIFIER STACK: adding equalitity between {} and {} with y_root: {}",
-                egraph.get_term(x),
-                egraph.get_term(y),
-                egraph.get_term(y_root)
-            );
-            assert!(
-                matches!(proof_parent_original, ProofForestEdge::Congruence { .. }),
-                "Expected {} to be a Congruence",
-                proof_parent_original
-            );
-            // if level != 0 {
-            egraph.from_quantifier_backtrack_set.insert(
-                x,
-                (
-                    proof_parent_original,
-                    y_root_parent.clone(),
-                    proof_parent.clone(), // proof_parent_original
-                    y_root,
-                ),
-            );
-            // }
-            // this gets give to proof forest_patrack with inputs (proof_parent, y_root, y_root_parent, egraph)
-        }
+        debug_println!(
+            16,
+            0,
+            "BACKTTRACK STACK: adding equalitity between {} and {} with y_root: {} at level {}",
+            egraph.get_term(x),
+            egraph.get_term(y),
+            egraph.get_term(y_root),
+            level
+        );
+        egraph.proof_forest_backtrack_stack.push((
+            level,
+            proof_parent.clone(),
+            y_root,
+            y_root_parent.clone(),
+        ));
     }
 
     debug_println!(

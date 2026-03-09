@@ -330,49 +330,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .collect::<Vec<_>>()
         );
 
-        // TODO: have to clone here which is really bad
-        for (term_num, (_equality, term_parent_original, new_equality, original_y)) in
-            self.egraph.from_quantifier_backtrack_set.clone().iter()
-        {
-            // let congruence_pairs = if let ProofForestEdge::Congruence { pairs, .. } = equality {
-            //     pairs
-            // } else {
-            //     panic!("We should not be considering a term that is not a congruence");
-            // };
-            // for (p1, p2) in congruence_pairs.iter() {
-            //     if self.egraph.find(*p1) != self.egraph.find(*p2) {
-            //         // remove the equality from egraph
-            //         debug_println!(
-            //             16,
-            //             0,
-            //             "[QUANTIFIER_BACKTRACK] We are backtracking on the equality {:?}",
-            //             equality
-            //         );
-            proof_forest_backtrack(
-                new_equality.clone(),
-                *original_y, //*term_num,
-                term_parent_original.clone(),
-                self.egraph,
-            );
-            //     // remove from backtracking list
-            //     debug_println!(
-            //         16,
-            //         0,
-            //         "We are removing the equality between {} and {} at level {} [{:?}] from the backtracking list because of failed equality between {} and {}",
-            //         self.egraph.get_term(equality.get_parent()),
-            //         self.egraph.get_term(equality.get_child()),
-            //         self.decision_level,
-            //         equality,
-            //         self.egraph.get_term(*p1),
-            //         self.egraph.get_term(*p2)
-            //     );
-            //     debug_println!(11, 0, "{}", self.egraph);
-            self.egraph.from_quantifier_backtrack_set.remove(term_num);
-            //     break;
-            // }
-            // }
-        }
-
         // adding the new predecessors created by quantifiers to the predecessors list
         for (term, parents) in &self.egraph.predecessors_created_by_quantifiers {
             let current_ancestor = self.egraph.find(*term);
@@ -405,16 +362,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     "We have the predecessors of {}",
                     self.egraph.get_term(current_ancestor)
                 );
-                // for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
-                //     debug_println!(
-                //         11,
-                //         4,
-                //         "{} with level {} and hash {}",
-                //         self.egraph.get_term(pred.1.predecessor),
-                //         pred.1.level,
-                //         pred.1.hash
-                //     )
-                // }
+                for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
+                    debug_println!(
+                        11,
+                        4,
+                        "{} with level {} and hash {}",
+                        self.egraph.get_term(pred.1.predecessor),
+                        pred.1.level,
+                        pred.1.hash
+                    )
+                }
             }
         }
 
