@@ -7,6 +7,7 @@ use crate::{
         ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
         extract_linear_expression,
     },
+    debug_println,
     egraphs::proofforest::ProofForestEdge,
     utils::{DeterministicHashMap, DeterministicHashSet},
 };

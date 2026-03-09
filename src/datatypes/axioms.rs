@@ -8,6 +8,7 @@ use yaspar_ir::ast::{ATerm::*, CheckedApi, FetchSort, Sort, Str, TermAllocator};
 use yaspar_ir::ast::{ObjectAllocatorExt, Repr, StrAllocator, Term};
 
 use crate::cnf::CNFConversion as _;
+use crate::debug_println;
 use crate::egraphs::datastructures::ConstructorType;
 use crate::egraphs::egraph::Egraph;
 

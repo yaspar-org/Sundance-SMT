@@ -3,6 +3,7 @@
 
 //! Keeps track of the eDRAT proof
 //!
+use crate::debug_println;
 use cadical_sys::ProofTracer;
 use core::panic;
 use std::collections::{HashMap, HashSet};

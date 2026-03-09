@@ -11,6 +11,7 @@ use yaspar_ir::ast::{FetchSort, ObjectAllocatorExt, Repr, Term};
 
 use crate::cnf::CNFConversion as _;
 use crate::datatypes::axioms::find_datatype_axioms;
+use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
 use crate::utils::DeterministicHashSet;
 
