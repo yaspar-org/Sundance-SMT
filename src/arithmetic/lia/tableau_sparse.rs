@@ -19,6 +19,7 @@
 
 use crate::arithmetic::lia::sparse;
 use crate::arithmetic::lia::tableau::{Tableau, TableauError, TableauResult};
+use crate::arithmetic::lia::tableau_dense::TableauDense;
 use crate::arithmetic::lia::types::Rational;
 
 /// [TableauSparse] wraps a sparse matrix over the [Rational]s and implements
@@ -48,6 +49,21 @@ impl TableauSparse {
     /// Return the number of columns in the tableau (= number of basic + non-basic variables)
     pub fn ncols(&self) -> usize {
         self.matrix.ncols()
+    }
+
+    /// Convert this sparse tableau to a dense tableau.
+    ///
+    /// Used in tests to compare the equivalence of the sparse/dense pivot algorithms.
+    pub fn to_dense(&self) -> TableauResult<TableauDense> {
+        let mut rows = Vec::with_capacity(self.nrows());
+        for row in 0..self.nrows() {
+            let mut row_vec = Vec::with_capacity(self.ncols());
+            for col in 0..self.ncols() {
+                row_vec.push(self.get(row, col)?.clone());
+            }
+            rows.push(row_vec);
+        }
+        TableauDense::from_rows(&rows)
     }
 }
 
@@ -89,5 +105,90 @@ mod tests {
         assert_eq!(*tab.get(1, 1).unwrap(), rbig!(-1));
         assert_eq!(*tab.get(2, 0).unwrap(), rbig!(-1));
         assert_eq!(*tab.get(2, 1).unwrap(), rbig!(2));
+    }
+
+    #[test]
+    fn to_dense_3x3() {
+        let tuples = vec![
+            (0, 0, rbig!(1)),
+            (0, 1, rbig!(2)),
+            (0, 2, rbig!(3)),
+            (1, 0, rbig!(4)),
+            (1, 1, rbig!(5)),
+            (1, 2, rbig!(6)),
+            (2, 0, rbig!(7)),
+            (2, 1, rbig!(8)),
+            (2, 2, rbig!(9)),
+        ];
+        let dense = TableauDense::from_tuples(3, 3, tuples.clone()).unwrap();
+        let sparse = TableauSparse::from_tuples(3, 3, tuples).unwrap();
+        let converted = sparse.to_dense().unwrap();
+        assert_eq!(dense, converted);
+    }
+
+    /// Create equivalent dense/sparse tableau, pivot both at (0,0) and compare results
+    #[test]
+    fn to_dense_after_pivot() {
+        let tuples = vec![
+            (0, 0, rbig!(1)),
+            (0, 1, rbig!(2)),
+            (0, 2, rbig!(3)),
+            (1, 0, rbig!(4)),
+            (1, 1, rbig!(5)),
+            (1, 2, rbig!(6)),
+            (2, 0, rbig!(7)),
+            (2, 1, rbig!(8)),
+            (2, 2, rbig!(9)),
+        ];
+        let mut dense = TableauDense::from_tuples(3, 3, tuples.clone()).unwrap();
+        let mut sparse = TableauSparse::from_tuples(3, 3, tuples).unwrap();
+        dense.pivot(0, 0).unwrap();
+        sparse.pivot(0, 0).unwrap();
+        let converted = sparse.to_dense().unwrap();
+        assert_eq!(dense, converted);
+    }
+
+    /// Create equivalent dense/sparse tableau, pivot both at (1,2) and compare results.
+    /// This version of the test is sparse; it has 7 out of 16 entries non-zero.
+    #[test]
+    fn to_dense_sparse_after_pivot() {
+        let tuples = vec![
+            (0, 0, rbig!(2)),
+            (0, 3, rbig!(4)),
+            (1, 1, rbig!(3)),
+            (1, 2, rbig!(6)), // <- pivot
+            (2, 2, rbig!(5)),
+            (3, 0, rbig!(1)),
+            (3, 2, rbig!(7)),
+        ];
+        let mut dense = TableauDense::from_tuples(4, 4, tuples.clone()).unwrap();
+        let mut sparse = TableauSparse::from_tuples(4, 4, tuples).unwrap();
+        dense.pivot(1, 2).unwrap();
+        sparse.pivot(1, 2).unwrap();
+        let converted = sparse.to_dense().unwrap();
+        assert_eq!(dense, converted);
+    }
+
+    /// 10x10 matrix with only 10 non-zero entries (10% density), pivot at (3,4).
+    #[test]
+    fn to_dense_very_sparse_after_pivot() {
+        let tuples = vec![
+            (0, 2, rbig!(3)),
+            (1, 7, rbig!(5)),
+            (2, 0, rbig!(2)),
+            (3, 4, rbig!(7)), // <- pivot
+            (4, 9, rbig!(1)),
+            (5, 1, rbig!(4)),
+            (6, 6, rbig!(8)),
+            (7, 3, rbig!(6)),
+            (8, 5, rbig!(9)),
+            (9, 8, rbig!(2)),
+        ];
+        let mut dense = TableauDense::from_tuples(10, 10, tuples.clone()).unwrap();
+        let mut sparse = TableauSparse::from_tuples(10, 10, tuples).unwrap();
+        dense.pivot(3, 4).unwrap();
+        sparse.pivot(3, 4).unwrap();
+        let converted = sparse.to_dense().unwrap();
+        assert_eq!(dense, converted);
     }
 }

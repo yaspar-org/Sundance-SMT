@@ -469,8 +469,8 @@ impl<V: Zero + fmt::Debug> Matrix<V> {
                     // a -> 1/a
                     p_n.value = inv_pivot.clone();
                 } else {
-                    // b -> b/a
-                    p_n.value = p_n.value.clone() * inv_pivot.clone();
+                    // b -> -b/a
+                    p_n.value = -(p_n.value.clone() * inv_pivot.clone());
                 }
                 p = p_n.left;
             } else {
@@ -491,7 +491,7 @@ impl<V: Zero + fmt::Debug> Matrix<V> {
                 if prow != row {
                     let old_value = &p_n.value;
                     pivot_col_values.insert(prow, old_value.clone());
-                    p_n.value = -(old_value.clone() / pivot_value.clone());
+                    p_n.value = old_value.clone() / pivot_value.clone();
                 }
                 p = p_n.up;
             } else {
@@ -750,20 +750,20 @@ mod tests {
         assert!(m.pivot(0, 0).is_ok());
 
         // Expected result:
-        // [ 2   4   6 ]    [ 0.5   2    3 ]
-        // [ 1   3   5 ] -> [-0.5   1    2 ]
-        // [ 3   6   9 ]    [-1.5   0    0 ]
+        // [ 2   4   6 ]    [ 0.5  -2   -3 ]
+        // [ 1   3   5 ] -> [ 0.5   1    2 ]
+        // [ 3   6   9 ]    [ 1.5   0    0 ]
 
         // Check pivot element: 2 → 1/2
         assert_eq!(m.get(0, 0), Some(&rbig!(1 / 2)));
 
-        // Check rest of the pivot row: b -> b/a
-        assert_eq!(m.get(0, 1), Some(&rbig!(2)));
-        assert_eq!(m.get(0, 2), Some(&rbig!(3)));
+        // Check rest of the pivot row: b -> -b/a
+        assert_eq!(m.get(0, 1), Some(&rbig!(-2)));
+        assert_eq!(m.get(0, 2), Some(&rbig!(-3)));
 
-        // Check pivot column: c → -c/2
-        assert_eq!(m.get(1, 0), Some(&rbig!(-1 / 2)));
-        assert_eq!(m.get(2, 0), Some(&rbig!(-3 / 2)));
+        // Check pivot column: c → c/a
+        assert_eq!(m.get(1, 0), Some(&rbig!(1 / 2)));
+        assert_eq!(m.get(2, 0), Some(&rbig!(3 / 2)));
 
         // Check other elements: d - b*c/2
         // (1,1): 3 - 4*1/2 = 3 - 2 = 1
@@ -822,11 +822,11 @@ mod tests {
         assert!(m.pivot(0, 0).is_ok());
 
         // Expected:
-        // [ 1/2   2 ]  (0,1) = 4/2 = 2
-        // [-1/2   0 ]  (1,1) = 2 - 4*1/2 = 2 - 2 = 0
+        // [ 1/2  -2 ]  (0,1) = -4/2 = -2
+        // [ 1/2   0 ]  (1,1) = 2 - 4*1/2 = 2 - 2 = 0 (uses original pivot row value 4)
         assert_eq!(m.get(0, 0), Some(&rbig!(1 / 2)));
-        assert_eq!(m.get(0, 1), Some(&rbig!(2)));
-        assert_eq!(m.get(1, 0), Some(&rbig!(-1 / 2)));
+        assert_eq!(m.get(0, 1), Some(&rbig!(-2)));
+        assert_eq!(m.get(1, 0), Some(&rbig!(1 / 2)));
         assert_eq!(m.get(1, 1), Some(&rbig!(0)));
     }
 
@@ -849,19 +849,21 @@ mod tests {
         assert!(m.pivot(0, 0).is_ok());
 
         // After first pivot:
-        // [ 1/3   2 ]  (0,1) = 6/3 = 2
-        // [-2/3   1 ]  (1,1) = 5 - 2*2/3 = 5 - 4 = 1
+        // [ 1/3  -2 ]  (0,1) = -6/3 = -2
+        // [ 2/3   1 ]  (1,1) = 5 - 6*2/3 = 5 - 4 = 1 (uses original pivot row value 6)
         assert_eq!(m.get(0, 0), Some(&rbig!(1 / 3)));
-        assert_eq!(m.get(0, 1), Some(&rbig!(2)));
-        assert_eq!(m.get(1, 0), Some(&rbig!(-2 / 3)));
+        assert_eq!(m.get(0, 1), Some(&rbig!(-2)));
+        assert_eq!(m.get(1, 0), Some(&rbig!(2 / 3)));
         assert_eq!(m.get(1, 1), Some(&rbig!(1)));
 
         // Second pivot on (1, 1)
         assert!(m.pivot(1, 1).is_ok());
 
         // After second pivot:
-        // [ 5/3  -2 ]  (0,0) -> 1/3 - (-2/3)*2/1 = 1/3 + 4/3 = 5/3
-        // [-2/3   1 ]
+        // [ 5/3  -2 ]  (0,0) -> 1/3 - (-2)*2/3/1 = 1/3 + 4/3 = 5/3 (uses original pivot row value -2)
+        //              (0,1) -> -2*1 = -2 (pivot column for non-pivot row)
+        // [-2/3   1 ]  (1,0) -> -(2/3)/1 = -2/3 (pivot row negated)
+        //              (1,1) -> 1/1 = 1
         assert_eq!(m.get(0, 0), Some(&rbig!(5 / 3)));
         assert_eq!(m.get(0, 1), Some(&rbig!(-2)));
         assert_eq!(m.get(1, 0), Some(&rbig!(-2 / 3)));
@@ -887,11 +889,11 @@ mod tests {
         assert!(m.pivot(0, 0).is_ok());
 
         // After pivot:
-        // [ 1/2   1/2 ]
-        // [-1/2  -1/2 ] (1,1) entry goes from zero to non-zero --> 0 - 1*1/2 = -1/2
+        // [ 1/2  -1/2 ]
+        // [ 1/2  -1/2 ] (1,1) entry goes from zero to non-zero --> 0 - 1*1/2 = -1/2 (uses original pivot row value 1)
         assert_eq!(m.get(0, 0), Some(&rbig!(1 / 2)));
-        assert_eq!(m.get(0, 1), Some(&rbig!(1 / 2)));
-        assert_eq!(m.get(1, 0), Some(&rbig!(-1 / 2)));
+        assert_eq!(m.get(0, 1), Some(&rbig!(-1 / 2)));
+        assert_eq!(m.get(1, 0), Some(&rbig!(1 / 2)));
         assert_eq!(m.get(1, 1), Some(&rbig!(-1 / 2)));
     }
 
