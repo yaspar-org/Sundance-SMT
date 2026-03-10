@@ -104,13 +104,13 @@ impl<'a> CustomExternalPropagator<'a> {
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_assignment(&mut self, lits: &[i32]) {
         debug_println!(
-            7,
+            22,
             0,
             "PROPAGATOR: Processing assignments (level {}): {:?}",
             self.decision_level,
             lits
         );
-        debug_println!(6, 0, "{}", self.egraph);
+        debug_println!(16, 0, "{}", self.egraph);
         for lit in lits {
             debug_println!(
                 7,
@@ -243,6 +243,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .resize(2 * self.egraph.predecessor_level.len(), 0);
         }
         self.decision_level += 1;
+        self.egraph.decision_level += 1;
         debug_println!(
             4,
             0,
@@ -260,12 +261,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "PROPAGATOR: Backtracking from level {} to level {}",
             self.decision_level,
             level
-        );
-        debug_println!(
-            4,
-            1,
-            "Current backtrack stack: {:?}",
-            self.egraph.proof_forest_backtrack_stack
         );
 
         self.egraph.predecessor_hash += 1;
@@ -294,9 +289,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         self.decision_level = level;
+        self.egraph.decision_level = level;
 
         debug_println!(
-            7,
+            16,
             0,
             "Before backtracking we hav the stack: {:?}",
             self.egraph
@@ -321,7 +317,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         debug_println!(
-            7,
+            16,
             0,
             "After backtracking we have the stack: {:?}",
             self.egraph
@@ -338,49 +334,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .collect::<Vec<_>>()
         );
 
-        // TODO: have to clone here which is really bad
-        for (term_num, (equality, term_parent_original, new_equality, original_y)) in
-            self.egraph.from_quantifier_backtrack_set.clone().iter()
-        {
-            let congruence_pairs = if let ProofForestEdge::Congruence { pairs, .. } = equality {
-                pairs
-            } else {
-                panic!("We should not be considering a term that is not a congruence");
-            };
-            for (p1, p2) in congruence_pairs.iter() {
-                if self.egraph.find(*p1) != self.egraph.find(*p2) {
-                    // remove the equality from egraph
-                    debug_println!(
-                        16,
-                        0,
-                        "[QUANTIFIER_BACKTRACK] We are backtracking on the equality {:?}",
-                        equality
-                    );
-                    proof_forest_backtrack(
-                        new_equality.clone(),
-                        *original_y, //*term_num,
-                        term_parent_original.clone(),
-                        self.egraph,
-                    );
-                    // remove from backtracking list
-                    debug_println!(
-                        16,
-                        0,
-                        "We are removing the equality between {} and {} at level {} [{:?}] from the backtracking list because of failed equality between {} and {}",
-                        self.egraph.get_term(equality.get_parent()),
-                        self.egraph.get_term(equality.get_child()),
-                        self.decision_level,
-                        equality,
-                        self.egraph.get_term(*p1),
-                        self.egraph.get_term(*p2)
-                    );
-                    debug_println!(11, 0, "{}", self.egraph);
-                    self.egraph.from_quantifier_backtrack_set.remove(term_num);
-                    break;
-                }
-            }
-        }
-
         // adding the new predecessors created by quantifiers to the predecessors list
         for (term, parents) in &self.egraph.predecessors_created_by_quantifiers {
             let current_ancestor = self.egraph.find(*term);
@@ -390,7 +343,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             for parent in parents {
                 debug_println!(
-                    11,
+                    16,
                     0,
                     "We are updating the predecessor of {} [ancestor of {}] to {} at level: {}; hash: {}",
                     self.egraph.get_term(current_ancestor),
@@ -436,13 +389,27 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // redoing the union_to_eclass stuff
         let union_to_eclass_info = self.egraph.union_to_eclass.clone();
         for (term, func, subterms) in union_to_eclass_info {
+            debug_println!(
+                16,
+                0,
+                "Reunioning term {} with function {} and subterms {:?}",
+                self.egraph.get_term(term),
+                func,
+                subterms
+                    .iter()
+                    .map(|x| self.egraph.get_term(*x))
+                    .collect::<Vec<_>>()
+            );
             self.egraph.find_and_union_to_eclass(term, func, subterms);
         }
 
         // once we get to level 0, we don't need to keep track of this anymore since we have reached the bottom case
         if level == 0 {
             self.egraph.union_to_eclass = DeterministicHashSet::new();
+            self.egraph.proof_forest_backtrack_stack = vec![];
         }
+
+        debug_println!(16, 0, "Ending backtracking at level {}", level);
 
         debug_println!(11, 0, "{}", self.egraph);
     }
@@ -484,7 +451,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 polarity
             );
         }
-        debug_println!(16, 0, "{}", self.egraph);
+        debug_println!(24, 0, "{}", self.egraph);
 
         // Check arithmetic consistency before instantiating quantifiers
         debug_println!(21, 0, "Starting arithmetic check",);

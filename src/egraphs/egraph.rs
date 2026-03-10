@@ -215,9 +215,6 @@ pub struct Egraph {
     pub proof_forest: Vec<ProofForestEdge>, // u64 -> ProofForestEdge [t <- ]
     /// keeps track of a stack of "edges" to backtrack on
     pub proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u64, ProofForestEdge)>,
-    /// the set of terms that have been unioned to the eclass from a quantifier
-    pub from_quantifier_backtrack_set:
-        DeterministicHashMap<u64, (ProofForestEdge, ProofForestEdge, ProofForestEdge, u64)>, // String, Vec<u64>)>,
     /// this is a map from terms (u64) -> (term in the same egraph, predecesssor of term in same egraph)
     pub predecessors: Vec<DeterministicHashMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
     /// number to keep track of the current hash
@@ -260,6 +257,8 @@ pub struct Egraph {
     pub eager_skolem: bool,
     /// store CNF cache
     pub cnf_cache: CNFCache,
+    /// the current decision level of the SAT solver, useful to keep track for backtracking
+    pub decision_level: usize,
 }
 
 impl Egraph {
@@ -279,7 +278,6 @@ impl Egraph {
             }], // think about whether using a vector or hashmap is better here
             // note: this is an option because if you are a subterm of a quantifier, you are not in the proof forest. TODO: maybe there is a better way to think about this
             proof_forest_backtrack_stack: Vec::new(),
-            from_quantifier_backtrack_set: DeterministicHashMap::default(),
             predecessors: vec![DeterministicHashMap::new()],
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
@@ -301,6 +299,7 @@ impl Egraph {
             ddsmt,
             eager_skolem,
             cnf_cache: Default::default(),
+            decision_level: 0,
         }
     }
 
@@ -626,11 +625,18 @@ impl Egraph {
         }
     }
 
+    /// This function takes in a term_num, func, subterms
+    /// term_num corresponds to the term with
+    /// func applied to subterms
+    /// if any of the predecessors of first element in subterms are equivalent (i.e. has the same function
+    /// and all of its subterms are equal to the subterms of term_num), then
+    /// we union term_num with that predecessors
+    /// Used when a term is learned at level > 0 because of quantifier instantiation or datatype axiom
     pub fn find_and_union_to_eclass(&mut self, term_num: u64, func: String, subterms: Vec<u64>) {
         let subterm_num = subterms[0];
         let subterm_root = self.find(subterm_num);
         debug_println!(
-            11,
+            16,
             0,
             "TRYING ECLASS: with term_num {}, term {}, function {}, subterm {}, subterm_root {}",
             term_num,
@@ -640,67 +646,57 @@ impl Egraph {
             self.get_term(subterm_root)
         );
 
-        // if this is an ite statement, then check if boolean is = true/false and if so union it
-        // if func == "ite" {
-        //      debug_println!(6, 0, "ECLASS ITE CASE with {}", self.get_term(term_num));
-        // assert!(subterms.len() == 3);
-        // if self.find(subterms[0]) == self.true_term {
-        // union_process_ite(&self.get_term(term_num), self, 0,true);
-        // } else if self.find(subterms[0]) == self.false_term {
-        //         union_process_ite(&self.get_term(term_num), self, 0, true);
-        // }
-        // }
-
-        // we don't actually want to have or and and unioned using find_and_union_to_eclass, they will be handled
-        // by the SAT solver
-        // if we did not skip this it could create an infinite loop
-        // todo: I think this might jusst be a bandage on a bigger problem. We may be able to create an infinite loop regardless
-        // maybe not I need to think about this harder
-        // if func == "or" || func == "and" || func == "not" {
-        //     return
-        // }
-
-        // // println!("{}", self);
         let subterm_root_predecessor = &self.predecessors[subterm_root as usize].clone(); // need to clone here because I mutably borrow later
-        // let mut subterm_root_predecessor_vec = subterm_root_predecessor.iter().collect::<Vec<_>>();
-        // subterm_root_predecessor_vec.sort();
+
+        debug_println!(
+            16,
+            0,
+            "We have the predecessors of the subterm root {} with term {} as",
+            subterm_root,
+            self.get_term(subterm_root),
+        );
+        for pred_key in subterm_root_predecessor.keys() {
+            debug_println!(16, 4, "{}", self.get_term(*pred_key),);
+        }
+
+        // enumerate through all of the predecessors of the root of the first subterm, and see if any of them are equivalent to term_num, and if so, union them
         for (pred_key, pred) in subterm_root_predecessor {
             debug_println!(6, 0, "before9");
+            // if the predecessor is not valid, then we can remove it from the predecessors list (this can happen because of backtracking) and continue
             if !self.valid_hash(pred.hash, pred.level) {
                 self.predecessors[subterm_root as usize].remove(pred_key);
+                debug_println!(
+                    16,
+                    1,
+                    "We removed predecessor {} with inner term {} because of invalid hash {} at level {}",
+                    self.get_term(*pred_key),
+                    self.get_term(pred.inner_term),
+                    pred.hash,
+                    pred.level
+                );
                 continue;
             }
             debug_println!(
-                11,
+                16,
                 0,
                 "We have subterm_root_predecessor {} with inner_term {}",
                 self.get_term(*pred_key),
                 self.get_term(pred.inner_term)
             );
             let pred_term = self.get_term(*pred_key);
-            debug_println!(6, 1, "We have the pred_term {}", pred_term);
             let (pred_func, pred_subterms) = get_subterms(&pred_term);
-            debug_println!(
-                6,
-                1,
-                "We have the pred_func {} and pred_subterms {:?}",
-                pred_func,
-                pred_subterms
-            );
+            // we can see if the predecessors has the same function name and the same number of subterms
+            // if it does we can check if all of the subterms are equal.
             if func == pred_func && pred_subterms.len() == subterms.len() {
                 let mut equal = true;
-                let mut completely_equal = true;
                 let mut congruence_pairs = vec![];
-                let (mut max_level, mut max_hash) = (0, 0);
-                //  debug_println!(10, 0, "{}", self);
+                // check if all of the subterms are equal. If they are, then we can union term_num with the predecessor
                 for (pred_subterm, subterm) in pred_subterms.iter().zip(subterms.iter()) {
                     let (pred_subterm_uid, subterm_uid) = (pred_subterm.uid(), *subterm);
-                    // let (pred_root, pred_level, pred_hash) = self.find_with_level(pred_subterm_uid, 0, 0);
-                    // let (subterm_root, subterm_level, subterm_hash) = self.find_with_level(subterm_uid, 0, 0);
                     let (subterm_equal, subterm_level, subterm_hash) =
                         self.check_equal(pred_subterm_uid, subterm_uid);
                     debug_println!(
-                        11,
+                        16,
                         4,
                         "We are checking the equality of {} and {}, we get equal {} at level {} and hash {}",
                         self.get_term(pred_subterm_uid),
@@ -714,33 +710,17 @@ impl Egraph {
                         break;
                     }
 
-                    // checking if either of these two paths have a higher level, if they do we can use this as a new level/hash
-                    if subterm_level > max_level {
-                        (max_level, max_hash) = (subterm_level, subterm_hash);
-                    }
-
-                    if pred_subterm_uid != subterm_uid {
-                        completely_equal = false;
-                    }
                     congruence_pairs.push((pred_subterm_uid, subterm_uid));
                 }
-                if equal && !completely_equal {
-                    // todo: I got rid of this because it was erroring, but not sure how to prevent redundancies otherwise
-                    // if self.from_quantifier_backtrack_set.contains_key(&term_num) {
-                    //     panic!(
-                    //         "we should not be considering a term that already exists {} and func {}",
-                    //         self.get_term(term_num),
-                    //         func
-                    //     );
-                    // }
+                if equal {
                     let equality = ProofForestEdge::Congruence {
                         pairs: congruence_pairs.clone(),
                         size: 0,
                         parent: term_num,
                         child: *pred_key,
                         disequalities: DeterministicHashMap::new(),
-                        level: max_level,
-                        hash: max_hash,
+                        level: self.decision_level,
+                        hash: self.predecessor_hash,
                         children: DeterministicHashSet::new(),
                     };
                     debug_println!(
@@ -751,9 +731,15 @@ impl Egraph {
                         self.get_term(*pred_key),
                         equality
                     );
-                    // having fixed as true here since these get backtracked on in the special case using from_quantifier_backtrack_set
-                    union(term_num, *pred_key, self, equality, max_level, false, true);
-                    break;
+                    union(
+                        term_num,
+                        *pred_key,
+                        self,
+                        equality,
+                        self.decision_level,
+                        false,
+                        true,
+                    );
                 }
             }
         }
