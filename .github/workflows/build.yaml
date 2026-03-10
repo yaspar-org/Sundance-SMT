@@ -41,6 +41,7 @@ jobs:
         run: |
           ./.github/copyright-check.sh src
           ./.github/copyright-check.sh tests
+          ./.github/copyright-check.sh benches
 
   test:
     name: Test Suite
