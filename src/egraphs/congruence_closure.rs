@@ -4,7 +4,7 @@
 //! Classic congruence closure algorithm
 
 use crate::cnf::CNFConversion as _;
-use crate::datatypes::axioms::learn_or_not_term_tester_term;
+use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::preprocess::check_for_function_bool;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
@@ -175,51 +175,51 @@ pub fn process_assignment(
                         // note that the from_quantifier is important here
                         // it essentially says that this is a term that we learn not necessarily at level 0
                         // but we want to retain this term even after we backtrack
-                        // let ctor_selector_clauses: Vec<Vec<i32>> = learn_ctor_selector_clauses(egraph, &inner_term, &ctor, &dt_sort, true);
-                        // Some(ctor_selector_clauses)
+                        let ctor_selector_clauses: Vec<Vec<i32>> = learn_ctor_selector_clauses(egraph, &inner_term, &ctor, &dt_sort, true);
+                        Some(ctor_selector_clauses)
 
-                        let mut selector_apps = vec![];
-                        for sel in &ctor.args {
-                            let sel_app = egraph
-                                .context
-                                .typed_simp_app(sel.0.clone(), vec![inner_term.clone()])
-                                .expect("type checking invariance violation: constructors");
-                            selector_apps.push(sel_app);
-                        }
+                        // let mut selector_apps = vec![];
+                        // for sel in &ctor.args {
+                        //     let sel_app = egraph
+                        //         .context
+                        //         .typed_simp_app(sel.0.clone(), vec![inner_term.clone()])
+                        //         .expect("type checking invariance violation: constructors");
+                        //     selector_apps.push(sel_app);
+                        // }
 
-                        // have the simple_sorted id for the global case and the simple id for the appp case
-                        let ctor_id = QualifiedIdentifier::simple(ctor_name);
-                        let ctor_app = if selector_apps.is_empty() {
-                            egraph.global(ctor_id, Some(dt_sort.clone()))
-                        } else {
-                            egraph.app(ctor_id, selector_apps, Some(dt_sort))
-                        };
-                        let eq = egraph.eq(inner_term, ctor_app);
+                        // // have the simple_sorted id for the global case and the simple id for the appp case
+                        // let ctor_id = QualifiedIdentifier::simple(ctor_name);
+                        // let ctor_app = if selector_apps.is_empty() {
+                        //     egraph.global(ctor_id, Some(dt_sort.clone()))
+                        // } else {
+                        //     egraph.app(ctor_id, selector_apps, Some(dt_sort))
+                        // };
+                        // let eq = egraph.eq(inner_term, ctor_app);
 
-                        let eq_nnf = eq.nnf(egraph);
-                        debug_println!(14 - 3, 0, "adding in {}", eq_nnf);
-                        egraph.insert_predecessor(&eq_nnf, None, None, true, None);
+                        // let eq_nnf = eq.nnf(egraph);
+                        // debug_println!(14 - 3, 0, "adding in {}", eq_nnf);
+                        // egraph.insert_predecessor(&eq_nnf, None, None, true, None);
 
-                        // note that additioanl constraints are needed for `datatypes/ctor_sel_term_additional_dt_constraints3.smt2`
-                        let mut additional_constraints =
-                            check_for_function_bool(&eq_nnf, egraph, false);
-                        let eq_cnf = eq_nnf.cnf_tseitin(egraph); // todo: do I need any more preprocessing
-                        assert_eq!(eq_cnf.0.len(), 1);
-                        let eq_clause = eq_cnf.0[0].0.clone();
-                        assert_eq!(eq_clause.len(), 1);
-                        let eq_lit = eq_clause[0];
-                        debug_println!(25, 10, "(assert (=> {} {}))", term, eq);
+                        // // note that additioanl constraints are needed for `datatypes/ctor_sel_term_additional_dt_constraints3.smt2`
+                        // let mut additional_constraints =
+                        //     check_for_function_bool(&eq_nnf, egraph, false);
+                        // let eq_cnf = eq_nnf.cnf_tseitin(egraph); // todo: do I need any more preprocessing
+                        // assert_eq!(eq_cnf.0.len(), 1);
+                        // let eq_clause = eq_cnf.0[0].0.clone();
+                        // assert_eq!(eq_clause.len(), 1);
+                        // let eq_lit = eq_clause[0];
+                        // debug_println!(25, 10, "(assert (=> {} {}))", term, eq);
 
-                        additional_constraints.push(vec![-term_lit, eq_lit]);
-                        // let additional_constraints: Vec<Vec<i32>> = vec![vec![-term_lit, eq_lit]];
+                        // additional_constraints.push(vec![-term_lit, eq_lit]);
+                        // // let additional_constraints: Vec<Vec<i32>> = vec![vec![-term_lit, eq_lit]];
 
-                        debug_println!(
-                            24,
-                            0,
-                            "additional constraints are {:?}",
-                            additional_constraints
-                        );
-                        Some(additional_constraints)
+                        // debug_println!(
+                        //     24,
+                        //     0,
+                        //     "additional constraints are {:?}",
+                        //     additional_constraints
+                        // );
+                        // Some(additional_constraints)
                     } else {
                         None
                     }
