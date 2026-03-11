@@ -32,6 +32,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v1
 
+      - name: Get z3 submodule commit
+        id: z3-rev
+        run: echo "hash=$(git submodule status z3 | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Cache z3 build
+        uses: actions/cache@v4
+        with:
+          path: target/debug/build/z3-sys-*
+          key: ${{ runner.os }}-z3-debug-${{ steps.z3-rev.outputs.hash }}
+
       - name: Run cargo check
         uses: actions-rs/cargo@v1
         with:
@@ -79,19 +89,17 @@ jobs:
           brew update
           brew install cmake
 
-      - name: Sanitize feature name for cache key
-        id: cache-key
-        run: echo "features=$(echo '${{ matrix.features }}' | tr ',' '_')" >> $GITHUB_OUTPUT
+      - name: Get z3 submodule commit
+        if: ${{ matrix.features == 'default' }}
+        id: z3-rev
+        run: echo "hash=$(git submodule status z3 | awk '{print $1}')" >> $GITHUB_OUTPUT
 
-      - name: Cache solver builds
+      - name: Cache z3 build
+        if: ${{ matrix.features == 'default' }}
         uses: actions/cache@v4
         with:
-          path: |
-            target/debug/build
-          key: ${{ runner.os }}-solver-${{ steps.cache-key.outputs.features }}-${{ hashFiles('lib/**') }}
-          restore-keys: |
-            ${{ runner.os }}-solver-${{ steps.cache-key.outputs.features }}-
-            ${{ runner.os }}-solver-
+          path: target/release/build/z3-sys-*
+          key: ${{ runner.os }}-z3-${{ steps.z3-rev.outputs.hash }}
 
       - name: Run tests
         run: cargo test --release --no-default-features --features "${{ matrix.features }}" -- --nocapture
@@ -116,6 +124,16 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v1
+
+      - name: Get z3 submodule commit
+        id: z3-rev
+        run: echo "hash=$(git submodule status z3 | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Cache z3 build
+        uses: actions/cache@v4
+        with:
+          path: target/debug/build/z3-sys-*
+          key: ${{ runner.os }}-z3-debug-${{ steps.z3-rev.outputs.hash }}
 
       - name: Run cargo fmt
         uses: actions-rs/cargo@v1
@@ -154,6 +172,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake
+
+      - name: Get z3 submodule commit
+        id: z3-rev
+        run: echo "hash=$(git submodule status z3 | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Cache z3 build
+        uses: actions/cache@v4
+        with:
+          path: target/debug/build/z3-sys-*
+          key: ${{ runner.os }}-z3-debug-${{ steps.z3-rev.outputs.hash }}
 
       - name: Build documentation
         run: cargo doc --all-features --no-deps

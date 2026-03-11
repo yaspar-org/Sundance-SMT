@@ -151,7 +151,7 @@ fn learn_exactly_one_tester_clause(
                 let tester_app_nnf = tester_app.nnf(egraph);
                 egraph.insert_predecessor(&tester_app_nnf, None, None, from_quantifier, None);
                 let tester_app_cnf = tester_app_nnf.cnf_tseitin(egraph).into_iter().map(|x| x.0);
-                debug_println!(25, 10, "1(assert {})", tester_app);
+                debug_println!(25, 10, "(assert {})", tester_app);
                 vector.extend(tester_app_cnf);
             }
             _ => {}
@@ -166,7 +166,7 @@ fn learn_exactly_one_tester_clause(
         egraph.or(tester_apps)
     };
     debug_println!(12, 0, "TESTER OR CASE");
-    debug_println!(25, 10, "2(assert {})", tester_or);
+    debug_println!(25, 10, "(assert {})", tester_or);
     egraph.insert_predecessor(&tester_or, None, None, from_quantifier, None);
     let tester_cnf = tester_or.cnf_tseitin(egraph).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
@@ -245,7 +245,7 @@ pub fn learn_ctor_selector_clauses(
 
     let eq = egraph.eq(term.clone(), ctor_app);
     let imp = egraph.implies(vec![tester_app], eq);
-    debug_println!(25, 10, "option 1 (assert {}) with sort {}", imp, sort);
+    debug_println!(25, 10, "assert {}) with sort {}", imp, sort);
     let imp_nnf = imp.nnf(egraph);
     egraph.insert_predecessor(&imp_nnf, None, None, from_quantifier, None);
     let imp_cnf = imp.cnf_tseitin(egraph);
@@ -282,7 +282,7 @@ fn learn_selector_ctor_clause(
             Some(so),
         );
         let sel_eq = egraph.eq(sel_app.clone(), sel_term.clone());
-        debug_println!(25, 10, "3(assert {})", sel_eq);
+        debug_println!(25, 10, "(assert {})", sel_eq);
         let sel_eq_nnf = sel_eq.nnf(egraph);
         egraph.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier, None);
         let sel_eq_cnf = sel_eq.cnf_tseitin(egraph);
@@ -309,7 +309,7 @@ pub fn learn_or_not_term_tester_term(
         .into_iter()
         .map(|x| x.0)
         .collect();
-    debug_println!(25, 10, "4(assert {})", or_not_tester_not_term,);
+    debug_println!(25, 10, "(assert {})", or_not_tester_not_term,);
     debug_println!(12, 2, "This gives us {:?}", tester_cnf);
     tester_cnf
 }
