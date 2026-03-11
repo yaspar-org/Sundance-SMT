@@ -26,6 +26,7 @@ use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::tableau_dense::TableauDense;
 use crate::arithmetic::lia::utils;
 use crate::arithmetic::lia::variables::{Owner, Var, VarInfo};
+use crate::debug_println;
 
 /// Generic frontend error
 #[derive(Debug)]
@@ -714,6 +715,7 @@ impl LinearSystem {
         // 0 <= x3 - x5  --> <0, 1, -1>
         //
         // time complexity is expected worst case O(#relations * #var)
+        let mut num_non_zero: usize = 0;
         let mut equations: Vec<Vec<Rational>> = Vec::new();
         let nvars = var_ids.len();
         for (rel, _) in self.ctx.get_relations() {
@@ -723,6 +725,7 @@ impl LinearSystem {
                     let col = var_id_col_map.get(&t.var).unwrap();
                     if !t.coeff_zero() {
                         row[*col] = t.coeff.clone();
+                        num_non_zero += 1;
                     }
                 }
             }
@@ -730,6 +733,14 @@ impl LinearSystem {
         }
         // all rows should have the same length: nvars
         debug_assert!(equations.iter().all(|r| r.len() == nvars));
+        debug_println!(
+            21,
+            0,
+            "lia::linear_system: nvars = {}, neqs = {}, num_non_zero = {}",
+            nvars,
+            equations.len(),
+            num_non_zero
+        );
         LRASolver::from_eqs(basic, non_basic, equations, self.ctx)
             .map_err(|e| LinearSystemError(format!("error building tableau: {}", e)))
     }
@@ -1076,8 +1087,6 @@ mod tests {
     ///
     #[test]
     fn solve_basic_feasible_system() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         let mut ctx = ConvContext::new();
         let x = ctx.allocate_var("x", VarType::Real);
         let y = ctx.allocate_var("y", VarType::Real);
@@ -1105,8 +1114,6 @@ mod tests {
     ///
     #[test]
     fn solve_unbounded_feasible_system() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         let mut ctx = ConvContext::new();
         let x = ctx.allocate_var("x", VarType::Real);
         let y = ctx.allocate_var("y", VarType::Real);
@@ -1169,8 +1176,6 @@ mod tests {
     ///
     #[test]
     fn solve_basic_infeasible_system() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         let mut ctx = ConvContext::new();
         let x0 = ctx.allocate_var("x0", VarType::Real);
         let x1 = ctx.allocate_var("x1", VarType::Real);
@@ -1344,8 +1349,6 @@ mod tests {
     /// x1 >  -1 x0 + 1  -->  x0 + x1 > 1
     #[test]
     fn solve_system_with_strict_gt() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         let mut ctx = ConvContext::new();
         let x0 = ctx.allocate_var("x0", VarType::Real);
         let x1 = ctx.allocate_var("x1", VarType::Real);
@@ -1394,7 +1397,6 @@ mod tests {
     ///
     #[test]
     fn solve_strict_system_strictly_in_unit_cube() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let (mut solver, _x, _y) = open_polytope_in_unit_cube();
         let result = solver.solve().expect("simplex failed");
         if let SolverDecision::FEASIBLE(assg) = result {
@@ -1408,7 +1410,6 @@ mod tests {
 
     #[test]
     fn solve_strict_system_strictly_in_unit_cube_then_assert_lower() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let (mut solver, x, _y) = open_polytope_in_unit_cube();
         assert!(matches!(
             solver.solve().expect("simplex failed"),
@@ -1455,7 +1456,6 @@ mod tests {
 
     #[test]
     fn solve_strict_system_strictly_in_unit_cube_then_assert_upper() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let (mut solver, x, y) = open_polytope_in_unit_cube();
         if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed") {
             // test x and y's values
@@ -1517,8 +1517,6 @@ mod tests {
     /// system is infeasible over Z.
     #[test]
     fn solve_non_strict_lia_system_strictly_in_unit_cube() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         let mut ctx = ConvContext::new();
         let x = ctx.allocate_var("x", VarType::Real);
         let y = ctx.allocate_var("y", VarType::Real);
@@ -1588,8 +1586,6 @@ mod tests {
     /// doesn't automatically filter trivially satisfiable relations.
     #[test]
     fn test_trivially_sat_relation_removal() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         let mut ctx = ConvContext::new();
         let x0 = ctx.allocate_var("x0", VarType::Real);
         let x1 = ctx.allocate_var("x1", VarType::Real);
@@ -1625,8 +1621,6 @@ mod tests {
     /// detect that it's infeasible.
     #[test]
     fn test_trivially_unsat_relation_preprocessing() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         let mut ctx = ConvContext::new();
         let x0 = ctx.allocate_var("x0", VarType::Real);
         let x1 = ctx.allocate_var("x1", VarType::Real);
