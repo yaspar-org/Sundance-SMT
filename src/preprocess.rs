@@ -22,7 +22,13 @@ pub fn check_for_function_bool(
     egraph: &mut Egraph,
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
-    // todo: I added the from_quantifier flag because of the insert_predecessor calls. I think this is right
+    debug_println!(
+        27,
+        0,
+        "checking for function bool in term {} with from_quantifier {}",
+        term,
+        from_quantifier
+    );
     let mut vector = vec![];
 
     if let Some(formula) = process_ite(term, egraph, from_quantifier) {
@@ -33,6 +39,12 @@ pub fn check_for_function_bool(
     // checking if term is a bool
     if sort == egraph.bool_sort() {
         // if a term is a bool, but not part of the cnf, we need to add it
+        debug_println!(
+            27,
+            0,
+            "term {} is a bool, checking if it is in the cnf cache",
+            term
+        );
         if !egraph.cnf_cache.var_map.contains_key(&term.uid()) {
             let nnf_term = term.nnf(egraph);
             let cnf_formula = term.cnf_tseitin(egraph).into_iter().map(|x| x.0);
@@ -40,14 +52,31 @@ pub fn check_for_function_bool(
             egraph.insert_predecessor(&nnf_term, None, None, from_quantifier, None); // todo: I think its right to have a from_quantifier here
 
             vector.extend(cnf_formula);
+            debug_println!(
+                27,
+                0,
+                "term {} is not in the cnf cache, adding its cnf formula {:?}",
+                term,
+                vector
+            );
 
             // the last clause will be asserting the literal so we drop it
             let vector_lit = vector.pop().unwrap();
             // might not have term in context because of simplifications done in flat_and/flat_or
             // see tests/regression/smt_files/edge_cases/tseitin.smt2 for an example
-            // todo: below doesn't do anything; remove it
             if let Some(l) = egraph.cnf_cache.var_map.get(&term.uid()) {
                 assert!(vector_lit.len() == 1 && (vector_lit[0] == *l));
+            } else {
+                // For terms like ite/implies, cnf_tseitin converts to NNF first, so only the NNF
+                // term's UID ends up in var_map. Register the original term's UID here so
+                // downstream code (e.g. the tautology clause below) can find its literal.
+                if vector_lit.len() == 1 {
+                    egraph.cnf_cache.var_map.insert(term.uid(), vector_lit[0]);
+                    egraph
+                        .cnf_cache
+                        .var_map_reverse
+                        .insert(vector_lit[0], term.uid());
+                }
             }
         }
 
@@ -157,7 +186,7 @@ pub fn check_for_function_bool(
         Let(_, _) => panic!("We should have inlined lets by now"),
         Constant(..) | Global(..) | Local(..) => (), // todo: I think existentials should be handled separately when they get skolemized but not 100% sure about this
     };
-    // println!("returning {:?}", vector);
+    debug_println!(27, 0, "returning {:?}", vector);
     vector
 }
 

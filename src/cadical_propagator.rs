@@ -432,7 +432,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         if !self.disequalities.borrow_mut().is_empty() {
             debug_println!(
-                7,
+                27,
                 0,
                 "Trying to check model when the disequalities are not empty"
             );
@@ -442,7 +442,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         for term in model {
             let (u64_val, polarity) = self.egraph.get_u64_from_lit_with_polarity(*term);
             debug_println!(
-                24,
+                27,
                 4,
                 "{} [lit: {}] [u64: {} with polarity {}]",
                 self.egraph.get_term_from_lit(*term),
