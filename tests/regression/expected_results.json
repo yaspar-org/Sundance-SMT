@@ -58,6 +58,7 @@
     "edge_cases/noflatand.smt2": "unsat",
     "edge_cases/noflatand2.smt2": "unsat",
     "edge_cases/noflatand3.smt2": "unsat",
+    "edge_cases/ite_with_arith.smt2": "sat",
     "edge_cases_quantifiers/pattern-test.smt2": "unknown",
     "edge_cases_quantifiers/pattern-test-2.smt2": "unsat",
     "edge_cases_quantifiers/wrongpattern.smt2": "unknown",
