@@ -23,7 +23,7 @@ pub fn check_for_function_bool(
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     debug_println!(
-        27,
+        16,
         0,
         "checking for function bool in term {} with from_quantifier {}",
         term,
@@ -40,7 +40,7 @@ pub fn check_for_function_bool(
     if sort == egraph.bool_sort() {
         // if a term is a bool, but not part of the cnf, we need to add it
         debug_println!(
-            27,
+            16,
             0,
             "term {} is a bool, checking if it is in the cnf cache",
             term
@@ -53,7 +53,7 @@ pub fn check_for_function_bool(
 
             vector.extend(cnf_formula);
             debug_println!(
-                27,
+                16,
                 0,
                 "term {} is not in the cnf cache, adding its cnf formula {:?}",
                 term,
@@ -70,6 +70,7 @@ pub fn check_for_function_bool(
                 // For terms like ite/implies, cnf_tseitin converts to NNF first, so only the NNF
                 // term's UID ends up in var_map. Register the original term's UID here so
                 // downstream code (e.g. the tautology clause below) can find its literal.
+                assert!(vector_lit.len() == 1);
                 if vector_lit.len() == 1 {
                     egraph.cnf_cache.var_map.insert(term.uid(), vector_lit[0]);
                     egraph
@@ -186,7 +187,7 @@ pub fn check_for_function_bool(
         Let(_, _) => panic!("We should have inlined lets by now"),
         Constant(..) | Global(..) | Local(..) => (), // todo: I think existentials should be handled separately when they get skolemized but not 100% sure about this
     };
-    debug_println!(27, 0, "returning {:?}", vector);
+    debug_println!(16, 0, "returning {:?}", vector);
     vector
 }
 
