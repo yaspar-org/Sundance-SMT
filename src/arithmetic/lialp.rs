@@ -17,6 +17,7 @@ use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use dashu::{Integer, Rational};
+use std::collections::HashMap;
 
 pub fn check_integer_constraints_satisfiable_lia(
     terms: &[i32],
@@ -34,12 +35,16 @@ pub fn check_integer_constraints_satisfiable_lia(
 
     let mut var_map = DeterministicHashMap::new();
 
-    // Create a context for the internal lia solver then build it up
+    // Create a context for the internal arithmetic solver then build it up
     let mut ctx = ConvContext::new();
     let mut roots = vec![];
+    // For each var we create in the arithmetic solver, track the literals that were used to justify
+    // it. This is used later for translating an "infeasible" outcome into an unsat core.
+    let mut slack_to_lits: HashMap<Var, Vec<i32>> = HashMap::new();
+
     for term_id in egraph.arithmetic_terms.clone() {
         if let ProofForestEdge::Root { .. } = &egraph.proof_forest[term_id as usize] {
-            let (expr, _) = extract_linear_expression(term_id, egraph);
+            let (expr, additional_constraints) = extract_linear_expression(term_id, egraph);
             let root_var = *var_map.entry(term_id).or_insert_with(|| {
                 ctx.allocate_var(&format!("!ext_var_{}", term_id), VarType::Int)
             });
@@ -53,11 +58,9 @@ pub fn check_integer_constraints_satisfiable_lia(
             let slack =
                 ctx.allocate_var(&format!("!ext_slack_var_root_{}", term_id), VarType::Real);
             ctx.push_relation(Rel::mk_eq(monomials, constant), slack);
+            slack_to_lits.insert(slack, additional_constraints);
         }
     }
-
-    let mut constraint_literals: Vec<Vec<i32>> = Vec::new();
-    let mut constraint_slack_vars: DeterministicHashMap<Var, usize> = DeterministicHashMap::new();
 
     for (constraint_idx, constraint) in constraints.iter().enumerate() {
         debug_println!(4, 0, "WE ARE IN ARITH CHECK: Constraint: {:?}", constraint);
@@ -84,11 +87,10 @@ pub fn check_integer_constraints_satisfiable_lia(
             VarType::Real,
         );
         ctx.push_relation(rel, slack);
-        constraint_slack_vars.insert(slack, constraint_idx);
 
         let mut lits = constraint.additional_constraint.clone().unwrap_or_default();
         lits.push(arithmetic_literals[constraint_idx]);
-        constraint_literals.push(lits);
+        slack_to_lits.insert(slack, lits);
     }
 
     match frontend::solve_ctx_raw(&mut ctx) {
@@ -106,8 +108,7 @@ pub fn check_integer_constraints_satisfiable_lia(
         Ok(SolverDecision::INFEASIBLE(conflict)) => {
             let unsat_core_literals: Vec<i32> = conflict
                 .iter()
-                .filter_map(|var| constraint_slack_vars.get(var))
-                .flat_map(|&idx| constraint_literals[idx].iter().copied())
+                .flat_map(|var| slack_to_lits.get(var).into_iter().flatten().copied())
                 .collect();
             debug_println!(21, 4, "LIA: Unsat core literals: {:?}", unsat_core_literals);
             ArithResult::Unsat(unsat_core_literals)
