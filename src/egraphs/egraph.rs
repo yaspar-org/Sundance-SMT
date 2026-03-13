@@ -216,7 +216,7 @@ pub struct Egraph {
     /// keeps track of a stack of "edges" to backtrack on
     pub proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u64, ProofForestEdge)>,
     /// this is a map from terms (u64) -> (term in the same egraph, predecesssor of term in same egraph)
-    pub predecessors: Vec<DeterministicHashMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
+    pub predecessors: Vec<indexmap::IndexMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
     /// number to keep track of the current hash
     pub predecessor_hash: u64,
     /// mapping from levels -> corresponding hash
@@ -278,7 +278,7 @@ impl Egraph {
             }], // think about whether using a vector or hashmap is better here
             // note: this is an option because if you are a subterm of a quantifier, you are not in the proof forest. TODO: maybe there is a better way to think about this
             proof_forest_backtrack_stack: Vec::new(),
-            predecessors: vec![DeterministicHashMap::new()],
+            predecessors: vec![indexmap::IndexMap::new()],
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
             assertions: vec![],
@@ -434,7 +434,7 @@ impl Egraph {
                 },
             );
             self.predecessors
-                .resize(self.predecessors.len() * 2, DeterministicHashMap::new());
+                .resize(self.predecessors.len() * 2, indexmap::IndexMap::new());
         }
 
         // if this has already been inserted, then we don't need to do anything
@@ -605,7 +605,7 @@ impl Egraph {
                 },
             );
             self.predecessors
-                .resize(self.predecessors.len() * 2, DeterministicHashMap::new());
+                .resize(self.predecessors.len() * 2, indexmap::IndexMap::new());
         }
 
         // if this has already been inserted, then we don't need to do anything
@@ -664,7 +664,7 @@ impl Egraph {
             debug_println!(6, 0, "before9");
             // if the predecessor is not valid, then we can remove it from the predecessors list (this can happen because of backtracking) and continue
             if !self.valid_hash(pred.hash, pred.level) {
-                self.predecessors[subterm_root as usize].remove(pred_key);
+                self.predecessors[subterm_root as usize].swap_remove(pred_key);
                 debug_println!(
                     16,
                     1,

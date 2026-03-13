@@ -1037,7 +1037,7 @@ fn union_predecessors(
                 predecessor_u.level,
                 egraph.predecessor_level[predecessor_u.level]
             );
-            egraph.predecessors[u as usize].remove(pred_u_key);
+            egraph.predecessors[u as usize].swap_remove(pred_u_key);
             continue;
         }
         debug_println!(
@@ -1144,7 +1144,7 @@ fn union_predecessors(
                 level,
                 egraph.predecessor_hash
             );
-            egraph.predecessors[v as usize].remove(pred_v_key);
+            egraph.predecessors[v as usize].swap_remove(pred_v_key);
             continue;
         }
         debug_println!(
