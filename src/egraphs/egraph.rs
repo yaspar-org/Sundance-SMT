@@ -227,6 +227,9 @@ pub struct Egraph {
     pub quantifiers: Vec<Quantifier>,
     /// map from functions (String) -> terms of this function
     pub function_maps: DeterministicHashMap<String, Vec<(u64, Vec<u64>)>>, // maps a function name to a list of terms that are of that function
+    /// per-argument-position index for relational pattern matching (egglog-style)
+    /// function_indices[f][i] maps an e-class id to all terms of f where the i-th argument belongs to that e-class
+    pub function_indices: DeterministicHashMap<String, Vec<DeterministicHashMap<u64, Vec<u64>>>>,
     /// uid for true
     pub true_term: u64,
     /// uid for false
@@ -255,6 +258,8 @@ pub struct Egraph {
     pub ddsmt: bool,
     /// user flag for whether we should skolemize eagerly
     pub eager_skolem: bool,
+    /// user flag for whether to enable egglog-style relational (datalog) pattern matching
+    pub datalog: bool,
     /// store CNF cache
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
@@ -262,7 +267,7 @@ pub struct Egraph {
 }
 
 impl Egraph {
-    pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
+    pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool, datalog: bool) -> Self {
         let tru = context.get_true();
         let fal = context.get_false();
         let datatype_info = DatatypeInfo::from_context(&context);
@@ -284,6 +289,7 @@ impl Egraph {
             assertions: vec![],
             quantifiers: vec![],
             function_maps: DeterministicHashMap::default(),
+            function_indices: DeterministicHashMap::default(),
             true_term: tru.uid(),
             false_term: fal.uid(),
             added_instantiations: HashMap::default(),
@@ -298,6 +304,7 @@ impl Egraph {
             arithmetic_terms: vec![],
             ddsmt,
             eager_skolem,
+            datalog,
             cnf_cache: Default::default(),
             decision_level: 0,
         }
@@ -518,22 +525,49 @@ impl Egraph {
                 func,
                 subterms
             );
-            let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
-            self.function_maps
-                .entry(func.to_string())
-                .or_default()
-                .push((num, subterms_u64));
+            if self.datalog {
+                let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
+                // let arg_eclasses: Vec<u64> =
+                //     subterms_u64.iter().map(|&a| self.find(a)).collect();
+                let func_str = func.to_string();
+                let arity = subterms_u64.len();
+                self.function_maps
+                    .entry(func_str.clone())
+                    .or_default()
+                    .push((num, subterms_u64.clone()));
+                let indices = self
+                    .function_indices
+                    .entry(func_str)
+                    .or_insert_with(|| vec![DeterministicHashMap::new(); arity]);
+                assert_eq!(indices.len(), arity);
+                for (i, &eclass) in subterms_u64.iter().enumerate() {
+                    indices[i].entry(eclass).or_default().push(num);
+                }
+            }
         };
 
         // inserting the ite term into the list of functions
         if let Ite(b, t1, t2) = term.repr() {
             let subterms = vec![b, t1, t2];
             debug_println!(5, 0, "We are adding the ite subterms {:?}", subterms);
-            let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
-            self.function_maps
-                .entry("ite".to_string())
-                .or_default()
-                .push((num, subterms_u64));
+            if self.datalog {
+                let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
+                // let arg_eclasses: Vec<u64> =
+                //     subterms_u64.iter().map(|&a| self.find(a)).collect();
+                let arity = subterms_u64.len();
+                self.function_maps
+                    .entry("ite".to_string())
+                    .or_default()
+                    .push((num, subterms_u64.clone()));
+                let indices = self
+                    .function_indices
+                    .entry("ite".to_string())
+                    .or_insert_with(|| vec![DeterministicHashMap::new(); arity]);
+                assert_eq!(indices.len(), arity);
+                for (i, &eclass) in subterms_u64.iter().enumerate() {
+                    indices[i].entry(eclass).or_default().push(num);
+                }
+            }
         };
 
         // TODO: inserting the term if it is a quantifier
@@ -924,6 +958,48 @@ impl Egraph {
                 .insert((num, func.to_string(), subterms_cloned));
         }
     }
+
+
+    // Not 100% sure if we need these because we can always look things up with find
+
+    // /// After merging two e-classes (old_root → new_root), update function_indices so that
+    // /// all entries previously keyed under old_root are moved to new_root.
+    // pub fn merge_function_indices(&mut self, old_root: u64, new_root: u64) {
+    //     for indices in self.function_indices.values_mut() {
+    //         for pos_idx in indices.iter_mut() {
+    //             if let Some(terms) = pos_idx.remove(&old_root) {
+    //                 pos_idx.entry(new_root).or_default().extend(terms);
+    //             }
+    //         }
+    //     }
+    // }
+
+    // /// Rebuild function_indices from scratch using the current union-find structure.
+    // /// Should be called after backtracking to restore index consistency.
+    // pub fn rebuild_function_indices(&mut self) {
+    //     self.function_indices.clear();
+    //     let entries: Vec<(String, u64, Vec<u64>)> = self
+    //         .function_maps
+    //         .iter()
+    //         .flat_map(|(name, terms)| {
+    //             terms
+    //                 .iter()
+    //                 .map(|(term_id, arg_ids)| (name.clone(), *term_id, arg_ids.clone()))
+    //         })
+    //         .collect();
+    //     for (func_name, term_id, arg_ids) in entries {
+    //         let arity = arg_ids.len();
+    //         let eclasses: Vec<u64> = arg_ids.iter().map(|&a| self.find(a)).collect();
+    //         let indices = self
+    //             .function_indices
+    //             .entry(func_name)
+    //             .or_insert_with(|| vec![DeterministicHashMap::new(); arity]);
+    //         assert_eq!(indices.len(), arity);
+    //         for (i, eclass) in eclasses.into_iter().enumerate() {
+    //             indices[i].entry(eclass).or_default().push(term_id);
+    //         }
+    //     }
+    // }
 
     // FIND operation for union-find
     // lazy find, keep finding the representative until you get to something that is a representative of itself

@@ -38,6 +38,9 @@ pub struct Args {
     /// Eagerly skolemize every quantifier
     #[arg(long, default_value_t = false)]
     pub eager_skolem: bool,
+    /// Enable egglog-style relational (datalog) pattern matching via function indices
+    #[arg(long, default_value_t = false)]
+    pub datalog: bool,
     /// Set timeout in seconds (0 means no timeout)
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,
