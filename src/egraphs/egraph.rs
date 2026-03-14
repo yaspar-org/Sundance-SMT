@@ -267,7 +267,13 @@ pub struct Egraph {
 }
 
 impl Egraph {
-    pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool, datalog: bool) -> Self {
+    pub fn new(
+        mut context: Context,
+        lazy_dt: bool,
+        ddsmt: bool,
+        eager_skolem: bool,
+        datalog: bool,
+    ) -> Self {
         let tru = context.get_true();
         let fal = context.get_false();
         let datatype_info = DatatypeInfo::from_context(&context);
@@ -958,7 +964,6 @@ impl Egraph {
                 .insert((num, func.to_string(), subterms_cloned));
         }
     }
-
 
     // Not 100% sure if we need these because we can always look things up with find
 
