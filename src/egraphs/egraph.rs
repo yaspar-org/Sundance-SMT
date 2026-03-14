@@ -228,7 +228,7 @@ pub struct Egraph {
     /// map from functions (String) -> terms of this function
     pub function_maps: DeterministicHashMap<String, Vec<(u64, Vec<u64>)>>, // maps a function name to a list of terms that are of that function
     /// per-argument-position index for relational pattern matching (egglog-style)
-    /// function_indices[f][i] maps an e-class id to all terms of f where the i-th argument belongs to that e-class
+    /// function_indices(f)(i) maps an e-class id to all terms of f where the i-th argument belongs to that e-class
     pub function_indices: DeterministicHashMap<String, Vec<DeterministicHashMap<u64, Vec<u64>>>>,
     /// uid for true
     pub true_term: u64,
