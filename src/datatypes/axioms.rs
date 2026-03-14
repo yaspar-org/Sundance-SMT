@@ -221,7 +221,7 @@ pub fn learn_ctor_selector_clauses(
         selector_apps.push(sel_app);
     }
 
-    // have the simple_sorted id for the global case and the simple id for the appp case
+    // have the simple_sorted id for the global case and the simple id for the app case
     let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
     let ctor_app = if selector_apps.is_empty() {
         egraph.global(ctor_id, Some(sort.clone()))
