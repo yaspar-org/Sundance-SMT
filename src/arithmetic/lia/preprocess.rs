@@ -6,6 +6,7 @@
 
 use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::variables::Var;
+use crate::debug_println;
 use std::collections::HashSet;
 
 /// Preprocessing result
@@ -43,19 +44,22 @@ pub fn preprocess(ctx: &mut ConvContext) -> PreprocessResult {
         } else {
             // immediately return if a trivially unsat relation (e.g. 0 <= -1) is found
             if r.is_trivial_unsat() {
-                log::debug!("query is trivially UNSAT");
+                debug_println!(21, 0, "lia::preprocess: query is trivially UNSAT");
                 return PreprocessResult::TriviallyUnsat(*v);
             }
         }
     }
-    log::debug!(
-        "num_monomials={}, num_trivial_relations={}",
+    debug_println!(
+        21,
+        0,
+        "lia::preprocess: num_monomials={}, num_trivial_relations={}",
         num_monomials,
         num_trivial
     );
     // Remove the trivially SAT relations (e.g. 0 <= 1).
     ctx.filter_vars(|v| !to_remove.contains(v));
     if ctx.num_relations() == 0 {
+        debug_println!(21, 0, "lia::preprocess: query is trivially SAT");
         return PreprocessResult::TriviallySat;
     }
     PreprocessResult::Unknown
