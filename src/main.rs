@@ -4,11 +4,13 @@
 use cadical_sys::Status;
 use clap::Parser;
 use std::fs;
+use std::sync::atomic::Ordering;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::egraphs::egraph::Egraph;
 use sundance_smt::preprocess::check_for_function_bool;
+use sundance_smt::stats;
 use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::TermAllocator;
 use yaspar_ir::ast::alg::{self};
@@ -17,6 +19,29 @@ use yaspar_ir::untyped::UntypedAst;
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
+
+    // Configure stats collection and signal handlers for graceful stat printing.
+    // Note: SIGKILL (kill -9) cannot be caught by any process; only SIGTERM/SIGINT are handled.
+    if args.stats {
+        stats::STATS_ENABLED.store(true, Ordering::Relaxed);
+
+        #[cfg(unix)]
+        // SAFETY: registering simple signal handlers before any threads are spawned.
+        unsafe {
+            unsafe extern "C" {
+                fn signal(
+                    signum: i32,
+                    handler: unsafe extern "C" fn(i32),
+                ) -> unsafe extern "C" fn(i32);
+            }
+            unsafe extern "C" fn on_signal(_: i32) {
+                stats::print_stats_to_stderr();
+                std::process::exit(1);
+            }
+            signal(2, on_signal); // SIGINT
+            signal(15, on_signal); // SIGTERM
+        }
+    }
 
     // Parse debug flag and level
     if args.debug > 0 {
@@ -178,6 +203,8 @@ fn main() -> Result<(), String> {
 
     let quantifiers = !egraph.quantifiers.is_empty();
 
+    stats::NUM_QUANTIFIERS.store(egraph.quantifiers.len(), Ordering::Relaxed);
+
     let return_value = cdcl_decision_procedure(
         &mut egraph,
         prop_skeleton,
@@ -200,5 +227,17 @@ fn main() -> Result<(), String> {
         Status::UNSATISFIABLE => println!("unsat"),
         Status::UNKNOWN => println!("unknown"),
     }
+
+    if args.stats {
+        println!(
+            "num-quantifiers: {}",
+            stats::NUM_QUANTIFIERS.load(Ordering::Relaxed)
+        );
+        println!(
+            "num-instantiations: {}",
+            stats::NUM_INSTANTIATIONS.load(Ordering::Relaxed)
+        );
+    }
+
     Ok(())
 }

@@ -41,4 +41,7 @@ pub struct Args {
     /// Set timeout in seconds (0 means no timeout)
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,
+    /// Print solver statistics (num-quantifiers, num-instantiations) after the result
+    #[arg(long, default_value_t = false)]
+    pub stats: bool,
 }

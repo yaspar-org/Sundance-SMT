@@ -15,6 +15,7 @@ use crate::log::is_important;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
+use crate::stats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
@@ -568,6 +569,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "Found quantifier instantiations {:?}",
             quantifier_instantiations
         );
+
+        stats::add_instantiations(quantifier_instantiations.len());
 
         if quantifier_instantiations.is_empty() {
             debug_println!(10, 0, "{}", self.egraph);
