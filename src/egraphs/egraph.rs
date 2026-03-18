@@ -269,6 +269,12 @@ pub struct Egraph {
     pub flat_atom_function_index: DeterministicHashMap<String, Vec<FlatAtom>>,
     /// counter for generating fresh variable IDs during pattern flattening
     pub fresh_var_counter: usize,
+    /// watermark for semi-naive evaluation: tracks how many function_maps entries per function
+    /// have been processed in previous matching rounds
+    pub function_maps_watermark: DeterministicHashMap<String, usize>,
+    /// the predecessor_hash at the time watermarks were last updated; if it changes, a backtrack
+    /// happened and watermarks must be reset
+    pub watermark_hash: u64,
     /// store CNF cache
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
@@ -324,6 +330,8 @@ impl Egraph {
             flat_patterns: DeterministicHashMap::new(),
             flat_atom_function_index: DeterministicHashMap::new(),
             fresh_var_counter: 0,
+            function_maps_watermark: DeterministicHashMap::new(),
+            watermark_hash: 1,
             cnf_cache: Default::default(),
             decision_level: 0,
         }
@@ -558,9 +566,11 @@ impl Egraph {
                     .function_indices
                     .entry(func_str)
                     .or_insert_with(|| vec![DeterministicHashMap::new(); arity]);
-                assert_eq!(indices.len(), arity);
-                for (i, &eclass) in subterms_u64.iter().enumerate() {
-                    indices[i].entry(eclass).or_default().push(num);
+                // Skip indexing if arity mismatch (overloaded function symbols)
+                if indices.len() == arity {
+                    for (i, &eclass) in subterms_u64.iter().enumerate() {
+                        indices[i].entry(eclass).or_default().push(num);
+                    }
                 }
             }
         };
@@ -582,9 +592,10 @@ impl Egraph {
                     .function_indices
                     .entry("ite".to_string())
                     .or_insert_with(|| vec![DeterministicHashMap::new(); arity]);
-                assert_eq!(indices.len(), arity);
-                for (i, &eclass) in subterms_u64.iter().enumerate() {
-                    indices[i].entry(eclass).or_default().push(num);
+                if indices.len() == arity {
+                    for (i, &eclass) in subterms_u64.iter().enumerate() {
+                        indices[i].entry(eclass).or_default().push(num);
+                    }
                 }
             }
         };
@@ -652,6 +663,9 @@ impl Egraph {
                         }
                     }
                     self.flat_patterns.insert(term.uid(), compiled);
+                    // New quantifier registered — reset watermarks so the next matching
+                    // round does a full pass (the new patterns need to see all existing entries).
+                    self.function_maps_watermark.clear();
                 }
             } else {
                 panic!("We have a quantifier {} without an annotation", term)

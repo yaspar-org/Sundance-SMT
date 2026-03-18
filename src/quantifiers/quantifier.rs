@@ -11,8 +11,10 @@ use crate::egraphs::datastructures::Polarity;
 use crate::egraphs::egraph::Egraph;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::proof_tracer::SMTProofTracker;
+use crate::quantifiers::datalogmatch;
 use crate::quantifiers::skolem::skolemize;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use std::collections::HashMap;
 
 use crate::debug_println;
 use crate::log::is_important;
@@ -38,7 +40,19 @@ pub fn instantiate_quantifiers(
 ) -> Vec<QuantifierInstance> {
     let quantifiers = &egraph.quantifiers.clone();
     let mut instantiations = vec![];
-    debug_println!(24, 0, "Starting a matching round");
+    debug_println!(26, 0, "Starting a matching round");
+
+    // If datalog is enabled, pre-compute all assignments via relational matching
+    let datalog_assignments: Option<HashMap<u64, Vec<DeterministicHashMap<String, Term>>>> =
+        if egraph.datalog {
+            datalogmatch::datalog_check_backtrack(egraph);
+            let results = datalogmatch::datalog_find_assignments(egraph);
+            datalogmatch::datalog_update_watermarks(egraph);
+            Some(results.into_iter().collect())
+        } else {
+            None
+        };
+
     for quantifier in quantifiers {
         debug_println!(
             19,
@@ -181,32 +195,40 @@ pub fn instantiate_quantifiers(
             "instantiating the quantifier {}",
             egraph.get_term(quantifier.id)
         );
-        let triggers = &quantifier.triggers;
-        // note we consider patterns in a multipattern conjunctively and multipatterns in a trigger disjunctively
-        for multipattern in triggers {
-            let body = quantifier.body;
-            let trigger_term_pairs = multipattern.iter().map(|t| (*t, None)).collect::<Vec<_>>();
 
-            let mut assignments = DeterministicHashMap::default();
-            debug_println!(12, 0, "after8");
+        // Phase: Find all variable assignments via matching
+        let list_assignments: Vec<(DeterministicHashMap<String, Term>, usize)> =
+            if let Some(ref dl) = datalog_assignments {
+                // Datalog path: use pre-computed relational matching results
+                dl.get(&quantifier.id)
+                    .map(|v| v.iter().map(|a| (a.clone(), 0usize)).collect())
+                    .unwrap_or_default()
+            } else {
+                // Classic path: per-multipattern recursive matching
+                let triggers = &quantifier.triggers;
+                let mut all_assignments = vec![];
+                for multipattern in triggers {
+                    let trigger_term_pairs =
+                        multipattern.iter().map(|t| (*t, None)).collect::<Vec<_>>();
+                    let mut assignments = DeterministicHashMap::default();
+                    let mp_assignments =
+                        match_term(&mut assignments, trigger_term_pairs, egraph);
+                    all_assignments.extend(mp_assignments);
+                }
+                all_assignments
+            };
+
+        if list_assignments.is_empty() {
             debug_println!(
-                19,
+                24,
                 0,
-                "About to match quantifier body {} with trigger {:?}",
-                egraph.get_term(body),
-                trigger_term_pairs
+                "No substitutions for {}",
+                egraph.get_term(quantifier.id)
             );
-            debug_println!(12, 0, "after9");
-            let list_assignments = match_term(&mut assignments, trigger_term_pairs, egraph);
+        }
 
-            if list_assignments.is_empty() {
-                debug_println!(
-                    24,
-                    0,
-                    "No substitutions for {}",
-                    egraph.get_term(quantifier.id)
-                );
-            }
+        {
+            let body = quantifier.body;
 
             debug_println!(7, 0, "We have the following list of assignments:");
             let mut substitutions = vec![];
@@ -221,7 +243,7 @@ pub fn instantiate_quantifiers(
                 if let Some(set) = egraph.added_instantiations.get(&quantifier.id)
                     && set.contains(subs)
                 {
-                    // println!("Skipping the instantiation {} for {}", t, egraph.get_term(quantifier.id));
+                    println!("Skipping the instantiation {:?} for {}", subs, egraph.get_term(quantifier.id));
                     continue;
                 }
                 egraph

@@ -11,6 +11,15 @@ use std::time::Duration;
 
 #[test]
 fn regression_test() {
+    run_regression_tests(&[]);
+}
+
+#[test]
+fn regression_test_datalog() {
+    run_regression_tests(&["--datalog"]);
+}
+
+fn run_regression_tests(extra_args: &[&str]) {
     let smt_files_dir = Path::new("tests/regression/smt_files");
     let expected_results_path = Path::new("tests/regression/expected_results.json");
 
@@ -45,6 +54,12 @@ fn regression_test() {
             }
         });
 
+    let suffix = if extra_args.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", extra_args.join(" "))
+    };
+
     // Statistics
     let mut correct = 0;
     let mut incorrect = 0;
@@ -54,7 +69,11 @@ fn regression_test() {
     // Process each subdirectory
     for subdir in subdirs {
         // continue;
-        println!("\nProcessing directory: {}", subdir.display());
+        println!(
+            "\nProcessing directory: {}{}",
+            subdir.display(),
+            suffix
+        );
 
         // Get all .smt2 files in the subdirectory
         let smt_files = fs::read_dir(&subdir)
@@ -87,12 +106,15 @@ fn regression_test() {
                 continue;
             };
 
-            print!("Testing file: {} ... ", relative_path);
+            print!("Testing file: {}{} ... ", relative_path, suffix);
             io::stdout().flush().unwrap();
 
             // Run solver with timeout
+            let mut args: Vec<&str> = vec![path.to_str().unwrap()];
+            args.extend_from_slice(extra_args);
+
             let child = Command::new("target/release/sundance-smt")
-                .args([path.to_str().unwrap()])
+                .args(&args)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
@@ -121,7 +143,7 @@ fn regression_test() {
     }
 
     // Print summary
-    println!("\nTest Summary:");
+    println!("\nTest Summary{}:", suffix);
     println!("Total tests: {}", total);
     println!("Correct:     {}", correct);
     println!("Incorrect:   {}", incorrect);
@@ -129,7 +151,7 @@ fn regression_test() {
 
     // Fail the test if there were any incorrect results
     if incorrect > 0 {
-        panic!("{} tests failed", incorrect);
+        panic!("{} tests failed{}", incorrect, suffix);
     }
 }
 
