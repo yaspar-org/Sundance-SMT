@@ -211,8 +211,7 @@ pub fn instantiate_quantifiers(
                     let trigger_term_pairs =
                         multipattern.iter().map(|t| (*t, None)).collect::<Vec<_>>();
                     let mut assignments = DeterministicHashMap::default();
-                    let mp_assignments =
-                        match_term(&mut assignments, trigger_term_pairs, egraph);
+                    let mp_assignments = match_term(&mut assignments, trigger_term_pairs, egraph);
                     all_assignments.extend(mp_assignments);
                 }
                 all_assignments

@@ -69,11 +69,7 @@ fn run_regression_tests(extra_args: &[&str]) {
     // Process each subdirectory
     for subdir in subdirs {
         // continue;
-        println!(
-            "\nProcessing directory: {}{}",
-            subdir.display(),
-            suffix
-        );
+        println!("\nProcessing directory: {}{}", subdir.display(), suffix);
 
         // Get all .smt2 files in the subdirectory
         let smt_files = fs::read_dir(&subdir)

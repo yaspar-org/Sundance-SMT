@@ -234,7 +234,10 @@ fn build_matching_index(egraph: &Egraph) -> MatchingIndex {
             for (i, &eclass) in entry.args.iter().enumerate() {
                 final_arg_index[i].entry(eclass).or_default().push(idx);
             }
-            final_output_index.entry(entry.output).or_default().push(idx);
+            final_output_index
+                .entry(entry.output)
+                .or_default()
+                .push(idx);
             final_entries.push(entry.clone());
         }
 
@@ -414,7 +417,11 @@ fn execute_join(
 }
 
 /// Evaluate a single multipattern (conjunctive query) with semi-naive evaluation.
-fn evaluate_multipattern(atoms: &[FlatAtom], index: &MatchingIndex, egraph: &Egraph) -> Vec<Binding> {
+fn evaluate_multipattern(
+    atoms: &[FlatAtom],
+    index: &MatchingIndex,
+    egraph: &Egraph,
+) -> Vec<Binding> {
     if atoms.is_empty() {
         return vec![];
     }
@@ -463,7 +470,14 @@ fn evaluate_multipattern(atoms: &[FlatAtom], index: &MatchingIndex, egraph: &Egr
             continue;
         }
 
-        let bindings = execute_join(&order, atoms, index, Some(pos), initial_binding.clone(), egraph);
+        let bindings = execute_join(
+            &order,
+            atoms,
+            index,
+            Some(pos),
+            initial_binding.clone(),
+            egraph,
+        );
 
         for b in bindings {
             // Dedup key uses canonical e-classes (bindings store raw UIDs).
@@ -527,7 +541,11 @@ pub fn datalog_find_assignments(
                     }
 
                     // Only include if all quantifier variables are bound
-                    if quantifier.variables.iter().all(|v| assignment.contains_key(v)) {
+                    if quantifier
+                        .variables
+                        .iter()
+                        .all(|v| assignment.contains_key(v))
+                    {
                         quant_assignments.push(assignment);
                     }
                 }
