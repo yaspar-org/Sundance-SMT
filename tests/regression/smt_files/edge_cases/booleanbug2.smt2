@@ -1,0 +1,8 @@
+(declare-sort S 0)
+(declare-fun f (Bool) S)
+(declare-const p Bool)
+(declare-const q Bool)
+(assert p)
+(assert q)
+(assert (not (= (f (=> p q)) (f true))))
+(check-sat)
