@@ -243,7 +243,7 @@ pub fn instantiate_quantifiers(
                 if let Some(set) = egraph.added_instantiations.get(&quantifier.id)
                     && set.contains(subs)
                 {
-                    println!("Skipping the instantiation {:?} for {}", subs, egraph.get_term(quantifier.id));
+                    // println!("Skipping the instantiation {:?} for {}", subs, egraph.get_term(quantifier.id));
                     continue;
                 }
                 egraph

@@ -62,14 +62,8 @@ pub fn flatten_pattern(
         }
 
         App(func, args, _) => {
-            let func_indices = &func.0.indices;
-            let func_name = if func_indices.is_empty() {
-                func.id_str().get().clone()
-            } else {
-                debug_assert_eq!(*func.id_str().get(), "is".to_string());
-                debug_assert_eq!(func_indices.len(), 1);
-                format!("(is {})", func_indices[0])
-            };
+            // Use func.to_string() to match the key format used in function_maps
+            let func_name = func.to_string();
             flatten_application(func_name, args.iter().collect(), quant_vars, fresh_counter)
         }
 
@@ -154,6 +148,11 @@ struct CanonEntry {
     output: u64,
     /// Canonical e-classes of the arguments.
     args: Vec<u64>,
+    /// Raw (original) argument UIDs — used for producing final variable bindings.
+    /// These are actual terms that exist in the egraph.
+    raw_args: Vec<u64>,
+    /// Raw (original) term UID for the output.
+    raw_output: u64,
 }
 
 /// Pre-built index for a single function symbol.
@@ -199,41 +198,44 @@ fn build_matching_index(egraph: &Egraph) -> MatchingIndex {
         }
 
         // Build entries partitioned: old entries first, then new entries.
+        // Each entry carries both canonical and raw UIDs.
         let mut old_entries = Vec::new();
         let mut new_entries = Vec::new();
         for (term_uid, arg_uids) in raw_entries {
+            if arg_uids.len() != arity {
+                continue; // Skip overloaded function symbols with mismatched arity
+            }
             let canon_output = egraph.find(*term_uid);
             let canon_args: Vec<u64> = arg_uids.iter().map(|a| egraph.find(*a)).collect();
-            let key = (canon_output, canon_args);
-            if old_canonical.contains(&key) {
-                old_entries.push(key);
+            let canon_key = (canon_output, canon_args.clone());
+            let entry = CanonEntry {
+                output: canon_output,
+                args: canon_args,
+                raw_args: arg_uids.clone(),
+                raw_output: *term_uid,
+            };
+            if old_canonical.contains(&canon_key) {
+                old_entries.push((canon_key, entry));
             } else {
-                new_entries.push(key);
+                new_entries.push((canon_key, entry));
             }
         }
-        // Dedup within each group
+        // Dedup within each group by canonical form
         let mut final_entries = Vec::new();
         let mut final_seen: HashSet<(u64, Vec<u64>)> = HashSet::new();
         let mut final_arg_index: Vec<HashMap<u64, Vec<usize>>> = vec![HashMap::new(); arity];
         let mut final_output_index: HashMap<u64, Vec<usize>> = HashMap::new();
 
-        for key in old_entries.iter().chain(new_entries.iter()) {
-            // Skip entries with mismatched arity (overloaded function symbols)
-            if key.1.len() != arity {
-                continue;
-            }
-            if !final_seen.insert(key.clone()) {
+        for (canon_key, entry) in old_entries.iter().chain(new_entries.iter()) {
+            if !final_seen.insert(canon_key.clone()) {
                 continue;
             }
             let idx = final_entries.len();
-            for (i, &eclass) in key.1.iter().enumerate() {
+            for (i, &eclass) in entry.args.iter().enumerate() {
                 final_arg_index[i].entry(eclass).or_default().push(idx);
             }
-            final_output_index.entry(key.0).or_default().push(idx);
-            final_entries.push(CanonEntry {
-                output: key.0,
-                args: key.1.clone(),
-            });
+            final_output_index.entry(entry.output).or_default().push(idx);
+            final_entries.push(entry.clone());
         }
 
         let old_count_final = final_entries
@@ -271,26 +273,40 @@ fn compute_join_order(atoms: &[FlatAtom], index: &MatchingIndex) -> Vec<usize> {
 
 /// Try to extend a binding with a function table entry for a given atom.
 /// Returns None if the entry is inconsistent with the current binding.
-fn try_extend_binding(binding: &Binding, atom: &FlatAtom, entry: &CanonEntry) -> Option<Binding> {
+///
+/// The binding stores **raw** UIDs (actual terms in the egraph). Consistency is
+/// checked using canonical e-classes (via `find()`), but new variables are bound
+/// to the raw UIDs from the entry. This ensures we only bind variables to terms
+/// that actually exist in the egraph.
+fn try_extend_binding(
+    binding: &Binding,
+    atom: &FlatAtom,
+    entry: &CanonEntry,
+    egraph: &Egraph,
+) -> Option<Binding> {
     let mut new_binding = binding.clone();
 
-    // Check/bind each argument
-    for (var, &eclass) in atom.args.iter().zip(entry.args.iter()) {
+    // Check/bind each argument: compare canonically, bind raw
+    for (var, (&canon_eclass, &raw_uid)) in atom
+        .args
+        .iter()
+        .zip(entry.args.iter().zip(entry.raw_args.iter()))
+    {
         match new_binding.get(var) {
-            Some(&bound) if bound == eclass => {} // consistent
-            Some(_) => return None,               // conflict
+            Some(&bound) if egraph.find(bound) == canon_eclass => {} // consistent
+            Some(_) => return None,                                  // conflict
             None => {
-                new_binding.insert(var.clone(), eclass);
+                new_binding.insert(var.clone(), raw_uid);
             }
         }
     }
 
-    // Check/bind output
+    // Check/bind output: compare canonically, bind raw
     match new_binding.get(&atom.output) {
-        Some(&bound) if bound == entry.output => {} // consistent
-        Some(_) => return None,                     // conflict
+        Some(&bound) if egraph.find(bound) == entry.output => {} // consistent
+        Some(_) => return None,                                  // conflict
         None => {
-            new_binding.insert(atom.output.clone(), entry.output);
+            new_binding.insert(atom.output.clone(), entry.raw_output);
         }
     }
 
@@ -299,19 +315,22 @@ fn try_extend_binding(binding: &Binding, atom: &FlatAtom, entry: &CanonEntry) ->
 
 /// Get candidate entry indices for an atom given the current binding.
 /// Uses the best available index for efficiency.
+/// Binding values are raw UIDs, so we canonicalize via `find()` before index lookup.
 fn get_candidates(
     table: &FuncTable,
     atom: &FlatAtom,
     binding: &Binding,
     delta_only: bool,
+    egraph: &Egraph,
 ) -> Vec<usize> {
     let mut best_candidates: Option<&Vec<usize>> = None;
     let mut best_size = usize::MAX;
 
-    // Check argument indices
+    // Check argument indices (canonicalize binding values for lookup)
     for (i, var) in atom.args.iter().enumerate() {
-        if let Some(&eclass) = binding.get(var) {
-            if let Some(candidates) = table.arg_index[i].get(&eclass) {
+        if let Some(&raw_uid) = binding.get(var) {
+            let canon = egraph.find(raw_uid);
+            if let Some(candidates) = table.arg_index[i].get(&canon) {
                 if candidates.len() < best_size {
                     best_size = candidates.len();
                     best_candidates = Some(candidates);
@@ -322,9 +341,10 @@ fn get_candidates(
         }
     }
 
-    // Check output index
-    if let Some(&eclass) = binding.get(&atom.output) {
-        if let Some(candidates) = table.output_index.get(&eclass) {
+    // Check output index (canonicalize binding value for lookup)
+    if let Some(&raw_uid) = binding.get(&atom.output) {
+        let canon = egraph.find(raw_uid);
+        if let Some(candidates) = table.output_index.get(&canon) {
             if candidates.len() < best_size {
                 best_candidates = Some(candidates);
             }
@@ -361,6 +381,7 @@ fn execute_join(
     index: &MatchingIndex,
     delta_position: Option<usize>,
     initial_binding: Binding,
+    egraph: &Egraph,
 ) -> Vec<Binding> {
     let mut bindings = vec![initial_binding];
 
@@ -374,10 +395,10 @@ fn execute_join(
 
         let mut new_bindings = Vec::new();
         for binding in &bindings {
-            let candidates = get_candidates(table, atom, binding, use_delta);
+            let candidates = get_candidates(table, atom, binding, use_delta, egraph);
             for entry_idx in candidates {
                 let entry = &table.entries[entry_idx];
-                if let Some(new_binding) = try_extend_binding(binding, atom, entry) {
+                if let Some(new_binding) = try_extend_binding(binding, atom, entry, egraph) {
                     new_bindings.push(new_binding);
                 }
             }
@@ -405,7 +426,7 @@ fn evaluate_multipattern(atoms: &[FlatAtom], index: &MatchingIndex, egraph: &Egr
     for atom in atoms {
         for var in atom.args.iter().chain(std::iter::once(&atom.output)) {
             if let FlatVar::Ground(uid) = var {
-                initial_binding.insert(var.clone(), egraph.find(*uid));
+                initial_binding.insert(var.clone(), *uid);
             }
         }
     }
@@ -442,22 +463,26 @@ fn evaluate_multipattern(atoms: &[FlatAtom], index: &MatchingIndex, egraph: &Egr
             continue;
         }
 
-        let bindings = execute_join(&order, atoms, index, Some(pos), initial_binding.clone());
+        let bindings = execute_join(&order, atoms, index, Some(pos), initial_binding.clone(), egraph);
 
         for b in bindings {
-            let mut key: Vec<u64> = b
+            // Dedup key uses canonical e-classes (bindings store raw UIDs).
+            // We pair each variable name with its canonical value to preserve
+            // the variable-to-value mapping (sorting by name, not by value).
+            let mut key: Vec<(String, u64)> = b
                 .iter()
                 .filter_map(|(k, v)| {
-                    if let FlatVar::Quantified(_) = k {
-                        Some(*v)
+                    if let FlatVar::Quantified(name) = k {
+                        Some((name.clone(), egraph.find(*v)))
                     } else {
                         None
                     }
                 })
                 .collect();
-            key.sort();
+            key.sort_by(|a, b| a.0.cmp(&b.0));
+            let key_vals: Vec<u64> = key.into_iter().map(|(_, v)| v).collect();
 
-            if seen.insert(key) {
+            if seen.insert(key_vals) {
                 all_bindings.push(b);
             }
         }
