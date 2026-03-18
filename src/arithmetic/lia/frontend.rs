@@ -4,7 +4,6 @@
 //! Conversion of SMT text to parser AST and then to [LinearSystem] relations
 //! and solver objects.
 
-use log;
 use std::collections;
 use std::fmt::{self, Display};
 use std::ops;
@@ -27,6 +26,7 @@ use crate::arithmetic::lia::solver_result_api::SolverDecisionApi;
 use crate::arithmetic::lia::tableau_dense::TableauDense;
 use crate::arithmetic::lia::types::{FBig, Integer, Rational, UBig};
 use crate::arithmetic::lia::variables::VarType;
+use crate::debug_println;
 
 /// Error type for conversion issues from [Term] to [Rel]
 #[derive(Debug)]
@@ -457,7 +457,12 @@ fn smt_to_terms(smt: &str) -> FrontendResult<Vec<Term>> {
 /// pre-processed away upstream.
 pub fn convert_smt(smt_input: &str) -> FrontendResult<ConvContext> {
     let terms = smt_to_terms(smt_input)?;
-    log::debug!("num_parsed_terms={}", terms.len());
+    debug_println!(
+        15,
+        0,
+        "lia::frontend: number of converted terms = {}",
+        terms.len()
+    );
     convert_terms(&terms)
 }
 
@@ -516,6 +521,13 @@ pub fn solve_ctx_raw(ctx: &mut ConvContext) -> FrontendResult<SolverDecision> {
     // preprocess the input relations, detect trivial cases, and otherwise return a [LinearSystem]
     // from which to build a solver.
     let result = preprocess(ctx);
+    debug_println!(
+        21,
+        0,
+        "lia::frontend: num_variables = {}, num_relations = {}",
+        ctx.num_variables(),
+        ctx.num_relations()
+    );
     let sys = match result {
         PreprocessResult::TriviallySat => {
             return Ok(SolverDecision::FEASIBLE(default_model(ctx.get_all_vars())));
@@ -690,7 +702,6 @@ mod tests {
 
     #[test]
     fn test_top_level_solve_smtlib() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let smt = r#"
 (set-logic QF_LRA)
 (declare-fun x0 () Real)
@@ -715,7 +726,6 @@ mod tests {
     /// relation "0 <= 5" should be removed during normalization.
     #[test]
     fn test_trivially_sat_relation_removal() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let smt_input = r#"
 (set-logic QF_LRA)
 (declare-fun x0 () Real)
@@ -746,7 +756,6 @@ mod tests {
     /// The resulting system is trivially satisfiable.
     #[test]
     fn test_trivially_sat() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let smt_input = r#"
 (set-logic QF_LRA)
 (declare-fun x0 () Real)
@@ -774,7 +783,6 @@ mod tests {
     /// the second relation.
     #[test]
     fn test_frontend_trivially_unsat_relation_preprocessing() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let smt_input = r#"
 (set-logic QF_LRA)
 (declare-fun x0 () Real)

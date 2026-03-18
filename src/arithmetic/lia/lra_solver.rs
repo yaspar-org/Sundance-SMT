@@ -7,7 +7,7 @@
 //! the rational solver methods and contains data like variable info and an underlying
 //! tableau representing a linear system.
 
-use log;
+use crate::debug_println;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -179,8 +179,10 @@ impl<T: Tableau> LRASolver<T> {
         pivot_col: usize,
         val: &QDelta,
     ) -> SolverResult<()> {
-        log::debug!(
-            "  pivot_and_update row={}, col={}, val={}",
+        debug_println!(
+            10,
+            0,
+            "lia::lra_solver:  pivot_and_update row={}, col={}, val={}",
             pivot_row,
             pivot_col,
             val
@@ -236,8 +238,10 @@ impl<T: Tableau> LRASolver<T> {
             .get(x)
             .ok_or(SolverError(format!("variable {0:?} does not exist", x)))?;
         let v = &mut self.variables[*idx];
-        log::debug!(
-            "assert_lower on variable {0:?}, lower={1}, non_basic?={2}",
+        debug_println!(
+            10,
+            0,
+            "lia::lra_solver: assert_lower on variable {0:?}, lower={1}, non_basic?={2}",
             v,
             l,
             v.is_non_basic().is_some()
@@ -246,27 +250,22 @@ impl<T: Tableau> LRASolver<T> {
         let bs = &v.bounds;
         if bs.above_upper(l) {
             // new lower bound is inconsistent with current upper bound
-            log::debug!("assert_lower: trivially inconsistent");
             return Ok(Some(false));
         } else if bs.above_lower(l) {
             // `l` is a tighter lower bound
-            log::debug!("assert_lower: new lower bound is an improvement");
             self.old_lower_bounds
                 .push((v.var, v.bounds.lower.clone(), self.backtrack_level));
             v.update_lower(l.clone());
-            log::debug!("assert_lower: new variable state: {v}");
         }
         // Note: in this check, l can be infinitesimally (in the QDelta sense) less or
         // equal to v.val
         if *l <= v.val {
-            log::debug!("assert_lower: current assignment satisfies new lower bound");
             return Ok(Some(true));
         }
         // if v.val is now outside the new lower bound, and v is a non-basic variable,
         // update v.val and adjust the basic variable values to maintain the tableau
         // invariant
         if let Some(col) = v.is_non_basic() {
-            log::debug!("assert_lower: updating tableaux");
             self.update(col, l);
         }
         Ok(None)
@@ -286,12 +285,6 @@ impl<T: Tableau> LRASolver<T> {
             .get(x)
             .ok_or(SolverError(format!("variable {0:?} does not exist", x)))?;
         let v = &mut self.variables[*idx];
-        log::debug!(
-            "assert_upper on variable {0:?}, upper={1}, non_basic?={2}",
-            v,
-            u,
-            v.is_non_basic().is_some()
-        );
 
         let bs = &v.bounds;
         if bs.below_lower(u) {
@@ -490,7 +483,6 @@ impl<T: Tableau> LRASolver<T> {
                     // strictly above the original lower bound
                     let d0 = (v.val.rat() - l.rat())
                         / (Rational::from(2) * (v.val.inf() - Rational::ONE).abs());
-                    log::debug!("d0 for var {} is {}", v, d0);
                     delta_ub.push(d0);
                 } else if l.inf().is_zero() && v.val.inf() < &Rational::ZERO {
                     // lower bound is non-strict, but assigned value is infinitesimally smaller
@@ -512,7 +504,6 @@ impl<T: Tableau> LRASolver<T> {
                     // strictly below the original upper bound
                     let d0 = (u.rat() - v.val.rat())
                         / (Rational::from(2) * (Rational::ONE + v.val.inf()).abs());
-                    log::debug!("d0 for var {} is {}", v, d0);
                     delta_ub.push(d0);
                 } else if u.inf().is_zero() && v.val.inf() > &Rational::ZERO {
                     // upper bound is non-strict, but assigned value is infinitesimally greater
@@ -527,7 +518,7 @@ impl<T: Tableau> LRASolver<T> {
         }
         let d0 = delta_ub.into_iter().min().unwrap_or(Rational::ONE); // choose δ_0 = 1 if there are no positive upper bounds
         debug_assert!(d0 >= Rational::ZERO);
-        log::debug!("δ_0 = {d0}");
+        debug_println!(10, 0, "lia::lra_solver: δ_0 = {d0}");
         d0
     }
 
@@ -554,7 +545,6 @@ impl<T: Tableau> LRASolver<T> {
         //   2. Switch to Bland's rule
         //
         for var in self.variables.iter() {
-            log::debug!("CONSIDER {}", var);
             let row = match var.is_basic() {
                 Some(r) => r,
                 None => continue,
@@ -565,11 +555,8 @@ impl<T: Tableau> LRASolver<T> {
             // 2. v.val is less than the lower bound
             // 3. v.val is greater than the upper bound
             if var.in_bounds() {
-                log::debug!("basic var (row {}) is in bounds: {}", row, var,);
                 continue;
             } else if var.below_lower() {
-                log::debug!("basic var (row {}) is below its lower bound: {}", row, var,);
-
                 // TODO: factor out loop code and simpler helper functions
                 // Try to increase basic_var's assignment to its lower bound
                 for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
@@ -580,8 +567,10 @@ impl<T: Tableau> LRASolver<T> {
                     {
                         // unwrap is safe because basic_var is below its lower bound
                         let basic_lower_bound = var.bounds.lower.as_ref().unwrap().clone();
-                        log::debug!(
-                            "pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
+                        debug_println!(
+                            15,
+                            0,
+                            "lia::lra_solver: pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
                             row,
                             var,
                             col,
@@ -596,7 +585,13 @@ impl<T: Tableau> LRASolver<T> {
                 self.state = LRASolverState::Unsat;
                 return Ok(SimplexStepResult::Infeasible(var.var));
             } else {
-                log::debug!("basic var (row {}) is above its upper bound: {}", row, var);
+                debug_println!(
+                    15,
+                    0,
+                    "lia::lra_solver: basic var (row {}) is above its upper bound: {}",
+                    row,
+                    var
+                );
                 debug_assert!(var.bounds.upper.is_some() && var.above_upper());
                 // Try to decrease basic_var's assignment to its upper bound
                 for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
@@ -611,8 +606,10 @@ impl<T: Tableau> LRASolver<T> {
                         // pivot basic_var and non_basic_var, update assignment of
                         // (previously) basic_var to its lower bound and then adjust all
                         // basic assignments so the equations hold
-                        log::debug!(
-                            "pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
+                        debug_println!(
+                            15,
+                            0,
+                            "lia::lra_solver: pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
                             row,
                             var,
                             col,
@@ -638,17 +635,29 @@ impl<T: Tableau> LRASolver<T> {
     pub fn solve(&mut self) -> SolverResult<SolverDecision> {
         let mut i: usize = 0;
         loop {
-            log::debug!("Stepping simplex, iteration {}", i);
+            debug_println!(21, 0, "lia::lra_solver: Stepping simplex, iteration {}", i);
             match self.step_simplex() {
                 Ok(SimplexStepResult::Unknown) => {
                     i += 1;
                 }
                 Ok(SimplexStepResult::Feasible) => {
                     let assg = self.compute_assignment();
+                    debug_println!(
+                        21,
+                        0,
+                        "lia::lra_solver::solve: simplex complete, num iterations = {}",
+                        i
+                    );
                     return Ok(SolverDecision::FEASIBLE(assg));
                 }
                 Ok(SimplexStepResult::Infeasible(v)) => {
                     let conflict = self.compute_conflict(v)?;
+                    debug_println!(
+                        21,
+                        0,
+                        "lia::lra_solver::solve: simplex complete, num iterations = {}",
+                        i
+                    );
                     return Ok(SolverDecision::INFEASIBLE(conflict));
                 }
                 Err(e) => return Err(e), // error
@@ -781,7 +790,12 @@ impl LRASolver<TableauDense> {
                 equations.len()
             )));
         }
-        log::debug!("LRASolver::from_eqs: nrows = {}", nrows);
+        debug_println!(
+            15,
+            0,
+            "lia::lra_solver: LRASolver::from_eqs: nrows = {}",
+            nrows
+        );
         // at this point: nrows == equations.len() > 0
         if equations[0].len() != ncols {
             return Err(SolverError(format!(
@@ -790,7 +804,12 @@ impl LRASolver<TableauDense> {
                 ncols,
             )));
         }
-        log::debug!("LRASolver::from_eqs: non_basic.len() = {}", ncols);
+        debug_println!(
+            15,
+            0,
+            "lia::lra_solver: LRASolver::from_eqs: non_basic.len() = {}",
+            ncols
+        );
 
         // Arrange non-basic (original) variables first, followed by basic (slack) variables
         let mut var_to_idx = BTreeMap::new();
@@ -832,7 +851,6 @@ mod tests {
     use crate::arithmetic::lia::context::ConvContext;
     use crate::arithmetic::lia::variables::{Var, VarInfo};
     use dashu::rbig;
-    use env_logger;
 
     #[test]
     fn initial_hl_tableau_invariants() {
@@ -1109,8 +1127,6 @@ mod tests {
 
     #[test]
     fn ex_5_6_run_simplex() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         // s1 | 1  1    2 <= s1
         // s2 | 2 -1    0 <= s2
         // s3 |-1  2    1 <= s3
@@ -1154,7 +1170,6 @@ mod tests {
 
     #[test]
     fn ex_triangle_hole_run_simplex_conflict() {
-        let _ = env_logger::builder().is_test(true).try_init();
         let mut tableau = ex_triangle_hole_infeasible();
         match tableau.solve().expect("Failed to run simplex") {
             SolverDecision::INFEASIBLE(conflict) => {
