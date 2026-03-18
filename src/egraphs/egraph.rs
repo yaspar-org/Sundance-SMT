@@ -10,6 +10,7 @@ use crate::egraphs::datastructures::{
 };
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
+use crate::quantifiers::datalogmatch::{self, FlatAtom};
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use sat_interface::Formula;
 use std::collections::{HashMap, HashSet};
@@ -260,6 +261,14 @@ pub struct Egraph {
     pub eager_skolem: bool,
     /// user flag for whether to enable egglog-style relational (datalog) pattern matching
     pub datalog: bool,
+    /// all flattened relational atoms from quantifier patterns (only populated when datalog is enabled)
+    pub flat_atoms: DeterministicHashSet<FlatAtom>,
+    /// for each quantifier (by uid), for each multipattern (disjunctive), the flattened atoms (conjunctive)
+    pub flat_patterns: DeterministicHashMap<u64, Vec<Vec<FlatAtom>>>,
+    /// index from function name to all flat atoms referencing that function (across all quantifiers)
+    pub flat_atom_function_index: DeterministicHashMap<String, Vec<FlatAtom>>,
+    /// counter for generating fresh variable IDs during pattern flattening
+    pub fresh_var_counter: usize,
     /// store CNF cache
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
@@ -311,6 +320,10 @@ impl Egraph {
             ddsmt,
             eager_skolem,
             datalog,
+            flat_atoms: DeterministicHashSet::new(),
+            flat_patterns: DeterministicHashMap::new(),
+            flat_atom_function_index: DeterministicHashMap::new(),
+            fresh_var_counter: 0,
             cnf_cache: Default::default(),
             decision_level: 0,
         }
@@ -531,16 +544,16 @@ impl Egraph {
                 func,
                 subterms
             );
+            let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
+            let func_str = func.to_string();
+            self.function_maps
+                .entry(func_str.clone())
+                .or_default()
+                .push((num, subterms_u64.clone()));
             if self.datalog {
-                let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
                 // let arg_eclasses: Vec<u64> =
                 //     subterms_u64.iter().map(|&a| self.find(a)).collect();
-                let func_str = func.to_string();
                 let arity = subterms_u64.len();
-                self.function_maps
-                    .entry(func_str.clone())
-                    .or_default()
-                    .push((num, subterms_u64.clone()));
                 let indices = self
                     .function_indices
                     .entry(func_str)
@@ -613,13 +626,33 @@ impl Egraph {
 
                 self.quantifiers.push(Quantifier {
                     triggers: trigger_ids,
-                    variables,
+                    variables: variables.clone(),
                     body: inner_term.uid(),
                     id: term.uid(),
                     guard,
                     polarity,
                     skolemized: false,
                 });
+
+                if self.datalog {
+                    let trigger_refs: Vec<Vec<&Term>> =
+                        triggers.iter().map(|mp| mp.iter().collect()).collect();
+                    let compiled = datalogmatch::compile_multipatterns(
+                        &trigger_refs,
+                        &variables,
+                        &mut self.fresh_var_counter,
+                    );
+                    for multipattern_atoms in &compiled {
+                        for atom in multipattern_atoms {
+                            self.flat_atoms.insert(atom.clone());
+                            self.flat_atom_function_index
+                                .entry(atom.func.clone())
+                                .or_default()
+                                .push(atom.clone());
+                        }
+                    }
+                    self.flat_patterns.insert(term.uid(), compiled);
+                }
             } else {
                 panic!("We have a quantifier {} without an annotation", term)
             }
