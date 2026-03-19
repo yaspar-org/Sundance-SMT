@@ -775,6 +775,20 @@ pub fn union(
     );
     make_root(y, proof_parent, egraph);
 
+    // Reset watermarks for functions affected by this merge, and merge root_to_functions
+    if egraph.datalog {
+        if let Some(y_funcs) = egraph.root_to_functions.remove(&y_root) {
+            for func in &y_funcs {
+                egraph.function_maps_watermark.remove(func);
+            }
+            egraph
+                .root_to_functions
+                .entry(x_root)
+                .or_default()
+                .extend(y_funcs);
+        }
+    }
+
     // need to add the new disequalities into x_root
     // TODO: could also clean up some backtracking stuff here, probably want to factor this into its own function
     let (x_root_disequalities_edge, y_root_disequalities_edge) = if x_root > y_root {

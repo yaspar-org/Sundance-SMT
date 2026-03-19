@@ -275,6 +275,16 @@ pub struct Egraph {
     /// the predecessor_hash at the time watermarks were last updated; if it changes, a backtrack
     /// happened and watermarks must be reset
     pub watermark_hash: u64,
+    /// Reverse index: maps each e-class root to the set of function names that have entries
+    /// referencing that e-class. We track both term UIDs (outputs) and arg UIDs because:
+    /// - Args: if an arg's root changes via merge, the canonical arg tuple of the entry changes,
+    ///   so the function table's canonical view has new entries (e.g., `f(a,b)` where `find(a)`
+    ///   now equals some ground constant from a pattern).
+    /// - Outputs (term UIDs): if the output's root changes, the `output_index` in the matching
+    ///   index has new canonical keys, affecting patterns that constrain the output variable.
+    /// On union of x_root and y_root, we look up y_root here to find affected functions and
+    /// reset their watermarks so semi-naive evaluation re-examines them.
+    pub root_to_functions: HashMap<u64, HashSet<String>>,
     /// store CNF cache
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
@@ -332,6 +342,7 @@ impl Egraph {
             fresh_var_counter: 0,
             function_maps_watermark: DeterministicHashMap::new(),
             watermark_hash: 1,
+            root_to_functions: HashMap::new(),
             cnf_cache: Default::default(),
             decision_level: 0,
         }
@@ -562,6 +573,7 @@ impl Egraph {
                 // let arg_eclasses: Vec<u64> =
                 //     subterms_u64.iter().map(|&a| self.find(a)).collect();
                 let arity = subterms_u64.len();
+                let func_str_clone = func_str.clone();
                 let indices = self
                     .function_indices
                     .entry(func_str)
@@ -571,6 +583,14 @@ impl Egraph {
                     for (i, &eclass) in subterms_u64.iter().enumerate() {
                         indices[i].entry(eclass).or_default().push(num);
                     }
+                }
+                // Update root_to_functions for semi-naive watermark invalidation
+                for &uid in std::iter::once(&num).chain(subterms_u64.iter()) {
+                    let root = self.find(uid);
+                    self.root_to_functions
+                        .entry(root)
+                        .or_default()
+                        .insert(func_str_clone.clone());
                 }
             }
         };
@@ -596,6 +616,14 @@ impl Egraph {
                     for (i, &eclass) in subterms_u64.iter().enumerate() {
                         indices[i].entry(eclass).or_default().push(num);
                     }
+                }
+                // Update root_to_functions for ite
+                for &uid in std::iter::once(&num).chain(subterms_u64.iter()) {
+                    let root = self.find(uid);
+                    self.root_to_functions
+                        .entry(root)
+                        .or_default()
+                        .insert("ite".to_string());
                 }
             }
         };

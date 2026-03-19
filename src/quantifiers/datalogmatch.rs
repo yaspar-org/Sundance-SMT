@@ -334,11 +334,31 @@ fn get_candidates(
         if let Some(&raw_uid) = binding.get(var) {
             let canon = egraph.find(raw_uid);
             if let Some(candidates) = table.arg_index[i].get(&canon) {
+                debug_println!(
+                    26,
+                    0,
+                    "      get_candidates: arg[{}] {} bound to raw={} canon={} -> {} candidates",
+                    i,
+                    var,
+                    raw_uid,
+                    canon,
+                    candidates.len()
+                );
                 if candidates.len() < best_size {
                     best_size = candidates.len();
                     best_candidates = Some(candidates);
                 }
             } else {
+                debug_println!(
+                    26,
+                    0,
+                    "      get_candidates: arg[{}] {} bound to raw={} canon={} -> NO MATCH (index keys: {:?})",
+                    i,
+                    var,
+                    raw_uid,
+                    canon,
+                    table.arg_index[i].keys().collect::<Vec<_>>()
+                );
                 return vec![]; // No entries match this bound argument
             }
         }
@@ -423,10 +443,35 @@ fn evaluate_multipattern(
     egraph: &Egraph,
 ) -> Vec<Binding> {
     if atoms.is_empty() {
+        debug_println!(26, 0, "  evaluate_multipattern: empty atoms, returning");
         return vec![];
     }
 
+    debug_println!(26, 0, "  evaluate_multipattern: {} atoms", atoms.len());
+    for (i, atom) in atoms.iter().enumerate() {
+        let table_size = index
+            .tables
+            .get(&atom.func)
+            .map(|t| t.entries.len())
+            .unwrap_or(0);
+        let table_old = index
+            .tables
+            .get(&atom.func)
+            .map(|t| t.old_count)
+            .unwrap_or(0);
+        debug_println!(
+            26,
+            0,
+            "    atom[{}]: {}  (table size={}, old={})",
+            i,
+            atom,
+            table_size,
+            table_old
+        );
+    }
+
     let order = compute_join_order(atoms, index);
+    debug_println!(26, 0, "  join order: {:?}", order);
 
     // Initialize binding with ground variables
     let mut initial_binding = Binding::new();
@@ -436,6 +481,17 @@ fn evaluate_multipattern(
                 initial_binding.insert(var.clone(), *uid);
             }
         }
+    }
+    if !initial_binding.is_empty() {
+        debug_println!(
+            26,
+            0,
+            "  initial ground bindings: {:?}",
+            initial_binding
+                .iter()
+                .map(|(k, v)| format!("{} -> {} (canon={})", k, v, egraph.find(*v)))
+                .collect::<Vec<_>>()
+        );
     }
 
     // Semi-naive optimization: check if any atom has new (delta) entries.
@@ -450,6 +506,7 @@ fn evaluate_multipattern(
     });
 
     if !any_has_delta {
+        debug_println!(26, 0, "  no delta entries for any atom, skipping");
         return vec![];
     }
 
@@ -467,8 +524,25 @@ fn evaluate_multipattern(
             .unwrap_or(false);
 
         if !has_delta {
+            debug_println!(
+                26,
+                0,
+                "  pass pos={}: atom[{}] ({}) has no delta, skipping",
+                pos,
+                atom_idx,
+                func
+            );
             continue;
         }
+
+        debug_println!(
+            26,
+            0,
+            "  pass pos={}: atom[{}] ({}) using delta",
+            pos,
+            atom_idx,
+            func
+        );
 
         let bindings = execute_join(
             &order,
@@ -477,6 +551,13 @@ fn evaluate_multipattern(
             Some(pos),
             initial_binding.clone(),
             egraph,
+        );
+
+        debug_println!(
+            26,
+            0,
+            "    join produced {} raw bindings",
+            bindings.len()
         );
 
         for b in bindings {
@@ -497,11 +578,36 @@ fn evaluate_multipattern(
             let key_vals: Vec<u64> = key.into_iter().map(|(_, v)| v).collect();
 
             if seen.insert(key_vals) {
+                debug_println!(
+                    26,
+                    0,
+                    "    new binding: {:?}",
+                    b.iter()
+                        .filter_map(|(k, v)| {
+                            if let FlatVar::Quantified(name) = k {
+                                Some(format!(
+                                    "{}={} (canon={})",
+                                    name,
+                                    egraph.get_term(*v),
+                                    egraph.find(*v)
+                                ))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                );
                 all_bindings.push(b);
             }
         }
     }
 
+    debug_println!(
+        26,
+        0,
+        "  total unique bindings: {}",
+        all_bindings.len()
+    );
     all_bindings
 }
 
@@ -510,6 +616,26 @@ fn evaluate_multipattern(
 pub fn datalog_check_backtrack(egraph: &mut Egraph) {
     if egraph.predecessor_hash != egraph.watermark_hash {
         egraph.function_maps_watermark.clear();
+        // Rebuild root_to_functions from scratch since backtracking may have
+        // un-merged e-classes, invalidating the merged root_to_functions map.
+        rebuild_root_to_functions(egraph);
+    }
+}
+
+/// Rebuild root_to_functions from function_maps using current union-find state.
+pub fn rebuild_root_to_functions(egraph: &mut Egraph) {
+    egraph.root_to_functions.clear();
+    for (func_name, entries) in &egraph.function_maps {
+        for (term_uid, arg_uids) in entries {
+            for &uid in std::iter::once(term_uid).chain(arg_uids.iter()) {
+                let root = egraph.find(uid);
+                egraph
+                    .root_to_functions
+                    .entry(root)
+                    .or_default()
+                    .insert(func_name.clone());
+            }
+        }
     }
 }
 
@@ -551,16 +677,16 @@ pub fn datalog_find_assignments(
                 }
             }
 
-            if !quant_assignments.is_empty() {
+            // if !quant_assignments.is_empty() {
                 debug_println!(
-                    24,
+                    26,
                     0,
                     "Datalog matcher found {} assignments for quantifier {}",
                     quant_assignments.len(),
                     egraph.get_term(quantifier.id)
                 );
                 results.push((quantifier.id, quant_assignments));
-            }
+            // }
         }
     }
 
