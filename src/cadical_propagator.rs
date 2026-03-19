@@ -15,8 +15,9 @@ use crate::log::is_important;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, ExternalPropagator};
+use indexmap::IndexMap;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -383,7 +384,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // once we get to level 0, we don't need to keep track of this anymore since we have reached the bottom case
         if level == 0 {
-            self.egraph.predecessors_created_by_quantifiers = DeterministicHashMap::new();
+            self.egraph.predecessors_created_by_quantifiers = IndexMap::new();
         }
 
         // redoing the union_to_eclass stuff

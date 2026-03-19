@@ -237,7 +237,7 @@ pub struct Egraph {
     /// this is a list of skolemized terms
     pub added_skolemizations: DeterministicHashSet<u64>,
     /// keeps track of terms created by quantifier instantiation and their predecessors
-    pub predecessors_created_by_quantifiers: DeterministicHashMap<u64, DeterministicHashSet<u64>>,
+    pub predecessors_created_by_quantifiers: IndexMap<u64, DeterministicHashSet<u64>>,
     /// keeps track of info about datatypes
     pub datatype_info: DatatypeInfo,
     /// keeps track of all constructors (from dt preprocessing pass)
@@ -289,7 +289,7 @@ impl Egraph {
             false_term: fal.uid(),
             added_instantiations: HashMap::default(),
             added_skolemizations: DeterministicHashSet::default(),
-            predecessors_created_by_quantifiers: DeterministicHashMap::new(),
+            predecessors_created_by_quantifiers: IndexMap::new(),
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             union_to_eclass: DeterministicHashSet::new(),
