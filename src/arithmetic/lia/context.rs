@@ -3,7 +3,7 @@
 
 //! Context tracked during SMT to [crate::arithmetic::lia::linear_system::LinearSystem] conversion
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dashu::Rational;
 
@@ -63,6 +63,8 @@ pub struct ConvContext {
     relations: Vec<Rel<Rational>>,
     /// List of (slack) variables corresponding to relations in `self.relations`
     relation_vars: Vec<Var>,
+    /// All variables in the context, no matter how they are allocated
+    all_variables: HashSet<Var>,
 }
 
 impl ConvContext {
@@ -76,6 +78,7 @@ impl ConvContext {
             var_to_term: HashMap::new(),
             relations: Vec::new(),
             relation_vars: Vec::new(),
+            all_variables: HashSet::new(),
         }
     }
 
@@ -92,6 +95,11 @@ impl ConvContext {
     /// Return the number of contained relations
     pub fn num_relations(&self) -> usize {
         self.relations.len()
+    }
+
+    /// Return the number of defined variables
+    pub fn num_variables(&self) -> usize {
+        self.all_variables.len()
     }
 
     /// Filter associated variables and relations based on a variable predicate
@@ -126,6 +134,7 @@ impl ConvContext {
         // TODO: intern the strings instead of copying
         self.name_to_var.insert(name.to_string(), new_var);
         self.var_to_name.insert(new_var, name.to_string());
+        self.all_variables.insert(new_var);
         new_var
     }
 
@@ -146,6 +155,7 @@ impl ConvContext {
         self.var_to_name.insert(new_var, name.to_string());
         self.term_to_var.insert(term.clone(), new_var);
         self.var_to_term.insert(new_var, term);
+        self.all_variables.insert(new_var);
         new_var
     }
 
@@ -189,6 +199,7 @@ impl ConvContext {
         self.var_to_term.insert(new_var, term);
         self.name_to_var.insert(new_var_name.clone(), new_var);
         self.var_to_name.insert(new_var, new_var_name);
+        self.all_variables.insert(new_var);
         new_var
     }
 
@@ -231,13 +242,13 @@ impl ConvContext {
         self.term_to_var.get(&term).copied()
     }
 
-    /// Copy and return all the ids in the context
+    /// Copy and return all the vars in the context
     pub fn get_all_vars(&self) -> impl Iterator<Item = Var> {
-        self.var_to_name.keys().copied()
+        self.all_variables.clone().into_iter()
     }
 
     #[allow(dead_code)]
-    /// Get name associated with an id, if present
+    /// Get name associated with an var, if present
     pub fn get_name(&self, var: Var) -> Option<&str> {
         self.var_to_name.get(&var).map(|s| s.as_str())
     }

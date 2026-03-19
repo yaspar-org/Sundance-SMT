@@ -31,8 +31,6 @@ impl SolverDecisionApi {
     ) -> SolverResult<Self> {
         match decision {
             SolverDecision::FEASIBLE(assg) => {
-                log::debug!("from_solver_decision: assg {:?}", assg);
-                log::debug!("from_solver_decision: term map {:?}", var_term_map);
                 // let term_assign = BTreeMap::new();
                 let term_assign = assg
                     .into_iter()

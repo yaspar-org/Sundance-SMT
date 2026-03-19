@@ -432,7 +432,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         if !self.disequalities.borrow_mut().is_empty() {
             debug_println!(
-                7,
+                24,
                 0,
                 "Trying to check model when the disequalities are not empty"
             );
