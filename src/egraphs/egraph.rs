@@ -11,6 +11,7 @@ use crate::egraphs::datastructures::{
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use indexmap::IndexMap;
 use sat_interface::Formula;
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
@@ -273,7 +274,7 @@ impl Egraph {
             proof_forest: vec![ProofForestEdge::Root {
                 size: 1000,
                 child: 0,
-                disequalities: DeterministicHashMap::new(),
+                disequalities: IndexMap::new(),
                 children: DeterministicHashSet::new(),
             }], // think about whether using a vector or hashmap is better here
             // note: this is an option because if you are a subterm of a quantifier, you are not in the proof forest. TODO: maybe there is a better way to think about this
@@ -408,7 +409,7 @@ impl Egraph {
         &mut self,
         term: &Term,
         guard: Option<u64>,
-        disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
+        disequalities: Option<IndexMap<u64, DisequalTerm>>,
     ) -> bool {
         // returns a vector of literals which do not occur in the propositional skeleton
         debug_println!(
@@ -429,7 +430,7 @@ impl Egraph {
                 ProofForestEdge::Root {
                     size: 1000,
                     child: 0,
-                    disequalities: DeterministicHashMap::new(),
+                    disequalities: IndexMap::new(),
                     children: DeterministicHashSet::new(),
                 },
             );
@@ -471,7 +472,7 @@ impl Egraph {
         //             term: None,
         //             parent: 0,
         //             child: 0,
-        //             disequalities: DeterministicHashMap::new(),
+        //             disequalities: IndexMap::new(),
         //             level: 0,
         //             hash: 0,
         //             children: DeterministicHashSet::new()
@@ -490,7 +491,7 @@ impl Egraph {
         //             term: None,
         //             parent: 0,
         //             child: 0,
-        //             disequalities: DeterministicHashMap::new(),
+        //             disequalities: IndexMap::new(),
         //             level: 0,
         //             hash: 0,
         //             children: DeterministicHashSet::new()
@@ -600,7 +601,7 @@ impl Egraph {
                 ProofForestEdge::Root {
                     size: 1000,
                     child: 0,
-                    disequalities: DeterministicHashMap::new(),
+                    disequalities: IndexMap::new(),
                     children: DeterministicHashSet::new(),
                 },
             );
@@ -718,7 +719,7 @@ impl Egraph {
                         size: 0,
                         parent: term_num,
                         child: *pred_key,
-                        disequalities: DeterministicHashMap::new(),
+                        disequalities: IndexMap::new(),
                         level: self.decision_level,
                         hash: self.predecessor_hash,
                         children: DeterministicHashSet::new(),
@@ -753,7 +754,7 @@ impl Egraph {
         parent: Option<u64>,
         guard: Option<u64>,
         from_quantifier: bool,
-        disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
+        disequalities: Option<IndexMap<u64, DisequalTerm>>,
     ) {
         debug_println!(
             22,

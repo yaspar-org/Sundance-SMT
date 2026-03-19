@@ -6,6 +6,7 @@
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
+use indexmap::IndexMap;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{FetchSort, IdentifierKind, Repr, Term, TermAllocator};
 
@@ -45,7 +46,7 @@ pub fn process_assignment(
                 term: Some((*t, egraph.true_term)),
                 parent: 0,
                 child: 0,
-                disequalities: DeterministicHashMap::new(),
+                disequalities: IndexMap::new(),
                 level,
                 hash: egraph.predecessor_hash,
                 children: DeterministicHashSet::new(),
@@ -81,7 +82,7 @@ pub fn process_assignment(
                 term: Some((*t, egraph.false_term)),
                 parent: 0,
                 child: 0,
-                disequalities: DeterministicHashMap::new(),
+                disequalities: IndexMap::new(),
                 level,
                 hash: egraph.predecessor_hash,
                 children: DeterministicHashSet::new(),
@@ -199,7 +200,7 @@ pub fn process_assignment(
                     term: Some((t1, t2)),
                     parent: 0,
                     child: 0,
-                    disequalities: DeterministicHashMap::new(),
+                    disequalities: IndexMap::new(),
                     level,
                     hash: egraph.predecessor_hash,
                     children: DeterministicHashSet::new(),
@@ -938,7 +939,7 @@ fn make_root(vertex: u64, proof_parent: ProofForestEdge, egraph: &mut Egraph) {
                     pairs,
                     parent: vertex,
                     child: parent,
-                    disequalities: DeterministicHashMap::new(),
+                    disequalities: IndexMap::new(),
                     level,
                     hash,
                     children,
@@ -965,7 +966,7 @@ fn make_root(vertex: u64, proof_parent: ProofForestEdge, egraph: &mut Egraph) {
                     term,
                     parent: vertex,
                     child: parent,
-                    disequalities: DeterministicHashMap::new(),
+                    disequalities: IndexMap::new(),
                     level,
                     hash,
                     children,
@@ -1209,7 +1210,7 @@ fn union_predecessors(
                         pairs: terms_pairwise,
                         parent: 0,
                         child: 0,
-                        disequalities: DeterministicHashMap::new(),
+                        disequalities: IndexMap::new(),
                         level,
                         hash: egraph.predecessor_hash,
                         children: DeterministicHashSet::new(),
@@ -1394,7 +1395,7 @@ pub fn proof_forest_backtrack(
     let childs_child = get_child(&child_edge);
 
     // we are adding disequalities from the "parent" edge to the child
-    let mut new_disequalities = DeterministicHashMap::new();
+    let mut new_disequalities = IndexMap::new();
     for (k, v) in child_edge.disequalities().iter() {
         if egraph.valid_hash(v.hash, v.level) {
             debug_println!(11, 0, "Keeping disequality {}: {} in {}", k, v, child);

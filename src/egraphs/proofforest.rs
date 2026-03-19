@@ -4,7 +4,8 @@
 //! datastructures for proof forest inside of the egraph
 use crate::debug_println;
 use crate::egraphs::datastructures::DisequalTerm;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use crate::utils::DeterministicHashSet;
+use indexmap::IndexMap;
 use std::fmt;
 
 /// Represents an edge in the egraph's proof forest
@@ -16,7 +17,7 @@ pub enum ProofForestEdge {
     Root {
         size: u64, // TODO: I don't know of a good way to recover the size when backtracking, so I need to figure out an efficient way to do this or maybe just remove size
         child: u64, // TODO: I am not 100% sure if child actually does anything, I think it is useful for reversing edges in the proof forest, but not 100% sure
-        disequalities: DeterministicHashMap<u64, DisequalTerm>, // TODO: this might lead to a lot of allocations
+        disequalities: IndexMap<u64, DisequalTerm>, // TODO: this might lead to a lot of allocations
         children: DeterministicHashSet<u64>,
     },
     /// Represents a node with an equality relationship
@@ -25,7 +26,7 @@ pub enum ProofForestEdge {
         size: u64,
         parent: u64,
         child: u64,
-        disequalities: DeterministicHashMap<u64, DisequalTerm>,
+        disequalities: IndexMap<u64, DisequalTerm>,
         level: usize,
         hash: u64,
         children: DeterministicHashSet<u64>,
@@ -36,7 +37,7 @@ pub enum ProofForestEdge {
         size: u64,
         parent: u64,
         child: u64,
-        disequalities: DeterministicHashMap<u64, DisequalTerm>,
+        disequalities: IndexMap<u64, DisequalTerm>,
         level: usize,
         hash: u64,
         children: DeterministicHashSet<u64>,
@@ -169,7 +170,7 @@ impl ProofForestEdge {
     }
 
     /// Get a reference to the disequalities vector for any ProofForestEdge variant
-    pub fn disequalities(&self) -> &DeterministicHashMap<u64, DisequalTerm> {
+    pub fn disequalities(&self) -> &IndexMap<u64, DisequalTerm> {
         match self {
             ProofForestEdge::Root { disequalities, .. } => disequalities,
             ProofForestEdge::Equality { disequalities, .. } => disequalities,
@@ -187,7 +188,7 @@ impl ProofForestEdge {
     }
 
     /// Get a mutable reference to the disequalities vector for any ProofForestEdge variant
-    pub fn disequalities_mut(&mut self) -> &mut DeterministicHashMap<u64, DisequalTerm> {
+    pub fn disequalities_mut(&mut self) -> &mut IndexMap<u64, DisequalTerm> {
         match self {
             ProofForestEdge::Root { disequalities, .. } => disequalities,
             ProofForestEdge::Equality { disequalities, .. } => disequalities,
@@ -196,10 +197,7 @@ impl ProofForestEdge {
     }
 
     /// Set the disequalities in a ProofForestEdge
-    pub fn set_disequalities(
-        self,
-        diseq: DeterministicHashMap<u64, DisequalTerm>,
-    ) -> ProofForestEdge {
+    pub fn set_disequalities(self, diseq: IndexMap<u64, DisequalTerm>) -> ProofForestEdge {
         match self {
             ProofForestEdge::Root {
                 size,
