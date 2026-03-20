@@ -28,7 +28,7 @@ impl fmt::Display for Egraph {
         writeln!(f, "Predecessor relationships: {}", self.predecessors.len())?;
         writeln!(f, "Assertions: {}", self.assertions.len())?;
         writeln!(f, "Quantifiers: {}", self.quantifiers.len())?;
-        writeln!(f, "Function maps: {}", self.function_maps.len())?;
+        writeln!(f, "Function entries: {}", self.function_entries.len())?;
 
         // Proof forest structure
         if !self.proof_forest.is_empty() {
@@ -171,10 +171,10 @@ impl fmt::Display for Egraph {
             }
         }
 
-        // Function maps
-        if !self.function_maps.is_empty() {
+        // Function entries (raw log)
+        if !self.function_entries.is_empty() {
             writeln!(f, "\n=== Function Applications ===")?;
-            for (func_name, applications) in self.function_maps.iter() {
+            for (func_name, applications) in self.function_entries.iter() {
                 writeln!(f, "  {}: {} applications", func_name, applications.len())?;
                 for (term_id, subterms) in applications {
                     write!(f, "    {} (", self.get_term(*term_id))?;
@@ -226,11 +226,21 @@ pub struct Egraph {
     pub assertions: Vec<Assertion>,
     /// this is a list of quantifiers
     pub quantifiers: Vec<Quantifier>,
-    /// map from functions (String) -> terms of this function
-    pub function_maps: DeterministicHashMap<String, Vec<(u64, Vec<u64>)>>, // maps a function name to a list of terms that are of that function
-    /// per-argument-position index for relational pattern matching (egglog-style)
-    /// function_indices(f)(i) maps an e-class id to all terms of f where the i-th argument belongs to that e-class
-    pub function_indices: DeterministicHashMap<String, Vec<DeterministicHashMap<u64, Vec<u64>>>>,
+    /// Append-only raw log of function applications: F -> Vec<(term_uid, arg_uids)>.
+    /// Never modified after insertion; used by the traditional (non-datalog) matcher.
+    pub function_entries: DeterministicHashMap<String, Vec<(u64, Vec<u64>)>>,
+    /// Canonical output index: F -> (e-class root -> f-node UIDs in that output e-class).
+    /// Updated on every union; uses persistent data structure for O(1) snapshot/restore.
+    pub function_maps: im::OrdMap<String, im::OrdMap<u64, Vec<u64>>>,
+    /// Canonical arg index: F -> arg_pos -> (e-class root -> f-node UIDs using that e-class at that position).
+    /// Updated on every union; uses persistent data structure for O(1) snapshot/restore.
+    pub function_indices: im::OrdMap<String, Vec<im::OrdMap<u64, Vec<u64>>>>,
+    /// Snapshot stack for function_maps/function_indices: saved at each decision level for backtracking.
+    pub function_index_snapshots: Vec<(usize, im::OrdMap<String, im::OrdMap<u64, Vec<u64>>>, im::OrdMap<String, Vec<im::OrdMap<u64, Vec<u64>>>>)>,
+    /// Terms created by quantifier instantiations that need to be re-added to canonical indices
+    /// after backtracking. Each entry is (func_name, term_uid, arg_uids).
+    /// Cleared at level 0 since all terms are permanent at that point.
+    pub terms_added_by_quantifiers: Vec<(String, u64, Vec<u64>)>,
     /// uid for true
     pub true_term: u64,
     /// uid for false
@@ -269,22 +279,12 @@ pub struct Egraph {
     pub flat_atom_function_index: DeterministicHashMap<String, Vec<FlatAtom>>,
     /// counter for generating fresh variable IDs during pattern flattening
     pub fresh_var_counter: usize,
-    /// watermark for semi-naive evaluation: tracks how many function_maps entries per function
+    /// watermark for semi-naive evaluation: tracks how many function_entries entries per function
     /// have been processed in previous matching rounds
     pub function_maps_watermark: DeterministicHashMap<String, usize>,
     /// the predecessor_hash at the time watermarks were last updated; if it changes, a backtrack
     /// happened and watermarks must be reset
     pub watermark_hash: u64,
-    /// Reverse index: maps each e-class root to the set of function names that have entries
-    /// referencing that e-class. We track both term UIDs (outputs) and arg UIDs because:
-    /// - Args: if an arg's root changes via merge, the canonical arg tuple of the entry changes,
-    ///   so the function table's canonical view has new entries (e.g., `f(a,b)` where `find(a)`
-    ///   now equals some ground constant from a pattern).
-    /// - Outputs (term UIDs): if the output's root changes, the `output_index` in the matching
-    ///   index has new canonical keys, affecting patterns that constrain the output variable.
-    /// On union of x_root and y_root, we look up y_root here to find affected functions and
-    /// reset their watermarks so semi-naive evaluation re-examines them.
-    pub root_to_functions: HashMap<u64, HashSet<String>>,
     /// store CNF cache
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
@@ -319,8 +319,11 @@ impl Egraph {
             predecessor_level: vec![1, 1],
             assertions: vec![],
             quantifiers: vec![],
-            function_maps: DeterministicHashMap::default(),
-            function_indices: DeterministicHashMap::default(),
+            function_entries: DeterministicHashMap::default(),
+            function_maps: im::OrdMap::new(),
+            function_indices: im::OrdMap::new(),
+            function_index_snapshots: Vec::new(),
+            terms_added_by_quantifiers: Vec::new(),
             true_term: tru.uid(),
             false_term: fal.uid(),
             added_instantiations: HashMap::default(),
@@ -342,7 +345,6 @@ impl Egraph {
             fresh_var_counter: 0,
             function_maps_watermark: DeterministicHashMap::new(),
             watermark_hash: 1,
-            root_to_functions: HashMap::new(),
             cnf_cache: Default::default(),
             decision_level: 0,
         }
@@ -565,33 +567,13 @@ impl Egraph {
             );
             let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
             let func_str = func.to_string();
-            self.function_maps
+            // Append to raw log (used by traditional matcher)
+            self.function_entries
                 .entry(func_str.clone())
                 .or_default()
                 .push((num, subterms_u64.clone()));
             if self.datalog {
-                // let arg_eclasses: Vec<u64> =
-                //     subterms_u64.iter().map(|&a| self.find(a)).collect();
-                let arity = subterms_u64.len();
-                let func_str_clone = func_str.clone();
-                let indices = self
-                    .function_indices
-                    .entry(func_str)
-                    .or_insert_with(|| vec![DeterministicHashMap::new(); arity]);
-                // Skip indexing if arity mismatch (overloaded function symbols)
-                if indices.len() == arity {
-                    for (i, &eclass) in subterms_u64.iter().enumerate() {
-                        indices[i].entry(eclass).or_default().push(num);
-                    }
-                }
-                // Update root_to_functions for semi-naive watermark invalidation
-                for &uid in std::iter::once(&num).chain(subterms_u64.iter()) {
-                    let root = self.find(uid);
-                    self.root_to_functions
-                        .entry(root)
-                        .or_default()
-                        .insert(func_str_clone.clone());
-                }
+                self.insert_into_canonical_indices(func_str, num, &subterms_u64);
             }
         };
 
@@ -599,32 +581,13 @@ impl Egraph {
         if let Ite(b, t1, t2) = term.repr() {
             let subterms = vec![b, t1, t2];
             debug_println!(5, 0, "We are adding the ite subterms {:?}", subterms);
+            let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
+            self.function_entries
+                .entry("ite".to_string())
+                .or_default()
+                .push((num, subterms_u64.clone()));
             if self.datalog {
-                let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
-                // let arg_eclasses: Vec<u64> =
-                //     subterms_u64.iter().map(|&a| self.find(a)).collect();
-                let arity = subterms_u64.len();
-                self.function_maps
-                    .entry("ite".to_string())
-                    .or_default()
-                    .push((num, subterms_u64.clone()));
-                let indices = self
-                    .function_indices
-                    .entry("ite".to_string())
-                    .or_insert_with(|| vec![DeterministicHashMap::new(); arity]);
-                if indices.len() == arity {
-                    for (i, &eclass) in subterms_u64.iter().enumerate() {
-                        indices[i].entry(eclass).or_default().push(num);
-                    }
-                }
-                // Update root_to_functions for ite
-                for &uid in std::iter::once(&num).chain(subterms_u64.iter()) {
-                    let root = self.find(uid);
-                    self.root_to_functions
-                        .entry(root)
-                        .or_default()
-                        .insert("ite".to_string());
-                }
+                self.insert_into_canonical_indices("ite".to_string(), num, &subterms_u64);
             }
         };
 
@@ -938,6 +901,14 @@ impl Egraph {
         // Recursively insert predecessors for all subterms
         let (func, subterms) = get_subterms(term);
 
+        // Track function applications created by quantifier instantiations for re-insertion
+        // after backtracking (only when datalog is on).
+        if from_quantifier && self.datalog && !subterms.is_empty() {
+            let subterms_u64: Vec<u64> = subterms.iter().map(|t| t.uid()).collect();
+            self.terms_added_by_quantifiers
+                .push((func.to_string(), num, subterms_u64));
+        }
+
         // for forall  and Exists terms, we need to add the subterms to the terms_list but not to any of the other data structures
         if let Exists(_, _) | Forall(_, _) = term.repr() {
             for subterm in subterms {
@@ -1080,6 +1051,117 @@ impl Egraph {
     //         }
     //     }
     // }
+
+    /// Insert a function application into the canonical output index (function_maps)
+    /// and the canonical arg index (function_indices).
+    pub fn insert_into_canonical_indices(
+        &mut self,
+        func: String,
+        term_uid: u64,
+        arg_uids: &[u64],
+    ) {
+        // Compute all canonical roots upfront to avoid borrow conflicts
+        let output_root = self.find(term_uid);
+        let arg_roots: Vec<u64> = arg_uids.iter().map(|&a| self.find(a)).collect();
+        let arity = arg_uids.len();
+        // Insert into function_maps: output e-class -> f-node UIDs
+        self.function_maps
+            .entry(func.clone())
+            .or_default()
+            .entry(output_root)
+            .or_insert_with(Vec::new)
+            .push(term_uid);
+        // Insert into function_indices: per-arg-position e-class -> f-node UIDs
+        let arg_maps = self
+            .function_indices
+            .entry(func)
+            .or_insert_with(|| vec![im::OrdMap::new(); arity]);
+        // Skip indexing if arity mismatch (overloaded function symbols)
+        if arg_maps.len() == arity {
+            for (i, &arg_root) in arg_roots.iter().enumerate() {
+                arg_maps[i]
+                    .entry(arg_root)
+                    .or_insert_with(Vec::new)
+                    .push(term_uid);
+            }
+        }
+    }
+
+    /// Merge entries in function_maps and function_indices from old_root into new_root.
+    /// Called during union when two e-classes are merged.
+    pub fn merge_function_index_roots(&mut self, old_root: u64, new_root: u64) {
+        // Merge output index entries: any f-node whose output was in old_root now belongs to new_root
+        let func_keys: Vec<String> = self.function_maps.keys().cloned().collect();
+        for func in func_keys {
+            let output_map = self.function_maps.get_mut(&func).unwrap();
+            if let Some(old_entries) = output_map.remove(&old_root) {
+                let new_entries = output_map.entry(new_root).or_insert_with(Vec::new);
+                new_entries.extend(old_entries);
+            }
+        }
+        // Merge arg index entries: for each function and each arg position
+        let func_keys: Vec<String> = self.function_indices.keys().cloned().collect();
+        for func in func_keys {
+            let arg_maps = self.function_indices.get_mut(&func).unwrap();
+            for pos_map in arg_maps.iter_mut() {
+                if let Some(old_entries) = pos_map.remove(&old_root) {
+                    let new_entries = pos_map.entry(new_root).or_insert_with(Vec::new);
+                    new_entries.extend(old_entries);
+                }
+            }
+        }
+    }
+
+    /// Save a snapshot of the canonical indices at the given decision level.
+    /// If a snapshot already exists at this level (e.g., level 0 may be re-entered),
+    /// we update it with the current state.
+    pub fn snapshot_function_indices(&mut self, level: usize) {
+        if let Some((snap_level, _, _)) = self.function_index_snapshots.last() {
+            if *snap_level == level {
+                // Update the existing snapshot at this level
+                let last = self.function_index_snapshots.last_mut().unwrap();
+                last.1 = self.function_maps.clone();
+                last.2 = self.function_indices.clone();
+                return;
+            }
+        }
+        self.function_index_snapshots.push((
+            level,
+            self.function_maps.clone(),
+            self.function_indices.clone(),
+        ));
+    }
+
+    /// Restore the canonical indices to the snapshot at the given decision level,
+    /// then re-insert terms that were added by quantifier instantiations.
+    pub fn restore_function_indices(&mut self, level: usize) {
+        // Pop snapshots until we find the right level
+        while let Some((snap_level, _, _)) = self.function_index_snapshots.last() {
+            if *snap_level > level {
+                self.function_index_snapshots.pop();
+            } else {
+                break;
+            }
+        }
+        if let Some((snap_level, snap_maps, snap_indices)) = self.function_index_snapshots.last() {
+            if *snap_level == level {
+                self.function_maps = snap_maps.clone();
+                self.function_indices = snap_indices.clone();
+            }
+        }
+        // Re-insert terms that were created by quantifier instantiations.
+        // These terms are permanent in the egraph but were added after the snapshot,
+        // so they need to be re-added to the restored canonical indices.
+        let terms_to_readd: Vec<(String, u64, Vec<u64>)> =
+            self.terms_added_by_quantifiers.clone();
+        for (func, term_uid, arg_uids) in terms_to_readd {
+            self.insert_into_canonical_indices(func, term_uid, &arg_uids);
+        }
+        // Clear at level 0 since everything is permanent
+        if level == 0 {
+            self.terms_added_by_quantifiers.clear();
+        }
+    }
 
     // FIND operation for union-find
     // lazy find, keep finding the representative until you get to something that is a representative of itself

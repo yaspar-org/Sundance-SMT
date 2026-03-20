@@ -174,85 +174,85 @@ struct MatchingIndex {
 
 type Binding = HashMap<FlatVar, u64>;
 
-/// Build the matching index from function_maps, canonicalizing all e-classes.
+/// Build the matching index from the canonical function_maps and function_indices.
+///
+/// Since function_maps and function_indices are already maintained in canonical form
+/// (updated on every union), we just need to:
+/// 1. Collect all f-node UIDs from function_maps (output index)
+/// 2. Look up their raw args from function_entries
+/// 3. Build per-entry CanonEntry structs
+/// 4. Build the per-argument and output hash indices for the matching engine
 fn build_matching_index(egraph: &Egraph) -> MatchingIndex {
     let mut tables = HashMap::new();
 
-    for (func_name, raw_entries) in &egraph.function_maps {
-        let old_watermark = egraph
-            .function_maps_watermark
-            .get(func_name)
-            .copied()
+    for (func_name, output_map) in &egraph.function_maps {
+        // Collect all f-node UIDs and determine arity from function_entries
+        let raw_entries_opt = egraph.function_entries.get(func_name);
+        if raw_entries_opt.is_none() {
+            continue;
+        }
+
+        // Build a lookup: term_uid -> raw arg_uids from function_entries
+        let raw_lookup: HashMap<u64, &Vec<u64>> = raw_entries_opt
+            .unwrap()
+            .iter()
+            .map(|(uid, args)| (*uid, args))
+            .collect();
+
+        let arity = raw_entries_opt
+            .unwrap()
+            .first()
+            .map(|(_, args)| args.len())
             .unwrap_or(0);
 
-        let arity = raw_entries.first().map(|(_, args)| args.len()).unwrap_or(0);
-
-        // Track which canonical entries are "old" (existed before this round)
-        let mut old_canonical: HashSet<(u64, Vec<u64>)> = HashSet::new();
-
-        // First pass: identify old canonical entries
-        for (term_uid, arg_uids) in raw_entries.iter().take(old_watermark) {
-            let canon_output = egraph.find(*term_uid);
-            let canon_args: Vec<u64> = arg_uids.iter().map(|a| egraph.find(*a)).collect();
-            old_canonical.insert((canon_output, canon_args));
-        }
-
-        // Build entries partitioned: old entries first, then new entries.
-        // Each entry carries both canonical and raw UIDs.
-        let mut old_entries = Vec::new();
-        let mut new_entries = Vec::new();
-        for (term_uid, arg_uids) in raw_entries {
-            if arg_uids.len() != arity {
-                continue; // Skip overloaded function symbols with mismatched arity
-            }
-            let canon_output = egraph.find(*term_uid);
-            let canon_args: Vec<u64> = arg_uids.iter().map(|a| egraph.find(*a)).collect();
-            let canon_key = (canon_output, canon_args.clone());
-            let entry = CanonEntry {
-                output: canon_output,
-                args: canon_args,
-                raw_args: arg_uids.clone(),
-                raw_output: *term_uid,
-            };
-            if old_canonical.contains(&canon_key) {
-                old_entries.push((canon_key, entry));
-            } else {
-                new_entries.push((canon_key, entry));
-            }
-        }
-        // Dedup within each group by canonical form
         let mut final_entries = Vec::new();
-        let mut final_seen: HashSet<(u64, Vec<u64>)> = HashSet::new();
         let mut final_arg_index: Vec<HashMap<u64, Vec<usize>>> = vec![HashMap::new(); arity];
         let mut final_output_index: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut seen: HashSet<u64> = HashSet::new(); // dedup by f-node UID
 
-        for (canon_key, entry) in old_entries.iter().chain(new_entries.iter()) {
-            if !final_seen.insert(canon_key.clone()) {
-                continue;
+        // Iterate over the canonical output index
+        for (canon_output, fnode_uids) in output_map {
+            for &fnode_uid in fnode_uids {
+                if !seen.insert(fnode_uid) {
+                    continue;
+                }
+                let raw_args = match raw_lookup.get(&fnode_uid) {
+                    Some(args) => args,
+                    None => continue,
+                };
+                if raw_args.len() != arity {
+                    continue;
+                }
+                // Get canonical args from function_indices (they're already canonical there)
+                let canon_args: Vec<u64> = raw_args.iter().map(|a| egraph.find(*a)).collect();
+                let idx = final_entries.len();
+                for (i, &canon_arg) in canon_args.iter().enumerate() {
+                    final_arg_index[i].entry(canon_arg).or_default().push(idx);
+                }
+                final_output_index
+                    .entry(*canon_output)
+                    .or_default()
+                    .push(idx);
+                final_entries.push(CanonEntry {
+                    output: *canon_output,
+                    args: canon_args,
+                    raw_args: (*raw_args).clone(),
+                    raw_output: fnode_uid,
+                });
             }
-            let idx = final_entries.len();
-            for (i, &eclass) in entry.args.iter().enumerate() {
-                final_arg_index[i].entry(eclass).or_default().push(idx);
-            }
-            final_output_index
-                .entry(entry.output)
-                .or_default()
-                .push(idx);
-            final_entries.push(entry.clone());
         }
 
-        let old_count_final = final_entries
-            .iter()
-            .take_while(|e| old_canonical.contains(&(e.output, e.args.clone())))
-            .count();
-
+        // For semi-naive: all entries are treated as new (old_count = 0) since the
+        // canonical indices are always up-to-date. The watermark tracking is no longer
+        // needed because the persistent data structure handles backtracks.
+        // TODO: re-implement semi-naive with the persistent indices if performance requires it
         tables.insert(
             func_name.clone(),
             FuncTable {
                 entries: final_entries,
                 arg_index: final_arg_index,
                 output_index: final_output_index,
-                old_count: old_count_final,
+                old_count: 0,
             },
         );
     }
@@ -612,30 +612,11 @@ fn evaluate_multipattern(
 }
 
 /// Reset watermarks if a backtrack has occurred since the last matching round.
-/// Must be called before building the matching index.
+/// With persistent canonical indices, backtracking is handled by snapshot/restore
+/// in notify_backtrack, so this just updates the watermark hash.
 pub fn datalog_check_backtrack(egraph: &mut Egraph) {
     if egraph.predecessor_hash != egraph.watermark_hash {
         egraph.function_maps_watermark.clear();
-        // Rebuild root_to_functions from scratch since backtracking may have
-        // un-merged e-classes, invalidating the merged root_to_functions map.
-        rebuild_root_to_functions(egraph);
-    }
-}
-
-/// Rebuild root_to_functions from function_maps using current union-find state.
-pub fn rebuild_root_to_functions(egraph: &mut Egraph) {
-    egraph.root_to_functions.clear();
-    for (func_name, entries) in &egraph.function_maps {
-        for (term_uid, arg_uids) in entries {
-            for &uid in std::iter::once(term_uid).chain(arg_uids.iter()) {
-                let root = egraph.find(uid);
-                egraph
-                    .root_to_functions
-                    .entry(root)
-                    .or_default()
-                    .insert(func_name.clone());
-            }
-        }
     }
 }
 
@@ -695,7 +676,7 @@ pub fn datalog_find_assignments(
 
 /// Update watermarks after a matching round.
 pub fn datalog_update_watermarks(egraph: &mut Egraph) {
-    for (func_name, entries) in &egraph.function_maps {
+    for (func_name, entries) in &egraph.function_entries {
         egraph
             .function_maps_watermark
             .insert(func_name.clone(), entries.len());

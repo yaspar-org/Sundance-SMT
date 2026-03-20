@@ -564,7 +564,7 @@ fn find_assignments_on_term(
     let mut list_assignments = Vec::new();
 
     // let func_name = &func.id_str().to_string();
-    let function_terms = egraph.function_maps.get(func_name);
+    let function_terms = egraph.function_entries.get(func_name);
     // if there are no terms of this function, then we cannot do a specific instantiation
     if function_terms.is_none() {
         debug_println!(5, 0, "Function term not found: {}", func_name);

@@ -775,18 +775,9 @@ pub fn union(
     );
     make_root(y, proof_parent, egraph);
 
-    // Reset watermarks for functions affected by this merge, and merge root_to_functions
+    // Merge canonical function index entries from y_root into x_root
     if egraph.datalog {
-        if let Some(y_funcs) = egraph.root_to_functions.remove(&y_root) {
-            for func in &y_funcs {
-                egraph.function_maps_watermark.remove(func);
-            }
-            egraph
-                .root_to_functions
-                .entry(x_root)
-                .or_default()
-                .extend(y_funcs);
-        }
+        egraph.merge_function_index_roots(y_root, x_root);
     }
 
     // need to add the new disequalities into x_root
