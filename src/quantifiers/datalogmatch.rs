@@ -163,8 +163,17 @@ struct FuncTable {
     arg_index: Vec<HashMap<u64, Vec<usize>>>,
     /// Output index: output_index[eclass] = entry indices with that output eclass.
     output_index: HashMap<u64, Vec<usize>>,
-    /// Number of entries that existed before the current round (for semi-naive).
-    old_count: usize,
+    /// Whether this function's output index has been modified since the last matching round.
+    output_hot: bool,
+    /// Per-argument hot flags: arg_hot[i] = true means position i has been modified.
+    arg_hot: Vec<bool>,
+}
+
+impl FuncTable {
+    /// A function is hot if its output index or any arg index has been modified.
+    fn is_hot(&self) -> bool {
+        self.output_hot || self.arg_hot.iter().any(|&h| h)
+    }
 }
 
 /// The matching index, built once at the start of each matching round.
@@ -242,17 +251,24 @@ fn build_matching_index(egraph: &Egraph) -> MatchingIndex {
             }
         }
 
-        // For semi-naive: all entries are treated as new (old_count = 0) since the
-        // canonical indices are always up-to-date. The watermark tracking is no longer
-        // needed because the persistent data structure handles backtracks.
-        // TODO: re-implement semi-naive with the persistent indices if performance requires it
+        let output_hot = egraph
+            .function_maps_hot
+            .get(func_name)
+            .copied()
+            .unwrap_or(true);
+        let arg_hot = egraph
+            .function_indices_hot
+            .get(func_name)
+            .cloned()
+            .unwrap_or_else(|| vec![true; arity]);
         tables.insert(
             func_name.clone(),
             FuncTable {
                 entries: final_entries,
                 arg_index: final_arg_index,
                 output_index: final_output_index,
-                old_count: 0,
+                output_hot,
+                arg_hot,
             },
         );
     }
@@ -319,6 +335,9 @@ fn try_extend_binding(
 /// Get candidate entry indices for an atom given the current binding.
 /// Uses the best available index for efficiency.
 /// Binding values are raw UIDs, so we canonicalize via `find()` before index lookup.
+///
+/// When `delta_only` is true, returns empty if the function is not hot (no changes
+/// since last round). Otherwise returns all matching candidates.
 fn get_candidates(
     table: &FuncTable,
     atom: &FlatAtom,
@@ -326,6 +345,11 @@ fn get_candidates(
     delta_only: bool,
     egraph: &Egraph,
 ) -> Vec<usize> {
+    // Semi-naive: if delta_only and this function hasn't changed, skip entirely
+    if delta_only && !table.is_hot() {
+        return vec![];
+    }
+
     let mut best_candidates: Option<&Vec<usize>> = None;
     let mut best_size = usize::MAX;
 
@@ -377,21 +401,10 @@ fn get_candidates(
     }
 
     match best_candidates {
-        Some(candidates) => {
-            if delta_only {
-                candidates
-                    .iter()
-                    .filter(|&&idx| idx >= table.old_count)
-                    .copied()
-                    .collect()
-            } else {
-                candidates.clone()
-            }
-        }
+        Some(candidates) => candidates.clone(),
         None => {
             // No bound variables — full scan
-            let start = if delta_only { table.old_count } else { 0 };
-            (start..table.entries.len()).collect()
+            (0..table.entries.len()).collect()
         }
     }
 }
@@ -454,19 +467,19 @@ fn evaluate_multipattern(
             .get(&atom.func)
             .map(|t| t.entries.len())
             .unwrap_or(0);
-        let table_old = index
+        let is_hot = index
             .tables
             .get(&atom.func)
-            .map(|t| t.old_count)
-            .unwrap_or(0);
+            .map(|t| t.is_hot())
+            .unwrap_or(false);
         debug_println!(
             26,
             0,
-            "    atom[{}]: {}  (table size={}, old={})",
+            "    atom[{}]: {}  (table size={}, hot={})",
             i,
             atom,
             table_size,
-            table_old
+            is_hot
         );
     }
 
@@ -494,14 +507,12 @@ fn evaluate_multipattern(
         );
     }
 
-    // Semi-naive optimization: check if any atom has new (delta) entries.
-    // Watermarks are reset on backtracks (detected via predecessor_hash change),
-    // so after a backtrack all entries are treated as new.
+    // Semi-naive: check if any atom's function is hot (modified since last round).
     let any_has_delta = order.iter().any(|&atom_idx| {
         index
             .tables
             .get(&atoms[atom_idx].func)
-            .map(|t| t.old_count < t.entries.len())
+            .map(|t| t.is_hot())
             .unwrap_or(false)
     });
 
@@ -510,8 +521,9 @@ fn evaluate_multipattern(
         return vec![];
     }
 
-    // For each atom position that has delta, run a pass where that atom
-    // uses only new entries (all others use all entries). Union results.
+    // For each atom position whose function is hot, run a pass where that atom
+    // uses only delta (= all entries, since the whole table is hot).
+    // Other atoms use all entries. Union results.
     let mut all_bindings = Vec::new();
     let mut seen: HashSet<Vec<u64>> = HashSet::new();
 
@@ -520,14 +532,14 @@ fn evaluate_multipattern(
         let has_delta = index
             .tables
             .get(func)
-            .map(|t| t.old_count < t.entries.len())
+            .map(|t| t.is_hot())
             .unwrap_or(false);
 
         if !has_delta {
             debug_println!(
                 26,
                 0,
-                "  pass pos={}: atom[{}] ({}) has no delta, skipping",
+                "  pass pos={}: atom[{}] ({}) not hot, skipping",
                 pos,
                 atom_idx,
                 func
@@ -538,7 +550,7 @@ fn evaluate_multipattern(
         debug_println!(
             26,
             0,
-            "  pass pos={}: atom[{}] ({}) using delta",
+            "  pass pos={}: atom[{}] ({}) is hot, using delta",
             pos,
             atom_idx,
             func
@@ -611,14 +623,9 @@ fn evaluate_multipattern(
     all_bindings
 }
 
-/// Reset watermarks if a backtrack has occurred since the last matching round.
-/// With persistent canonical indices, backtracking is handled by snapshot/restore
-/// in notify_backtrack, so this just updates the watermark hash.
-pub fn datalog_check_backtrack(egraph: &mut Egraph) {
-    if egraph.predecessor_hash != egraph.watermark_hash {
-        egraph.function_maps_watermark.clear();
-    }
-}
+/// No-op: backtracking is handled by snapshot/restore in notify_backtrack.
+/// Hot flags are set by the persistent index operations.
+pub fn datalog_check_backtrack(_egraph: &mut Egraph) {}
 
 /// Main entry point: find all new variable assignments for all quantifiers.
 ///
@@ -674,14 +681,9 @@ pub fn datalog_find_assignments(
     results
 }
 
-/// Update watermarks after a matching round.
+/// Reset hot flags after a matching round.
 pub fn datalog_update_watermarks(egraph: &mut Egraph) {
-    for (func_name, entries) in &egraph.function_entries {
-        egraph
-            .function_maps_watermark
-            .insert(func_name.clone(), entries.len());
-    }
-    egraph.watermark_hash = egraph.predecessor_hash;
+    egraph.set_all_hot_flags(false);
 }
 
 // ============================================================
