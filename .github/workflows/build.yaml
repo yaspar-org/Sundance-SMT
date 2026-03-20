@@ -20,32 +20,23 @@ jobs:
       contents: read
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+        uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Get z3 submodule commit
-        id: z3-rev
-        run: echo "hash=$(git submodule status z3 | awk '{print $1}')" >> $GITHUB_OUTPUT
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake
 
-      - name: Cache z3 build
-        uses: actions/cache@v4
-        with:
-          path: target/debug/build/z3-sys-*
-          key: ${{ runner.os }}-z3-debug-${{ steps.z3-rev.outputs.hash }}
+      - name: Setup Z3
+        uses: ./.github/actions/setup-z3
 
       - name: Run cargo check
-        uses: actions-rs/cargo@v1
-        with:
-          command: check
+        run: cargo check --no-default-features --features local-z3
 
       - name: Run copyright check
         run: |
@@ -60,46 +51,33 @@ jobs:
         os: [ ubuntu-latest, macos-latest ]
         rust: [ stable ]
         features:
-          - 'default'
+          - 'local-z3'
           - ''
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           submodules: recursive
+
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
+        uses: dtolnay/rust-toolchain@${{ matrix.rust }}
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Install build dependencies (Ubuntu)
-        if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake z3 libz3-dev
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y cmake
 
-      - name: Install Homebrew dependencies (Mac)
-        if: ${{ matrix.os == 'macos-latest' }}
-        run: |
-          brew update
-          brew install cmake
+      - name: Install build dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: brew update && brew install cmake
 
-      - name: Get z3 submodule commit
-        if: ${{ matrix.features == 'default' }}
-        id: z3-rev
-        run: echo "hash=$(git submodule status z3 | awk '{print $1}')" >> $GITHUB_OUTPUT
-
-      - name: Cache z3 build
-        if: ${{ matrix.features == 'default' }}
-        uses: actions/cache@v4
-        with:
-          path: target/release/build/z3-sys-*
-          key: ${{ runner.os }}-z3-${{ steps.z3-rev.outputs.hash }}
+      - name: Setup Z3
+        if: matrix.features == 'local-z3'
+        uses: ./.github/actions/setup-z3
 
       - name: Run tests
         run: cargo test --release --no-default-features --features "${{ matrix.features }}" -- --nocapture
@@ -111,49 +89,33 @@ jobs:
       contents: read
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Get z3 submodule commit
-        id: z3-rev
-        run: echo "hash=$(git submodule status z3 | awk '{print $1}')" >> $GITHUB_OUTPUT
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake
 
-      - name: Cache z3 build
-        uses: actions/cache@v4
-        with:
-          path: target/debug/build/z3-sys-*
-          key: ${{ runner.os }}-z3-debug-${{ steps.z3-rev.outputs.hash }}
+      - name: Setup Z3
+        uses: ./.github/actions/setup-z3
 
       - name: Run cargo fmt
-        uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+        run: cargo fmt --all -- --check
 
       - name: Run cargo clippy
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-features --tests -- -D warnings
+        run: cargo clippy --no-default-features --features local-z3 --tests -- -D warnings
 
       - name: Run rustdoc lints
-        uses: actions-rs/cargo@v1
+        run: cargo doc --workspace --no-default-features --features local-z3 --no-deps --document-private-items
         env:
-          RUSTDOCFLAGS: ""
-        with:
-          command: doc
-          args: --workspace --all-features --no-deps --document-private-items
+          RUSTDOCFLAGS: -D warnings
 
   docs:
     name: Documentation
@@ -168,22 +130,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake
+        run: sudo apt-get update && sudo apt-get install -y cmake
 
-      - name: Get z3 submodule commit
-        id: z3-rev
-        run: echo "hash=$(git submodule status z3 | awk '{print $1}')" >> $GITHUB_OUTPUT
-
-      - name: Cache z3 build
-        uses: actions/cache@v4
-        with:
-          path: target/debug/build/z3-sys-*
-          key: ${{ runner.os }}-z3-debug-${{ steps.z3-rev.outputs.hash }}
+      - name: Setup Z3
+        uses: ./.github/actions/setup-z3
 
       - name: Build documentation
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --no-default-features --features local-z3 --no-deps
         env:
           RUSTDOCFLAGS: -D warnings

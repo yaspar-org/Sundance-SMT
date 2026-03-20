@@ -1,0 +1,49 @@
+name: 'Setup Z3'
+description: 'Build Z3 from the submodule with cmake and cache the result'
+
+inputs:
+  build-type:
+    description: 'CMake build type (Release or Debug)'
+    required: false
+    default: 'Release'
+
+outputs:
+  cache-hit:
+    description: 'Whether the Z3 cache was hit'
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Get z3 submodule commit
+      id: z3-rev
+      shell: bash
+      run: echo "hash=$(git submodule status z3 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+    - name: Cache z3 install
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: z3-install
+        key: z3-${{ runner.os }}-${{ inputs.build-type }}-${{ steps.z3-rev.outputs.hash }}
+
+    - name: Build z3
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cmake -S z3 -B z3-build \
+          -DCMAKE_BUILD_TYPE=${{ inputs.build-type }} \
+          -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/z3-install" \
+          -DZ3_BUILD_LIBZ3_SHARED=FALSE \
+          -DZ3_BUILD_EXECUTABLE=FALSE \
+          -DZ3_BUILD_TEST_EXECUTABLES=FALSE \
+          -DZ3_BUILD_PYTHON_BINDINGS=FALSE \
+          -DZ3_BUILD_DOTNET_BINDINGS=FALSE \
+          -DZ3_BUILD_JAVA_BINDINGS=FALSE
+        cmake --build z3-build -j "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" --target install
+
+    - name: Export z3 environment
+      shell: bash
+      run: |
+        echo "Z3_SYS_Z3_HEADER=$GITHUB_WORKSPACE/z3-install/include/z3.h" >> "$GITHUB_ENV"
+        echo "Z3_LIBRARY_PATH_OVERRIDE=$GITHUB_WORKSPACE/z3-install/lib" >> "$GITHUB_ENV"
