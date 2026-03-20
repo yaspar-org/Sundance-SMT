@@ -79,30 +79,9 @@ pub enum ProofStepData {
 
 /// Format a sort definition as a declare-sort command
 fn format_sort_declaration(sort_name: &Str, sort_def: &SortDef) -> String {
-    // Skip default sorts that are predefined in SMT-LIB
-    let default_sorts = [
-        "Bool",
-        "Int",
-        "Real",
-        "String",
-        "Reglan",
-        "Float128",
-        "Float64",
-        "Float32",
-        "Float16",
-        "Float8",
-        "Float4",
-        "Float2",
-        "Float1",
-        "RoundingMode",
-        "Array",
-    ];
-    if default_sorts.contains(&sort_name.as_str()) {
-        return String::new();
-    }
-
     match sort_def {
-        SortDef::Opaque(arity) => {
+        SortDef::Opaque(_) => String::new(),
+        SortDef::OpaqueDeclared(arity) => {
             format!("(declare-sort {} {})\n", sort_name, arity)
         }
         SortDef::Transparent { params, sort } => {
@@ -131,7 +110,7 @@ fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> (String, HashSe
     let mut datatype_funs = HashSet::new();
     for (sort_name, sort_def) in sorts {
         match sort_def {
-            SortDef::Opaque(..) | SortDef::Transparent { .. } => {}
+            SortDef::Opaque(..) | SortDef::OpaqueDeclared(..) | SortDef::Transparent { .. } => {}
             SortDef::Datatype(data) => {
                 sort_str.push(format!("({} {})", sort_name, data.params.len()));
 
