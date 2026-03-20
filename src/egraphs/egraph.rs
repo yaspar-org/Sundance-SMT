@@ -279,12 +279,12 @@ pub struct Egraph {
     pub flat_atom_function_index: DeterministicHashMap<String, Vec<FlatAtom>>,
     /// counter for generating fresh variable IDs during pattern flattening
     pub fresh_var_counter: usize,
-    /// Semi-naive: tracks which function output indices have been modified since the last
-    /// matching round. True = "hot" (has new/changed entries). Reset to false after each round.
-    pub function_maps_hot: HashMap<String, bool>,
-    /// Semi-naive: tracks which function arg indices have been modified since the last
-    /// matching round. function_indices_hot[f][i] = true means position i of function f is hot.
-    pub function_indices_hot: HashMap<String, Vec<bool>>,
+    /// watermark for semi-naive evaluation: tracks how many function_entries entries per function
+    /// have been processed in previous matching rounds
+    pub function_maps_watermark: DeterministicHashMap<String, usize>,
+    /// the predecessor_hash at the time watermarks were last updated; if it changes, a backtrack
+    /// happened and watermarks must be reset
+    pub watermark_hash: u64,
     /// store CNF cache
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
@@ -343,8 +343,8 @@ impl Egraph {
             flat_patterns: DeterministicHashMap::new(),
             flat_atom_function_index: DeterministicHashMap::new(),
             fresh_var_counter: 0,
-            function_maps_hot: HashMap::new(),
-            function_indices_hot: HashMap::new(),
+            function_maps_watermark: DeterministicHashMap::new(),
+            watermark_hash: 1,
             cnf_cache: Default::default(),
             decision_level: 0,
         }
@@ -654,9 +654,9 @@ impl Egraph {
                         }
                     }
                     self.flat_patterns.insert(term.uid(), compiled);
-                    // New quantifier registered — mark all indices as hot so the next
-                    // matching round does a full pass (the new patterns need to see all entries).
-                    self.set_all_hot_flags(true);
+                    // New quantifier registered — reset watermarks so the next matching
+                    // round does a full pass (the new patterns need to see all existing entries).
+                    self.function_maps_watermark.clear();
                 }
             } else {
                 panic!("We have a quantifier {} without an annotation", term)
@@ -1064,8 +1064,6 @@ impl Egraph {
         let output_root = self.find(term_uid);
         let arg_roots: Vec<u64> = arg_uids.iter().map(|&a| self.find(a)).collect();
         let arity = arg_uids.len();
-        // Mark output index as hot
-        self.function_maps_hot.insert(func.clone(), true);
         // Insert into function_maps: output e-class -> f-node UIDs
         self.function_maps
             .entry(func.clone())
@@ -1074,15 +1072,6 @@ impl Egraph {
             .or_insert_with(Vec::new)
             .push(term_uid);
         // Insert into function_indices: per-arg-position e-class -> f-node UIDs
-        let hot = self
-            .function_indices_hot
-            .entry(func.clone())
-            .or_insert_with(|| vec![false; arity]);
-        if hot.len() == arity {
-            for i in 0..arity {
-                hot[i] = true;
-            }
-        }
         let arg_maps = self
             .function_indices
             .entry(func)
@@ -1106,7 +1095,6 @@ impl Egraph {
         for func in func_keys {
             let output_map = self.function_maps.get_mut(&func).unwrap();
             if let Some(old_entries) = output_map.remove(&old_root) {
-                self.function_maps_hot.insert(func.clone(), true);
                 let new_entries = output_map.entry(new_root).or_insert_with(Vec::new);
                 new_entries.extend(old_entries);
             }
@@ -1115,16 +1103,8 @@ impl Egraph {
         let func_keys: Vec<String> = self.function_indices.keys().cloned().collect();
         for func in func_keys {
             let arg_maps = self.function_indices.get_mut(&func).unwrap();
-            let arity = arg_maps.len();
-            for (i, pos_map) in arg_maps.iter_mut().enumerate() {
+            for pos_map in arg_maps.iter_mut() {
                 if let Some(old_entries) = pos_map.remove(&old_root) {
-                    let hot = self
-                        .function_indices_hot
-                        .entry(func.clone())
-                        .or_insert_with(|| vec![false; arity]);
-                    if i < hot.len() {
-                        hot[i] = true;
-                    }
                     let new_entries = pos_map.entry(new_root).or_insert_with(Vec::new);
                     new_entries.extend(old_entries);
                 }
@@ -1169,8 +1149,6 @@ impl Egraph {
                 self.function_indices = snap_indices.clone();
             }
         }
-        // After restoring a snapshot, mark all indices as hot since merges were undone
-        self.set_all_hot_flags(true);
         // Re-insert terms that were created by quantifier instantiations.
         // These terms are permanent in the egraph but were added after the snapshot,
         // so they need to be re-added to the restored canonical indices.
@@ -1182,23 +1160,6 @@ impl Egraph {
         // Clear at level 0 since everything is permanent
         if level == 0 {
             self.terms_added_by_quantifiers.clear();
-        }
-    }
-
-    /// Set all hot flags to the given value.
-    /// Called with `true` after backtracking, `false` after each matching round.
-    pub fn set_all_hot_flags(&mut self, value: bool) {
-        for func in self.function_maps.keys() {
-            self.function_maps_hot.insert(func.clone(), value);
-        }
-        for (func, arg_maps) in &self.function_indices {
-            let hot = self
-                .function_indices_hot
-                .entry(func.clone())
-                .or_insert_with(|| vec![false; arg_maps.len()]);
-            for h in hot.iter_mut() {
-                *h = value;
-            }
         }
     }
 
