@@ -554,12 +554,7 @@ fn evaluate_multipattern(
             egraph,
         );
 
-        debug_println!(
-            26,
-            0,
-            "    join produced {} raw bindings",
-            bindings.len()
-        );
+        debug_println!(26, 0, "    join produced {} raw bindings", bindings.len());
 
         for b in bindings {
             // Dedup key uses canonical e-classes (bindings store raw UIDs).
@@ -603,12 +598,7 @@ fn evaluate_multipattern(
         }
     }
 
-    debug_println!(
-        26,
-        0,
-        "  total unique bindings: {}",
-        all_bindings.len()
-    );
+    debug_println!(26, 0, "  total unique bindings: {}", all_bindings.len());
     all_bindings
 }
 
@@ -660,14 +650,14 @@ pub fn datalog_find_assignments(
             }
 
             // if !quant_assignments.is_empty() {
-                debug_println!(
-                    26,
-                    0,
-                    "Datalog matcher found {} assignments for quantifier {}",
-                    quant_assignments.len(),
-                    egraph.get_term(quantifier.id)
-                );
-                results.push((quantifier.id, quant_assignments));
+            debug_println!(
+                26,
+                0,
+                "Datalog matcher found {} assignments for quantifier {}",
+                quant_assignments.len(),
+                egraph.get_term(quantifier.id)
+            );
+            results.push((quantifier.id, quant_assignments));
             // }
         }
     }

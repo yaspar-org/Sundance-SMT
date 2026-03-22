@@ -236,7 +236,11 @@ pub struct Egraph {
     /// Updated on every union; uses persistent data structure for O(1) snapshot/restore.
     pub function_indices: im::OrdMap<String, Vec<im::OrdMap<u64, Vec<u64>>>>,
     /// Snapshot stack for function_maps/function_indices: saved at each decision level for backtracking.
-    pub function_index_snapshots: Vec<(usize, im::OrdMap<String, im::OrdMap<u64, Vec<u64>>>, im::OrdMap<String, Vec<im::OrdMap<u64, Vec<u64>>>>)>,
+    pub function_index_snapshots: Vec<(
+        usize,
+        im::OrdMap<String, im::OrdMap<u64, Vec<u64>>>,
+        im::OrdMap<String, Vec<im::OrdMap<u64, Vec<u64>>>>,
+    )>,
     /// Terms created by quantifier instantiations that need to be re-added to canonical indices
     /// after backtracking. Each entry is (func_name, term_uid, arg_uids).
     /// Cleared at level 0 since all terms are permanent at that point.
@@ -1054,12 +1058,7 @@ impl Egraph {
 
     /// Insert a function application into the canonical output index (function_maps)
     /// and the canonical arg index (function_indices).
-    pub fn insert_into_canonical_indices(
-        &mut self,
-        func: String,
-        term_uid: u64,
-        arg_uids: &[u64],
-    ) {
+    pub fn insert_into_canonical_indices(&mut self, func: String, term_uid: u64, arg_uids: &[u64]) {
         // Compute all canonical roots upfront to avoid borrow conflicts
         let output_root = self.find(term_uid);
         let arg_roots: Vec<u64> = arg_uids.iter().map(|&a| self.find(a)).collect();
@@ -1069,7 +1068,7 @@ impl Egraph {
             .entry(func.clone())
             .or_default()
             .entry(output_root)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(term_uid);
         // Insert into function_indices: per-arg-position e-class -> f-node UIDs
         let arg_maps = self
@@ -1081,7 +1080,7 @@ impl Egraph {
             for (i, &arg_root) in arg_roots.iter().enumerate() {
                 arg_maps[i]
                     .entry(arg_root)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(term_uid);
             }
         }
@@ -1095,7 +1094,7 @@ impl Egraph {
         for func in func_keys {
             let output_map = self.function_maps.get_mut(&func).unwrap();
             if let Some(old_entries) = output_map.remove(&old_root) {
-                let new_entries = output_map.entry(new_root).or_insert_with(Vec::new);
+                let new_entries = output_map.entry(new_root).or_default();
                 new_entries.extend(old_entries);
             }
         }
@@ -1116,15 +1115,14 @@ impl Egraph {
     /// If a snapshot already exists at this level (e.g., level 0 may be re-entered),
     /// we update it with the current state.
     pub fn snapshot_function_indices(&mut self, level: usize) {
-        if let Some((snap_level, _, _)) = self.function_index_snapshots.last() {
-            if *snap_level == level {
+        if let Some((snap_level, _, _)) = self.function_index_snapshots.last()
+            && *snap_level == level {
                 // Update the existing snapshot at this level
                 let last = self.function_index_snapshots.last_mut().unwrap();
                 last.1 = self.function_maps.clone();
                 last.2 = self.function_indices.clone();
                 return;
             }
-        }
         self.function_index_snapshots.push((
             level,
             self.function_maps.clone(),
@@ -1143,17 +1141,15 @@ impl Egraph {
                 break;
             }
         }
-        if let Some((snap_level, snap_maps, snap_indices)) = self.function_index_snapshots.last() {
-            if *snap_level == level {
+        if let Some((snap_level, snap_maps, snap_indices)) = self.function_index_snapshots.last()
+            && *snap_level == level {
                 self.function_maps = snap_maps.clone();
                 self.function_indices = snap_indices.clone();
             }
-        }
         // Re-insert terms that were created by quantifier instantiations.
         // These terms are permanent in the egraph but were added after the snapshot,
         // so they need to be re-added to the restored canonical indices.
-        let terms_to_readd: Vec<(String, u64, Vec<u64>)> =
-            self.terms_added_by_quantifiers.clone();
+        let terms_to_readd: Vec<(String, u64, Vec<u64>)> = self.terms_added_by_quantifiers.clone();
         for (func, term_uid, arg_uids) in terms_to_readd {
             self.insert_into_canonical_indices(func, term_uid, &arg_uids);
         }
