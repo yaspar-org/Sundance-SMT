@@ -249,7 +249,7 @@ impl Constraint {
         }
     }
 
-    /// Test whether `Rational::ZERO <constraint> val` holds, where <constraint> represents
+    /// Test whether `Rational::ZERO <constraint> val` holds, where `constraint` represents
     /// `self`
     fn test_zero(&self, val: &Rational) -> bool {
         match self {
@@ -449,10 +449,10 @@ impl Rel<Rational> {
     ///
     /// pre-condition: terms have been combined
     /// post-conditions:
-    ///   - self.terms.is_empty() || self.terms[0].coeff > 0
+    ///   - `self.terms.is_empty() || self.terms[0].coeff > 0`
     ///   - if self.constraint == Eq then self'.contraint == Eq
-    ///   - if self.constraint == Lq and self.terms[0].coeff < 0 then self'.contraint == Ge
-    ///   - if self.constraint == Ge and self.terms[0].coeff < 0 then self'.contraint == Le
+    ///   - if self.constraint == Lq and `self.terms[0].coeff < 0` then self'.contraint == Ge
+    ///   - if self.constraint == Ge and `self.terms[0].coeff < 0` then self'.contraint == Le
     ///
     fn make_initial_term_positive(&mut self) {
         if self.terms.is_empty() || self.terms[0].coeff_pos() {
