@@ -365,7 +365,7 @@ pub fn instantiate_quantifiers(
 
 /// The simplify algorithm for matching patterns, iteratively
 /// building a list of assignments for the free variables in the pattern
-/// see https://mmoskal.github.io/smt/e-matching.pdf
+/// see <https://mmoskal.github.io/smt/e-matching.pdf>
 ///
 /// todo: @Amar the following comment is out of date
 /// Returning assignments as DeterministicHashMap<u64, u64> and DeterministicHashMap<string, u64>,
