@@ -283,12 +283,8 @@ pub struct Egraph {
     pub flat_atom_function_index: DeterministicHashMap<String, Vec<FlatAtom>>,
     /// counter for generating fresh variable IDs during pattern flattening
     pub fresh_var_counter: usize,
-    /// watermark for semi-naive evaluation: tracks how many function_entries entries per function
-    /// have been processed in previous matching rounds
-    pub function_maps_watermark: DeterministicHashMap<String, usize>,
-    /// the predecessor_hash at the time watermarks were last updated; if it changes, a backtrack
-    /// happened and watermarks must be reset
-    pub watermark_hash: u64,
+    /// Placeholder for future semi-naive evaluation. Currently unused (naive mode).
+    pub function_maps_hot: HashMap<String, bool>,
     /// store CNF cache
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
@@ -347,8 +343,7 @@ impl Egraph {
             flat_patterns: DeterministicHashMap::new(),
             flat_atom_function_index: DeterministicHashMap::new(),
             fresh_var_counter: 0,
-            function_maps_watermark: DeterministicHashMap::new(),
-            watermark_hash: 1,
+            function_maps_hot: HashMap::new(),
             cnf_cache: Default::default(),
             decision_level: 0,
         }
@@ -658,9 +653,8 @@ impl Egraph {
                         }
                     }
                     self.flat_patterns.insert(term.uid(), compiled);
-                    // New quantifier registered — reset watermarks so the next matching
-                    // round does a full pass (the new patterns need to see all existing entries).
-                    self.function_maps_watermark.clear();
+                    // New quantifier registered — in naive mode all entries are always
+                    // examined, so no watermark reset needed.
                 }
             } else {
                 panic!("We have a quantifier {} without an annotation", term)
@@ -1078,10 +1072,7 @@ impl Egraph {
         // Skip indexing if arity mismatch (overloaded function symbols)
         if arg_maps.len() == arity {
             for (i, &arg_root) in arg_roots.iter().enumerate() {
-                arg_maps[i]
-                    .entry(arg_root)
-                    .or_default()
-                    .push(term_uid);
+                arg_maps[i].entry(arg_root).or_default().push(term_uid);
             }
         }
     }
@@ -1116,13 +1107,14 @@ impl Egraph {
     /// we update it with the current state.
     pub fn snapshot_function_indices(&mut self, level: usize) {
         if let Some((snap_level, _, _)) = self.function_index_snapshots.last()
-            && *snap_level == level {
-                // Update the existing snapshot at this level
-                let last = self.function_index_snapshots.last_mut().unwrap();
-                last.1 = self.function_maps.clone();
-                last.2 = self.function_indices.clone();
-                return;
-            }
+            && *snap_level == level
+        {
+            // Update the existing snapshot at this level
+            let last = self.function_index_snapshots.last_mut().unwrap();
+            last.1 = self.function_maps.clone();
+            last.2 = self.function_indices.clone();
+            return;
+        }
         self.function_index_snapshots.push((
             level,
             self.function_maps.clone(),
@@ -1142,10 +1134,11 @@ impl Egraph {
             }
         }
         if let Some((snap_level, snap_maps, snap_indices)) = self.function_index_snapshots.last()
-            && *snap_level == level {
-                self.function_maps = snap_maps.clone();
-                self.function_indices = snap_indices.clone();
-            }
+            && *snap_level == level
+        {
+            self.function_maps = snap_maps.clone();
+            self.function_indices = snap_indices.clone();
+        }
         // Re-insert terms that were created by quantifier instantiations.
         // These terms are permanent in the egraph but were added after the snapshot,
         // so they need to be re-added to the restored canonical indices.
