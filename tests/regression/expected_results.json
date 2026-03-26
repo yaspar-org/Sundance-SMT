@@ -1034,5 +1034,12 @@
     "setmembership/set_simple_query_004.smt2": "unsat",
     "setmembership/set_simple_query_005.smt2": "unsat",
     "setmembership/set_simple_query_006_incomplete.smt2": "unknown",
-    "setmembership/set_simple_query_006.smt2": "unsat"
+    "setmembership/set_simple_query_006.smt2": "unsat",
+    "define_fun/nullary.smt2": "unsat",
+    "define_fun/unary.smt2": "unsat",
+    "define_fun/binary.smt2": "unsat",
+    "define_fun/nested.smt2": "unsat",
+    "define_fun/bool_valued.smt2": "unsat",
+    "define_fun/multiple_uses.smt2": "sat",
+    "define_fun/arithmetic.smt2": "unsat"
 }
