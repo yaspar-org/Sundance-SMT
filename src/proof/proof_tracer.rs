@@ -85,16 +85,12 @@ fn format_sort_declaration(sort_name: &Str, sort_def: &SortDef) -> String {
             format!("(declare-sort {} {})\n", sort_name, arity)
         }
         SortDef::Transparent { params, sort } => {
-            if params.is_empty() {
-                format!("(define-sort {} {})\n", sort_name, sort)
-            } else {
-                let params_str = params
-                    .iter()
-                    .map(|p| p.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                format!("(define-sort {} ({}) {})\n", sort_name, params_str, sort)
-            }
+            let params_str = params
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("(define-sort {} ({}) {})\n", sort_name, params_str, sort)
         }
         SortDef::Datatype(..) => {
             // datatypes handled by `format_datatype_declaration`
@@ -104,135 +100,51 @@ fn format_sort_declaration(sort_name: &Str, sort_def: &SortDef) -> String {
 }
 
 /// Format a sort definition as a declare-sort command
-fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> (String, HashSet<&Str>) {
+fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> String {
     let mut sort_str = vec![];
     let mut ctor_strs = vec![];
     let mut datatype_funs = HashSet::new();
     for (sort_name, sort_def) in sorts {
-        match sort_def {
-            SortDef::Opaque(..) | SortDef::OpaqueDeclared(..) | SortDef::Transparent { .. } => {}
-            SortDef::Datatype(data) => {
-                sort_str.push(format!("({} {})", sort_name, data.params.len()));
+        if let SortDef::Datatype(data) = sort_def {
+            sort_str.push(format!("({} {})", sort_name, data.params.len()));
 
-                for ctor in &data.constructors {
-                    datatype_funs.insert(&ctor.ctor);
-                    for sel in &ctor.args {
-                        datatype_funs.insert(&sel.0);
-                    }
+            for ctor in &data.constructors {
+                datatype_funs.insert(&ctor.ctor);
+                for sel in &ctor.args {
+                    datatype_funs.insert(&sel.0);
                 }
-
-                ctor_strs.push(data.to_string());
             }
+
+            ctor_strs.push(data.to_string());
         }
     }
 
     if sort_str.is_empty() {
-        (String::new(), datatype_funs)
+        String::new()
     } else {
-        (
-            format!(
-                "(declare-datatypes ({}) ({}))\n",
-                sort_str.join(" "),
-                ctor_strs.join(" ")
-            ),
-            datatype_funs,
+        format!(
+            "(declare-datatypes ({}) ({}))\n",
+            sort_str.join(" "),
+            ctor_strs.join(" ")
         )
     }
 }
 
 /// Format a function signature as a declare-fun command
 fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) -> String {
-    // Skip default functions that are predefined in SMT-LIB theories
-    let default_functions = [
-        // TODO: there's gotta be a cleaner way to just avoid this
-        "=",
-        "distinct",
-        "ite",
-        "and",
-        "or",
-        "not",
-        "=>",
-        "xor",
-        "+",
-        "-",
-        "*",
-        "/",
-        "div",
-        "mod",
-        "abs",
-        "<",
-        "<=",
-        ">",
-        ">=",
-        "char",
-        // "str.++", "str.len", "str.<", "str.to_re", "str.in_re",
-        // "re.none", "re.all", "re.allchar", "re.++", "re.union", "re.inter", "re.*",
-        "select",
-        "store",
-        "RTP",
-        "RNA",
-        "roundTowardZero",
-        "roundTowardPositive",
-        "roundTowardNegative",
-        "roundNearestTiesToEven",
-        "roundNearestTiesToAway",
-        "to_real",
-        "is_int",
-        "RNE",
-        "RTZ",
-        "str_from_int",
-        "to_int",
-        "RTN",
-    ];
-
-    let symbol_as_str = symbol_name.as_str();
-    if default_functions.contains(&symbol_as_str) {
+    // overloading is only possible for generated functions; we skip them.
+    if sigs.len() != 1 {
         return String::new();
     }
 
-    if symbol_as_str.starts_with("re.") || symbol_as_str.starts_with("str.") {
-        return String::new();
-    }
+    let (sig, meta) = &sigs[0];
 
-    if symbol_as_str == "is" {
-        return String::new();
-    }
-
-    assert_eq!(
-        sigs.len(),
-        1,
-        "We only support one signature per symbol: {:?}",
-        symbol_name
-    );
-    let sig = &sigs[0].0;
-
-    match sig {
-        Sig::ParFunc(_, sort_vars, input_sorts, output_sort) => {
-            if sort_vars.is_empty() {
-                // Non-polymorphic function
-                if symbol_name.starts_with("is-") {
-                    return String::new();
-                }
-                let input_sorts_str = input_sorts
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                format!(
-                    "(declare-fun {} ({}) {})\n",
-                    symbol_name, input_sorts_str, output_sort
-                )
-            } else {
-                // Polymorphic function - we don't support non-ADT polymorphic functions right now
-                // since they are not in SMTLib
-                // ADT polymorphic functions are handled by the datatype declaration
-                String::new()
-            }
-        }
-        Sig::VarLenFunc(input_sort, min_args, output_sort) => {
-            // For variable length functions, we'll declare them with the minimum number of arguments
-            let input_sorts_str = (0..*min_args)
-                .map(|_| input_sort.to_string())
+    match (sig, meta) {
+        (Sig::ParFunc(_, _, input_sorts, output_sort), FunctionMeta::OpaqueDeclared) => {
+            // user declared uninterpreted functions; must be non-polymorphic functions
+            let input_sorts_str = input_sorts
+                .iter()
+                .map(|s| s.to_string())
                 .collect::<Vec<_>>()
                 .join(" ");
             format!(
@@ -240,7 +152,12 @@ fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) 
                 symbol_name, input_sorts_str, output_sort
             )
         }
-        // TODO: look at the rest of the cases (bitvector stuff)
+        (Sig::ParFunc(..), FunctionMeta::Defined(meta)) => {
+            if !meta.rec_deps.is_empty() {
+                panic!("We do not handle recursive function definitions!");
+            }
+            format!("(define-fun {})", meta.def)
+        }
         _ => String::new(),
     }
 }
@@ -342,16 +259,12 @@ impl SMTProofTracker {
             output.push_str(&format_sort_declaration(sort, sort_def));
         }
 
-        let (datatype_string, datatype_funs) = &format_datatype_declaration(&self.sorts);
+        let datatype_string = format_datatype_declaration(&self.sorts);
 
-        output.push_str(datatype_string);
+        output.push_str(&datatype_string);
 
         // emit the symbol table
         for (symbol, sigs) in &self.symbol_table {
-            // skip the ctors/selectors that are already part of datatype decl
-            if datatype_funs.contains(symbol) {
-                continue;
-            }
             output.push_str(&format_function_declaration(symbol, sigs));
         }
         // Clone proof_steps to avoid borrow checker issues
