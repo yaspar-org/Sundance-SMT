@@ -224,44 +224,45 @@ fn intersect_candidates(result: &mut Option<HashSet<u64>>, candidates: &[u64]) {
 /// we fall back to returning all fnode UIDs for the function — the only constraint is
 /// the function symbol itself. `try_extend_binding` then does all the work of binding
 /// variables and checking consistency.
-fn get_candidates(atom: &FlatAtom, binding: &Binding, egraph: &Egraph) -> Vec<u64> {
+fn get_candidates(
+    atom: &FlatAtom,
+    binding: &Binding,
+    delta_only: bool,
+    egraph: &Egraph,
+) -> Vec<u64> {
     let mut result: Option<HashSet<u64>> = None;
+    let matching_round = egraph.matching_round;
 
     // Check argument indices (canonicalize binding values for lookup)
-    if let Some(arg_maps) = egraph.function_indices.get(&atom.func) {
+    if let Some(arg_idx) = egraph.function_indices.get(&atom.func) {
         for (i, var) in atom.args.iter().enumerate() {
-            if i >= arg_maps.len() {
+            if i >= arg_idx.args.len() {
                 break;
             }
             if let Some(&raw_uid) = binding.get(var) {
                 let canon = egraph.find(raw_uid);
-                if let Some(candidates) = arg_maps[i].get(&canon) {
-                    debug_println!(
-                        26,
-                        0,
-                        "      get_candidates: arg[{}] {} bound to raw={} canon={} -> {} candidates",
-                        i,
-                        var,
-                        raw_uid,
-                        canon,
-                        candidates.len()
-                    );
-                    intersect_candidates(&mut result, candidates);
-                    if result.as_ref().unwrap().is_empty() {
-                        return vec![];
-                    }
+                let candidates: Vec<u64> = if delta_only {
+                    arg_idx.args[i].get_delta(canon, matching_round)
                 } else {
-                    debug_println!(
-                        26,
-                        0,
-                        "      get_candidates: arg[{}] {} bound to raw={} canon={} -> NO MATCH (index keys: {:?})",
-                        i,
-                        var,
-                        raw_uid,
-                        canon,
-                        arg_maps[i].keys().collect::<Vec<_>>()
-                    );
-                    return vec![]; // No entries match this bound argument
+                    arg_idx.args[i].get_all(canon)
+                };
+                debug_println!(
+                    26,
+                    0,
+                    "      get_candidates: arg[{}] {} bound to raw={} canon={} -> {} candidates (delta={})",
+                    i,
+                    var,
+                    raw_uid,
+                    canon,
+                    candidates.len(),
+                    delta_only
+                );
+                if candidates.is_empty() {
+                    return vec![];
+                }
+                intersect_candidates(&mut result, &candidates);
+                if result.as_ref().unwrap().is_empty() {
+                    return vec![];
                 }
             }
         }
@@ -270,12 +271,16 @@ fn get_candidates(atom: &FlatAtom, binding: &Binding, egraph: &Egraph) -> Vec<u6
     // Check output index (canonicalize binding value for lookup)
     if let Some(&raw_uid) = binding.get(&atom.output) {
         let canon = egraph.find(raw_uid);
-        if let Some(output_map) = egraph.function_maps.get(&atom.func) {
-            if let Some(candidates) = output_map.get(&canon) {
-                intersect_candidates(&mut result, candidates);
+        if let Some(func_out) = egraph.function_maps.get(&atom.func) {
+            let candidates: Vec<u64> = if delta_only {
+                func_out.output.get_delta(canon, matching_round)
             } else {
-                return vec![]; // No entries match bound output
+                func_out.output.get_all(canon)
+            };
+            if candidates.is_empty() {
+                return vec![];
             }
+            intersect_candidates(&mut result, &candidates);
         }
     }
 
@@ -285,16 +290,20 @@ fn get_candidates(atom: &FlatAtom, binding: &Binding, egraph: &Egraph) -> Vec<u6
             // No bound variables — full scan: return all fnode UIDs for this function.
             // This happens for the first atom in the join order when it has no ground
             // constants. try_extend_binding will bind all unbound variables.
-            egraph
-                .function_maps
-                .get(&atom.func)
-                .map(|output_map| {
-                    output_map
-                        .values()
-                        .flat_map(|v| v.iter().copied())
+            if let Some(func_out) = egraph.function_maps.get(&atom.func) {
+                if delta_only {
+                    // Only collect fnodes from e-class keys with delta entries
+                    func_out.output.index.values()
+                        .flat_map(|ts| ts.delta(matching_round))
                         .collect()
-                })
-                .unwrap_or_default()
+                } else {
+                    func_out.output.index.values()
+                        .flat_map(|ts| ts.all())
+                        .collect()
+                }
+            } else {
+                vec![]
+            }
         }
     }
 }
@@ -327,7 +336,7 @@ fn execute_join(
 
     for (pos, &atom_idx) in order.iter().enumerate() {
         let atom = &atoms[atom_idx];
-        let _use_delta = delta_position == Some(pos);
+        let use_delta = delta_position == Some(pos);
 
         let raw_lookup = match func_lookups.get(atom.func.as_str()) {
             Some(l) => l,
@@ -336,7 +345,7 @@ fn execute_join(
 
         let mut new_bindings = Vec::new();
         for binding in &bindings {
-            let candidates = get_candidates(atom, binding, egraph);
+            let candidates = get_candidates(atom, binding, use_delta, egraph);
             debug_println!(28, 0, "We have the following candidates for atom {}", atom);
             for fnode_uid in candidates {
                 debug_println!(28, 4, "{}", egraph.get_term(fnode_uid));
@@ -502,8 +511,10 @@ pub fn datalog_find_assignments(
     results
 }
 
-/// Placeholder for future semi-naive evaluation. Currently a no-op (naive mode).
-pub fn datalog_update_watermarks(_egraph: &mut Egraph) {}
+/// Increment matching_round after each matching round for semi-naive evaluation.
+pub fn datalog_update_watermarks(egraph: &mut Egraph) {
+    egraph.matching_round += 1;
+}
 
 // ============================================================
 // Display implementations

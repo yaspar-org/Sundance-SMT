@@ -207,6 +207,152 @@ impl fmt::Display for Egraph {
     }
 }
 
+// ============================================================
+// Timestamped index data structures for semi-naive evaluation
+// ============================================================
+
+/// Entries under a single e-class key, grouped by the matching round (timestamp)
+/// in which they became current. Stored as an OrdMap so we can efficiently
+/// query only entries from recent rounds via `range(matching_round..)`.
+#[derive(Clone, Debug)]
+pub struct TimestampedEntries {
+    pub entries: im::OrdMap<usize, Vec<u64>>,
+}
+
+impl TimestampedEntries {
+    pub fn new() -> Self {
+        TimestampedEntries {
+            entries: im::OrdMap::new(),
+        }
+    }
+
+    /// Insert an fnode UID at the given timestamp.
+    pub fn insert(&mut self, timestamp: usize, fnode_uid: u64) {
+        self.entries.entry(timestamp).or_insert_with(Vec::new).push(fnode_uid);
+    }
+
+    /// Get all fnode UIDs across all timestamps.
+    pub fn all(&self) -> impl Iterator<Item = u64> + '_ {
+        self.entries.values().flat_map(|v| v.iter().copied())
+    }
+
+    /// Get only delta fnode UIDs (timestamp >= matching_round).
+    /// Uses range query to skip old entries entirely.
+    pub fn delta(&self, matching_round: usize) -> impl Iterator<Item = u64> + '_ {
+        self.entries.range(matching_round..).flat_map(|(_, v)| v.iter().copied())
+    }
+
+    /// Check if there are any delta entries (timestamp >= matching_round).
+    pub fn has_delta(&self, matching_round: usize) -> bool {
+        self.entries.range(matching_round..).next().is_some()
+    }
+
+    /// Merge all entries from another TimestampedEntries, re-stamping them
+    /// at the given timestamp (their canonical form changed due to a merge).
+    pub fn merge_from(&mut self, other: &TimestampedEntries, timestamp: usize) {
+        let all_fnodes: Vec<u64> = other.all().collect();
+        if !all_fnodes.is_empty() {
+            self.entries.entry(timestamp).or_insert_with(Vec::new).extend(all_fnodes);
+        }
+    }
+}
+
+/// Index from e-class root to timestamped fnode entries.
+/// Tracks a max timestamp for O(1) "has any delta?" checks.
+#[derive(Clone, Debug)]
+pub struct EClassIndex {
+    /// Maximum timestamp across all entries in this index.
+    pub max_stamp: usize,
+    /// Maps e-class root -> timestamped entries under that e-class.
+    pub index: im::OrdMap<u64, TimestampedEntries>,
+}
+
+impl EClassIndex {
+    pub fn new() -> Self {
+        EClassIndex {
+            max_stamp: 0,
+            index: im::OrdMap::new(),
+        }
+    }
+
+    /// Insert an fnode UID under the given e-class at the given timestamp.
+    pub fn insert(&mut self, eclass: u64, timestamp: usize, fnode_uid: u64) {
+        self.index
+            .entry(eclass)
+            .or_insert_with(TimestampedEntries::new)
+            .insert(timestamp, fnode_uid);
+        if timestamp > self.max_stamp {
+            self.max_stamp = timestamp;
+        }
+    }
+
+    /// Get all fnode UIDs under the given e-class (all timestamps).
+    pub fn get_all(&self, eclass: u64) -> Vec<u64> {
+        self.index
+            .get(&eclass)
+            .map(|ts| ts.all().collect())
+            .unwrap_or_default()
+    }
+
+    /// Get only delta fnode UIDs under the given e-class.
+    pub fn get_delta(&self, eclass: u64, matching_round: usize) -> Vec<u64> {
+        self.index
+            .get(&eclass)
+            .map(|ts| ts.delta(matching_round).collect())
+            .unwrap_or_default()
+    }
+
+    /// Check if this index has any delta entries at all (O(1)).
+    pub fn has_delta(&self, matching_round: usize) -> bool {
+        self.max_stamp >= matching_round
+    }
+
+    /// Merge entries from old_root into new_root at the given timestamp.
+    /// Returns true if any entries were actually moved.
+    pub fn merge_roots(&mut self, old_root: u64, new_root: u64, timestamp: usize) -> bool {
+        if let Some(old_entries) = self.index.remove(&old_root) {
+            self.index
+                .entry(new_root)
+                .or_insert_with(TimestampedEntries::new)
+                .merge_from(&old_entries, timestamp);
+            if timestamp > self.max_stamp {
+                self.max_stamp = timestamp;
+            }
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Per-function output index: maps output e-class to fnode UIDs.
+#[derive(Clone, Debug)]
+pub struct FunctionOutputIndex {
+    pub output: EClassIndex,
+}
+
+impl FunctionOutputIndex {
+    pub fn new() -> Self {
+        FunctionOutputIndex {
+            output: EClassIndex::new(),
+        }
+    }
+}
+
+/// Per-function argument index: one EClassIndex per argument position.
+#[derive(Clone, Debug)]
+pub struct FunctionArgIndex {
+    pub args: Vec<EClassIndex>,
+}
+
+impl FunctionArgIndex {
+    pub fn new(arity: usize) -> Self {
+        FunctionArgIndex {
+            args: (0..arity).map(|_| EClassIndex::new()).collect(),
+        }
+    }
+}
+
 /// The egraph datastructure that keeps track of terms, equalities and parents
 pub struct Egraph {
     pub context: Context,
@@ -229,18 +375,21 @@ pub struct Egraph {
     /// Append-only raw log of function applications: F -> Vec<(term_uid, arg_uids)>.
     /// Never modified after insertion; used by the traditional (non-datalog) matcher.
     pub function_entries: DeterministicHashMap<String, Vec<(u64, Vec<u64>)>>,
-    /// Canonical output index: F -> (e-class root -> f-node UIDs in that output e-class).
-    /// Updated on every union; uses persistent data structure for O(1) snapshot/restore.
-    pub function_maps: im::OrdMap<String, im::OrdMap<u64, Vec<u64>>>,
-    /// Canonical arg index: F -> arg_pos -> (e-class root -> f-node UIDs using that e-class at that position).
-    /// Updated on every union; uses persistent data structure for O(1) snapshot/restore.
-    pub function_indices: im::OrdMap<String, Vec<im::OrdMap<u64, Vec<u64>>>>,
-    /// Snapshot stack for function_maps/function_indices: saved at each decision level for backtracking.
+    /// Canonical output index: F -> FunctionOutputIndex (timestamped for semi-naive).
+    pub function_maps: im::OrdMap<String, FunctionOutputIndex>,
+    /// Canonical arg index: F -> FunctionArgIndex (timestamped for semi-naive).
+    pub function_indices: im::OrdMap<String, FunctionArgIndex>,
+    /// Snapshot stack: saved at each decision level for O(1) backtracking.
+    /// Includes matching_round so semi-naive timestamps are consistent after backtrack.
     pub function_index_snapshots: Vec<(
         usize,
-        im::OrdMap<String, im::OrdMap<u64, Vec<u64>>>,
-        im::OrdMap<String, Vec<im::OrdMap<u64, Vec<u64>>>>,
+        im::OrdMap<String, FunctionOutputIndex>,
+        im::OrdMap<String, FunctionArgIndex>,
+        usize, // matching_round at snapshot time
     )>,
+    /// Current matching round for semi-naive evaluation. Incremented after each matching round.
+    /// Entries with timestamp >= matching_round are "delta" (new since last round).
+    pub matching_round: usize,
     /// Terms created by quantifier instantiations that need to be re-added to canonical indices
     /// after backtracking. Each entry is (func_name, term_uid, arg_uids).
     /// Cleared at level 0 since all terms are permanent at that point.
@@ -283,8 +432,6 @@ pub struct Egraph {
     pub flat_atom_function_index: DeterministicHashMap<String, Vec<FlatAtom>>,
     /// counter for generating fresh variable IDs during pattern flattening
     pub fresh_var_counter: usize,
-    /// Placeholder for future semi-naive evaluation. Currently unused (naive mode).
-    pub function_maps_hot: HashMap<String, bool>,
     /// store CNF cache
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
@@ -323,6 +470,7 @@ impl Egraph {
             function_maps: im::OrdMap::new(),
             function_indices: im::OrdMap::new(),
             function_index_snapshots: Vec::new(),
+            matching_round: 0,
             terms_added_by_quantifiers: Vec::new(),
             true_term: tru.uid(),
             false_term: fal.uid(),
@@ -343,7 +491,6 @@ impl Egraph {
             flat_patterns: DeterministicHashMap::new(),
             flat_atom_function_index: DeterministicHashMap::new(),
             fresh_var_counter: 0,
-            function_maps_hot: HashMap::new(),
             cnf_cache: Default::default(),
             decision_level: 0,
         }
@@ -1053,26 +1200,24 @@ impl Egraph {
     /// Insert a function application into the canonical output index (function_maps)
     /// and the canonical arg index (function_indices).
     pub fn insert_into_canonical_indices(&mut self, func: String, term_uid: u64, arg_uids: &[u64]) {
-        // Compute all canonical roots upfront to avoid borrow conflicts
         let output_root = self.find(term_uid);
         let arg_roots: Vec<u64> = arg_uids.iter().map(|&a| self.find(a)).collect();
         let arity = arg_uids.len();
-        // Insert into function_maps: output e-class -> f-node UIDs
+        let stamp = self.matching_round;
+        // Insert into function_maps (output index)
         self.function_maps
             .entry(func.clone())
-            .or_default()
-            .entry(output_root)
-            .or_default()
-            .push(term_uid);
-        // Insert into function_indices: per-arg-position e-class -> f-node UIDs
-        let arg_maps = self
+            .or_insert_with(FunctionOutputIndex::new)
+            .output
+            .insert(output_root, stamp, term_uid);
+        // Insert into function_indices (arg index)
+        let arg_idx = self
             .function_indices
             .entry(func)
-            .or_insert_with(|| vec![im::OrdMap::new(); arity]);
-        // Skip indexing if arity mismatch (overloaded function symbols)
-        if arg_maps.len() == arity {
+            .or_insert_with(|| FunctionArgIndex::new(arity));
+        if arg_idx.args.len() == arity {
             for (i, &arg_root) in arg_roots.iter().enumerate() {
-                arg_maps[i].entry(arg_root).or_default().push(term_uid);
+                arg_idx.args[i].insert(arg_root, stamp, term_uid);
             }
         }
     }
@@ -1080,24 +1225,19 @@ impl Egraph {
     /// Merge entries in function_maps and function_indices from old_root into new_root.
     /// Called during union when two e-classes are merged.
     pub fn merge_function_index_roots(&mut self, old_root: u64, new_root: u64) {
-        // Merge output index entries: any f-node whose output was in old_root now belongs to new_root
+        let stamp = self.matching_round;
+        // Merge output index entries
         let func_keys: Vec<String> = self.function_maps.keys().cloned().collect();
         for func in func_keys {
-            let output_map = self.function_maps.get_mut(&func).unwrap();
-            if let Some(old_entries) = output_map.remove(&old_root) {
-                let new_entries = output_map.entry(new_root).or_default();
-                new_entries.extend(old_entries);
-            }
+            let func_idx = self.function_maps.get_mut(&func).unwrap();
+            func_idx.output.merge_roots(old_root, new_root, stamp);
         }
-        // Merge arg index entries: for each function and each arg position
+        // Merge arg index entries
         let func_keys: Vec<String> = self.function_indices.keys().cloned().collect();
         for func in func_keys {
-            let arg_maps = self.function_indices.get_mut(&func).unwrap();
-            for pos_map in arg_maps.iter_mut() {
-                if let Some(old_entries) = pos_map.remove(&old_root) {
-                    let new_entries = pos_map.entry(new_root).or_insert_with(Vec::new);
-                    new_entries.extend(old_entries);
-                }
+            let arg_idx = self.function_indices.get_mut(&func).unwrap();
+            for eclass_idx in arg_idx.args.iter_mut() {
+                eclass_idx.merge_roots(old_root, new_root, stamp);
             }
         }
     }
@@ -1106,19 +1246,20 @@ impl Egraph {
     /// If a snapshot already exists at this level (e.g., level 0 may be re-entered),
     /// we update it with the current state.
     pub fn snapshot_function_indices(&mut self, level: usize) {
-        if let Some((snap_level, _, _)) = self.function_index_snapshots.last()
+        if let Some((snap_level, _, _, _)) = self.function_index_snapshots.last()
             && *snap_level == level
         {
-            // Update the existing snapshot at this level
             let last = self.function_index_snapshots.last_mut().unwrap();
             last.1 = self.function_maps.clone();
             last.2 = self.function_indices.clone();
+            last.3 = self.matching_round;
             return;
         }
         self.function_index_snapshots.push((
             level,
             self.function_maps.clone(),
             self.function_indices.clone(),
+            self.matching_round,
         ));
     }
 
@@ -1126,18 +1267,20 @@ impl Egraph {
     /// then re-insert terms that were added by quantifier instantiations.
     pub fn restore_function_indices(&mut self, level: usize) {
         // Pop snapshots until we find the right level
-        while let Some((snap_level, _, _)) = self.function_index_snapshots.last() {
+        while let Some((snap_level, _, _, _)) = self.function_index_snapshots.last() {
             if *snap_level > level {
                 self.function_index_snapshots.pop();
             } else {
                 break;
             }
         }
-        if let Some((snap_level, snap_maps, snap_indices)) = self.function_index_snapshots.last()
+        if let Some((snap_level, snap_maps, snap_indices, snap_round)) =
+            self.function_index_snapshots.last()
             && *snap_level == level
         {
             self.function_maps = snap_maps.clone();
             self.function_indices = snap_indices.clone();
+            self.matching_round = *snap_round;
         }
         // Re-insert terms that were created by quantifier instantiations.
         // These terms are permanent in the egraph but were added after the snapshot,
