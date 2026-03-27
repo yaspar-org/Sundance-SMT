@@ -367,17 +367,51 @@ fn execute_join(
     bindings
 }
 
+/// Check if a function has any delta entries (timestamp >= matching_round).
+fn func_has_delta(egraph: &Egraph, func: &str) -> bool {
+    let mr = egraph.matching_round;
+    egraph
+        .function_maps
+        .get(func)
+        .map(|f| f.output.has_delta(mr))
+        .unwrap_or(false)
+}
+
 /// Evaluate a single multipattern (conjunctive query) with semi-naive evaluation.
-fn evaluate_multipattern(atoms: &[FlatAtom], egraph: &Egraph) -> Vec<Binding> {
+///
+/// If `full_pass` is true (e.g., for a newly registered quantifier), we do a single
+/// full join over all atoms (no delta filtering). Otherwise, we run k passes where
+/// pass i restricts atom i to delta-only entries, ensuring we only find new derivations.
+fn evaluate_multipattern(
+    atoms: &[FlatAtom],
+    full_pass: bool,
+    egraph: &Egraph,
+) -> Vec<Binding> {
     if atoms.is_empty() {
         debug_println!(26, 0, "  evaluate_multipattern: empty atoms, returning");
         return vec![];
     }
 
-    debug_println!(26, 0, "  evaluate_multipattern: {} atoms", atoms.len());
+    debug_println!(
+        26,
+        0,
+        "  evaluate_multipattern: {} atoms, full_pass={}, matching_round={}",
+        atoms.len(),
+        full_pass,
+        egraph.matching_round
+    );
     for (i, atom) in atoms.iter().enumerate() {
         let size = table_size(egraph, &atom.func);
-        debug_println!(26, 0, "    atom[{}]: {}  (table size={})", i, atom, size);
+        let has_delta = func_has_delta(egraph, &atom.func);
+        debug_println!(
+            26,
+            0,
+            "    atom[{}]: {}  (table size={}, has_delta={})",
+            i,
+            atom,
+            size,
+            has_delta
+        );
     }
 
     let order = compute_join_order(atoms, egraph);
@@ -404,49 +438,104 @@ fn evaluate_multipattern(atoms: &[FlatAtom], egraph: &Egraph) -> Vec<Binding> {
         );
     }
 
-    // Naive evaluation: run a single join over all atoms
-    let bindings = execute_join(&order, atoms, None, initial_binding, egraph);
-    debug_println!(26, 0, "    join produced {} raw bindings", bindings.len());
-
-    // Dedup by canonical e-class assignments
+    // Dedup helper: canonical key for a binding
     let mut all_bindings = Vec::new();
     let mut seen: HashSet<Vec<u64>> = HashSet::new();
 
-    for b in bindings {
-        let mut key: Vec<(String, u64)> = b
-            .iter()
-            .filter_map(|(k, v)| {
-                if let FlatVar::Quantified(name) = k {
-                    Some((name.clone(), egraph.find(*v)))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        key.sort_by(|a, b| a.0.cmp(&b.0));
-        let key_vals: Vec<u64> = key.into_iter().map(|(_, v)| v).collect();
+    let mut add_bindings = |bindings: Vec<Binding>,
+                            all_bindings: &mut Vec<Binding>,
+                            seen: &mut HashSet<Vec<u64>>,
+                            egraph: &Egraph| {
+        for b in bindings {
+            let mut key: Vec<(String, u64)> = b
+                .iter()
+                .filter_map(|(k, v)| {
+                    if let FlatVar::Quantified(name) = k {
+                        Some((name.clone(), egraph.find(*v)))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            key.sort_by(|a, b| a.0.cmp(&b.0));
+            let key_vals: Vec<u64> = key.into_iter().map(|(_, v)| v).collect();
 
-        if seen.insert(key_vals) {
+            if seen.insert(key_vals) {
+                debug_println!(
+                    26,
+                    0,
+                    "    new binding: {:?}",
+                    b.iter()
+                        .filter_map(|(k, v)| {
+                            if let FlatVar::Quantified(name) = k {
+                                Some(format!(
+                                    "{}={} (canon={})",
+                                    name,
+                                    egraph.get_term(*v),
+                                    egraph.find(*v)
+                                ))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                );
+                all_bindings.push(b);
+            }
+        }
+    };
+
+    if full_pass {
+        // Full pass: single join with no delta filtering
+        debug_println!(26, 0, "  running full pass (no delta filtering)");
+        let bindings = execute_join(&order, atoms, None, initial_binding, egraph);
+        debug_println!(26, 0, "    join produced {} raw bindings", bindings.len());
+        add_bindings(bindings, &mut all_bindings, &mut seen, egraph);
+    } else {
+        // Semi-naive: check if any atom has delta entries
+        let any_has_delta = order
+            .iter()
+            .any(|&atom_idx| func_has_delta(egraph, &atoms[atom_idx].func));
+
+        if !any_has_delta {
+            debug_println!(26, 0, "  no delta entries for any atom, skipping");
+            return vec![];
+        }
+
+        // Run k passes: in pass i, atom at position i uses delta-only
+        for (pos, &atom_idx) in order.iter().enumerate() {
+            let func = &atoms[atom_idx].func;
+            if !func_has_delta(egraph, func) {
+                debug_println!(
+                    26,
+                    0,
+                    "  pass pos={}: atom[{}] ({}) has no delta, skipping",
+                    pos,
+                    atom_idx,
+                    func
+                );
+                continue;
+            }
+
             debug_println!(
                 26,
                 0,
-                "    new binding: {:?}",
-                b.iter()
-                    .filter_map(|(k, v)| {
-                        if let FlatVar::Quantified(name) = k {
-                            Some(format!(
-                                "{}={} (canon={})",
-                                name,
-                                egraph.get_term(*v),
-                                egraph.find(*v)
-                            ))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
+                "  pass pos={}: atom[{}] ({}) using delta",
+                pos,
+                atom_idx,
+                func
             );
-            all_bindings.push(b);
+
+            let bindings =
+                execute_join(&order, atoms, Some(pos), initial_binding.clone(), egraph);
+            debug_println!(
+                26,
+                0,
+                "    pass {} produced {} raw bindings",
+                pos,
+                bindings.len()
+            );
+            add_bindings(bindings, &mut all_bindings, &mut seen, egraph);
         }
     }
 
@@ -462,21 +551,26 @@ pub fn datalog_check_backtrack(_egraph: &mut Egraph) {}
 ///
 /// Returns: Vec<(quantifier_uid, list of variable assignments)>
 pub fn datalog_find_assignments(
-    egraph: &Egraph,
+    egraph: &mut Egraph,
 ) -> Vec<(u64, Vec<DeterministicHashMap<String, Term>>)> {
-    let flat_patterns = &egraph.flat_patterns;
+    // Collect per-quantifier info before the immutable borrow
+    let quant_info: Vec<(u64, Vec<String>, bool)> = egraph
+        .quantifiers
+        .iter()
+        .map(|q| (q.id, q.variables.clone(), q.needs_full_pass))
+        .collect();
 
+    let flat_patterns = &egraph.flat_patterns;
     let mut results = Vec::new();
 
-    for quantifier in &egraph.quantifiers {
-        if let Some(multipatterns) = flat_patterns.get(&quantifier.id) {
+    for (qid, variables, needs_full_pass) in &quant_info {
+        if let Some(multipatterns) = flat_patterns.get(qid) {
             let mut quant_assignments = Vec::new();
 
             for atoms in multipatterns {
-                let bindings = evaluate_multipattern(atoms, egraph);
+                let bindings = evaluate_multipattern(atoms, *needs_full_pass, egraph);
 
                 for binding in bindings {
-                    // Convert binding to DeterministicHashMap<String, Term>
                     let mut assignment = DeterministicHashMap::new();
                     for (var, eclass) in &binding {
                         if let FlatVar::Quantified(name) = var {
@@ -484,28 +578,26 @@ pub fn datalog_find_assignments(
                         }
                     }
 
-                    // Only include if all quantifier variables are bound
-                    if quantifier
-                        .variables
-                        .iter()
-                        .all(|v| assignment.contains_key(v))
-                    {
+                    if variables.iter().all(|v| assignment.contains_key(v)) {
                         quant_assignments.push(assignment);
                     }
                 }
             }
 
-            // if !quant_assignments.is_empty() {
             debug_println!(
                 26,
                 0,
                 "Datalog matcher found {} assignments for quantifier {}",
                 quant_assignments.len(),
-                egraph.get_term(quantifier.id)
+                egraph.get_term(*qid)
             );
-            results.push((quantifier.id, quant_assignments));
-            // }
+            results.push((*qid, quant_assignments));
         }
+    }
+
+    // Clear needs_full_pass for all quantifiers after the matching round
+    for quantifier in &mut egraph.quantifiers {
+        quantifier.needs_full_pass = false;
     }
 
     results

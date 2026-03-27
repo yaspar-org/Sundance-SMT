@@ -124,6 +124,10 @@ pub struct Quantifier {
     pub guard: Option<u64>, // term that is required in order to instantiate the quantifier
     pub polarity: Polarity, // keep track of whether it is a universal or existential quantifier
     pub skolemized: bool,   // keeps track if the quantifier has been skolemized yet
+    /// True if this quantifier hasn't had a full matching pass yet.
+    /// On its first pass we skip semi-naive and do a full join so it sees all existing entries.
+    /// Reset to false after the first full pass.
+    pub needs_full_pass: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -296,10 +296,25 @@ impl EClassIndex {
 
     /// Get only delta fnode UIDs under the given e-class.
     pub fn get_delta(&self, eclass: u64, matching_round: usize) -> Vec<u64> {
-        self.index
+        let result: Vec<u64> = self
+            .index
             .get(&eclass)
             .map(|ts| ts.delta(matching_round).collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if result.is_empty() {
+            if let Some(ts) = self.index.get(&eclass) {
+                let all: Vec<u64> = ts.all().collect();
+                let stamps: Vec<&usize> = ts.entries.keys().collect();
+                if !all.is_empty() {
+                    debug_println!(
+                        26, 0,
+                        "      get_delta: eclass={} matching_round={} -> 0 delta but {} total entries, stamps={:?}",
+                        eclass, matching_round, all.len(), stamps
+                    );
+                }
+            }
+        }
+        result
     }
 
     /// Check if this index has any delta entries at all (O(1)).
@@ -311,6 +326,8 @@ impl EClassIndex {
     /// Returns true if any entries were actually moved.
     pub fn merge_roots(&mut self, old_root: u64, new_root: u64, timestamp: usize) -> bool {
         if let Some(old_entries) = self.index.remove(&old_root) {
+            let count: usize = old_entries.entries.values().map(|v| v.len()).sum();
+            debug_println!(26, 0, "      EClassIndex::merge_roots: moving {} entries from {} to {} at stamp={}", count, old_root, new_root, timestamp);
             self.index
                 .entry(new_root)
                 .or_insert_with(TimestampedEntries::new)
@@ -780,6 +797,7 @@ impl Egraph {
                     guard,
                     polarity,
                     skolemized: false,
+                    needs_full_pass: true,
                 });
 
                 if self.datalog {
