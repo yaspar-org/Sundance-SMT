@@ -364,19 +364,19 @@ fn execute_join(
 ) -> Vec<Binding> {
     // Build a raw-arg lookup for each function we need
     // todo: I feel like we are doing redundant work here -> try to get rid of this
-    let func_lookups: HashMap<&str, HashMap<u64, &Vec<u64>>> = {
-        let mut lookups = HashMap::new();
-        for &atom_idx in order {
-            let func = &atoms[atom_idx].func;
-            if !lookups.contains_key(func.as_str())
-                && let Some(entries) = egraph.function_entries.get(func) {
-                    let lookup: HashMap<u64, &Vec<u64>> =
-                        entries.iter().map(|(uid, args)| (*uid, args)).collect();
-                    lookups.insert(func.as_str(), lookup);
-                }
-        }
-        lookups
-    };
+    // let func_lookups: HashMap<&str, HashMap<u64, &Vec<u64>>> = {
+    //     let mut lookups = HashMap::new();
+    //     for &atom_idx in order {
+    //         let func = &atoms[atom_idx].func;
+    //         if !lookups.contains_key(func.as_str())
+    //             && let Some(entries) = egraph.function_entries.get(func) {
+    //                 let lookup: HashMap<u64, &Vec<u64>> =
+    //                     entries.iter().map(|(uid, args)| (*uid, args)).collect();
+    //                 lookups.insert(func.as_str(), lookup);
+    //             }
+    //     }
+    //     lookups
+    // };
 
     let mut bindings = vec![initial_binding];
 
@@ -384,9 +384,9 @@ fn execute_join(
         let atom = &atoms[atom_idx];
         let use_delta = delta_position == Some(pos);
 
-        let raw_lookup = match func_lookups.get(atom.func.as_str()) {
+        let raw_lookup = match egraph.function_entries.get(atom.func.as_str()) {
             Some(l) => {
-                debug_println!(26, 0, "    raw_lookup for '{}': {} entries, keys={:?}", atom.func, l.len(), l.keys().collect::<Vec<_>>());
+                // debug_println!(26, 0, "    raw_lookup for '{}': {} entries, keys={:?}", atom.func, l.len(), l.keys().collect::<Vec<_>>());
                 l
             },
             None => {

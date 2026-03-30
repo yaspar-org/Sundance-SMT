@@ -391,7 +391,7 @@ pub struct Egraph {
     pub quantifiers: Vec<Quantifier>,
     /// Append-only raw log of function applications: F -> Vec<(term_uid, arg_uids)>.
     /// Never modified after insertion; used by the traditional (non-datalog) matcher.
-    pub function_entries: DeterministicHashMap<String, Vec<(u64, Vec<u64>)>>,
+    pub function_entries: DeterministicHashMap<String, DeterministicHashMap<u64, Vec<u64>>>,
     /// Canonical output index: F -> FunctionOutputIndex (timestamped for semi-naive).
     pub function_maps: im::OrdMap<String, FunctionOutputIndex>,
     /// Canonical arg index: F -> FunctionArgIndex (timestamped for semi-naive).
@@ -734,7 +734,7 @@ impl Egraph {
             self.function_entries
                 .entry(func_str.clone())
                 .or_default()
-                .push((num, subterms_u64.clone()));
+                .insert(num, subterms_u64.clone());
             if self.datalog {
                 self.insert_into_canonical_indices(func_str, num, &subterms_u64);
             }
@@ -748,7 +748,7 @@ impl Egraph {
             self.function_entries
                 .entry("ite".to_string())
                 .or_default()
-                .push((num, subterms_u64.clone()));
+                .insert(num, subterms_u64.clone());
             if self.datalog {
                 self.insert_into_canonical_indices("ite".to_string(), num, &subterms_u64);
             }
@@ -759,7 +759,7 @@ impl Egraph {
             self.function_entries
                 .entry(name.to_string())
                 .or_default()
-                .push((num, vec![]));
+                .insert(num, vec![]);
             self.insert_into_canonical_indices(name.to_string(), num, &vec![]);
             // Track for re-insertion after backtrack (zero-arg, so empty arg list)
             self.terms_added_by_quantifiers.push((name.to_string(), num, vec![]));
@@ -770,7 +770,7 @@ impl Egraph {
             self.function_entries
                 .entry(name.to_string())
                 .or_default()
-                .push((num, vec![]));
+                .insert(num, vec![]);
             self.insert_into_canonical_indices(name.to_string(), num, &vec![]);
             // Track for re-insertion after backtrack (zero-arg, so empty arg list)
             self.terms_added_by_quantifiers.push((name.to_string(), num, vec![]));
