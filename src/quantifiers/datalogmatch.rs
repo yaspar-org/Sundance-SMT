@@ -240,14 +240,29 @@ fn try_extend_binding(
 
 /// Eagerly intersect a new candidate set into a running result.
 /// If result is None, initializes it. Otherwise retains only UIDs present in both.
-fn intersect_candidates(result: &mut Option<HashSet<u64>>, candidates: &[u64]) {
+/// Uses sorted-vec merge intersection to avoid all hashing overhead.
+fn intersect_candidates(result: &mut Option<Vec<u64>>, candidates: &mut Vec<u64>) {
+    candidates.sort_unstable();
+    candidates.dedup();
     match result {
         None => {
-            *result = Some(candidates.iter().copied().collect());
+            *result = Some(std::mem::take(candidates));
         }
-        Some(set) => {
-            let other: HashSet<u64> = candidates.iter().copied().collect();
-            set.retain(|uid| other.contains(uid));
+        Some(existing) => {
+            let mut merged = Vec::with_capacity(existing.len().min(candidates.len()));
+            let (mut i, mut j) = (0, 0);
+            while i < existing.len() && j < candidates.len() {
+                match existing[i].cmp(&candidates[j]) {
+                    std::cmp::Ordering::Less => i += 1,
+                    std::cmp::Ordering::Greater => j += 1,
+                    std::cmp::Ordering::Equal => {
+                        merged.push(existing[i]);
+                        i += 1;
+                        j += 1;
+                    }
+                }
+            }
+            *existing = merged;
         }
     }
 }
@@ -270,7 +285,7 @@ fn get_candidates(
     egraph: &Egraph,
     var_index: &HashMap<FlatVar, usize>,
 ) -> Vec<u64> {
-    let mut result: Option<HashSet<u64>> = None;
+    let mut result: Option<Vec<u64>> = None;
     let matching_round = egraph.matching_round;
 
     // Check argument indices (canonicalize binding values for lookup)
@@ -282,7 +297,7 @@ fn get_candidates(
             }
             if let Some(raw_uid) = binding.get(var_index[var]) {
                 let canon = egraph.find(raw_uid);
-                let candidates: Vec<u64> = if delta_only {
+                let mut candidates: Vec<u64> = if delta_only {
                     arg_idx.args[i].get_delta(canon, matching_round)
                 } else {
                     arg_idx.args[i].get_all(canon)
@@ -301,7 +316,7 @@ fn get_candidates(
                 if candidates.is_empty() {
                     return vec![];
                 }
-                intersect_candidates(&mut result, &candidates);
+                intersect_candidates(&mut result, &mut candidates);
                 if result.as_ref().unwrap().is_empty() {
                     return vec![];
                 }
@@ -313,7 +328,7 @@ fn get_candidates(
     if let Some(raw_uid) = binding.get(var_index[&atom.output]) {
         let canon = egraph.find(raw_uid);
         if let Some(func_out) = egraph.function_maps.get(&atom.func) {
-            let candidates: Vec<u64> = if delta_only {
+            let mut candidates: Vec<u64> = if delta_only {
                 func_out.output.get_delta(canon, matching_round)
             } else {
                 func_out.output.get_all(canon)
@@ -321,12 +336,12 @@ fn get_candidates(
             if candidates.is_empty() {
                 return vec![];
             }
-            intersect_candidates(&mut result, &candidates);
+            intersect_candidates(&mut result, &mut candidates);
         }
     }
 
     match result {
-        Some(set) => set.into_iter().collect(),
+        Some(vec) => vec,
         None => {
             // No bound variables — full scan: return all fnode UIDs for this function.
             // This happens for the first atom in the join order when it has no ground
@@ -485,17 +500,17 @@ fn evaluate_multipattern(
     let num_vars = var_index.len();
 
     // Collect which slots correspond to quantified variables (for dedup)
-    let mut quant_slots: Vec<(String, usize)> = var_index
-        .iter()
-        .filter_map(|(var, &idx)| {
-            if let FlatVar::Quantified(name) = var {
-                Some((name.clone(), idx))
-            } else {
-                None
-            }
-        })
-        .collect();
-    quant_slots.sort_by(|a, b| a.0.cmp(&b.0));
+    // let mut quant_slots: Vec<(String, usize)> = var_index
+    //     .iter()
+    //     .filter_map(|(var, &idx)| {
+    //         if let FlatVar::Quantified(name) = var {
+    //             Some((name.clone(), idx))
+    //         } else {
+    //             None
+    //         }
+    //     })
+    //     .collect();
+    // quant_slots.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Initialize binding with ground variables
     let mut initial_binding = Binding::new(num_vars);
@@ -509,39 +524,37 @@ fn evaluate_multipattern(
 
     // Dedup helper: canonical key for a binding
     let mut all_bindings = Vec::new();
-    let mut seen: HashSet<Vec<u64>> = HashSet::new();
+    // let mut seen: HashSet<Vec<u64>> = HashSet::new();
 
     let mut add_bindings = |bindings: Vec<Binding>,
-                            all_bindings: &mut Vec<Binding>,
-                            seen: &mut HashSet<Vec<u64>>,
-                            egraph: &Egraph,
-                            quant_slots: &[(String, usize)]| {
+                            all_bindings: &mut Vec<Binding>|
+                            // seen: &mut HashSet<Vec<u64>>,
+                            // egraph: &Egraph,
+                            // var_index: &HashMap<FlatVar, usize>| 
+                            {
         for b in bindings {
-            let key_vals: Vec<u64> = quant_slots
-                .iter()
-                .map(|(_, idx)| egraph.find(b.slots[*idx]))
-                .collect();
+            // let key_vals: Vec<u64> = var_index.keys().into_iter();
 
-            if seen.insert(key_vals) {
-                debug_println!(
-                    26,
-                    0,
-                    "    new binding: {:?}",
-                    quant_slots
-                        .iter()
-                        .map(|(name, idx)| {
-                            let v = b.slots[*idx];
-                            format!(
-                                "{}={} (canon={})",
-                                name,
-                                egraph.get_term(v),
-                                egraph.find(v)
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                );
+            // if seen.insert(key_vals) {
+                // debug_println!(
+                //     26,
+                //     0,
+                //     "    new binding: {:?}",
+                //     quant_slots
+                //         .iter()
+                //         .map(|(name, idx)| {
+                //             let v = b.slots[*idx];
+                //             format!(
+                //                 "{}={} (canon={})",
+                //                 name,
+                //                 egraph.get_term(v),
+                //                 egraph.find(v)
+                //             )
+                //         })
+                //         .collect::<Vec<_>>()
+                // );
                 all_bindings.push(b);
-            }
+            // }
         }
     };
 
@@ -550,7 +563,7 @@ fn evaluate_multipattern(
         debug_println!(26, 0, "  running full pass (no delta filtering)");
         let bindings = execute_join(&order, atoms, None, initial_binding, egraph, &var_index);
         debug_println!(26, 0, "    join produced {} raw bindings", bindings.len());
-        add_bindings(bindings, &mut all_bindings, &mut seen, egraph, &quant_slots);
+        add_bindings(bindings, &mut all_bindings);
     } else {
         // Semi-naive: check if any atom has delta entries
         let any_has_delta = order
@@ -595,7 +608,7 @@ fn evaluate_multipattern(
                 pos,
                 bindings.len()
             );
-            add_bindings(bindings, &mut all_bindings, &mut seen, egraph, &quant_slots);
+            add_bindings(bindings, &mut all_bindings);
         }
     }
 
