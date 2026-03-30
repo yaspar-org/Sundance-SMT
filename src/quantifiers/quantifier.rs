@@ -126,7 +126,7 @@ pub fn instantiate_quantifiers(
             let additional_constraints =
                 check_for_function_bool(&skolemized_quantifier, egraph, true);
             debug_println!(19, 0, "we are skolemizing {}", term);
-            debug_println!(26, 0, "(assert {})", skolemized_quantifier);
+            debug_println!(28, 0, "(assert {})", skolemized_quantifier);
             debug_println!(
                 24,
                 8,
@@ -319,7 +319,7 @@ pub fn instantiate_quantifiers(
 
                 let nnf_term = let_elim_term.nnf(egraph);
 
-                debug_println!(26, 4, "(assert {})", nnf_term.clone());
+                debug_println!(28, 0, "(assert {})", nnf_term.clone());
                 debug_println!(
                     24,
                     8,

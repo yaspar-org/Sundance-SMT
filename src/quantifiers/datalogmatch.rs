@@ -83,7 +83,9 @@ pub fn flatten_pattern(
 
         Not(t) => flatten_application("not".to_string(), vec![t], quant_vars, fresh_counter),
 
-        Constant(..) | Global(..) => (vec![], FlatVar::Ground(term.uid())),
+        Constant(f, _)=> flatten_application(f.to_string(), vec![], quant_vars, fresh_counter),
+        Global(f, _) => flatten_application(f.to_string(), vec![], quant_vars, fresh_counter),
+        // Constant(..) | Global(..) => (vec![], FlatVar::Ground(term.uid())),
 
         other => panic!(
             "Unexpected term variant in pattern during flattening: {:?}",
@@ -141,7 +143,41 @@ pub fn compile_multipatterns(
 // Relational matching engine
 // ============================================================
 
-type Binding = HashMap<FlatVar, u64>;
+/// A binding is a fixed-size vector of slots, one per variable in the multipattern.
+/// `u64::MAX` represents an unbound variable. This is much cheaper to clone than a HashMap.
+#[derive(Clone, Debug)]
+struct Binding {
+    slots: Vec<u64>,
+}
+
+const UNBOUND: u64 = u64::MAX;
+
+impl Binding {
+    fn new(num_vars: usize) -> Self {
+        Binding { slots: vec![UNBOUND; num_vars] }
+    }
+
+    fn get(&self, idx: usize) -> Option<u64> {
+        let v = self.slots[idx];
+        if v == UNBOUND { None } else { Some(v) }
+    }
+
+    fn set(&mut self, idx: usize, val: u64) {
+        self.slots[idx] = val;
+    }
+}
+
+/// Maps each FlatVar in a multipattern to a numeric index for use in Binding.
+fn build_var_index(atoms: &[FlatAtom]) -> HashMap<FlatVar, usize> {
+    let mut index = HashMap::new();
+    for atom in atoms {
+        for var in atom.args.iter().chain(std::iter::once(&atom.output)) {
+            let len = index.len();
+            index.entry(var.clone()).or_insert(len);
+        }
+    }
+    index
+}
 
 /// Estimate the number of entries for a function in the egraph.
 fn table_size(egraph: &Egraph, func: &str) -> usize {
@@ -171,28 +207,31 @@ fn try_extend_binding(
     fnode_uid: u64,
     raw_args: &[u64],
     egraph: &Egraph,
+    var_index: &HashMap<FlatVar, usize>,
 ) -> Option<Binding> {
     let mut new_binding = binding.clone();
 
     // Check/bind each argument: compare canonically, bind raw
     for (var, &raw_uid) in atom.args.iter().zip(raw_args.iter()) {
+        let idx = var_index[var];
         let canon_eclass = egraph.find(raw_uid);
-        match new_binding.get(var) {
-            Some(&bound) if egraph.find(bound) == canon_eclass => {} // consistent
+        match new_binding.get(idx) {
+            Some(bound) if egraph.find(bound) == canon_eclass => {} // consistent
             Some(_) => return None,                                  // conflict
             None => {
-                new_binding.insert(var.clone(), raw_uid);
+                new_binding.set(idx, raw_uid);
             }
         }
     }
 
     // Check/bind output: compare canonically, bind raw
+    let out_idx = var_index[&atom.output];
     let canon_output = egraph.find(fnode_uid);
-    match new_binding.get(&atom.output) {
-        Some(&bound) if egraph.find(bound) == canon_output => {} // consistent
+    match new_binding.get(out_idx) {
+        Some(bound) if egraph.find(bound) == canon_output => {} // consistent
         Some(_) => return None,                                  // conflict
         None => {
-            new_binding.insert(atom.output.clone(), fnode_uid);
+            new_binding.set(out_idx, fnode_uid);
         }
     }
 
@@ -229,17 +268,19 @@ fn get_candidates(
     binding: &Binding,
     delta_only: bool,
     egraph: &Egraph,
+    var_index: &HashMap<FlatVar, usize>,
 ) -> Vec<u64> {
     let mut result: Option<HashSet<u64>> = None;
     let matching_round = egraph.matching_round;
 
     // Check argument indices (canonicalize binding values for lookup)
     if let Some(arg_idx) = egraph.function_indices.get(&atom.func) {
+        debug_println!(26, 0, "      get_candidates for '{}': found in function_indices, arity={}", atom.func, arg_idx.args.len());
         for (i, var) in atom.args.iter().enumerate() {
             if i >= arg_idx.args.len() {
                 break;
             }
-            if let Some(&raw_uid) = binding.get(var) {
+            if let Some(raw_uid) = binding.get(var_index[var]) {
                 let canon = egraph.find(raw_uid);
                 let candidates: Vec<u64> = if delta_only {
                     arg_idx.args[i].get_delta(canon, matching_round)
@@ -269,7 +310,7 @@ fn get_candidates(
     }
 
     // Check output index (canonicalize binding value for lookup)
-    if let Some(&raw_uid) = binding.get(&atom.output) {
+    if let Some(raw_uid) = binding.get(var_index[&atom.output]) {
         let canon = egraph.find(raw_uid);
         if let Some(func_out) = egraph.function_maps.get(&atom.func) {
             let candidates: Vec<u64> = if delta_only {
@@ -291,7 +332,7 @@ fn get_candidates(
             // This happens for the first atom in the join order when it has no ground
             // constants. try_extend_binding will bind all unbound variables.
             if let Some(func_out) = egraph.function_maps.get(&atom.func) {
-                if delta_only {
+                let candidates: Vec<u64> = if delta_only {
                     // Only collect fnodes from e-class keys with delta entries
                     func_out.output.index.values()
                         .flat_map(|ts| ts.delta(matching_round))
@@ -300,8 +341,11 @@ fn get_candidates(
                     func_out.output.index.values()
                         .flat_map(|ts| ts.all())
                         .collect()
-                }
+                };
+                debug_println!(26, 0, "      full scan for '{}': {} candidates (uids={:?}), delta_only={}, index has {} eclasses, matching_round={}", atom.func, candidates.len(), candidates, delta_only, func_out.output.index.len(), matching_round);
+                candidates
             } else {
+                debug_println!(24, 0, "      full scan for '{}': NOT in function_maps! keys={:?}", atom.func, egraph.function_maps.keys().collect::<Vec<_>>());
                 vec![]
             }
         }
@@ -316,8 +360,10 @@ fn execute_join(
     delta_position: Option<usize>,
     initial_binding: Binding,
     egraph: &Egraph,
+    var_index: &HashMap<FlatVar, usize>,
 ) -> Vec<Binding> {
     // Build a raw-arg lookup for each function we need
+    // todo: I feel like we are doing redundant work here -> try to get rid of this
     let func_lookups: HashMap<&str, HashMap<u64, &Vec<u64>>> = {
         let mut lookups = HashMap::new();
         for &atom_idx in order {
@@ -339,22 +385,39 @@ fn execute_join(
         let use_delta = delta_position == Some(pos);
 
         let raw_lookup = match func_lookups.get(atom.func.as_str()) {
-            Some(l) => l,
-            None => return vec![], // Function not in egraph
+            Some(l) => {
+                debug_println!(26, 0, "    raw_lookup for '{}': {} entries, keys={:?}", atom.func, l.len(), l.keys().collect::<Vec<_>>());
+                l
+            },
+            None => {
+                debug_println!(
+                    26,
+                    0,
+                    "No entries for function '{}' in egraph, skipping atom {}",
+                    atom.func,
+                    atom
+                );
+                return vec![];
+            }, // Function not in egraph
         };
 
         let mut new_bindings = Vec::new();
         for binding in &bindings {
-            let candidates = get_candidates(atom, binding, use_delta, egraph);
-            debug_println!(28, 0, "We have the following candidates for atom {}", atom);
+            let candidates = get_candidates(atom, binding, use_delta, egraph, var_index);
+            debug_println!(27, 0, "We have the following candidates for atom {}", atom);
             for fnode_uid in candidates {
-                debug_println!(28, 4, "{}", egraph.get_term(fnode_uid));
-                if let Some(raw_args) = raw_lookup.get(&fnode_uid)
-                    && let Some(new_binding) =
-                        try_extend_binding(binding, atom, fnode_uid, raw_args, egraph)
+                debug_println!(27, 4, "{}", egraph.get_term(fnode_uid));
+                if let Some(raw_args) = raw_lookup.get(&fnode_uid) {
+                    if let Some(new_binding) =
+                        try_extend_binding(binding, atom, fnode_uid, raw_args, egraph, var_index)
                     {
                         new_bindings.push(new_binding);
+                    } else {
+                        debug_println!(26, 0, "      try_extend_binding FAILED for uid={} ({}) raw_args={:?}", fnode_uid, egraph.get_term(fnode_uid), raw_args);
                     }
+                } else {
+                    debug_println!(26, 0, "      uid={} NOT in raw_lookup for '{}'", fnode_uid, atom.func);
+                }
             }
         }
 
@@ -386,10 +449,10 @@ fn evaluate_multipattern(
     atoms: &[FlatAtom],
     full_pass: bool,
     egraph: &Egraph,
-) -> Vec<Binding> {
+) -> (Vec<Binding>, HashMap<FlatVar, usize>) {
     if atoms.is_empty() {
         debug_println!(26, 0, "  evaluate_multipattern: empty atoms, returning");
-        return vec![];
+        return (vec![], HashMap::new());
     }
 
     debug_println!(
@@ -417,25 +480,31 @@ fn evaluate_multipattern(
     let order = compute_join_order(atoms, egraph);
     debug_println!(26, 0, "  join order: {:?}", order);
 
+    // Build variable index: maps each FlatVar to a slot number
+    let var_index = build_var_index(atoms);
+    let num_vars = var_index.len();
+
+    // Collect which slots correspond to quantified variables (for dedup)
+    let mut quant_slots: Vec<(String, usize)> = var_index
+        .iter()
+        .filter_map(|(var, &idx)| {
+            if let FlatVar::Quantified(name) = var {
+                Some((name.clone(), idx))
+            } else {
+                None
+            }
+        })
+        .collect();
+    quant_slots.sort_by(|a, b| a.0.cmp(&b.0));
+
     // Initialize binding with ground variables
-    let mut initial_binding = Binding::new();
+    let mut initial_binding = Binding::new(num_vars);
     for atom in atoms {
         for var in atom.args.iter().chain(std::iter::once(&atom.output)) {
             if let FlatVar::Ground(uid) = var {
-                initial_binding.insert(var.clone(), *uid);
+                initial_binding.set(var_index[var], *uid);
             }
         }
-    }
-    if !initial_binding.is_empty() {
-        debug_println!(
-            26,
-            0,
-            "  initial ground bindings: {:?}",
-            initial_binding
-                .iter()
-                .map(|(k, v)| format!("{} -> {} (canon={})", k, v, egraph.find(*v)))
-                .collect::<Vec<_>>()
-        );
     }
 
     // Dedup helper: canonical key for a binding
@@ -445,38 +514,29 @@ fn evaluate_multipattern(
     let mut add_bindings = |bindings: Vec<Binding>,
                             all_bindings: &mut Vec<Binding>,
                             seen: &mut HashSet<Vec<u64>>,
-                            egraph: &Egraph| {
+                            egraph: &Egraph,
+                            quant_slots: &[(String, usize)]| {
         for b in bindings {
-            let mut key: Vec<(String, u64)> = b
+            let key_vals: Vec<u64> = quant_slots
                 .iter()
-                .filter_map(|(k, v)| {
-                    if let FlatVar::Quantified(name) = k {
-                        Some((name.clone(), egraph.find(*v)))
-                    } else {
-                        None
-                    }
-                })
+                .map(|(_, idx)| egraph.find(b.slots[*idx]))
                 .collect();
-            key.sort_by(|a, b| a.0.cmp(&b.0));
-            let key_vals: Vec<u64> = key.into_iter().map(|(_, v)| v).collect();
 
             if seen.insert(key_vals) {
                 debug_println!(
                     26,
                     0,
                     "    new binding: {:?}",
-                    b.iter()
-                        .filter_map(|(k, v)| {
-                            if let FlatVar::Quantified(name) = k {
-                                Some(format!(
-                                    "{}={} (canon={})",
-                                    name,
-                                    egraph.get_term(*v),
-                                    egraph.find(*v)
-                                ))
-                            } else {
-                                None
-                            }
+                    quant_slots
+                        .iter()
+                        .map(|(name, idx)| {
+                            let v = b.slots[*idx];
+                            format!(
+                                "{}={} (canon={})",
+                                name,
+                                egraph.get_term(v),
+                                egraph.find(v)
+                            )
                         })
                         .collect::<Vec<_>>()
                 );
@@ -488,9 +548,9 @@ fn evaluate_multipattern(
     if full_pass {
         // Full pass: single join with no delta filtering
         debug_println!(26, 0, "  running full pass (no delta filtering)");
-        let bindings = execute_join(&order, atoms, None, initial_binding, egraph);
+        let bindings = execute_join(&order, atoms, None, initial_binding, egraph, &var_index);
         debug_println!(26, 0, "    join produced {} raw bindings", bindings.len());
-        add_bindings(bindings, &mut all_bindings, &mut seen, egraph);
+        add_bindings(bindings, &mut all_bindings, &mut seen, egraph, &quant_slots);
     } else {
         // Semi-naive: check if any atom has delta entries
         let any_has_delta = order
@@ -499,7 +559,7 @@ fn evaluate_multipattern(
 
         if !any_has_delta {
             debug_println!(26, 0, "  no delta entries for any atom, skipping");
-            return vec![];
+            return (vec![], var_index);
         }
 
         // Run k passes: in pass i, atom at position i uses delta-only
@@ -527,7 +587,7 @@ fn evaluate_multipattern(
             );
 
             let bindings =
-                execute_join(&order, atoms, Some(pos), initial_binding.clone(), egraph);
+                execute_join(&order, atoms, Some(pos), initial_binding.clone(), egraph, &var_index);
             debug_println!(
                 26,
                 0,
@@ -535,12 +595,12 @@ fn evaluate_multipattern(
                 pos,
                 bindings.len()
             );
-            add_bindings(bindings, &mut all_bindings, &mut seen, egraph);
+            add_bindings(bindings, &mut all_bindings, &mut seen, egraph, &quant_slots);
         }
     }
 
     debug_println!(26, 0, "  total unique bindings: {}", all_bindings.len());
-    all_bindings
+    (all_bindings, var_index)
 }
 
 /// Reset watermarks if a backtrack has occurred since the last matching round.
@@ -568,13 +628,25 @@ pub fn datalog_find_assignments(
             let mut quant_assignments = Vec::new();
 
             for atoms in multipatterns {
-                let bindings = evaluate_multipattern(atoms, *needs_full_pass, egraph);
+                debug_println!(
+                    26,
+                    0,
+                    "Matching quantifier {} with {} atoms {:?} (needs_full_pass={})",
+                    egraph.get_term(*qid),
+                    atoms.len(),
+                    atoms,
+                    needs_full_pass
+                );
+                let (bindings, var_index) = evaluate_multipattern(atoms, *needs_full_pass, egraph);
 
                 for binding in bindings {
                     let mut assignment = DeterministicHashMap::new();
-                    for (var, eclass) in &binding {
+                    for (var, &idx) in &var_index {
                         if let FlatVar::Quantified(name) = var {
-                            assignment.insert(name.clone(), egraph.get_term(*eclass));
+                            let eclass = binding.slots[idx];
+                            if eclass != UNBOUND {
+                                assignment.insert(name.clone(), egraph.get_term(eclass));
+                            }
                         }
                     }
 
@@ -605,6 +677,7 @@ pub fn datalog_find_assignments(
 
 /// Increment matching_round after each matching round for semi-naive evaluation.
 pub fn datalog_update_watermarks(egraph: &mut Egraph) {
+    debug_println!(24, 0, "Incrementing matching_round from {} to {}", egraph.matching_round, egraph.matching_round + 1);
     egraph.matching_round += 1;
 }
 

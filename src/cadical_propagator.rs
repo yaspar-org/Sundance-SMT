@@ -260,7 +260,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_backtrack(&mut self, level: usize) {
         debug_println!(
-            23,
+            28,
             0,
             "PROPAGATOR: Backtracking from level {} to level {}",
             self.decision_level,

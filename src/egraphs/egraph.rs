@@ -397,7 +397,7 @@ pub struct Egraph {
     /// Canonical arg index: F -> FunctionArgIndex (timestamped for semi-naive).
     pub function_indices: im::OrdMap<String, FunctionArgIndex>,
     /// Snapshot stack: saved at each decision level for O(1) backtracking.
-    /// Includes matching_round so semi-naive timestamps are consistent after backtrack.
+    /// Snapshot stack for backtracking canonical indices.
     pub function_index_snapshots: Vec<(
         usize,
         im::OrdMap<String, FunctionOutputIndex>,
@@ -754,6 +754,28 @@ impl Egraph {
             }
         };
 
+        if let Constant(name, _) = term.repr() && self.datalog {
+            debug_println!(24, 0, "Indexing Constant '{}' uid={} into canonical indices", name, num);
+            self.function_entries
+                .entry(name.to_string())
+                .or_default()
+                .push((num, vec![]));
+            self.insert_into_canonical_indices(name.to_string(), num, &vec![]);
+            // Track for re-insertion after backtrack (zero-arg, so empty arg list)
+            self.terms_added_by_quantifiers.push((name.to_string(), num, vec![]));
+        }
+
+        if let Global(name, _) = term.repr() && self.datalog {
+            debug_println!(24, 0, "Indexing Global '{}' uid={} into canonical indices", name, num);
+            self.function_entries
+                .entry(name.to_string())
+                .or_default()
+                .push((num, vec![]));
+            self.insert_into_canonical_indices(name.to_string(), num, &vec![]);
+            // Track for re-insertion after backtrack (zero-arg, so empty arg list)
+            self.terms_added_by_quantifiers.push((name.to_string(), num, vec![]));
+        }
+
         // TODO: inserting the term if it is a quantifier
         // TODO: there is a weird issue where quantifiers dont get added normally
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
@@ -997,7 +1019,7 @@ impl Egraph {
         disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
     ) {
         debug_println!(
-            22,
+            27,
             0,
             "We are in insert_predecessor with {} [{}] and from_quantifier {}",
             term,
@@ -1303,8 +1325,8 @@ impl Egraph {
         // Re-insert terms that were created by quantifier instantiations.
         // These terms are permanent in the egraph but were added after the snapshot,
         // so they need to be re-added to the restored canonical indices.
-        let terms_to_readd: Vec<(String, u64, Vec<u64>)> = self.terms_added_by_quantifiers.clone();
-        for (func, term_uid, arg_uids) in terms_to_readd {
+        let terms_to_read: Vec<(String, u64, Vec<u64>)> = self.terms_added_by_quantifiers.clone();
+        for (func, term_uid, arg_uids) in terms_to_read {
             self.insert_into_canonical_indices(func, term_uid, &arg_uids);
         }
         // Clear at level 0 since everything is permanent
