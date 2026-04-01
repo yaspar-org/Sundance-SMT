@@ -287,34 +287,32 @@ impl EClassIndex {
     }
 
     /// Get all fnode UIDs under the given e-class (all timestamps).
-    pub fn get_all(&self, eclass: u64) -> Vec<u64> {
-        self.index
-            .get(&eclass)
-            .map(|ts| ts.all().collect())
-            .unwrap_or_default()
+    /// Clears `buf` and fills it with results, avoiding allocation if buf has capacity.
+    pub fn get_all_into(&self, eclass: u64, buf: &mut Vec<u64>) {
+        buf.clear();
+        if let Some(ts) = self.index.get(&eclass) {
+            buf.extend(ts.all());
+        }
     }
 
     /// Get only delta fnode UIDs under the given e-class.
-    pub fn get_delta(&self, eclass: u64, matching_round: usize) -> Vec<u64> {
-        let result: Vec<u64> = self
-            .index
-            .get(&eclass)
-            .map(|ts| ts.delta(matching_round).collect())
-            .unwrap_or_default();
-        if result.is_empty() {
-            if let Some(ts) = self.index.get(&eclass) {
-                let all: Vec<u64> = ts.all().collect();
-                let stamps: Vec<&usize> = ts.entries.keys().collect();
-                if !all.is_empty() {
+    /// Clears `buf` and fills it with results, avoiding allocation if buf has capacity.
+    pub fn get_delta_into(&self, eclass: u64, matching_round: usize, buf: &mut Vec<u64>) {
+        buf.clear();
+        if let Some(ts) = self.index.get(&eclass) {
+            buf.extend(ts.delta(matching_round));
+            if buf.is_empty() {
+                let all_count: usize = ts.entries.values().map(|v| v.len()).sum();
+                if all_count > 0 {
+                    let stamps: Vec<&usize> = ts.entries.keys().collect();
                     debug_println!(
                         26, 0,
                         "      get_delta: eclass={} matching_round={} -> 0 delta but {} total entries, stamps={:?}",
-                        eclass, matching_round, all.len(), stamps
+                        eclass, matching_round, all_count, stamps
                     );
                 }
             }
         }
-        result
     }
 
     /// Check if this index has any delta entries at all (O(1)).

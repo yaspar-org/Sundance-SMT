@@ -287,6 +287,7 @@ fn get_candidates(
 ) -> Vec<u64> {
     let mut result: Option<Vec<u64>> = None;
     let matching_round = egraph.matching_round;
+    let mut candidates: Vec<u64> = Vec::new();
 
     // Check argument indices (canonicalize binding values for lookup)
     if let Some(arg_idx) = egraph.function_indices.get(&atom.func) {
@@ -297,11 +298,11 @@ fn get_candidates(
             }
             if let Some(raw_uid) = binding.get(var_index[var]) {
                 let canon = egraph.find(raw_uid);
-                let mut candidates: Vec<u64> = if delta_only {
-                    arg_idx.args[i].get_delta(canon, matching_round)
+                if delta_only {
+                    arg_idx.args[i].get_delta_into(canon, matching_round, &mut candidates);
                 } else {
-                    arg_idx.args[i].get_all(canon)
-                };
+                    arg_idx.args[i].get_all_into(canon, &mut candidates);
+                }
                 debug_println!(
                     26,
                     0,
@@ -328,11 +329,11 @@ fn get_candidates(
     if let Some(raw_uid) = binding.get(var_index[&atom.output]) {
         let canon = egraph.find(raw_uid);
         if let Some(func_out) = egraph.function_maps.get(&atom.func) {
-            let mut candidates: Vec<u64> = if delta_only {
-                func_out.output.get_delta(canon, matching_round)
+            if delta_only {
+                func_out.output.get_delta_into(canon, matching_round, &mut candidates);
             } else {
-                func_out.output.get_all(canon)
-            };
+                func_out.output.get_all_into(canon, &mut candidates);
+            }
             if candidates.is_empty() {
                 return vec![];
             }
@@ -347,16 +348,16 @@ fn get_candidates(
             // This happens for the first atom in the join order when it has no ground
             // constants. try_extend_binding will bind all unbound variables.
             if let Some(func_out) = egraph.function_maps.get(&atom.func) {
-                let candidates: Vec<u64> = if delta_only {
-                    // Only collect fnodes from e-class keys with delta entries
-                    func_out.output.index.values()
-                        .flat_map(|ts| ts.delta(matching_round))
-                        .collect()
+                candidates.clear();
+                if delta_only {
+                    for ts in func_out.output.index.values() {
+                        candidates.extend(ts.delta(matching_round));
+                    }
                 } else {
-                    func_out.output.index.values()
-                        .flat_map(|ts| ts.all())
-                        .collect()
-                };
+                    for ts in func_out.output.index.values() {
+                        candidates.extend(ts.all());
+                    }
+                }
                 debug_println!(26, 0, "      full scan for '{}': {} candidates (uids={:?}), delta_only={}, index has {} eclasses, matching_round={}", atom.func, candidates.len(), candidates, delta_only, func_out.output.index.len(), matching_round);
                 candidates
             } else {
