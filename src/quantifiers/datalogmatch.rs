@@ -5,6 +5,7 @@ use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
 use crate::utils::DeterministicHashMap;
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::{Repr, Term};
 
@@ -188,10 +189,62 @@ fn table_size(egraph: &Egraph, func: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Compute join order: sort atoms by estimated table size (smaller first).
+/// Collect all variables (non-Ground) from an atom.
+fn atom_vars(atom: &FlatAtom) -> HashSet<&FlatVar> {
+    atom.args
+        .iter()
+        .chain(std::iter::once(&atom.output))
+        .filter(|v| !matches!(v, FlatVar::Ground(_)))
+        .collect()
+}
+
+/// Compute join order using a greedy heuristic that avoids cartesian products.
+///
+/// 1. Pick the first atom by smallest table size.
+/// 2. For each subsequent position, among the remaining atoms, prefer the one that
+///    shares the most variables with the already-bound set (avoids cartesian products).
+///    Break ties by smallest table size.
 fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..atoms.len()).collect();
-    order.sort_by_key(|&i| table_size(egraph, &atoms[i].func));
+    let n = atoms.len();
+    if n == 0 {
+        return vec![];
+    }
+
+    let mut remaining: Vec<usize> = (0..n).collect();
+    let mut order = Vec::with_capacity(n);
+    let mut bound_vars: HashSet<FlatVar> = HashSet::new();
+
+    // First atom: pick the smallest table
+    remaining.sort_by_key(|&i| table_size(egraph, &atoms[i].func));
+    let first = remaining.remove(0);
+    for v in atom_vars(&atoms[first]) {
+        bound_vars.insert(v.clone());
+    }
+    order.push(first);
+
+    // Greedily pick the next atom that shares the most variables with bound set
+    while !remaining.is_empty() {
+        let best_pos = remaining
+            .iter()
+            .enumerate()
+            .max_by_key(|&(_, &atom_idx)| {
+                let vars = atom_vars(&atoms[atom_idx]);
+                let shared = vars.iter().filter(|v| bound_vars.contains(*v)).count();
+                let size = table_size(egraph, &atoms[atom_idx].func);
+                // Primary: maximize shared variables. Secondary: minimize table size.
+                // Encode as (shared, MAX - size) so both sort ascending-is-better via max_by_key.
+                (shared, usize::MAX - size)
+            })
+            .map(|(pos, _)| pos)
+            .unwrap();
+
+        let chosen = remaining.swap_remove(best_pos);
+        for v in atom_vars(&atoms[chosen]) {
+            bound_vars.insert(v.clone());
+        }
+        order.push(chosen);
+    }
+
     order
 }
 
@@ -438,6 +491,25 @@ fn execute_join(
         }
 
         bindings = new_bindings;
+
+        // Level 28: show binding set after this join step
+        debug_println!(28, 0, "    After step {} (atom[{}] = {}{}):", pos, atom_idx, atom, if use_delta { " [DELTA]" } else { "" });
+        debug_println!(28, 0, "      {} bindings", bindings.len());
+        if !bindings.is_empty() {
+            // Show up to 5 example bindings
+            for (bi, b) in bindings.iter().enumerate().take(5) {
+                let bound_vars: Vec<String> = var_index.iter()
+                    .filter_map(|(var, &idx)| {
+                        b.get(idx).map(|uid| format!("{}={}", var, egraph.get_term(uid)))
+                    })
+                    .collect();
+                debug_println!(28, 0, "        [{}] {{ {} }}", bi, bound_vars.join(", "));
+            }
+            if bindings.len() > 5 {
+                debug_println!(28, 0, "        ... and {} more", bindings.len() - 5);
+            }
+        }
+
         if bindings.is_empty() {
             break;
         }
@@ -495,6 +567,15 @@ fn evaluate_multipattern(
 
     let order = compute_join_order(atoms, egraph);
     debug_println!(26, 0, "  join order: {:?}", order);
+
+    // Level 28: show the join order with atom details
+    debug_println!(28, 0, "  Join order (smallest table first):");
+    for (pos, &atom_idx) in order.iter().enumerate() {
+        let atom = &atoms[atom_idx];
+        let size = table_size(egraph, &atom.func);
+        let has_delta = func_has_delta(egraph, &atom.func);
+        debug_println!(28, 0, "    step {}: atom[{}] {}  (table_size={}, delta={})", pos, atom_idx, atom, size, has_delta);
+    }
 
     // Build variable index: maps each FlatVar to a slot number
     let var_index = build_var_index(atoms);
@@ -562,8 +643,10 @@ fn evaluate_multipattern(
     if full_pass {
         // Full pass: single join with no delta filtering
         debug_println!(26, 0, "  running full pass (no delta filtering)");
+        debug_println!(28, 0, "  --- Full pass (all entries, no delta filtering) ---");
         let bindings = execute_join(&order, atoms, None, initial_binding, egraph, &var_index);
         debug_println!(26, 0, "    join produced {} raw bindings", bindings.len());
+        debug_println!(28, 0, "  Full pass produced {} bindings", bindings.len());
         add_bindings(bindings, &mut all_bindings);
     } else {
         // Semi-naive: check if any atom has delta entries
@@ -577,6 +660,7 @@ fn evaluate_multipattern(
         }
 
         // Run k passes: in pass i, atom at position i uses delta-only
+        debug_println!(28, 0, "  --- Semi-naive: {} passes ---", order.len());
         for (pos, &atom_idx) in order.iter().enumerate() {
             let func = &atoms[atom_idx].func;
             if !func_has_delta(egraph, func) {
@@ -588,6 +672,7 @@ fn evaluate_multipattern(
                     atom_idx,
                     func
                 );
+                debug_println!(28, 0, "  Pass {}/{}: atom[{}] {} -- SKIPPED (no delta)", pos + 1, order.len(), atom_idx, atoms[atom_idx]);
                 continue;
             }
 
@@ -599,6 +684,7 @@ fn evaluate_multipattern(
                 atom_idx,
                 func
             );
+            debug_println!(28, 0, "  Pass {}/{}: atom[{}] {} -- delta atom for this pass", pos + 1, order.len(), atom_idx, atoms[atom_idx]);
 
             let bindings =
                 execute_join(&order, atoms, Some(pos), initial_binding.clone(), egraph, &var_index);
@@ -609,11 +695,13 @@ fn evaluate_multipattern(
                 pos,
                 bindings.len()
             );
+            debug_println!(28, 0, "    -> pass produced {} bindings", bindings.len());
             add_bindings(bindings, &mut all_bindings);
         }
     }
 
     debug_println!(26, 0, "  total unique bindings: {}", all_bindings.len());
+    debug_println!(28, 0, "  Total unique bindings: {}", all_bindings.len());
     (all_bindings, var_index)
 }
 
@@ -640,6 +728,7 @@ pub fn datalog_find_assignments(
     for (qid, variables, needs_full_pass) in &quant_info {
         if let Some(multipatterns) = flat_patterns.get(qid) {
             let mut quant_assignments = Vec::new();
+            let quant_start = if crate::log::is_important(28) { Some(Instant::now()) } else { None };
 
             for atoms in multipatterns {
                 debug_println!(
@@ -651,7 +740,37 @@ pub fn datalog_find_assignments(
                     atoms,
                     needs_full_pass
                 );
+
+                // Level 28: high-level overview of the flattened pattern
+                debug_println!(28, 0, "");
+                debug_println!(28, 0, "=== Relational Match for quantifier {} ===", egraph.get_term(*qid));
+                debug_println!(28, 0, "  Flattened pattern ({} atoms):", atoms.len());
+                for (i, atom) in atoms.iter().enumerate() {
+                    let has_delta = func_has_delta(egraph, &atom.func);
+                    debug_println!(28, 0, "    [{}] {}  {}", i, atom, if has_delta { "<-- DELTA" } else { "" });
+                }
+                debug_println!(28, 0, "  Mode: {}", if *needs_full_pass { "FULL PASS (new quantifier)" } else { "SEMI-NAIVE" });
+
                 let (bindings, var_index) = evaluate_multipattern(atoms, *needs_full_pass, egraph);
+
+                debug_println!(28, 0, "  Result: {} total bindings", bindings.len());
+                // Show final bindings (quantified variables only) at level 28
+                for (bi, binding) in bindings.iter().enumerate().take(10) {
+                    let qvars: Vec<String> = var_index.iter()
+                        .filter_map(|(var, &idx)| {
+                            if let FlatVar::Quantified(name) = var {
+                                binding.get(idx).map(|uid| format!("?{}={}", name, egraph.get_term(uid)))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    debug_println!(28, 0, "    [{}] {{ {} }}", bi, qvars.join(", "));
+                }
+                if bindings.len() > 10 {
+                    debug_println!(28, 0, "    ... and {} more", bindings.len() - 10);
+                }
+                debug_println!(28, 0, "");
 
                 for binding in bindings {
                     let mut assignment = DeterministicHashMap::new();
@@ -677,6 +796,11 @@ pub fn datalog_find_assignments(
                 quant_assignments.len(),
                 egraph.get_term(*qid)
             );
+            if let Some(start) = quant_start {
+                let quant_elapsed = start.elapsed();
+                debug_println!(28, 0, "=== Quantifier {}: {} assignments in {:.3}ms ===",
+                    egraph.get_term(*qid), quant_assignments.len(), quant_elapsed.as_secs_f64() * 1000.0);
+            }
             results.push((*qid, quant_assignments));
         }
     }
