@@ -705,9 +705,11 @@ fn evaluate_multipattern(
     (all_bindings, var_index)
 }
 
-/// Reset watermarks if a backtrack has occurred since the last matching round.
-/// Backtracking is handled by snapshot/restore which marks all indices hot.
-pub fn datalog_check_backtrack(_egraph: &mut Egraph) {}
+/// If a backtrack has occurred since the last matching round, rebuild the
+/// canonical indices from the raw function_entries log.
+pub fn datalog_check_backtrack(egraph: &mut Egraph) {
+    egraph.restore_function_indices();
+}
 
 /// Main entry point: find all new variable assignments for all quantifiers.
 ///

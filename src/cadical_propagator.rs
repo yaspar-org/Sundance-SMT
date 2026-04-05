@@ -242,7 +242,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .predecessor_level
                 .resize(2 * self.egraph.predecessor_level.len(), 0);
         }
-        // Snapshot canonical function indices at current level before incrementing
+        // Save matching_round at current level before incrementing
         if self.egraph.datalog {
             self.egraph.snapshot_function_indices(self.decision_level);
         }
@@ -338,10 +338,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .collect::<Vec<_>>()
         );
 
-        // Restore canonical function indices to the snapshot at this level,
-        // then re-insert any function entries that were added since the snapshot.
+        // Mark canonical function indices as dirty so they get rebuilt
+        // lazily before the next quantifier matching round.
         if self.egraph.datalog {
-            self.egraph.restore_function_indices(level);
+            self.egraph.function_indices_dirty = true;
         }
 
         // adding the new predecessors created by quantifiers to the predecessors list

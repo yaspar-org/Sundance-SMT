@@ -216,13 +216,13 @@ impl fmt::Display for Egraph {
 /// query only entries from recent rounds via `range(matching_round..)`.
 #[derive(Clone, Debug)]
 pub struct TimestampedEntries {
-    pub entries: im::OrdMap<usize, Vec<u64>>,
+    pub entries: DeterministicHashMap<usize, Vec<u64>>,
 }
 
 impl TimestampedEntries {
     pub fn new() -> Self {
         TimestampedEntries {
-            entries: im::OrdMap::new(),
+            entries: DeterministicHashMap::new(),
         }
     }
 
@@ -264,14 +264,14 @@ pub struct EClassIndex {
     /// Maximum timestamp across all entries in this index.
     pub max_stamp: usize,
     /// Maps e-class root -> timestamped entries under that e-class.
-    pub index: im::OrdMap<u64, TimestampedEntries>,
+    pub index: DeterministicHashMap<u64, TimestampedEntries>,
 }
 
 impl EClassIndex {
     pub fn new() -> Self {
         EClassIndex {
             max_stamp: 0,
-            index: im::OrdMap::new(),
+            index: DeterministicHashMap::new(),
         }
     }
 
@@ -391,17 +391,15 @@ pub struct Egraph {
     /// Never modified after insertion; used by the traditional (non-datalog) matcher.
     pub function_entries: DeterministicHashMap<String, DeterministicHashMap<u64, Vec<u64>>>,
     /// Canonical output index: F -> FunctionOutputIndex (timestamped for semi-naive).
-    pub function_maps: im::OrdMap<String, FunctionOutputIndex>,
+    pub function_maps: DeterministicHashMap<String, FunctionOutputIndex>,
     /// Canonical arg index: F -> FunctionArgIndex (timestamped for semi-naive).
-    pub function_indices: im::OrdMap<String, FunctionArgIndex>,
-    /// Snapshot stack: saved at each decision level for O(1) backtracking.
-    /// Snapshot stack for backtracking canonical indices.
-    pub function_index_snapshots: Vec<(
-        usize,
-        im::OrdMap<String, FunctionOutputIndex>,
-        im::OrdMap<String, FunctionArgIndex>,
-        usize, // matching_round at snapshot time
-    )>,
+    pub function_indices: DeterministicHashMap<String, FunctionArgIndex>,
+    /// Stack of matching_round values saved at each decision level for backtracking.
+    /// Entry i holds the matching_round that was current when decision level i was entered.
+    pub matching_round_stack: Vec<usize>,
+    /// True when backtracking has invalidated the canonical indices and they need rebuilding.
+    /// Set to true on backtrack, cleared after restore_function_indices runs.
+    pub function_indices_dirty: bool,
     /// Current matching round for semi-naive evaluation. Incremented after each matching round.
     /// Entries with timestamp >= matching_round are "delta" (new since last round).
     pub matching_round: usize,
@@ -482,9 +480,10 @@ impl Egraph {
             assertions: vec![],
             quantifiers: vec![],
             function_entries: DeterministicHashMap::default(),
-            function_maps: im::OrdMap::new(),
-            function_indices: im::OrdMap::new(),
-            function_index_snapshots: Vec::new(),
+            function_maps: DeterministicHashMap::new(),
+            function_indices: DeterministicHashMap::new(),
+            matching_round_stack: Vec::new(),
+            function_indices_dirty: false,
             matching_round: 0,
             terms_added_by_quantifiers: Vec::new(),
             true_term: tru.uid(),
@@ -1280,57 +1279,67 @@ impl Egraph {
         }
     }
 
-    /// Save a snapshot of the canonical indices at the given decision level.
-    /// If a snapshot already exists at this level (e.g., level 0 may be re-entered),
-    /// we update it with the current state.
+    /// Save the current matching_round for the given decision level.
+    /// Called when entering a new decision level.
     pub fn snapshot_function_indices(&mut self, level: usize) {
-        if let Some((snap_level, _, _, _)) = self.function_index_snapshots.last()
-            && *snap_level == level
-        {
-            let last = self.function_index_snapshots.last_mut().unwrap();
-            last.1 = self.function_maps.clone();
-            last.2 = self.function_indices.clone();
-            last.3 = self.matching_round;
-            return;
+        // Ensure the stack is large enough
+        while self.matching_round_stack.len() <= level {
+            self.matching_round_stack.push(self.matching_round);
         }
-        self.function_index_snapshots.push((
-            level,
-            self.function_maps.clone(),
-            self.function_indices.clone(),
-            self.matching_round,
-        ));
+        self.matching_round_stack[level] = self.matching_round;
     }
 
-    /// Restore the canonical indices to the snapshot at the given decision level,
-    /// then re-insert terms that were added by quantifier instantiations.
-    pub fn restore_function_indices(&mut self, level: usize) {
-        // Pop snapshots until we find the right level
-        while let Some((snap_level, _, _, _)) = self.function_index_snapshots.last() {
-            if *snap_level > level {
-                self.function_index_snapshots.pop();
-            } else {
-                break;
+    /// Restore the canonical indices after backtracking.
+    /// Rebuilds function_maps and function_indices from the raw function_entries log
+    /// using the current (post-backtrack) union-find, then re-inserts quantifier terms.
+    /// Only call this when function_indices_dirty is true.
+    pub fn restore_function_indices(&mut self) {
+        if !self.function_indices_dirty {
+            return;
+        }
+
+        // Restore matching_round to what it was when this decision level was entered
+        let level = self.decision_level;
+        if level < self.matching_round_stack.len() {
+            self.matching_round = self.matching_round_stack[level];
+        }
+
+        // Clear canonical indices
+        self.function_maps.clear();
+        self.function_indices.clear();
+
+        // Rebuild from the raw function_entries log using current union-find
+        let entries: Vec<(String, Vec<(u64, Vec<u64>)>)> = self
+            .function_entries
+            .iter()
+            .map(|(func, apps)| {
+                let apps_vec: Vec<(u64, Vec<u64>)> = apps
+                    .iter()
+                    .map(|(&uid, args)| (uid, args.clone()))
+                    .collect();
+                (func.clone(), apps_vec)
+            })
+            .collect();
+        for (func, apps) in entries {
+            for (term_uid, arg_uids) in apps {
+                self.insert_into_canonical_indices(func.clone(), term_uid, &arg_uids);
             }
         }
-        if let Some((snap_level, snap_maps, snap_indices, snap_round)) =
-            self.function_index_snapshots.last()
-            && *snap_level == level
-        {
-            self.function_maps = snap_maps.clone();
-            self.function_indices = snap_indices.clone();
-            self.matching_round = *snap_round;
-        }
+
         // Re-insert terms that were created by quantifier instantiations.
-        // These terms are permanent in the egraph but were added after the snapshot,
-        // so they need to be re-added to the restored canonical indices.
-        let terms_to_read: Vec<(String, u64, Vec<u64>)> = self.terms_added_by_quantifiers.clone();
-        for (func, term_uid, arg_uids) in terms_to_read {
+        // These terms are permanent in the egraph but may not be in function_entries.
+        let terms_to_readd: Vec<(String, u64, Vec<u64>)> =
+            self.terms_added_by_quantifiers.clone();
+        for (func, term_uid, arg_uids) in terms_to_readd {
             self.insert_into_canonical_indices(func, term_uid, &arg_uids);
         }
+
         // Clear at level 0 since everything is permanent
         if level == 0 {
             self.terms_added_by_quantifiers.clear();
         }
+
+        self.function_indices_dirty = false;
     }
 
     // FIND operation for union-find
