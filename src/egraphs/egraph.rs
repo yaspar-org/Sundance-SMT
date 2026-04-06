@@ -228,6 +228,12 @@ impl TimestampedEntries {
 
     /// Insert an fnode UID at the given timestamp.
     pub fn insert(&mut self, timestamp: usize, fnode_uid: u64) {
+        // Check if this fnode_uid already exists in any timestamp
+        for entry_list in self.entries.values() {
+            if entry_list.contains(&fnode_uid) {
+                panic!("TimestampedEntries::insert: duplicate fnode_uid {} being added!", fnode_uid);
+            }
+        }
         self.entries.entry(timestamp).or_insert_with(Vec::new).push(fnode_uid);
     }
 
@@ -247,11 +253,20 @@ impl TimestampedEntries {
         self.entries.range(matching_round..).next().is_some()
     }
 
+    /// Remove all entries with timestamp > watermark.
+    /// Returns true if any entries were removed.
+    pub fn truncate(&mut self, watermark: usize) -> bool {
+        // split_off(watermark+1) gives us everything >= watermark+1, i.e. > watermark
+        let removed = self.entries.split_off(&(watermark + 1));
+        !removed.is_empty()
+    }
+
     /// Merge all entries from another TimestampedEntries, re-stamping them
     /// at the given timestamp (their canonical form changed due to a merge).
     pub fn merge_from(&mut self, other: &TimestampedEntries, timestamp: usize) {
         let all_fnodes: Vec<u64> = other.all().collect();
         if !all_fnodes.is_empty() {
+            debug_println!(26, 0, "TimestampedEntries::merge_from: merging {} entries at timestamp {}", all_fnodes.len(), timestamp);
             self.entries.entry(timestamp).or_insert_with(Vec::new).extend(all_fnodes);
         }
     }
@@ -283,6 +298,11 @@ impl EClassIndex {
             .insert(timestamp, fnode_uid);
         if timestamp > self.max_stamp {
             self.max_stamp = timestamp;
+        }
+        // Count total entries for debugging
+        let total: usize = self.index.values().flat_map(|ts| ts.entries.values().map(|v| v.len())).sum();
+        if total > 100000 {
+            debug_println!(26, 0, "EClassIndex::insert LARGE: eclass={}, total_entries={}", eclass, total);
         }
     }
 
@@ -320,16 +340,41 @@ impl EClassIndex {
         self.max_stamp >= matching_round
     }
 
-    /// Merge entries from old_root into new_root at the given timestamp.
-    /// Returns true if any entries were actually moved.
+    /// Truncate all entries with timestamp > watermark across all e-classes.
+    /// Removes e-class keys that become empty after truncation.
+    pub fn truncate(&mut self, watermark: usize) {
+        let mut new_max: usize = 0;
+        let keys: Vec<u64> = self.index.keys().copied().collect();
+        for key in keys {
+            if let Some(ts) = self.index.get_mut(&key) {
+                ts.truncate(watermark);
+                if ts.entries.is_empty() {
+                    self.index.remove(&key);
+                } else if let Some(&last_stamp) = ts.entries.keys().next_back() {
+                    if last_stamp > new_max {
+                        new_max = last_stamp;
+                    }
+                }
+            }
+        }
+        self.max_stamp = new_max;
+    }
+
+    /// Copy entries from old_root into new_root at the given timestamp.
+    /// Keeps old_root entries intact so that backtracking (truncation) restores them.
+    /// Returns true if any entries were copied.
     pub fn merge_roots(&mut self, old_root: u64, new_root: u64, timestamp: usize) -> bool {
-        if let Some(old_entries) = self.index.remove(&old_root) {
+        if let Some(old_entries) = self.index.get(&old_root) {
             let count: usize = old_entries.entries.values().map(|v| v.len()).sum();
-            debug_println!(26, 0, "      EClassIndex::merge_roots: moving {} entries from {} to {} at stamp={}", count, old_root, new_root, timestamp);
+            if count == 0 {
+                return false;
+            }
+            debug_println!(26, 0, "      EClassIndex::merge_roots: copying {} entries from {} to {} at stamp={}", count, old_root, new_root, timestamp);
+            let old_entries_clone = old_entries.clone();
             self.index
                 .entry(new_root)
                 .or_insert_with(TimestampedEntries::new)
-                .merge_from(&old_entries, timestamp);
+                .merge_from(&old_entries_clone, timestamp);
             if timestamp > self.max_stamp {
                 self.max_stamp = timestamp;
             }
@@ -399,7 +444,7 @@ pub struct Egraph {
     pub matching_round_stack: Vec<usize>,
     /// True when backtracking has invalidated the canonical indices and they need rebuilding.
     /// Set to true on backtrack, cleared after restore_function_indices runs.
-    pub function_indices_dirty: bool,
+    // pub function_indices_dirty: bool,
     /// Current matching round for semi-naive evaluation. Incremented after each matching round.
     /// Entries with timestamp >= matching_round are "delta" (new since last round).
     pub matching_round: usize,
@@ -483,7 +528,7 @@ impl Egraph {
             function_maps: DeterministicHashMap::new(),
             function_indices: DeterministicHashMap::new(),
             matching_round_stack: Vec::new(),
-            function_indices_dirty: false,
+            // function_indices_dirty: false,
             matching_round: 0,
             terms_added_by_quantifiers: Vec::new(),
             true_term: tru.uid(),
@@ -719,7 +764,7 @@ impl Egraph {
         // inserting the term into the list of functions
         if let App(func, subterms, ..) = term.repr() {
             debug_println!(
-                22,
+                26,
                 0,
                 "We are adding the function {} with subterms {:?}",
                 func,
@@ -752,25 +797,21 @@ impl Egraph {
         };
 
         if let Constant(name, _) = term.repr() && self.datalog {
-            debug_println!(24, 0, "Indexing Constant '{}' uid={} into canonical indices", name, num);
+            debug_println!(26, 0, "Indexing Constant '{}' uid={} into canonical indices", name, num);
             self.function_entries
                 .entry(name.to_string())
                 .or_default()
                 .insert(num, vec![]);
             self.insert_into_canonical_indices(name.to_string(), num, &vec![]);
-            // Track for re-insertion after backtrack (zero-arg, so empty arg list)
-            self.terms_added_by_quantifiers.push((name.to_string(), num, vec![]));
         }
 
         if let Global(name, _) = term.repr() && self.datalog {
-            debug_println!(24, 0, "Indexing Global '{}' uid={} into canonical indices", name, num);
+            debug_println!(26, 0, "Indexing Global '{}' uid={} into canonical indices", name, num);
             self.function_entries
                 .entry(name.to_string())
                 .or_default()
                 .insert(num, vec![]);
             self.insert_into_canonical_indices(name.to_string(), num, &vec![]);
-            // Track for re-insertion after backtrack (zero-arg, so empty arg list)
-            self.terms_added_by_quantifiers.push((name.to_string(), num, vec![]));
         }
 
         // TODO: inserting the term if it is a quantifier
@@ -1241,6 +1282,10 @@ impl Egraph {
         let arg_roots: Vec<u64> = arg_uids.iter().map(|&a| self.find(a)).collect();
         let arity = arg_uids.len();
         let stamp = self.matching_round;
+
+        debug_println!(26, 0, "insert_into_canonical_indices: func={}, term={}, output_root={}, stamp={}, arity={}",
+            func, self.get_term(term_uid), self.get_term(output_root), stamp, arity);
+
         // Insert into function_maps (output index)
         self.function_maps
             .entry(func.clone())
@@ -1250,12 +1295,15 @@ impl Egraph {
         // Insert into function_indices (arg index)
         let arg_idx = self
             .function_indices
-            .entry(func)
+            .entry(func.clone())
             .or_insert_with(|| FunctionArgIndex::new(arity));
         if arg_idx.args.len() == arity {
             for (i, &arg_root) in arg_roots.iter().enumerate() {
                 arg_idx.args[i].insert(arg_root, stamp, term_uid);
             }
+        } else {
+            debug_println!(26, 0, "  WARNING: arity mismatch for func={}: expected {}, got {}",
+                func, arity, arg_idx.args.len());
         }
     }
 
@@ -1264,16 +1312,66 @@ impl Egraph {
     pub fn merge_function_index_roots(&mut self, old_root: u64, new_root: u64) {
         let stamp = self.matching_round;
         // Merge output index entries
+
+        debug_println!(
+            26,
+            0,
+            "Merging function index roots from {} to {} at stamp {}",
+            self.get_term(old_root),
+            self.get_term(new_root),
+            stamp
+        );
         let func_keys: Vec<String> = self.function_maps.keys().cloned().collect();
         for func in func_keys {
+            debug_println!(
+                26,
+                1,
+                "Merging function index for func {} with old_root {} and new_root {}",
+                func,
+                self.get_term(old_root),
+                self.get_term(new_root)
+            );
             let func_idx = self.function_maps.get_mut(&func).unwrap();
+            
             func_idx.output.merge_roots(old_root, new_root, stamp);
+
+            // Debug: print first 10 terms being copied
+            if let Some(old_entries) = func_idx.output.index.get(&old_root).cloned() {
+                let all_terms: Vec<u64> = old_entries.all().take(10).collect();
+                for (i, term_uid) in all_terms.iter().enumerate() {
+                    debug_println!(
+                        26,
+                        1,
+                        "  [{}] Copying term: {}",
+                        i,
+                        self.get_term(*term_uid)
+                    );
+                }
+                if old_entries.all().count() > 10 {
+                    debug_println!(
+                        26,
+                        1,
+                        "  ... and {} more terms",
+                        old_entries.all().count() - 10
+                    );
+                }
+            }
+
         }
         // Merge arg index entries
         let func_keys: Vec<String> = self.function_indices.keys().cloned().collect();
         for func in func_keys {
             let arg_idx = self.function_indices.get_mut(&func).unwrap();
             for eclass_idx in arg_idx.args.iter_mut() {
+                // debug_println!(
+                //     26,
+                //     1,
+                //     "Merging arg index {:?} for func {} with old_root {} and new_root {}",
+                //     eclass_idx,
+                //     func,
+                //     old_root,
+                //     new_root    
+                // );
                 eclass_idx.merge_roots(old_root, new_root, stamp);
             }
         }
@@ -1289,14 +1387,15 @@ impl Egraph {
         self.matching_round_stack[level] = self.matching_round;
     }
 
-    /// Restore the canonical indices after backtracking.
-    /// Rebuilds function_maps and function_indices from the raw function_entries log
-    /// using the current (post-backtrack) union-find, then re-inserts quantifier terms.
-    /// Only call this when function_indices_dirty is true.
+    /// Restore the canonical indices after backtracking by truncating entries
+    /// with timestamps above the saved watermark. Since merge_roots copies
+    /// (rather than moves) entries, the originals under old_root survive truncation.
+    /// Only runs when function_indices_dirty is true.
     pub fn restore_function_indices(&mut self) {
-        if !self.function_indices_dirty {
-            return;
-        }
+        // if !self.function_indices_dirty {
+        //     debug_println!(26, 0, "restore_function_indices called but indices not dirty, skipping");
+        //     return;
+        // }
 
         // Restore matching_round to what it was when this decision level was entered
         let level = self.decision_level;
@@ -1304,42 +1403,75 @@ impl Egraph {
             self.matching_round = self.matching_round_stack[level];
         }
 
-        // Clear canonical indices
-        self.function_maps.clear();
-        self.function_indices.clear();
+        let watermark = self.matching_round;
 
-        // Rebuild from the raw function_entries log using current union-find
-        let entries: Vec<(String, Vec<(u64, Vec<u64>)>)> = self
-            .function_entries
-            .iter()
-            .map(|(func, apps)| {
-                let apps_vec: Vec<(u64, Vec<u64>)> = apps
-                    .iter()
-                    .map(|(&uid, args)| (uid, args.clone()))
-                    .collect();
-                (func.clone(), apps_vec)
-            })
-            .collect();
-        for (func, apps) in entries {
-            for (term_uid, arg_uids) in apps {
-                self.insert_into_canonical_indices(func.clone(), term_uid, &arg_uids);
+        // Truncate output indices
+        for (f, func_idx) in self.function_maps.iter_mut() {
+            debug_println!(
+                26,
+                0,
+                "Restoring function index for func {} at level {} with size {}, truncating to watermark {}",
+                f,
+                level,
+                func_idx.output.index.len(),
+                watermark
+            );
+            func_idx.output.truncate(watermark);
+            debug_println!(
+                26,
+                0,
+                "After truncation, function index for func {} has size {}",
+                f,
+                func_idx.output.index.len()
+            );
+        }
+
+        // Truncate arg indices
+        for (f, arg_idx) in self.function_indices.iter_mut() {
+            debug_println!(
+                26,
+                0,
+                "Restoring arg index for func {} at level {} with {} arg positions, truncating to watermark {}",
+                f,
+                level,
+                arg_idx.args.len(),
+                watermark
+            );
+            for eclass_idx in arg_idx.args.iter_mut() {
+                eclass_idx.truncate(watermark);
             }
+            debug_println!(
+                26,
+                0,
+                "After truncation, arg index for func {} has {} arg positions",
+                f,
+                arg_idx.args.len()
+            );
         }
 
         // Re-insert terms that were created by quantifier instantiations.
-        // These terms are permanent in the egraph but may not be in function_entries.
-        let terms_to_readd: Vec<(String, u64, Vec<u64>)> =
-            self.terms_added_by_quantifiers.clone();
-        for (func, term_uid, arg_uids) in terms_to_readd {
-            self.insert_into_canonical_indices(func, term_uid, &arg_uids);
-        }
+        // These are permanent and need to be present regardless of backtracking.
+        // let terms_to_readd: Vec<(String, u64, Vec<u64>)> =
+        //     self.terms_added_by_quantifiers.clone();
+        // for (func, term_uid, arg_uids) in terms_to_readd {
+        //     debug_println!(
+        //         26,
+        //         0,
+        //         "Re-inserting term {} with uid {} and func {} into canonical indices after backtracking to level {}",
+        //         self.get_term(term_uid),
+        //         term_uid,
+        //         func,
+        //         level
+        //     );
+        //     self.insert_into_canonical_indices(func, term_uid, &arg_uids);
+        // }
 
         // Clear at level 0 since everything is permanent
         if level == 0 {
             self.terms_added_by_quantifiers.clear();
         }
 
-        self.function_indices_dirty = false;
+        // self.function_indices_dirty = false;
     }
 
     // FIND operation for union-find

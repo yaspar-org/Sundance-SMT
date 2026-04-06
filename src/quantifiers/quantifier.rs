@@ -45,7 +45,7 @@ pub fn instantiate_quantifiers(
     // If datalog is enabled, pre-compute all assignments via relational matching
     let datalog_assignments: Option<HashMap<u64, Vec<DeterministicHashMap<String, Term>>>> =
         if egraph.datalog {
-            datalogmatch::datalog_check_backtrack(egraph);
+            // datalogmatch::datalog_check_backtrack(egraph);
             let results = datalogmatch::datalog_find_assignments(egraph);
             datalogmatch::datalog_update_watermarks(egraph);
             Some(results.into_iter().collect())

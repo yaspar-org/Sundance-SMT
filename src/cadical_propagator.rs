@@ -13,6 +13,7 @@ use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::log::is_important;
 use crate::proof::proof_tracer::SMTProofTracker;
+use crate::quantifiers::datalogmatch::datalog_check_backtrack;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -341,7 +342,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // Mark canonical function indices as dirty so they get rebuilt
         // lazily before the next quantifier matching round.
         if self.egraph.datalog {
-            self.egraph.function_indices_dirty = true;
+            // debug_println!(
+            //     26,
+            //     0,
+            //     "Marking function indices as dirty due to backtracking at level {}",
+            //     level
+            // );
+            // self.egraph.function_indices_dirty = true;
+            datalog_check_backtrack(self.egraph);
         }
 
         // adding the new predecessors created by quantifiers to the predecessors list
