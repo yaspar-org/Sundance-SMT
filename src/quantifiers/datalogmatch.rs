@@ -817,8 +817,12 @@ pub fn datalog_find_assignments(
 
 /// Increment matching_round after each matching round for semi-naive evaluation.
 pub fn datalog_update_watermarks(egraph: &mut Egraph) {
-    debug_println!(24, 0, "Incrementing matching_round from {} to {}", egraph.matching_round, egraph.matching_round + 1);
-    egraph.matching_round += 1;
+    if egraph.decision_level > 0 {
+        debug_println!(24, 0, "Incrementing matching_round from {} to {}", egraph.matching_round, egraph.matching_round + 1);
+        egraph.matching_round += 1;
+    } else {
+        debug_println!(24, 0, "Not incrementing matching_round because log level is 0");
+    }
 }
 
 // ============================================================

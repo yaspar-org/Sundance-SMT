@@ -245,7 +245,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         // Save matching_round at current level before incrementing
         if self.egraph.datalog {
+            // Increment matching_round for each new decision level
+            // This ensures entries added at each level get a unique timestamp for backtracking
             self.egraph.snapshot_function_indices(self.decision_level);
+            self.egraph.matching_round += 1;
         }
         self.decision_level += 1;
         self.egraph.decision_level += 1;

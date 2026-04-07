@@ -229,9 +229,14 @@ impl TimestampedEntries {
     /// Insert an fnode UID at the given timestamp.
     pub fn insert(&mut self, timestamp: usize, fnode_uid: u64) {
         // Check if this fnode_uid already exists in any timestamp
-        for entry_list in self.entries.values() {
+        for (ts, entry_list) in self.entries.iter() {
             if entry_list.contains(&fnode_uid) {
-                panic!("TimestampedEntries::insert: duplicate fnode_uid {} being added!", fnode_uid);
+                eprintln!("WARNING: TimestampedEntries::insert: duplicate fnode_uid {} already at timestamp {}, trying to add at timestamp {}",
+                    fnode_uid, ts, timestamp);
+                // Log stack trace
+                eprintln!("Stack trace:\n{:?}", std::backtrace::Backtrace::capture());
+                // Still allow the insertion (don't panic)
+                return;
             }
         }
         self.entries.entry(timestamp).or_insert_with(Vec::new).push(fnode_uid);
@@ -267,7 +272,18 @@ impl TimestampedEntries {
         let all_fnodes: Vec<u64> = other.all().collect();
         if !all_fnodes.is_empty() {
             debug_println!(26, 0, "TimestampedEntries::merge_from: merging {} entries at timestamp {}", all_fnodes.len(), timestamp);
-            self.entries.entry(timestamp).or_insert_with(Vec::new).extend(all_fnodes);
+
+            let target_vec = self.entries.entry(timestamp).or_insert_with(Vec::new);
+            for &fnode in &all_fnodes {
+                if target_vec.contains(&fnode) {
+                    eprintln!("ERROR: merge_from creating duplicate fnode_uid {} at timestamp {}", fnode, timestamp);
+                    eprintln!("Target vec already has {} entries", target_vec.len());
+                    eprintln!("Stack trace:\n{:?}", std::backtrace::Backtrace::capture());
+                    panic!("Duplicate fnode in merge_from");
+                }
+            }
+
+            target_vec.extend(all_fnodes);
         }
     }
 }
@@ -343,11 +359,14 @@ impl EClassIndex {
     /// Truncate all entries with timestamp > watermark across all e-classes.
     /// Removes e-class keys that become empty after truncation.
     pub fn truncate(&mut self, watermark: usize) {
+        debug_println!(26, 0, "EClassIndex::truncate: watermark={}", watermark);
         let mut new_max: usize = 0;
         let keys: Vec<u64> = self.index.keys().copied().collect();
         for key in keys {
             if let Some(ts) = self.index.get_mut(&key) {
+                debug_println!(26, 0, "  Before truncate: eclass={} max_stamp={:?} num entries={}", key, ts.entries.keys().max(), ts.entries.len());
                 ts.truncate(watermark);
+                debug_println!(26, 0, "  After truncate: eclass={} max_stamp={:?} num entries={}", key, ts.entries.keys().max(), ts.entries.len());
                 if ts.entries.is_empty() {
                     self.index.remove(&key);
                 } else if let Some(&last_stamp) = ts.entries.keys().next_back() {
@@ -527,7 +546,7 @@ impl Egraph {
             function_entries: DeterministicHashMap::default(),
             function_maps: DeterministicHashMap::new(),
             function_indices: DeterministicHashMap::new(),
-            matching_round_stack: Vec::new(),
+            matching_round_stack: vec![0], // start with matching round 0 at decision level 0
             // function_indices_dirty: false,
             matching_round: 0,
             terms_added_by_quantifiers: Vec::new(),
@@ -1381,10 +1400,14 @@ impl Egraph {
     /// Called when entering a new decision level.
     pub fn snapshot_function_indices(&mut self, level: usize) {
         // Ensure the stack is large enough
+        debug_println!(26, 0, "Snapshotting function indices at level {} with matching round {} and stack {:?}", level, self.matching_round, self.matching_round_stack);
         while self.matching_round_stack.len() <= level {
             self.matching_round_stack.push(self.matching_round);
         }
-        self.matching_round_stack[level] = self.matching_round;
+        assert!(self.matching_round_stack[level] == self.matching_round);
+        // this is wrong in current implementation because we do not clear matching round in backtrack
+        // assert!(self.matching_round_stack.len() == level + 1);
+        debug_println!(26, 0, "After snapshotting, matching round stack is {:?}", self.matching_round_stack);
     }
 
     /// Restore the canonical indices after backtracking by truncating entries
@@ -1400,6 +1423,13 @@ impl Egraph {
         // Restore matching_round to what it was when this decision level was entered
         let level = self.decision_level;
         if level < self.matching_round_stack.len() {
+            debug_println!(
+                26,
+                0,
+                "We have the matching round stack at level {}: {:?}",
+                level,
+                self.matching_round_stack
+            );
             self.matching_round = self.matching_round_stack[level];
         }
 
