@@ -18,15 +18,13 @@ bundled-z3 = ["z3-solver", "z3/bundled"]
 local-z3 = ["z3-solver"]
 
 [dependencies]
-yaspar-ir = "2.7.1"
+yaspar-ir = "2.7.2"
 sat-interface = "0.1.1"
 cadical-sys = { version = "0.7.0" }
 
 array2d = "^0.3"
 clap = { version = "4.5.40", features = ["derive"] }
 dashu = { version = "^0.4", features = ["num-traits"] }
-env_logger = "^0.11"
-log = "^0.4"
 num-traits = "^0.2"
 serde_json = "1.0"
 slotmap = "^1.0"

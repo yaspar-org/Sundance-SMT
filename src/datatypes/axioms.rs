@@ -3,14 +3,17 @@
 
 use std::vec;
 
-use yaspar_ir::ast::alg::{ConstructorDec, DatatypeDec, Identifier, Index, QualifiedIdentifier};
-use yaspar_ir::ast::{ATerm::*, CheckedApi, FetchSort, Sort, Str, TermAllocator};
+use yaspar_ir::ast::{
+    ATerm::*, ConstructorDec, DatatypeDec, FetchSort, Identifier, Index, Monomorphization,
+    QualifiedIdentifier, Sort, Str, TermAllocator,
+};
 use yaspar_ir::ast::{ObjectAllocatorExt, Repr, StrAllocator, Term};
 
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
 use crate::egraphs::datastructures::ConstructorType;
 use crate::egraphs::egraph::Egraph;
+use crate::preprocess::check_for_function_bool;
 
 /// For a term of datatype sort, we want to learn the following axioms:
 /// 1. isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
@@ -38,6 +41,9 @@ pub fn find_datatype_axioms(
         // the sort is not a datatype
         return vector;
     };
+    let dt_dec = dt_dec
+        .monomorphize(sort, egraph)
+        .expect("type invariant violation: datatype fails to monomorphize");
 
     // Step 1. Store the constructor in term_constructors
     let num = term.uid();
@@ -117,7 +123,7 @@ fn add_to_term_constructors(egraph: &mut Egraph, term: &Term) {
 fn learn_exactly_one_tester_clause(
     egraph: &mut Egraph,
     term: &Term,
-    dt_dec: &DatatypeDec<Str, Sort>,
+    dt_dec: &DatatypeDec,
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     // Collect all constructors for this datatype sort
@@ -174,11 +180,14 @@ fn learn_exactly_one_tester_clause(
 }
 
 /// For a term of datatype sort, learn the clause (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f
+///
+/// Precondition:
+/// - dt_dec should be monomorphized; c.f. [yaspar_ir::ast::Monomorphization]
 fn learn_ctors_selector_clauses(
     egraph: &mut Egraph,
     term: &Term,
     sort: &Sort,
-    dt_dec: &DatatypeDec<Str, Sort>,
+    dt_dec: &DatatypeDec,
 ) -> Vec<Vec<i32>> {
     let mut vector = vec![];
 
@@ -190,19 +199,20 @@ fn learn_ctors_selector_clauses(
 }
 
 /// For a term of datatype sort, learn the clause (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m for a specific constructor f are the selectors of f
+///
+/// Precondition:
+/// - ctor should be monomorphized; c.f. [yaspar_ir::ast::Monomorphization]
 pub fn learn_ctor_selector_clauses(
     egraph: &mut Egraph,
     term: &Term,
-    ctor: &ConstructorDec<Str, Sort>,
+    ctor: &ConstructorDec,
     sort: &Sort,
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
-    let mut vector = vec![];
     let is_symbol = egraph.allocate_symbol("is");
     let bool_sort = egraph.bool_sort();
 
     let ctor_name = &ctor.ctor;
-    // todo: repeating from last for loop, can probably combine stuff
     let tester_identifier = Identifier {
         symbol: is_symbol.clone(),
         indices: vec![Index::Symbol(ctor_name.clone())],
@@ -212,40 +222,39 @@ pub fn learn_ctor_selector_clauses(
         vec![term.clone()],
         Some(bool_sort.clone()),
     );
-    let mut selectors_apps = vec![];
+
+    let mut selector_apps = vec![];
     for sel in &ctor.args {
-        let sel_app = egraph
-            .context
-            .typed_simp_app(sel.0.clone(), vec![term.clone()])
-            .expect("type checking invariant violation");
-        let sel_sort = sel_app.get_sort(egraph);
-
-        // include new constraints for subterms
-        debug_println!(
-            24,
-            0,
-            "adding datatype axioms for selector application {} of term {}",
-            sel_app,
-            term
+        let sel_app = egraph.context.app(
+            QualifiedIdentifier::simple(sel.0.clone()),
+            vec![term.clone()],
+            // this line requires monomorphization, otherwise it's wrong!
+            Some(sel.2.clone()),
         );
-        let additional_constraints = find_datatype_axioms(&sel_app, &sel_sort, egraph, false);
-        vector.extend(additional_constraints.clone());
-
-        selectors_apps.push(sel_app);
+        selector_apps.push(sel_app);
     }
 
-    // this needs to be a variable if ctor talks in no arguments
+    // have the simple_sorted id for the global case and the simple id for the app case
     let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
-    let ctor_app = if selectors_apps.is_empty() {
-        // we directly use sort because we will be using equality
+    let ctor_app = if selector_apps.is_empty() {
         egraph.global(ctor_id, Some(sort.clone()))
     } else {
-        egraph.app(ctor_id, selectors_apps, Some(sort.clone()))
+        egraph.app(ctor_id, selector_apps, Some(sort.clone()))
     };
-
     let eq = egraph.eq(term.clone(), ctor_app);
+
+    let eq_nnf = eq.nnf(egraph);
+    egraph.insert_predecessor(&eq_nnf, None, None, true, None);
+
+    // note that additioanl constraints are needed for `datatypes/ctor_sel_term_additional_dt_constraints3.smt2`
+    let mut vector = check_for_function_bool(&eq_nnf, egraph, false);
+    let eq_cnf = eq_nnf.cnf_tseitin(egraph);
+    assert_eq!(eq_cnf.0.len(), 1);
+    let eq_clause = eq_cnf.0[0].0.clone();
+    assert_eq!(eq_clause.len(), 1);
+
     let imp = egraph.implies(vec![tester_app], eq);
-    debug_println!(25, 10, "assert {}) with sort {}", imp, sort);
+    debug_println!(25, 10, "(assert {})", imp);
     let imp_nnf = imp.nnf(egraph);
     egraph.insert_predecessor(&imp_nnf, None, None, from_quantifier, None);
     let imp_cnf = imp.cnf_tseitin(egraph);
@@ -262,7 +271,7 @@ fn learn_selector_ctor_clause(
     term: &Term,
     f: &Str,
     subterms: &[Term],
-    dt_dec: &DatatypeDec<Str, Sort>,
+    dt_dec: &DatatypeDec,
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     let mut vector = vec![];

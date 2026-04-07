@@ -12,9 +12,9 @@ use sundance_smt::egraphs::egraph::Egraph;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::stats;
 use sundance_smt::{debug_println, log};
-use yaspar_ir::ast::TermAllocator;
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
+use yaspar_ir::ast::{GlobalSubst, TermAllocator};
 use yaspar_ir::untyped::UntypedAst;
 
 fn main() -> Result<(), String> {
@@ -111,16 +111,18 @@ fn main() -> Result<(), String> {
         ));
     }
 
+    let global_names = egraph.context.all_defined_symbols();
     let mut nnf_terms = vec![];
     for assert in assertions {
         debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
 
         // inline the let bindings
-        let let_elim_term = assert.let_elim(&mut egraph.context);
-        debug_println!(10, 0, "Let_elim form: {}", let_elim_term);
-        // todo: for some reason not inling define-fun
+        let expanded_term = assert
+            .let_elim(&mut egraph.context)
+            .gsubst(global_names.clone(), &mut egraph.context);
+        debug_println!(10, 0, "Expanded form: {}", expanded_term);
 
-        let skolemized_term = let_elim_term;
+        let skolemized_term = expanded_term;
 
         let nnf_term = skolemized_term.nnf(&mut egraph);
         debug_println!(

@@ -8,8 +8,8 @@
 
 use std::fmt;
 
+use crate::debug_println;
 use dashu::{Integer, Rational};
-use log;
 use slotmap;
 
 use crate::arithmetic::lia::bounds::Bounds;
@@ -104,42 +104,61 @@ impl BrtExplorer {
                 BrtNodeState::Active(_) | BrtNodeState::Branched(_, _, _) => break,
                 BrtNodeState::Pruned(c) => c.clone(), // TODO: resolve: cloning conflicts at every node is expensive
             };
-            log::debug!(
-                "bnb::resolve: current node is pruned and has conflicts {:?}",
+            debug_println!(
+                15,
+                0,
+                "lia::lira_solver::resolve: current node is pruned and has conflicts {:?}",
                 current_conflict
             );
-            log::debug!("bnb::resolve: parent node {:?}", self.arena[parent_k]);
+            debug_println!(
+                15,
+                0,
+                "lia::lira_solver::resolve: parent node {:?}",
+                self.arena[parent_k]
+            );
 
             // Parent state
             match self.arena[parent_k].state {
                 BrtNodeState::Branched(var, left_k, right_k) => {
-                    log::debug!("bnb::resolve: parent node is branched on {var}");
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver::resolve: parent node is branched on {var}"
+                    );
                     let other_k = if current_k == left_k { right_k } else { left_k };
                     let other_conflict = match &self.arena[other_k].state {
                         // the other branch hasn't been fully explored yet
                         BrtNodeState::Active(_) => {
-                            log::debug!(
-                                "bnb::resolve: other branch is still active; ending conflict resolution"
+                            debug_println!(
+                                15,
+                                0,
+                                "lia::lira_solver::resolve: other branch is still active; ending conflict resolution"
                             );
                             return self.arena[parent_k].level.unwrap(); // safe b/c parent is branched, not active
                         }
                         BrtNodeState::Branched(other_var, _, _) => {
                             debug_assert!(var == *other_var);
-                            log::debug!(
-                                "bnb::resolve: other branch is still branched; ending conflict resolution"
+                            debug_println!(
+                                15,
+                                0,
+                                "lia::lira_solver::resolve: other branch is still branched; ending conflict resolution"
                             );
                             return self.arena[parent_k].level.unwrap(); // safe b/c parent is branched, not active
                         }
                         // the other branch is fully explored and pruned
                         BrtNodeState::Pruned(c) => c,
                     };
-                    log::debug!(
-                        "bnb::resolve: other branch is pruned and has conflicts {:?}",
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver::resolve: other branch is pruned and has conflicts {:?}",
                         other_conflict
                     );
                     current_conflict = current_conflict.resolve(var, other_conflict);
-                    log::debug!(
-                        "bnb::resolve: after resolution conflicts are {:?}",
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver::resolve: after resolution conflicts are {:?}",
                         current_conflict
                     );
                     self.arena[parent_k].state = BrtNodeState::Pruned(current_conflict);
@@ -147,7 +166,7 @@ impl BrtExplorer {
                 // If the parent is Active or Pruned, it's a bug
                 // there's nothing to resolve
                 BrtNodeState::Pruned(_) | BrtNodeState::Active(_) => {
-                    unreachable!("bnb::resolve: unexpected active/pruned parent")
+                    unreachable!("lia::lira_solver::resolve: unexpected active/pruned parent")
                 }
             }
             current_k = parent_k;
@@ -196,7 +215,7 @@ impl<T: Tableau + fmt::Debug> LIRASolver<T> {
             BrtNodeState::Active(setup) => {
                 match setup {
                     BrtAction::BranchTo(Branch { var, bounds }) => {
-                        log::debug!("bnb: pushing branch {var} in {bounds}");
+                        debug_println!(15, 0, "lia::lira_solver: pushing branch {var} in {bounds}");
                         match (&bounds.lower, &bounds.upper) {
                             (Some(l), None) => {
                                 new_bt_level = Some(self.lra_solver.set_backtrack());
@@ -204,8 +223,10 @@ impl<T: Tableau + fmt::Debug> LIRASolver<T> {
                                     .lra_solver
                                     .assert_lower(var, &QDelta::from(Rational::from(l.clone())))?;
                                 if let Some(false) = ass_res {
-                                    log::debug!(
-                                        "bnb: (assert_lower) branch is trivially INFEASIBLE"
+                                    debug_println!(
+                                        15,
+                                        0,
+                                        "lia::lira_solver: (assert_lower) branch is trivially INFEASIBLE"
                                     );
                                     // conflict is the single variable asserted upon
                                     new_current_state = Some(BrtNodeState::Pruned(
@@ -220,8 +241,10 @@ impl<T: Tableau + fmt::Debug> LIRASolver<T> {
                                     .assert_upper(var, &QDelta::from(Rational::from(u.clone())))?;
                                 if let Some(false) = ass_res {
                                     // branch is trivially UNSAT
-                                    log::debug!(
-                                        "bnb: (assert_upper) branch is trivially INFEASIBLE"
+                                    debug_println!(
+                                        15,
+                                        0,
+                                        "lia::lira_solver: (assert_upper) branch is trivially INFEASIBLE"
                                     );
                                     // conflict is the single variable asserted upon
                                     new_current_state = Some(BrtNodeState::Pruned(
@@ -270,14 +293,18 @@ impl<T: Tableau + fmt::Debug> LIRASolver<T> {
     /// TODO: lira_solver::solve: document branch-and-bound algorithm using incremental simplex
     /// TODO: lira_solver::solve: clean up debug statements
     pub fn solve(&mut self) -> SolverResult<SolverDecision> {
-        log::debug!(
-            "bnb: starting LIRASolver with lra_solver: {:?}",
+        debug_println!(
+            21,
+            0,
+            "lia::lira_solver: starting LIRASolver with lra_solver: {:?}",
             self.lra_solver
         );
 
         while let Some(current_k) = self.explorer.active.pop() {
-            log::debug!(
-                "bnb::solve: pop & setup node {:?}",
+            debug_println!(
+                15,
+                0,
+                "lia::lira_solver::solve: pop & setup node {:?}",
                 self.explorer.arena[current_k]
             );
             self.setup_active(current_k)?;
@@ -291,34 +318,56 @@ impl<T: Tableau + fmt::Debug> LIRASolver<T> {
             }
 
             // setup done, now solve and update state and active
-            log::debug!("bnb: solving over Q");
+            debug_println!(21, 0, "lia::lira_solver: solving over Q");
             match self.lra_solver.solve()? {
                 SolverDecision::INFEASIBLE(cs) => {
-                    log::debug!("bnb: INFEASIBLE, pruning node and backtracking");
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver: INFEASIBLE, pruning node and backtracking"
+                    );
                     self.explorer.arena[current_k].state = BrtNodeState::Pruned(cs);
                     let level = self.explorer.resolve(current_k);
                     // Resolve optionally returns a final level to backtrack to; this
                     // may jump several levels back, not just to the parent.
-                    log::debug!("bnb: after resolution, backtracking to level {level}");
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver: after resolution, backtracking to level {level}"
+                    );
                     self.lra_solver.backtrack(level)
                 }
                 SolverDecision::FEASIBLE(assg) => {
-                    log::debug!("bnb: FEASIBLE, checking for non-integral assignments");
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver: FEASIBLE, checking for non-integral assignments"
+                    );
                     // identify the first integer type variable whose assigned value is not integral
                     let (x, val) = match self.find_next_int_var() {
                         None => return Ok(SolverDecision::FEASIBLE(assg)), // rational solution meets all type constraints
                         Some((x, val)) => {
-                            log::debug!("bnb: FEASIBLE, {x} is not assigned an integer: {val}");
+                            debug_println!(
+                                15,
+                                0,
+                                "lia::lira_solver: FEASIBLE, {x} is not assigned an integer: {val}"
+                            );
                             (x, val)
                         }
                     };
 
                     // (x : Int) is assigned a non-integer solution, so we branch
-                    log::debug!("bnb: branching on var {x} with current assignment {val}");
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver: branching on var {x} with current assignment {val}"
+                    );
                     let lower_branch = Bounds::below_of(val.floor()); // new upper bound for `x` in branch 1
                     let upper_branch = Bounds::above_of(val.ceil()); // new lower bound for `x` in branch 2
-                    log::debug!(
-                        "bnb: lower branch: {x} in {lower_branch}, upper branch: {x} in {upper_branch}"
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver: lower branch: {x} in {lower_branch}, upper branch: {x} in {upper_branch}"
                     );
 
                     // construct new lower and upper nodes to explore, add them to the tree
@@ -411,7 +460,6 @@ impl<T: Tableau + fmt::Debug> LIRASolver<T> {
 #[cfg(test)]
 mod tests {
     use dashu::{Rational, rbig};
-    use env_logger;
 
     use crate::arithmetic::lia::frontend::{smt_to_lra_solver, solve_smtlib};
     use crate::arithmetic::lia::lira_solver::LIRASolver;
@@ -421,7 +469,6 @@ mod tests {
     /// Execute branch and bound manually on an UNSAT QF_LIA problem
     #[test]
     fn manual_branch_and_bound_triangle() {
-        let _ = env_logger::builder().is_test(true).try_init();
         // If x, y are Real this problem is FEASBILE, ex. model {x := 1/3, y := 1/3}
         let smt_input = r#"
         (set-logic QF_LIRA)
@@ -489,7 +536,6 @@ mod tests {
     // Repeat the manual test above but using the actual LIRA solver branch-and-bound implementation
     #[test]
     fn branch_and_bound_triangle() {
-        let _ = env_logger::builder().is_test(true).try_init();
         // If x, y are Real this problem is FEASBILE, ex. model {x := 1/3, y := 1/3}
         let smt_input = r#"
         (set-logic QF_LIRA)
@@ -509,8 +555,6 @@ mod tests {
 
     #[test]
     fn unsat_2_sat_branch_and_bound() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         // Encode the 2-variable 2-SAT problem:
         // (x y) ∧ (-x y) ∧ (x -y) ∧ (-x -y)
         let smt_input = r#"
@@ -555,8 +599,6 @@ mod tests {
     /// The encoding in this unit test cost $2.61
     #[test]
     fn unsat_3_sat_branch_and_bound() {
-        let _ = env_logger::builder().is_test(true).try_init();
-
         // This encodes the 3-SAT problem:
         // (𝑥∨𝑦∨𝑧)∧(𝑥∨𝑦∨¬𝑧)∧(𝑥∨¬𝑦∨𝑧)∧(𝑥∨¬𝑦∨¬𝑧)∧(¬𝑥∨𝑦∨𝑧)∧(¬𝑥∨𝑦∨¬𝑧)∧(¬𝑥∨¬𝑦∨𝑧)∧(¬𝑥∨¬𝑦∨¬𝑧)
         let smt_input = r#"
