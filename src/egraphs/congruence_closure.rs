@@ -7,7 +7,9 @@ use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_te
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
 use yaspar_ir::ast::alg::CheckIdentifier;
-use yaspar_ir::ast::{FetchSort, IdentifierKind, Repr, Term, TermAllocator};
+use yaspar_ir::ast::{
+    FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Term, TermAllocator,
+};
 
 use crate::debug_println;
 use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
@@ -161,6 +163,9 @@ pub fn process_assignment(
                     if egraph.lazy_dt {
                         let dt_name = egraph.datatype_info.constructors.get(&ctor_name).unwrap();
                         let dt_dec = egraph.datatype_info.datatypes.get(dt_name).unwrap();
+                        let dt_dec = dt_dec
+                            .monomorphize(&dt_sort, egraph.context.arena())
+                            .expect("type invariant violation: datatype fails to monomorphize");
 
                         let ctor = dt_dec
                             .constructors
