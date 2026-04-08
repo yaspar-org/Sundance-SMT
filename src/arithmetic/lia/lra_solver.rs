@@ -17,8 +17,7 @@ use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::solver_result::{
     Assignment, Conflict, SolverDecision, SolverError, SolverResult,
 };
-use crate::arithmetic::lia::tableau::Tableau;
-use crate::arithmetic::lia::tableau_dense::TableauDense;
+use crate::arithmetic::lia::tableau::{Tableau, TableauImpl, TableauKind};
 use crate::arithmetic::lia::types::Rational;
 use crate::arithmetic::lia::variables::{Owner, Var, VarInfo};
 use dashu::base::{Abs, Inverse};
@@ -48,7 +47,7 @@ enum SimplexStepResult {
 }
 
 /// Linear real arithmetic solver
-pub struct LRASolver<T: Tableau + fmt::Debug> {
+pub struct LRASolver {
     /// Variable info for all original and slack variables. The vector itself should be immutable,
     /// but VarInfo pointed to are mutated during solving.
     ///
@@ -62,7 +61,7 @@ pub struct LRASolver<T: Tableau + fmt::Debug> {
     /// Low-level tableau representing equations b/w basic and non-basic variables. The tableau has
     /// rows and columns corresponding to the basic and non-basic variable vectors, not in the
     /// fixed variable order.
-    tableau: T,
+    tableau: TableauImpl,
 
     // -- Non-variable solver state --
     /// Solver decision state
@@ -91,10 +90,7 @@ pub struct LRASolver<T: Tableau + fmt::Debug> {
     ctx: ConvContext,
 }
 
-impl<T> fmt::Debug for LRASolver<T>
-where
-    T: Tableau + fmt::Debug,
-{
+impl fmt::Debug for LRASolver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = String::new();
         s.push_str("Variables:\n  [\n");
@@ -113,7 +109,7 @@ where
 }
 
 /// Shared functionality among all concrete instances of LRASolver
-impl<T: Tableau> LRASolver<T> {
+impl LRASolver {
     /// Perform a low-level swap of variable info between a basic and a non-basic variable.
     ///
     /// - `row` is the tableau row owned by the basic variable
@@ -760,7 +756,7 @@ impl<T: Tableau> LRASolver<T> {
     }
 }
 
-impl LRASolver<TableauDense> {
+impl LRASolver {
     /// Construct a new high-level tableau from:
     ///
     /// - basic variables, given in row order
@@ -774,6 +770,7 @@ impl LRASolver<TableauDense> {
         non_basic_info: Vec<VarInfo<QDelta>>,
         equations: Vec<Vec<Rational>>,
         ctx: ConvContext,
+        tableau_kind: TableauKind,
     ) -> SolverResult<Self> {
         let ncols = non_basic_info.len();
         let nrows = basic_info.len();
@@ -828,11 +825,21 @@ impl LRASolver<TableauDense> {
         let non_basic: Vec<usize> = (0..ncols).collect();
         let basic: Vec<usize> = (ncols..ncols + nrows).collect();
 
+        // Convert dense row data to tuples for the Tableau constructor
+        let mut tuples = Vec::new();
+        for (r, row) in equations.iter().enumerate() {
+            for (c, val) in row.iter().enumerate() {
+                if !val.is_zero() {
+                    tuples.push((r, c, val.clone()));
+                }
+            }
+        }
+
         Ok(Self {
             variables,
             basic,
             non_basic,
-            tableau: TableauDense::from_rows(&equations)?,
+            tableau: TableauImpl::new(tableau_kind, nrows, ncols, tuples)?,
             state: LRASolverState::Unknown,
             old_lower_bounds: vec![],
             old_upper_bounds: vec![],
@@ -849,6 +856,8 @@ mod tests {
     use super::*;
     use crate::arithmetic::lia::bounds::Bounds;
     use crate::arithmetic::lia::context::ConvContext;
+    use crate::arithmetic::lia::tableau::TableauKind;
+    use crate::arithmetic::lia::tableau_dense::TableauDense;
     use crate::arithmetic::lia::variables::{Var, VarInfo};
     use dashu::rbig;
 
@@ -867,7 +876,8 @@ mod tests {
         ];
         let equations = vec![vec![Rational::ONE; 2]; 2];
         let ctx = ConvContext::default();
-        let tableau = LRASolver::from_eqs(basic, non_basic, equations, ctx).unwrap();
+        let tableau =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
         assert!(tableau.assert_basic_assignments());
         assert!(tableau.assert_non_basic_in_bounds());
     }
@@ -918,7 +928,7 @@ mod tests {
     /// s2 | 2 -1    0 <= s2
     /// s3 |-1  2    1 <= s3
     ///
-    fn ex_5_6_tableau() -> LRASolver<TableauDense> {
+    fn ex_5_6_tableau() -> LRASolver {
         let basic = vec![
             VarInfo::new(Var::real(1), Owner::Basic(0)).with_bounds(Bounds::above_of(2)), // 2 <= s1
             VarInfo::new(Var::real(2), Owner::Basic(1)).with_bounds(Bounds::above_of(0)), // 0 <= s2
@@ -934,7 +944,7 @@ mod tests {
             vec![rbig!(-1), rbig!(2)],
         ];
         let ctx = ConvContext::default();
-        LRASolver::from_eqs(basic, non_basic, equations, ctx).unwrap()
+        LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap()
     }
 
     /// A simple infeasible tableau to test
@@ -953,7 +963,7 @@ mod tests {
     ///
     /// Initially, when all variables are assigned 0, the bounds on `s3` are violated.
     ///
-    fn ex_triangle_hole_infeasible() -> LRASolver<TableauDense> {
+    fn ex_triangle_hole_infeasible() -> LRASolver {
         let basic = vec![
             VarInfo::new(Var::real(1), Owner::Basic(0)).with_bounds(Bounds::below_of(0)),
             VarInfo::new(Var::real(2), Owner::Basic(1)).with_bounds(Bounds::below_of(0)),
@@ -970,7 +980,14 @@ mod tests {
             vec![rbig!(0), rbig!(1)],
             vec![rbig!(-1), rbig!(-1)],
         ];
-        LRASolver::from_eqs(basic, non_basic, equations, ConvContext::default()).unwrap()
+        LRASolver::from_eqs(
+            basic,
+            non_basic,
+            equations,
+            ConvContext::default(),
+            TableauKind::Dense,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -983,13 +1000,16 @@ mod tests {
     #[test]
     fn ex_5_6_update_x() {
         let mut tableau = ex_5_6_tableau();
-        let orig_lltab = tableau.tableau.clone();
+        let TableauImpl::Dense(ref orig_lltab) = tableau.tableau else {
+            panic!("expected Dense tableau");
+        };
+        let orig_lltab = orig_lltab.clone();
 
         // Increase x by 2 and then update the basic variables
         tableau.update(0, &rbig!(2).into());
         assert!(tableau.assert_basic_assignments());
         assert!(tableau.assert_non_basic_in_bounds()); // -inf <= 2 <= inf
-        assert_eq!(orig_lltab, tableau.tableau); // no pivot occurred
+        assert_eq!(TableauImpl::Dense(orig_lltab), tableau.tableau); // no pivot occurred
     }
 
     #[test]
@@ -1011,7 +1031,7 @@ mod tests {
             vec![rbig!(-1), rbig!(3)],
         ];
         let expected_lltab = TableauDense::from_rows(&expected_lldata).unwrap();
-        assert_eq!(solver.tableau, expected_lltab);
+        assert_eq!(solver.tableau, TableauImpl::Dense(expected_lltab));
 
         // Check post pivot_and_update variable assignments
         assert_eq!(solver.variables[0].val, 2.into()); // x
@@ -1039,7 +1059,7 @@ mod tests {
             vec![rbig!(1 / 3), rbig!(1 / 3)],
         ];
         let expected_lltab = TableauDense::from_rows(&expected_lldata).unwrap();
-        assert_eq!(solver.tableau, expected_lltab);
+        assert_eq!(solver.tableau, TableauImpl::Dense(expected_lltab));
 
         // Check post pivot_and_update variable assignments
         assert_eq!(solver.variables[0].val, 1.into()); // x, -inf <= 1 <= +inf
@@ -1067,7 +1087,7 @@ mod tests {
             vec![rbig!(-1), rbig!(3)],
         ];
         let expected_lltab = TableauDense::from_rows(&expected_lldata).unwrap();
-        assert_eq!(solver.tableau, expected_lltab);
+        assert_eq!(solver.tableau, TableauImpl::Dense(expected_lltab));
 
         // Check post pivot_and_update variable assignments
         assert_eq!(solver.variables[0].val, 2.into()); // x

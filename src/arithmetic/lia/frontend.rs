@@ -23,7 +23,7 @@ use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::preprocess::{PreprocessResult, preprocess};
 use crate::arithmetic::lia::solver_result::{Conflict, SolverDecision, SolverError, default_model};
 use crate::arithmetic::lia::solver_result_api::SolverDecisionApi;
-use crate::arithmetic::lia::tableau_dense::TableauDense;
+use crate::arithmetic::lia::tableau::TableauKind;
 use crate::arithmetic::lia::types::{FBig, Integer, Rational, UBig};
 use crate::arithmetic::lia::variables::VarType;
 use crate::debug_println;
@@ -480,9 +480,9 @@ fn convert_terms(terms: &[Term]) -> FrontendResult<ConvContext> {
 }
 
 /// Parse an SMT script and build a QF_LRA solver without preprocessing
-pub fn smt_to_lra_solver(smt_input: &str) -> FrontendResult<LRASolver<TableauDense>> {
+pub fn smt_to_lra_solver(smt_input: &str) -> FrontendResult<LRASolver> {
     let ctx = convert_smt(smt_input)?;
-    Ok(LinearSystem::new(ctx).to_lra_solver(true)?)
+    Ok(LinearSystem::new(ctx).to_lra_solver(true, TableauKind::Dense)?)
 }
 
 /// Top-level arithmetic solving function
@@ -540,7 +540,7 @@ pub fn solve_ctx_raw(ctx: &mut ConvContext) -> FrontendResult<SolverDecision> {
         PreprocessResult::Unknown => LinearSystem::new(ctx.clone()),
     };
     let lra_solver = sys
-        .to_lra_solver(true)
+        .to_lra_solver(true, TableauKind::Dense)
         .map_err(|e| FrontendError(format!("error building lra_solver: {}", e)))?;
     let mut lira_solver = LIRASolver::new(lra_solver);
     lira_solver

@@ -54,20 +54,29 @@ impl TableauSparse {
     /// Convert this sparse tableau to a dense tableau.
     ///
     /// Used in tests to compare the equivalence of the sparse/dense pivot algorithms.
-    pub fn to_dense(&self) -> TableauResult<TableauDense> {
+    pub fn to_dense(&self) -> TableauDense {
         let mut rows = Vec::with_capacity(self.nrows());
         for row in 0..self.nrows() {
             let mut row_vec = Vec::with_capacity(self.ncols());
             for col in 0..self.ncols() {
-                row_vec.push(self.get(row, col)?.clone());
+                row_vec.push(self.get(row, col).unwrap().clone());
             }
             rows.push(row_vec);
         }
         TableauDense::from_rows(&rows)
+            .expect("sparse tableau maintains invariant that nrows & ncols > 0")
     }
 }
 
 impl Tableau for TableauSparse {
+    fn from_tuples(
+        nrows: usize,
+        ncols: usize,
+        t: Vec<(usize, usize, Rational)>,
+    ) -> TableauResult<Self> {
+        TableauSparse::from_tuples(nrows, ncols, t)
+    }
+
     fn pivot(&mut self, row: usize, col: usize) -> TableauResult<()> {
         self.matrix.pivot(row, col).map_err(|e| TableauError(e.0))
     }
@@ -76,6 +85,14 @@ impl Tableau for TableauSparse {
         self.matrix
             .get(row, col)
             .ok_or_else(|| TableauError(format!("Index out of bounds: ({}, {})", row, col)))
+    }
+
+    fn nrows(&self) -> usize {
+        self.matrix.nrows()
+    }
+
+    fn ncols(&self) -> usize {
+        self.matrix.ncols()
     }
 }
 
@@ -122,7 +139,7 @@ mod tests {
         ];
         let dense = TableauDense::from_tuples(3, 3, tuples.clone()).unwrap();
         let sparse = TableauSparse::from_tuples(3, 3, tuples).unwrap();
-        let converted = sparse.to_dense().unwrap();
+        let converted = sparse.to_dense();
         assert_eq!(dense, converted);
     }
 
@@ -144,7 +161,7 @@ mod tests {
         let mut sparse = TableauSparse::from_tuples(3, 3, tuples).unwrap();
         dense.pivot(0, 0).unwrap();
         sparse.pivot(0, 0).unwrap();
-        let converted = sparse.to_dense().unwrap();
+        let converted = sparse.to_dense();
         assert_eq!(dense, converted);
     }
 
@@ -165,7 +182,7 @@ mod tests {
         let mut sparse = TableauSparse::from_tuples(4, 4, tuples).unwrap();
         dense.pivot(1, 2).unwrap();
         sparse.pivot(1, 2).unwrap();
-        let converted = sparse.to_dense().unwrap();
+        let converted = sparse.to_dense();
         assert_eq!(dense, converted);
     }
 
@@ -188,7 +205,7 @@ mod tests {
         let mut sparse = TableauSparse::from_tuples(10, 10, tuples).unwrap();
         dense.pivot(3, 4).unwrap();
         sparse.pivot(3, 4).unwrap();
-        let converted = sparse.to_dense().unwrap();
+        let converted = sparse.to_dense();
         assert_eq!(dense, converted);
     }
 }
