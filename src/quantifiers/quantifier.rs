@@ -5,6 +5,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Instant;
 
 use crate::cnf::CNFConversion;
 use crate::egraphs::datastructures::Polarity;
@@ -41,6 +42,8 @@ pub fn instantiate_quantifiers(
     let quantifiers = &egraph.quantifiers.clone();
     let mut instantiations = vec![];
     debug_println!(26, 0, "Starting a matching round");
+
+    let round_t0 = egraph.log_matching_time.then(Instant::now);
 
     // If datalog is enabled, pre-compute all assignments via relational matching
     let datalog_assignments: Option<HashMap<u64, Vec<DeterministicHashMap<String, Term>>>> =
@@ -381,6 +384,17 @@ pub fn instantiate_quantifiers(
             }
         }
     }
+
+    if let Some(t0) = round_t0 {
+        let round_elapsed = t0.elapsed();
+        egraph.matching_time += round_elapsed;
+        eprintln!(
+            "[matching] round {}: {:.3}ms",
+            egraph.matching_round,
+            round_elapsed.as_secs_f64() * 1000.0
+        );
+    }
+
     instantiations
 }
 

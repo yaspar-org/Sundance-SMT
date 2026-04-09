@@ -430,6 +430,7 @@ fn execute_join(
     initial_binding: Binding,
     egraph: &Egraph,
     var_index: &HashMap<FlatVar, usize>,
+    log: bool,
 ) -> Vec<Binding> {
     // Build a raw-arg lookup for each function we need
     // todo: I feel like we are doing redundant work here -> try to get rid of this
@@ -470,10 +471,15 @@ fn execute_join(
             }, // Function not in egraph
         };
 
+        let step_t0 = log.then(Instant::now);
+        let input_count = bindings.len();
+        let mut total_candidates = 0usize;
+
         let mut new_bindings = Vec::new();
         for binding in &bindings {
             let candidates = get_candidates(atom, binding, use_delta, egraph, var_index);
             debug_println!(27, 0, "We have the following candidates for atom {}", atom);
+            total_candidates += candidates.len();
             for fnode_uid in candidates {
                 debug_println!(27, 4, "{}", egraph.get_term(fnode_uid));
                 if let Some(raw_args) = raw_lookup.get(&fnode_uid) {
@@ -491,6 +497,16 @@ fn execute_join(
         }
 
         bindings = new_bindings;
+
+        if let Some(t0) = step_t0 {
+            eprintln!(
+                "[matching]   step {} atom '{}'{}: {} input bindings, {} candidates, {} output bindings, {:.3}ms",
+                pos, atom.func,
+                if use_delta { " [delta]" } else { "" },
+                input_count, total_candidates, bindings.len(),
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+        }
 
         // Level 28: show binding set after this join step
         debug_println!(28, 0, "    After step {} (atom[{}] = {}{}):", pos, atom_idx, atom, if use_delta { " [DELTA]" } else { "" });
@@ -537,6 +553,7 @@ fn evaluate_multipattern(
     atoms: &[FlatAtom],
     full_pass: bool,
     egraph: &Egraph,
+    log: bool,
 ) -> (Vec<Binding>, HashMap<FlatVar, usize>) {
     if atoms.is_empty() {
         debug_println!(26, 0, "  evaluate_multipattern: empty atoms, returning");
@@ -644,7 +661,12 @@ fn evaluate_multipattern(
         // Full pass: single join with no delta filtering
         debug_println!(26, 0, "  running full pass (no delta filtering)");
         debug_println!(28, 0, "  --- Full pass (all entries, no delta filtering) ---");
-        let bindings = execute_join(&order, atoms, None, initial_binding, egraph, &var_index);
+        if log { eprintln!("[matching]  full pass ({} atoms):", atoms.len()); }
+        let pass_t0 = log.then(Instant::now);
+        let bindings = execute_join(&order, atoms, None, initial_binding, egraph, &var_index, log);
+        if let Some(t0) = pass_t0 {
+            eprintln!("[matching]  full pass done: {} bindings, {:.3}ms", bindings.len(), t0.elapsed().as_secs_f64() * 1000.0);
+        }
         debug_println!(26, 0, "    join produced {} raw bindings", bindings.len());
         debug_println!(28, 0, "  Full pass produced {} bindings", bindings.len());
         add_bindings(bindings, &mut all_bindings);
@@ -686,8 +708,13 @@ fn evaluate_multipattern(
             );
             debug_println!(28, 0, "  Pass {}/{}: atom[{}] {} -- delta atom for this pass", pos + 1, order.len(), atom_idx, atoms[atom_idx]);
 
+            if log { eprintln!("[matching]  semi-naive pass {}/{}: delta atom '{}'", pos + 1, order.len(), func); }
+            let pass_t0 = log.then(Instant::now);
             let bindings =
-                execute_join(&order, atoms, Some(pos), initial_binding.clone(), egraph, &var_index);
+                execute_join(&order, atoms, Some(pos), initial_binding.clone(), egraph, &var_index, log);
+            if let Some(t0) = pass_t0 {
+                eprintln!("[matching]  pass {}/{} done: {} bindings, {:.3}ms", pos + 1, order.len(), bindings.len(), t0.elapsed().as_secs_f64() * 1000.0);
+            }
             debug_println!(
                 26,
                 0,
@@ -715,6 +742,7 @@ pub fn datalog_check_backtrack(_egraph: &mut Egraph) {}
 pub fn datalog_find_assignments(
     egraph: &mut Egraph,
 ) -> Vec<(u64, Vec<DeterministicHashMap<String, Term>>)> {
+    let log = egraph.log_matching_time;
     // Collect per-quantifier info before the immutable borrow
     let quant_info: Vec<(u64, Vec<String>, bool)> = egraph
         .quantifiers
@@ -751,7 +779,15 @@ pub fn datalog_find_assignments(
                 }
                 debug_println!(28, 0, "  Mode: {}", if *needs_full_pass { "FULL PASS (new quantifier)" } else { "SEMI-NAIVE" });
 
-                let (bindings, var_index) = evaluate_multipattern(atoms, *needs_full_pass, egraph);
+                if log {
+                    eprintln!("[matching] quantifier '{}': {} atoms, mode={}",
+                        egraph.get_term(*qid), atoms.len(),
+                        if *needs_full_pass { "full" } else { "semi-naive" });
+                    for (i, atom) in atoms.iter().enumerate() {
+                        eprintln!("[matching]   atom[{}]: {} (table_size={})", i, atom, table_size(egraph, &atom.func));
+                    }
+                }
+                let (bindings, var_index) = evaluate_multipattern(atoms, *needs_full_pass, egraph, log);
 
                 debug_println!(28, 0, "  Result: {} total bindings", bindings.len());
                 // Show final bindings (quantified variables only) at level 28

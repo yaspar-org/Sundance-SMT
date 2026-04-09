@@ -44,4 +44,7 @@ pub struct Args {
     /// Set timeout in seconds (0 means no timeout)
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,
+    /// Log total time spent in ematching (printed to stderr at end of solve)
+    #[arg(long, default_value_t = false)]
+    pub log_matching_time: bool,
 }

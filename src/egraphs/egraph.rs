@@ -439,6 +439,10 @@ pub struct Egraph {
     pub eager_skolem: bool,
     /// user flag for whether to enable egglog-style relational (datalog) pattern matching
     pub datalog: bool,
+    /// user flag for whether to log total ematching time at end of solve
+    pub log_matching_time: bool,
+    /// accumulated time spent in ematching across all matching rounds
+    pub matching_time: std::time::Duration,
     /// all flattened relational atoms from quantifier patterns (only populated when datalog is enabled)
     pub flat_atoms: DeterministicHashSet<FlatAtom>,
     /// for each quantifier (by uid), for each multipattern (disjunctive), the flattened atoms (conjunctive)
@@ -460,6 +464,7 @@ impl Egraph {
         ddsmt: bool,
         eager_skolem: bool,
         datalog: bool,
+        log_matching_time: bool,
     ) -> Self {
         let tru = context.get_true();
         let fal = context.get_false();
@@ -502,6 +507,8 @@ impl Egraph {
             ddsmt,
             eager_skolem,
             datalog,
+            log_matching_time,
+            matching_time: std::time::Duration::ZERO,
             flat_atoms: DeterministicHashSet::new(),
             flat_patterns: DeterministicHashMap::new(),
             flat_atom_function_index: DeterministicHashMap::new(),

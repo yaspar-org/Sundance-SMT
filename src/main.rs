@@ -79,6 +79,7 @@ fn main() -> Result<(), String> {
         args.ddsmt,
         args.eager_skolem,
         args.datalog,
+        args.log_matching_time,
     );
 
     egraph.insert_predecessor(&false_term, None, None, false, None);
@@ -194,6 +195,13 @@ fn main() -> Result<(), String> {
         args.arithmetic,
         args.timeout,
     );
+
+    if args.log_matching_time {
+        eprintln!(
+            "[matching] total ematching time: {:.3}ms",
+            egraph.matching_time.as_secs_f64() * 1000.0
+        );
+    }
 
     match return_value {
         Status::SATISFIABLE => {
