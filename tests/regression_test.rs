@@ -11,11 +11,19 @@ use std::time::Duration;
 
 #[test]
 fn regression_test() {
+    if env::var("DATALOG").is_ok() {
+        println!("Skipping non-datalog regression tests; DATALOG is set.");
+        return;
+    }
     run_regression_tests(&[]);
 }
 
 #[test]
 fn regression_test_datalog() {
+    if env::var("DATALOG").is_err() {
+        println!("Skipping datalog regression tests; set DATALOG=1 to enable.");
+        return;
+    }
     run_regression_tests(&["--datalog"]);
 }
 

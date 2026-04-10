@@ -144,27 +144,42 @@ pub fn compile_multipatterns(
 // Relational matching engine
 // ============================================================
 
-/// A binding is a fixed-size vector of slots, one per variable in the multipattern.
-/// `u64::MAX` represents an unbound variable. This is much cheaper to clone than a HashMap.
+/// A binding is a pair of fixed-size slot vectors, one per variable in the
+/// multipattern. Each slot stores both the canonical e-class root (for
+/// consistency checks and dedup) and the raw term UID (for substitution).
+/// `u64::MAX` in the root slot represents an unbound variable.
+///
+/// Storing the root avoids repeated `egraph.find()` calls in the hot path,
+/// and the root vector doubles as the canonical dedup key.
 #[derive(Clone, Debug)]
 struct Binding {
-    slots: Vec<u64>,
+    roots: Vec<u64>,
+    raws: Vec<u64>,
 }
 
 const UNBOUND: u64 = u64::MAX;
 
 impl Binding {
     fn new(num_vars: usize) -> Self {
-        Binding { slots: vec![UNBOUND; num_vars] }
+        Binding {
+            roots: vec![UNBOUND; num_vars],
+            raws: vec![UNBOUND; num_vars],
+        }
     }
 
-    fn get(&self, idx: usize) -> Option<u64> {
-        let v = self.slots[idx];
+    fn root(&self, idx: usize) -> Option<u64> {
+        let v = self.roots[idx];
         if v == UNBOUND { None } else { Some(v) }
     }
 
-    fn set(&mut self, idx: usize, val: u64) {
-        self.slots[idx] = val;
+    fn raw(&self, idx: usize) -> Option<u64> {
+        let v = self.raws[idx];
+        if v == UNBOUND { None } else { Some(v) }
+    }
+
+    fn set(&mut self, idx: usize, root: u64, raw: u64) {
+        self.roots[idx] = root;
+        self.raws[idx] = raw;
     }
 }
 
@@ -323,9 +338,9 @@ fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Option<Vec<usize>>
 /// correctly and we don't re-instantiate the same quantifier with different
 /// class representatives.
 ///
-/// Consistency checks canonicalize via `find()` so that different raw uids in
-/// the same e-class are treated as compatible. Dedup across bindings is done
-/// on a parallel canonical key (see `canonical_key`).
+/// The root is computed once via `find()` at bind time, stored alongside the
+/// raw uid, and reused for cheap consistency checks and dedup (no repeated
+/// `find()` calls in the hot path).
 fn try_extend_binding(
     binding: &Binding,
     atom: &FlatAtom,
@@ -336,43 +351,31 @@ fn try_extend_binding(
 ) -> Option<Binding> {
     let mut new_binding = binding.clone();
 
-    // Check/bind each argument: compare canonically, store raw
+    // Check/bind each argument: compare on pre-computed root, store both
     for (var, &raw_uid) in atom.args.iter().zip(raw_args.iter()) {
         let idx = var_index[var];
         let canon_eclass = egraph.find(raw_uid);
-        match new_binding.get(idx) {
-            Some(bound) if egraph.find(bound) == canon_eclass => {} // consistent
-            Some(_) => return None,                                  // conflict
+        match new_binding.root(idx) {
+            Some(bound_root) if bound_root == canon_eclass => {} // consistent
+            Some(_) => return None,                              // conflict
             None => {
-                new_binding.set(idx, raw_uid);
+                new_binding.set(idx, canon_eclass, raw_uid);
             }
         }
     }
 
-    // Check/bind output: compare canonically, store raw
+    // Check/bind output: compare on pre-computed root, store both
     let out_idx = var_index[&atom.output];
     let canon_output = egraph.find(fnode_uid);
-    match new_binding.get(out_idx) {
-        Some(bound) if egraph.find(bound) == canon_output => {} // consistent
-        Some(_) => return None,                                  // conflict
+    match new_binding.root(out_idx) {
+        Some(bound_root) if bound_root == canon_output => {} // consistent
+        Some(_) => return None,                              // conflict
         None => {
-            new_binding.set(out_idx, fnode_uid);
+            new_binding.set(out_idx, canon_output, fnode_uid);
         }
     }
 
     Some(new_binding)
-}
-
-/// Canonical key of a binding: each slot replaced by its canonical e-class
-/// (UNBOUND preserved). Two bindings that pick different raw representatives
-/// in the same e-classes map to the same canonical key, so dedup on this key
-/// collapses them into one and prevents cartesian blowups across join steps.
-fn canonical_key(binding: &Binding, egraph: &Egraph) -> Vec<u64> {
-    binding
-        .slots
-        .iter()
-        .map(|&u| if u == UNBOUND { UNBOUND } else { egraph.find(u) })
-        .collect()
 }
 
 /// Eagerly intersect a new candidate set into a running result.
@@ -434,23 +437,21 @@ fn get_candidates(
             if i >= arg_idx.args.len() {
                 break;
             }
-            if let Some(raw_uid) = binding.get(var_index[var]) {
-                let canon = egraph.find(raw_uid);
+            if let Some(canon) = binding.root(var_index[var]) {
                 if delta_only {
                     arg_idx.args[i].get_delta_into(canon, matching_round, &mut candidates);
                 } else {
                     arg_idx.args[i].get_all_into(canon, &mut candidates);
                 }
                 if log {
-                    eprintln!("[matching]        arg[{}] {} (var={:?}): raw={} canon={} -> {} candidates", i, var, var_index.get(var), raw_uid, canon, candidates.len());
+                    eprintln!("[matching]        arg[{}] {} (var={:?}): canon={} -> {} candidates", i, var, var_index.get(var), canon, candidates.len());
                 }
                 debug_println!(
                     26,
                     0,
-                    "      get_candidates: arg[{}] {} bound to raw={} canon={} -> {} candidates (delta={})",
+                    "      get_candidates: arg[{}] {} bound to canon={} -> {} candidates (delta={})",
                     i,
                     var,
-                    raw_uid,
                     canon,
                     candidates.len(),
                     delta_only
@@ -466,9 +467,8 @@ fn get_candidates(
         }
     }
 
-    // Check output index (canonicalize binding value for lookup)
-    if let Some(raw_uid) = binding.get(var_index[&atom.output]) {
-        let canon = egraph.find(raw_uid);
+    // Check output index using pre-computed root
+    if let Some(canon) = binding.root(var_index[&atom.output]) {
         if let Some(func_out) = egraph.function_maps.get(&atom.func) {
             if delta_only {
                 func_out.output.get_delta_into(canon, matching_round, &mut candidates);
@@ -476,7 +476,7 @@ fn get_candidates(
                 func_out.output.get_all_into(canon, &mut candidates);
             }
             if log {
-                eprintln!("[matching]        output (var={:?}): raw={} canon={} -> {} candidates", &atom.output, raw_uid, canon, candidates.len());
+                eprintln!("[matching]        output (var={:?}): canon={} -> {} candidates", &atom.output, canon, candidates.len());
             }
             if candidates.is_empty() {
                 return vec![];
@@ -597,14 +597,11 @@ fn execute_join(
         // steps. We keep one representative per canonical equivalence class,
         // preserving raw uids in the binding so substitution later uses literal
         // subterms (matching the classic matcher).
+        // Dedup directly on the precomputed roots vector (no `find()` calls).
         let before_dedup = new_bindings.len();
-        let mut keyed: Vec<(Vec<u64>, Binding)> = new_bindings
-            .into_iter()
-            .map(|b| (canonical_key(&b, egraph), b))
-            .collect();
-        keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        keyed.dedup_by(|a: &mut (Vec<u64>, Binding), b| a.0 == b.0);
-        bindings = keyed.into_iter().map(|(_, b)| b).collect();
+        new_bindings.sort_unstable_by(|a, b| a.roots.cmp(&b.roots));
+        new_bindings.dedup_by(|a, b| a.roots == b.roots);
+        bindings = new_bindings;
 
         if let Some(t0) = step_t0 {
             eprintln!(
@@ -624,7 +621,7 @@ fn execute_join(
             for (bi, b) in bindings.iter().enumerate().take(5) {
                 let bound_vars: Vec<String> = var_index.iter()
                     .filter_map(|(var, &idx)| {
-                        b.get(idx).map(|uid| format!("{}={}", var, egraph.get_term(uid)))
+                        b.raw(idx).map(|uid| format!("{}={}", var, egraph.get_term(uid)))
                     })
                     .collect();
                 debug_println!(28, 0, "        [{}] {{ {} }}", bi, bound_vars.join(", "));
@@ -726,12 +723,13 @@ fn evaluate_multipattern(
     //     .collect();
     // quant_slots.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Initialize binding with ground variables (store raw, matching try_extend_binding)
+    // Initialize binding with ground variables: store the raw uid and its
+    // canonical root so subsequent matching steps can use the root directly.
     let mut initial_binding = Binding::new(num_vars);
     for atom in atoms {
         for var in atom.args.iter().chain(std::iter::once(&atom.output)) {
             if let FlatVar::Ground(uid) = var {
-                initial_binding.set(var_index[var], *uid);
+                initial_binding.set(var_index[var], egraph.find(*uid), *uid);
             }
         }
     }
@@ -857,7 +855,7 @@ pub fn datalog_check_backtrack(_egraph: &mut Egraph) {}
 pub fn datalog_find_assignments(
     egraph: &mut Egraph,
 ) -> Vec<(u64, Vec<DeterministicHashMap<String, Term>>)> {
-    let log = egraph.log_matching_time;
+    let log = false; // egraph.log_matching_time;
     // Collect per-quantifier info before the immutable borrow
     let quant_info: Vec<(u64, Vec<String>, bool)> = egraph
         .quantifiers
@@ -910,7 +908,7 @@ pub fn datalog_find_assignments(
                     let qvars: Vec<String> = var_index.iter()
                         .filter_map(|(var, &idx)| {
                             if let FlatVar::Quantified(name) = var {
-                                binding.get(idx).map(|uid| format!("?{}={}", name, egraph.get_term(uid)))
+                                binding.raw(idx).map(|uid| format!("?{}={}", name, egraph.get_term(uid)))
                             } else {
                                 None
                             }
@@ -927,9 +925,8 @@ pub fn datalog_find_assignments(
                     let mut assignment = DeterministicHashMap::new();
                     for (var, &idx) in &var_index {
                         if let FlatVar::Quantified(name) = var {
-                            let eclass = binding.slots[idx];
-                            if eclass != UNBOUND {
-                                assignment.insert(name.clone(), egraph.get_term(eclass));
+                            if let Some(raw) = binding.raw(idx) {
+                                assignment.insert(name.clone(), egraph.get_term(raw));
                             }
                         }
                     }

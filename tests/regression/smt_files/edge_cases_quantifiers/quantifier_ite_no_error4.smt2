@@ -33,3 +33,4 @@
 (assert (= (ib (Po j) (o (lib (Po j) (o c) (I 1)))) (lib (I 0) (I (i (P (Po j)))) (o (ib (Po j) (o c))))))
 (declare-const t P)
 (assert (and (not (h t T)) (or (not (n (%Po t) 0)) (= c (li (%Po t))))))
+(check-sat)
