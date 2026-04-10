@@ -9,6 +9,7 @@ use std::fmt;
 
 use dashu::Rational;
 
+use crate::arithmetic::lia::stats::Stats;
 use crate::arithmetic::lia::tableau::TableauError;
 use crate::arithmetic::lia::variables::{Var, VarInfo};
 
@@ -198,6 +199,22 @@ pub enum SolverDecision {
     FEASIBLE(Assignment<Var>),
     /// The original linear real arithmetic problem is UNSAT
     INFEASIBLE(Conflict<Var>),
+}
+
+/// Result returned from the LRA or LIRA solvers
+#[derive(Debug)]
+pub struct SolverReturn {
+    /// Solver decision, FEASIBLE, INFEASIBLE, or UNKNOWN along with supporting data
+    pub decision: SolverDecision,
+    /// Runtime statistics
+    pub stats: Stats,
+}
+
+impl SolverReturn {
+    /// Construct a new solver return result
+    pub fn new(decision: SolverDecision, stats: Stats) -> Self {
+        Self { decision, stats }
+    }
 }
 
 /// Return a default model for a set of variable id's
