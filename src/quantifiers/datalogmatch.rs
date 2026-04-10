@@ -204,26 +204,74 @@ fn atom_vars(atom: &FlatAtom) -> HashSet<&FlatVar> {
 /// 2. For each subsequent position, among the remaining atoms, prefer the one that
 ///    shares the most variables with the already-bound set (avoids cartesian products).
 ///    Break ties by smallest table size.
-fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Vec<usize> {
+fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Option<Vec<usize>> {
     let n = atoms.len();
     if n == 0 {
-        return vec![];
+        return Some(vec![]);
+    }
+    let log = false;//egraph.log_matching_time;
+
+    // Short-circuit: if any atom's function has zero entries in the egraph,
+    // no binding can satisfy the conjunction — return None to signal empty result.
+    for (i, atom) in atoms.iter().enumerate() {
+        if table_size(egraph, &atom.func) == 0 {
+            if log {
+                eprintln!("[join-order] atom[{}] '{}' has table_size=0, short-circuiting to empty result",
+                    i, atom.func);
+            }
+            return None;
+        }
     }
 
     let mut remaining: Vec<usize> = (0..n).collect();
     let mut order = Vec::with_capacity(n);
     let mut bound_vars: HashSet<FlatVar> = HashSet::new();
 
+    if log {
+        eprintln!("[join-order] computing order for {} atoms:", n);
+        for (i, atom) in atoms.iter().enumerate() {
+            let size = table_size(egraph, &atom.func);
+            let vars: Vec<String> = atom_vars(atom).iter().map(|v| format!("{}", v)).collect();
+            eprintln!("[join-order]   atom[{}]: {} (table_size={}, vars={{{}}})", i, atom, size, vars.join(", "));
+        }
+    }
+
     // First atom: pick the smallest table
     remaining.sort_by_key(|&i| table_size(egraph, &atoms[i].func));
+    if log {
+        eprintln!("[join-order] first-atom candidates (sorted by table size):");
+        for &i in &remaining {
+            eprintln!("[join-order]   atom[{}] '{}' table_size={}", i, atoms[i].func, table_size(egraph, &atoms[i].func));
+        }
+    }
     let first = remaining.remove(0);
     for v in atom_vars(&atoms[first]) {
         bound_vars.insert(v.clone());
     }
     order.push(first);
+    if log {
+        let bv: Vec<String> = bound_vars.iter().map(|v| format!("{}", v)).collect();
+        eprintln!("[join-order] >>> chose first: atom[{}] '{}' (table_size={}); bound_vars={{{}}}",
+            first, atoms[first].func, table_size(egraph, &atoms[first].func), bv.join(", "));
+    }
 
     // Greedily pick the next atom that shares the most variables with bound set
     while !remaining.is_empty() {
+        if log {
+            eprintln!("[join-order] step {} candidates:", order.len());
+            for &atom_idx in &remaining {
+                let vars = atom_vars(&atoms[atom_idx]);
+                let shared = vars.iter().filter(|v| bound_vars.contains(*v)).count();
+                let size = table_size(egraph, &atoms[atom_idx].func);
+                let shared_vars: Vec<String> = vars.iter()
+                    .filter(|v| bound_vars.contains(*v))
+                    .map(|v| format!("{}", v))
+                    .collect();
+                eprintln!("[join-order]   atom[{}] '{}': shared={} {{{}}}, table_size={}",
+                    atom_idx, atoms[atom_idx].func, shared, shared_vars.join(", "), size);
+            }
+        }
+
         let best_pos = remaining
             .iter()
             .enumerate()
@@ -239,21 +287,45 @@ fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Vec<usize> {
             .unwrap();
 
         let chosen = remaining.swap_remove(best_pos);
+        let prev_bound = bound_vars.clone();
         for v in atom_vars(&atoms[chosen]) {
             bound_vars.insert(v.clone());
+        }
+        if log {
+            let chosen_vars = atom_vars(&atoms[chosen]);
+            let shared = chosen_vars.iter().filter(|v| prev_bound.contains(*v)).count();
+            let newly_bound: Vec<String> = chosen_vars.iter()
+                .filter(|v| !prev_bound.contains(*v))
+                .map(|v| format!("{}", v))
+                .collect();
+            eprintln!("[join-order] >>> chose atom[{}] '{}' (shared={}, table_size={}); newly bound: {{{}}}",
+                chosen, atoms[chosen].func, shared, table_size(egraph, &atoms[chosen].func), newly_bound.join(", "));
         }
         order.push(chosen);
     }
 
-    order
+    if log {
+        let order_str: Vec<String> = order.iter().map(|i| format!("{}", i)).collect();
+        eprintln!("[join-order] final order: [{}]", order_str.join(", "));
+    }
+
+    Some(order)
 }
 
 /// Try to extend a binding with a candidate fnode for a given atom.
 /// Returns None if the candidate is inconsistent with the current binding.
 ///
-/// The binding stores **canonical e-class** UIDs. Multiple fnodes sharing the same
-/// canonical argument/output classes produce identical bindings, so the caller can
-/// dedup them to avoid cartesian blowups across join steps.
+/// The binding stores **raw** term UIDs — the actual syntactic terms at the
+/// fnode's argument slots. This matches the classic matcher, which binds each
+/// variable to the literal subterm encountered during matching. Preserving raw
+/// uids keeps substitution results stable across rounds (the fnode's raw args
+/// don't change when unions happen), so `added_instantiations` dedup works
+/// correctly and we don't re-instantiate the same quantifier with different
+/// class representatives.
+///
+/// Consistency checks canonicalize via `find()` so that different raw uids in
+/// the same e-class are treated as compatible. Dedup across bindings is done
+/// on a parallel canonical key (see `canonical_key`).
 fn try_extend_binding(
     binding: &Binding,
     atom: &FlatAtom,
@@ -264,31 +336,43 @@ fn try_extend_binding(
 ) -> Option<Binding> {
     let mut new_binding = binding.clone();
 
-    // Check/bind each argument: compare and store canonically
+    // Check/bind each argument: compare canonically, store raw
     for (var, &raw_uid) in atom.args.iter().zip(raw_args.iter()) {
         let idx = var_index[var];
         let canon_eclass = egraph.find(raw_uid);
         match new_binding.get(idx) {
-            Some(bound) if bound == canon_eclass => {} // consistent (already canonical)
-            Some(_) => return None,                     // conflict
+            Some(bound) if egraph.find(bound) == canon_eclass => {} // consistent
+            Some(_) => return None,                                  // conflict
             None => {
-                new_binding.set(idx, canon_eclass);
+                new_binding.set(idx, raw_uid);
             }
         }
     }
 
-    // Check/bind output: compare and store canonically
+    // Check/bind output: compare canonically, store raw
     let out_idx = var_index[&atom.output];
     let canon_output = egraph.find(fnode_uid);
     match new_binding.get(out_idx) {
-        Some(bound) if bound == canon_output => {} // consistent (already canonical)
-        Some(_) => return None,                     // conflict
+        Some(bound) if egraph.find(bound) == canon_output => {} // consistent
+        Some(_) => return None,                                  // conflict
         None => {
-            new_binding.set(out_idx, canon_output);
+            new_binding.set(out_idx, fnode_uid);
         }
     }
 
     Some(new_binding)
+}
+
+/// Canonical key of a binding: each slot replaced by its canonical e-class
+/// (UNBOUND preserved). Two bindings that pick different raw representatives
+/// in the same e-classes map to the same canonical key, so dedup on this key
+/// collapses them into one and prevents cartesian blowups across join steps.
+fn canonical_key(binding: &Binding, egraph: &Egraph) -> Vec<u64> {
+    binding
+        .slots
+        .iter()
+        .map(|&u| if u == UNBOUND { UNBOUND } else { egraph.find(u) })
+        .collect()
 }
 
 /// Eagerly intersect a new candidate set into a running result.
@@ -506,14 +590,21 @@ fn execute_join(
             }
         }
 
-        // Dedup bindings: canonical slot vectors with identical contents represent
-        // the same semantic assignment. Without this, multiple fnodes sharing the
-        // same canonical arg/output classes produce duplicate bindings that explode
-        // across subsequent join steps.
+        // Dedup bindings on canonical key: bindings that differ only in which raw
+        // representative they picked for each e-class are semantically the same
+        // assignment. Without this, multiple fnodes sharing the same canonical
+        // classes produce duplicate bindings that explode across subsequent join
+        // steps. We keep one representative per canonical equivalence class,
+        // preserving raw uids in the binding so substitution later uses literal
+        // subterms (matching the classic matcher).
         let before_dedup = new_bindings.len();
-        new_bindings.sort_unstable_by(|a, b| a.slots.cmp(&b.slots));
-        new_bindings.dedup_by(|a, b| a.slots == b.slots);
-        bindings = new_bindings;
+        let mut keyed: Vec<(Vec<u64>, Binding)> = new_bindings
+            .into_iter()
+            .map(|b| (canonical_key(&b, egraph), b))
+            .collect();
+        keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        keyed.dedup_by(|a: &mut (Vec<u64>, Binding), b| a.0 == b.0);
+        bindings = keyed.into_iter().map(|(_, b)| b).collect();
 
         if let Some(t0) = step_t0 {
             eprintln!(
@@ -599,7 +690,17 @@ fn evaluate_multipattern(
         );
     }
 
-    let order = compute_join_order(atoms, egraph);
+    // Build variable index: maps each FlatVar to a slot number
+    let var_index = build_var_index(atoms);
+
+    let order = match compute_join_order(atoms, egraph) {
+        Some(o) => o,
+        None => {
+            // Some atom has zero entries — the join is guaranteed empty.
+            debug_println!(26, 0, "  compute_join_order short-circuited (atom with table_size=0)");
+            return (vec![], var_index);
+        }
+    };
     debug_println!(26, 0, "  join order: {:?}", order);
 
     // Level 28: show the join order with atom details
@@ -610,9 +711,6 @@ fn evaluate_multipattern(
         let has_delta = func_has_delta(egraph, &atom.func);
         debug_println!(28, 0, "    step {}: atom[{}] {}  (table_size={}, delta={})", pos, atom_idx, atom, size, has_delta);
     }
-
-    // Build variable index: maps each FlatVar to a slot number
-    let var_index = build_var_index(atoms);
     let num_vars = var_index.len();
 
     // Collect which slots correspond to quantified variables (for dedup)
@@ -628,12 +726,12 @@ fn evaluate_multipattern(
     //     .collect();
     // quant_slots.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Initialize binding with ground variables (store canonically, matching try_extend_binding)
+    // Initialize binding with ground variables (store raw, matching try_extend_binding)
     let mut initial_binding = Binding::new(num_vars);
     for atom in atoms {
         for var in atom.args.iter().chain(std::iter::once(&atom.output)) {
             if let FlatVar::Ground(uid) = var {
-                initial_binding.set(var_index[var], egraph.find(*uid));
+                initial_binding.set(var_index[var], *uid);
             }
         }
     }
