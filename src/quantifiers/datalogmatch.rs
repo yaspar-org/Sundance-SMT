@@ -855,7 +855,7 @@ pub fn datalog_check_backtrack(_egraph: &mut Egraph) {}
 pub fn datalog_find_assignments(
     egraph: &mut Egraph,
 ) -> Vec<(u64, Vec<DeterministicHashMap<String, Term>>)> {
-    let log = false; // egraph.log_matching_time;
+    let log =  false; // egraph.log_matching_time;
     // Collect per-quantifier info before the immutable borrow
     let quant_info: Vec<(u64, Vec<String>, bool)> = egraph
         .quantifiers
@@ -872,6 +872,38 @@ pub fn datalog_find_assignments(
             let quant_start = if crate::log::is_important(28) { Some(Instant::now()) } else { None };
 
             for atoms in multipatterns {
+                // Fast pre-check: skip the quantifier entirely before touching any
+                // per-quantifier state if the join is guaranteed to produce no new
+                // bindings. Two conditions let us bail out:
+                //   1. Some atom has zero entries in the egraph — join is empty.
+                //   2. In semi-naive mode, no atom has delta entries — no new
+                //      bindings since the last round.
+                // This avoids `build_var_index`, `compute_join_order`, and binding
+                // allocations for the overwhelming majority of quantifiers in a
+                // typical matching round.
+                let mut any_zero = false;
+                let mut any_delta = false;
+                for atom in atoms {
+                    let size = table_size(egraph, &atom.func);
+                    if size == 0 {
+                        any_zero = true;
+                        break;
+                    }
+                    if !*needs_full_pass && func_has_delta(egraph, &atom.func) {
+                        any_delta = true;
+                    }
+                }
+                if any_zero || (!*needs_full_pass && !any_delta) {
+                    debug_println!(
+                        26,
+                        0,
+                        "Skipping quantifier {}: {}",
+                        egraph.get_term(*qid),
+                        if any_zero { "atom with table_size=0" } else { "no delta entries in semi-naive mode" }
+                    );
+                    continue;
+                }
+
                 debug_println!(
                     26,
                     0,
