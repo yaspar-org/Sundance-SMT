@@ -201,6 +201,7 @@ fn main() -> Result<(), String> {
             "[matching] total ematching time: {:.3}ms",
             egraph.matching_time.as_secs_f64() * 1000.0
         );
+        egraph.matching_cumulative_stats.report(egraph.matching_time);
     }
 
     match return_value {

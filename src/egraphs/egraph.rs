@@ -368,6 +368,169 @@ impl FunctionArgIndex {
     }
 }
 
+/// Per-phase timing/counter collection for datalog ematching. Accumulated over
+/// a single matching round and printed once at the end of the round, then reset.
+/// Every phase tracks both elapsed time and a call count so we can compute
+/// average cost per call. Only populated when `log_matching_time` is enabled.
+#[derive(Clone, Debug, Default)]
+pub struct DatalogPhaseTimers {
+    /// Pre-check loop in datalog_find_assignments that decides whether to skip a quantifier.
+    pub precheck_time: std::time::Duration,
+    pub precheck_calls: u64,
+    /// Number of quantifier-multipatterns that were skipped by the pre-check.
+    pub precheck_skipped: u64,
+    /// build_var_index: building HashMap<FlatVar, usize> per multipattern.
+    pub var_index_time: std::time::Duration,
+    pub var_index_calls: u64,
+    /// compute_join_order: the greedy ordering loop.
+    pub join_order_time: std::time::Duration,
+    pub join_order_calls: u64,
+    /// Initial binding allocation + ground variable seeding.
+    pub init_binding_time: std::time::Duration,
+    pub init_binding_calls: u64,
+    /// get_candidates: index lookups for one atom given a binding.
+    pub get_candidates_time: std::time::Duration,
+    pub get_candidates_calls: u64,
+    /// try_extend_binding: consistency check and slot update.
+    pub try_extend_time: std::time::Duration,
+    pub try_extend_calls: u64,
+    /// Per-step canonical dedup on the binding set.
+    pub dedup_time: std::time::Duration,
+    pub dedup_calls: u64,
+    /// Converting the final Binding set into Vec<DeterministicHashMap<String, Term>>.
+    pub extract_assignments_time: std::time::Duration,
+    pub extract_assignments_calls: u64,
+    /// Cumulative totals across evaluate_multipattern invocations.
+    pub evaluate_multipattern_time: std::time::Duration,
+    pub evaluate_multipattern_calls: u64,
+}
+
+impl DatalogPhaseTimers {
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Accumulate another DatalogPhaseTimers into this one (used for cumulative totals).
+    pub fn accumulate(&mut self, other: &DatalogPhaseTimers) {
+        self.precheck_time += other.precheck_time;
+        self.precheck_calls += other.precheck_calls;
+        self.precheck_skipped += other.precheck_skipped;
+        self.var_index_time += other.var_index_time;
+        self.var_index_calls += other.var_index_calls;
+        self.join_order_time += other.join_order_time;
+        self.join_order_calls += other.join_order_calls;
+        self.init_binding_time += other.init_binding_time;
+        self.init_binding_calls += other.init_binding_calls;
+        self.get_candidates_time += other.get_candidates_time;
+        self.get_candidates_calls += other.get_candidates_calls;
+        self.try_extend_time += other.try_extend_time;
+        self.try_extend_calls += other.try_extend_calls;
+        self.dedup_time += other.dedup_time;
+        self.dedup_calls += other.dedup_calls;
+        self.extract_assignments_time += other.extract_assignments_time;
+        self.extract_assignments_calls += other.extract_assignments_calls;
+        self.evaluate_multipattern_time += other.evaluate_multipattern_time;
+        self.evaluate_multipattern_calls += other.evaluate_multipattern_calls;
+    }
+
+    pub fn report(&self, round: usize) {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        eprintln!("[matching] === datalog phase breakdown for round {} ===", round);
+        eprintln!("[matching]   precheck:           {:>8.3} ms  ({:>6} calls, {:>6} skipped)",
+            ms(self.precheck_time), self.precheck_calls, self.precheck_skipped);
+        eprintln!("[matching]   var_index_build:    {:>8.3} ms  ({:>6} calls)",
+            ms(self.var_index_time), self.var_index_calls);
+        eprintln!("[matching]   join_order:         {:>8.3} ms  ({:>6} calls)",
+            ms(self.join_order_time), self.join_order_calls);
+        eprintln!("[matching]   init_binding:       {:>8.3} ms  ({:>6} calls)",
+            ms(self.init_binding_time), self.init_binding_calls);
+        eprintln!("[matching]   get_candidates:     {:>8.3} ms  ({:>6} calls)",
+            ms(self.get_candidates_time), self.get_candidates_calls);
+        eprintln!("[matching]   try_extend_binding: {:>8.3} ms  ({:>6} calls)",
+            ms(self.try_extend_time), self.try_extend_calls);
+        eprintln!("[matching]   dedup:              {:>8.3} ms  ({:>6} calls)",
+            ms(self.dedup_time), self.dedup_calls);
+        eprintln!("[matching]   extract_assignments:{:>8.3} ms  ({:>6} calls)",
+            ms(self.extract_assignments_time), self.extract_assignments_calls);
+        eprintln!("[matching]   evaluate_multipatn: {:>8.3} ms  ({:>6} calls) [includes sub-phases]",
+            ms(self.evaluate_multipattern_time), self.evaluate_multipattern_calls);
+    }
+}
+
+/// Cumulative per-phase totals for the whole solve across all matching rounds.
+/// Covers both the matcher itself (classic match_term or datalog_find_assignments)
+/// and the post-match pipeline (substitution, let-elim, NNF, CNF, insert_predecessor,
+/// etc.). Populated only when `log_matching_time` is enabled and printed at end
+/// of solve so it can be machine-parsed by external tooling (e.g. run_verus.py).
+#[derive(Clone, Debug, Default)]
+pub struct MatchingCumulativeStats {
+    pub rounds: u64,
+    /// Time spent inside classic match_term (non-datalog path).
+    pub classic_match_time: std::time::Duration,
+    pub classic_match_assignments: u64,
+    /// Time spent inside datalog_find_assignments (datalog path), excluding
+    /// downstream post-match work.
+    pub datalog_find_assignments_time: std::time::Duration,
+    /// Cumulative sub-phase breakdown for the datalog matcher.
+    pub datalog_phases: DatalogPhaseTimers,
+    /// Post-match phases — shared by both matchers.
+    pub post_dedup_time: std::time::Duration,
+    pub post_dedup_skipped: u64,
+    pub post_subst_time: std::time::Duration,
+    pub post_let_elim_time: std::time::Duration,
+    pub post_nnf_time: std::time::Duration,
+    pub post_insert_pred_time: std::time::Duration,
+    pub post_cnf_time: std::time::Duration,
+    pub post_bool_check_time: std::time::Duration,
+    pub post_clause_assembly_time: std::time::Duration,
+    pub post_instantiation_count: u64,
+}
+
+impl MatchingCumulativeStats {
+    pub fn report(&self, total_matching_time: std::time::Duration) {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        eprintln!("[matching] === cumulative stats across all {} rounds ===", self.rounds);
+        eprintln!("[matching]   total ematching time:         {:>10.3} ms", ms(total_matching_time));
+        eprintln!("[matching]   classic match_term:           {:>10.3} ms  ({} assignments)",
+            ms(self.classic_match_time), self.classic_match_assignments);
+        eprintln!("[matching]   datalog_find_assignments:     {:>10.3} ms",
+            ms(self.datalog_find_assignments_time));
+        eprintln!("[matching]   -- datalog sub-phases --");
+        eprintln!("[matching]     precheck:                   {:>10.3} ms  ({} calls, {} skipped)",
+            ms(self.datalog_phases.precheck_time),
+            self.datalog_phases.precheck_calls,
+            self.datalog_phases.precheck_skipped);
+        eprintln!("[matching]     var_index_build:            {:>10.3} ms  ({} calls)",
+            ms(self.datalog_phases.var_index_time), self.datalog_phases.var_index_calls);
+        eprintln!("[matching]     join_order:                 {:>10.3} ms  ({} calls)",
+            ms(self.datalog_phases.join_order_time), self.datalog_phases.join_order_calls);
+        eprintln!("[matching]     init_binding:               {:>10.3} ms  ({} calls)",
+            ms(self.datalog_phases.init_binding_time), self.datalog_phases.init_binding_calls);
+        eprintln!("[matching]     get_candidates:             {:>10.3} ms  ({} calls)",
+            ms(self.datalog_phases.get_candidates_time), self.datalog_phases.get_candidates_calls);
+        eprintln!("[matching]     try_extend_binding:         {:>10.3} ms  ({} calls)",
+            ms(self.datalog_phases.try_extend_time), self.datalog_phases.try_extend_calls);
+        eprintln!("[matching]     dedup:                      {:>10.3} ms  ({} calls)",
+            ms(self.datalog_phases.dedup_time), self.datalog_phases.dedup_calls);
+        eprintln!("[matching]     extract_assignments:        {:>10.3} ms  ({} calls)",
+            ms(self.datalog_phases.extract_assignments_time),
+            self.datalog_phases.extract_assignments_calls);
+        eprintln!("[matching]     evaluate_multipattern:      {:>10.3} ms  ({} calls) [includes sub-phases]",
+            ms(self.datalog_phases.evaluate_multipattern_time),
+            self.datalog_phases.evaluate_multipattern_calls);
+        eprintln!("[matching]   -- post-match phases ({} instantiations, {} dedup-skipped) --",
+            self.post_instantiation_count, self.post_dedup_skipped);
+        eprintln!("[matching]     dedup_check:                {:>10.3} ms", ms(self.post_dedup_time));
+        eprintln!("[matching]     substitution:               {:>10.3} ms", ms(self.post_subst_time));
+        eprintln!("[matching]     let_elim:                   {:>10.3} ms", ms(self.post_let_elim_time));
+        eprintln!("[matching]     nnf:                        {:>10.3} ms", ms(self.post_nnf_time));
+        eprintln!("[matching]     insert_predecessor:         {:>10.3} ms", ms(self.post_insert_pred_time));
+        eprintln!("[matching]     cnf_tseitin:                {:>10.3} ms", ms(self.post_cnf_time));
+        eprintln!("[matching]     bool_check:                 {:>10.3} ms", ms(self.post_bool_check_time));
+        eprintln!("[matching]     clause_assembly:            {:>10.3} ms", ms(self.post_clause_assembly_time));
+    }
+}
+
 /// The egraph datastructure that keeps track of terms, equalities and parents
 pub struct Egraph {
     pub context: Context,
@@ -443,6 +606,14 @@ pub struct Egraph {
     pub log_matching_time: bool,
     /// accumulated time spent in ematching across all matching rounds
     pub matching_time: std::time::Duration,
+    /// per-phase timings for datalog ematching, printed after each round and
+    /// reset between rounds. Only populated when log_matching_time is set.
+    /// Wrapped in RefCell so hot-path functions can mutate it through an
+    /// immutable `&Egraph` borrow.
+    pub datalog_phase_timers: std::cell::RefCell<DatalogPhaseTimers>,
+    /// Cumulative per-phase totals across all matching rounds, for end-of-solve
+    /// reporting. Only populated when log_matching_time is set.
+    pub matching_cumulative_stats: MatchingCumulativeStats,
     /// all flattened relational atoms from quantifier patterns (only populated when datalog is enabled)
     pub flat_atoms: DeterministicHashSet<FlatAtom>,
     /// for each quantifier (by uid), for each multipattern (disjunctive), the flattened atoms (conjunctive)
@@ -509,6 +680,8 @@ impl Egraph {
             datalog,
             log_matching_time,
             matching_time: std::time::Duration::ZERO,
+            datalog_phase_timers: std::cell::RefCell::new(DatalogPhaseTimers::default()),
+            matching_cumulative_stats: MatchingCumulativeStats::default(),
             flat_atoms: DeterministicHashSet::new(),
             flat_patterns: DeterministicHashMap::new(),
             flat_atom_function_index: DeterministicHashMap::new(),

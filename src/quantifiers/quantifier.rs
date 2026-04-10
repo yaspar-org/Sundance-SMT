@@ -44,8 +44,26 @@ pub fn instantiate_quantifiers(
     debug_println!(26, 0, "Starting a matching round");
 
     let round_t0 = egraph.log_matching_time.then(Instant::now);
+    let log_phases = egraph.log_matching_time;
+
+    // Post-match phase timers: accumulated across all quantifiers this round.
+    let mut post_dedup_time = std::time::Duration::ZERO;
+    let mut post_subst_time = std::time::Duration::ZERO;
+    let mut post_let_elim_time = std::time::Duration::ZERO;
+    let mut post_nnf_time = std::time::Duration::ZERO;
+    let mut post_insert_pred_time = std::time::Duration::ZERO;
+    let mut post_cnf_time = std::time::Duration::ZERO;
+    let mut post_bool_check_time = std::time::Duration::ZERO;
+    let mut post_clause_assembly_time = std::time::Duration::ZERO;
+    let mut post_instantiation_count = 0u64;
+    let mut post_dedup_skipped = 0u64;
+    // Matching time for the classic path, accumulated across per-quantifier
+    // match_term calls. Datalog's time is measured separately via `dfa_elapsed`.
+    let mut classic_match_time = std::time::Duration::ZERO;
+    let mut classic_match_assignments = 0u64;
 
     // If datalog is enabled, pre-compute all assignments via relational matching
+    let dfa_t0 = log_phases.then(Instant::now);
     let datalog_assignments: Option<HashMap<u64, Vec<DeterministicHashMap<String, Term>>>> =
         if egraph.datalog {
             datalogmatch::datalog_check_backtrack(egraph);
@@ -55,6 +73,7 @@ pub fn instantiate_quantifiers(
         } else {
             None
         };
+    let dfa_elapsed = dfa_t0.map(|t| t.elapsed()).unwrap_or_default();
 
     for quantifier in quantifiers {
         debug_println!(
@@ -208,6 +227,7 @@ pub fn instantiate_quantifiers(
                     .unwrap_or_default()
             } else {
                 // Classic path: per-multipattern recursive matching
+                let cm_t0 = log_phases.then(Instant::now);
                 let triggers = &quantifier.triggers;
                 let mut all_assignments = vec![];
                 for multipattern in triggers {
@@ -216,6 +236,10 @@ pub fn instantiate_quantifiers(
                     let mut assignments = DeterministicHashMap::default();
                     let mp_assignments = match_term(&mut assignments, trigger_term_pairs, egraph);
                     all_assignments.extend(mp_assignments);
+                }
+                if let Some(t) = cm_t0 {
+                    classic_match_time += t.elapsed();
+                    classic_match_assignments += all_assignments.len() as u64;
                 }
                 all_assignments
             };
@@ -235,17 +259,15 @@ pub fn instantiate_quantifiers(
             debug_println!(7, 0, "We have the following list of assignments:");
             let mut substitutions = vec![];
             for (subs, activation_depth) in list_assignments.iter() {
-                // todo: maybe need to come up with a more efficient representation than adding in subs
-                // but I don't want to add in the substituted term for two reasons: (1) I want to avoid
-                // calling substitute when I don't need to and (2) if a term contains a quantifier, two
-                // equivalent terms will actually be unequal
-                // maybe I eventually want to do something in the match_term function
-                // we are doing a lot of redundant work. It would be nice to have something
-                // like semi-naive evaluation for datalog
-                if let Some(set) = egraph.added_instantiations.get(&quantifier.id)
-                    && set.contains(subs)
-                {
-                    // println!("Skipping the instantiation {:?} for {}", subs, egraph.get_term(quantifier.id));
+                let dedup_t0 = log_phases.then(Instant::now);
+                let already_seen = egraph
+                    .added_instantiations
+                    .get(&quantifier.id)
+                    .map(|set| set.contains(subs))
+                    .unwrap_or(false);
+                if already_seen {
+                    if let Some(t) = dedup_t0 { post_dedup_time += t.elapsed(); }
+                    post_dedup_skipped += 1;
                     continue;
                 }
                 egraph
@@ -253,6 +275,7 @@ pub fn instantiate_quantifiers(
                     .entry(quantifier.id)
                     .or_default()
                     .insert(subs.clone());
+                if let Some(t) = dedup_t0 { post_dedup_time += t.elapsed(); }
 
                 if is_important(22) {
                     debug_println!(22, 0, "The body is {}", body);
@@ -262,12 +285,14 @@ pub fn instantiate_quantifiers(
                     }
                 }
                 debug_println!(6, 0, "before12");
+                let subst_t0 = log_phases.then(Instant::now);
                 let term = egraph.get_term(body);
                 let substitution = Substitution::new(
                     subs.iter().map(|(s, t)| (s, t.clone())),
                     &mut egraph.context,
                 );
                 let substituted_term = term.subst(&substitution, &mut egraph.context);
+                if let Some(t) = subst_t0 { post_subst_time += t.elapsed(); }
                 substitutions.push((substituted_term, activation_depth, subs));
             }
 
@@ -284,13 +309,7 @@ pub fn instantiate_quantifiers(
             debug_println!(6, 0, "Starting to look at substitutions");
             debug_println!(6, 0, "{}", egraph);
             for (t, &activation_depth, _) in substitutions {
-                // skipping instantiations that have already been added
-                // TODO: need to come up with a more efficient way to do this
-                // TODO: have egraph.added_instantiations as a string right now, really want to go back to u32
-
-                // if this came from a negated existential, we have to negate the term
-
-                // println!("original_t: {}", t);
+                post_instantiation_count += 1;
                 let t = if quantifier.polarity == Polarity::Existential {
                     egraph.context.not(t)
                 } else {
@@ -308,8 +327,9 @@ pub fn instantiate_quantifiers(
 
                 debug_println!(4, 0, "We have the term {} with id {}", t, t.uid());
 
-                // eliminating lets
+                let le_t0 = log_phases.then(Instant::now);
                 let let_elim_term = t.let_elim(&mut egraph.context);
+                if let Some(t) = le_t0 { post_let_elim_time += t.elapsed(); }
 
                 debug_println!(
                     8,
@@ -320,7 +340,9 @@ pub fn instantiate_quantifiers(
                     activation_depth
                 );
 
+                let nnf_t0 = log_phases.then(Instant::now);
                 let nnf_term = let_elim_term.nnf(egraph);
+                if let Some(t) = nnf_t0 { post_nnf_time += t.elapsed(); }
 
                 debug_println!(29, 0, "(assert {})", nnf_term.clone());
                 debug_println!(
@@ -339,15 +361,16 @@ pub fn instantiate_quantifiers(
                     nnf_term.uid()
                 );
 
-                // note we do this after nnf
-                // this might lead to weirdness when you have equality of booleans not being represented in egraph
-                // but it should be fine. This is necessary becasue we need to look up lits
-                // todo: also might be less efficient as well because we are losing structure from original formula in the egraph
+                let ip_t0 = log_phases.then(Instant::now);
                 egraph.insert_predecessor(&nnf_term, None, None, true, None);
+                if let Some(t) = ip_t0 { post_insert_pred_time += t.elapsed(); }
 
+                let cnf_t0 = log_phases.then(Instant::now);
                 let cnf_term = nnf_term.cnf_tseitin(egraph);
+                if let Some(t) = cnf_t0 { post_cnf_time += t.elapsed(); }
                 debug_println!(7, 0, "We have the cnf term {:?}", cnf_term);
 
+                let asm_t0 = log_phases.then(Instant::now);
                 let mut clauses: Vec<_> = cnf_term
                     .clone()
                     .into_iter()
@@ -367,19 +390,16 @@ pub fn instantiate_quantifiers(
                 let mut final_clause = clauses.pop().unwrap();
                 final_clause.push(quantifier_literal);
                 clauses.push(final_clause);
+                if let Some(t) = asm_t0 { post_clause_assembly_time += t.elapsed(); }
 
-                // the bug comes from the additional constraints
-                // basically the additional constraints are valid lits -> converted to valid u64, but may not be in the actual term mapping
-                // it should be added in insert_predecessor which calls get_or_insert which adds into terms_list
+                let bc_t0 = log_phases.then(Instant::now);
                 let additional_constraints = check_for_function_bool(&nnf_term, egraph, true);
+                if let Some(t) = bc_t0 { post_bool_check_time += t.elapsed(); }
                 clauses.extend(additional_constraints);
-
-                // could activate bits here (the level should not be 0)
-                // activate_bits(&t, 0, egraph);
 
                 for clause in clauses {
                     let instantiation = QuantifierInstance::Instantiation { clause };
-                    instantiations.push(instantiation); // TODO: I would prefer to push t.uid() here, but it seems like the uid is not getting adding to the terms list
+                    instantiations.push(instantiation);
                 }
             }
         }
@@ -388,11 +408,53 @@ pub fn instantiate_quantifiers(
     if let Some(t0) = round_t0 {
         let round_elapsed = t0.elapsed();
         egraph.matching_time += round_elapsed;
+        let matcher_time = if egraph.datalog { dfa_elapsed } else { classic_match_time };
+        let post_match = round_elapsed.saturating_sub(matcher_time);
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        let matcher_label = if egraph.datalog { "datalog_find_assignments" } else { "classic match_term" };
         eprintln!(
-            "[matching] round {}: {:.3}ms",
+            "[matching] round {}: {:.3}ms ({}={:.3}ms, post-match={:.3}ms)",
             egraph.matching_round,
-            round_elapsed.as_secs_f64() * 1000.0
+            ms(round_elapsed),
+            matcher_label,
+            ms(matcher_time),
+            ms(post_match),
         );
+        if !egraph.datalog {
+            eprintln!("[matching]   classic match_term produced {} raw assignments",
+                classic_match_assignments);
+        }
+        eprintln!("[matching]   post-match breakdown ({} instantiations, {} dedup-skipped):",
+            post_instantiation_count, post_dedup_skipped);
+        eprintln!("[matching]     dedup_check:        {:>8.3} ms", ms(post_dedup_time));
+        eprintln!("[matching]     substitution:       {:>8.3} ms", ms(post_subst_time));
+        eprintln!("[matching]     let_elim:           {:>8.3} ms", ms(post_let_elim_time));
+        eprintln!("[matching]     nnf:                {:>8.3} ms", ms(post_nnf_time));
+        eprintln!("[matching]     insert_predecessor: {:>8.3} ms", ms(post_insert_pred_time));
+        eprintln!("[matching]     cnf_tseitin:        {:>8.3} ms", ms(post_cnf_time));
+        eprintln!("[matching]     bool_check:         {:>8.3} ms", ms(post_bool_check_time));
+        eprintln!("[matching]     clause_assembly:    {:>8.3} ms", ms(post_clause_assembly_time));
+
+        // Accumulate this round's numbers into the cumulative stats.
+        let cum = &mut egraph.matching_cumulative_stats;
+        cum.rounds += 1;
+        cum.classic_match_time += classic_match_time;
+        cum.classic_match_assignments += classic_match_assignments;
+        cum.datalog_find_assignments_time += dfa_elapsed;
+        cum.post_dedup_time += post_dedup_time;
+        cum.post_dedup_skipped += post_dedup_skipped;
+        cum.post_subst_time += post_subst_time;
+        cum.post_let_elim_time += post_let_elim_time;
+        cum.post_nnf_time += post_nnf_time;
+        cum.post_insert_pred_time += post_insert_pred_time;
+        cum.post_cnf_time += post_cnf_time;
+        cum.post_bool_check_time += post_bool_check_time;
+        cum.post_clause_assembly_time += post_clause_assembly_time;
+        cum.post_instantiation_count += post_instantiation_count;
+        // Snapshot this round's datalog phase timers (they will be reset on the
+        // next datalog_find_assignments call).
+        let phases_snapshot = egraph.datalog_phase_timers.borrow().clone();
+        cum.datalog_phases.accumulate(&phases_snapshot);
     }
 
     instantiations

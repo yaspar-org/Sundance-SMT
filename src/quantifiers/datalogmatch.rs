@@ -224,39 +224,41 @@ fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Option<Vec<usize>>
     if n == 0 {
         return Some(vec![]);
     }
-    let log = false;//egraph.log_matching_time;
 
     // Short-circuit: if any atom's function has zero entries in the egraph,
     // no binding can satisfy the conjunction — return None to signal empty result.
     for (i, atom) in atoms.iter().enumerate() {
         if table_size(egraph, &atom.func) == 0 {
-            if log {
-                eprintln!("[join-order] atom[{}] '{}' has table_size=0, short-circuiting to empty result",
-                    i, atom.func);
-            }
+            debug_println!(27, 0, "[join-order] atom[{}] '{}' has table_size=0, short-circuiting to empty result",
+                i, atom.func);
             return None;
         }
+    }
+
+    // Fast path: single-atom pattern, trivial order.
+    if n == 1 {
+        return Some(vec![0]);
     }
 
     let mut remaining: Vec<usize> = (0..n).collect();
     let mut order = Vec::with_capacity(n);
     let mut bound_vars: HashSet<FlatVar> = HashSet::new();
 
-    if log {
-        eprintln!("[join-order] computing order for {} atoms:", n);
+    if crate::log::is_important(27) {
+        debug_println!(27, 0, "[join-order] computing order for {} atoms:", n);
         for (i, atom) in atoms.iter().enumerate() {
             let size = table_size(egraph, &atom.func);
             let vars: Vec<String> = atom_vars(atom).iter().map(|v| format!("{}", v)).collect();
-            eprintln!("[join-order]   atom[{}]: {} (table_size={}, vars={{{}}})", i, atom, size, vars.join(", "));
+            debug_println!(27, 0, "[join-order]   atom[{}]: {} (table_size={}, vars={{{}}})", i, atom, size, vars.join(", "));
         }
     }
 
     // First atom: pick the smallest table
     remaining.sort_by_key(|&i| table_size(egraph, &atoms[i].func));
-    if log {
-        eprintln!("[join-order] first-atom candidates (sorted by table size):");
+    if crate::log::is_important(27) {
+        debug_println!(27, 0, "[join-order] first-atom candidates (sorted by table size):");
         for &i in &remaining {
-            eprintln!("[join-order]   atom[{}] '{}' table_size={}", i, atoms[i].func, table_size(egraph, &atoms[i].func));
+            debug_println!(27, 0, "[join-order]   atom[{}] '{}' table_size={}", i, atoms[i].func, table_size(egraph, &atoms[i].func));
         }
     }
     let first = remaining.remove(0);
@@ -264,16 +266,16 @@ fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Option<Vec<usize>>
         bound_vars.insert(v.clone());
     }
     order.push(first);
-    if log {
+    if crate::log::is_important(27) {
         let bv: Vec<String> = bound_vars.iter().map(|v| format!("{}", v)).collect();
-        eprintln!("[join-order] >>> chose first: atom[{}] '{}' (table_size={}); bound_vars={{{}}}",
+        debug_println!(27, 0, "[join-order] >>> chose first: atom[{}] '{}' (table_size={}); bound_vars={{{}}}",
             first, atoms[first].func, table_size(egraph, &atoms[first].func), bv.join(", "));
     }
 
     // Greedily pick the next atom that shares the most variables with bound set
     while !remaining.is_empty() {
-        if log {
-            eprintln!("[join-order] step {} candidates:", order.len());
+        if crate::log::is_important(27) {
+            debug_println!(27, 0, "[join-order] step {} candidates:", order.len());
             for &atom_idx in &remaining {
                 let vars = atom_vars(&atoms[atom_idx]);
                 let shared = vars.iter().filter(|v| bound_vars.contains(*v)).count();
@@ -282,7 +284,7 @@ fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Option<Vec<usize>>
                     .filter(|v| bound_vars.contains(*v))
                     .map(|v| format!("{}", v))
                     .collect();
-                eprintln!("[join-order]   atom[{}] '{}': shared={} {{{}}}, table_size={}",
+                debug_println!(27, 0, "[join-order]   atom[{}] '{}': shared={} {{{}}}, table_size={}",
                     atom_idx, atoms[atom_idx].func, shared, shared_vars.join(", "), size);
             }
         }
@@ -302,26 +304,26 @@ fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Option<Vec<usize>>
             .unwrap();
 
         let chosen = remaining.swap_remove(best_pos);
-        let prev_bound = bound_vars.clone();
-        for v in atom_vars(&atoms[chosen]) {
-            bound_vars.insert(v.clone());
-        }
-        if log {
+        if crate::log::is_important(27) {
+            let prev_bound = bound_vars.clone();
             let chosen_vars = atom_vars(&atoms[chosen]);
             let shared = chosen_vars.iter().filter(|v| prev_bound.contains(*v)).count();
             let newly_bound: Vec<String> = chosen_vars.iter()
                 .filter(|v| !prev_bound.contains(*v))
                 .map(|v| format!("{}", v))
                 .collect();
-            eprintln!("[join-order] >>> chose atom[{}] '{}' (shared={}, table_size={}); newly bound: {{{}}}",
+            debug_println!(27, 0, "[join-order] >>> chose atom[{}] '{}' (shared={}, table_size={}); newly bound: {{{}}}",
                 chosen, atoms[chosen].func, shared, table_size(egraph, &atoms[chosen].func), newly_bound.join(", "));
+        }
+        for v in atom_vars(&atoms[chosen]) {
+            bound_vars.insert(v.clone());
         }
         order.push(chosen);
     }
 
-    if log {
+    if crate::log::is_important(27) {
         let order_str: Vec<String> = order.iter().map(|i| format!("{}", i)).collect();
-        eprintln!("[join-order] final order: [{}]", order_str.join(", "));
+        debug_println!(27, 0, "[join-order] final order: [{}]", order_str.join(", "));
     }
 
     Some(order)
@@ -424,13 +426,12 @@ fn get_candidates(
     delta_only: bool,
     egraph: &Egraph,
     var_index: &HashMap<FlatVar, usize>,
-    log: bool,
 ) -> Vec<u64> {
     let mut result: Option<Vec<u64>> = None;
     let matching_round = egraph.matching_round;
     let mut candidates: Vec<u64> = Vec::new();
 
-    // Check argument indices (canonicalize binding values for lookup)
+    // Check argument indices using pre-computed canonical roots
     if let Some(arg_idx) = egraph.function_indices.get(&atom.func) {
         debug_println!(26, 0, "      get_candidates for '{}': found in function_indices, arity={}", atom.func, arg_idx.args.len());
         for (i, var) in atom.args.iter().enumerate() {
@@ -443,9 +444,7 @@ fn get_candidates(
                 } else {
                     arg_idx.args[i].get_all_into(canon, &mut candidates);
                 }
-                if log {
-                    eprintln!("[matching]        arg[{}] {} (var={:?}): canon={} -> {} candidates", i, var, var_index.get(var), canon, candidates.len());
-                }
+                debug_println!(27, 0, "[matching]        arg[{}] {} (var={:?}): canon={} -> {} candidates", i, var, var_index.get(var), canon, candidates.len());
                 debug_println!(
                     26,
                     0,
@@ -475,9 +474,7 @@ fn get_candidates(
             } else {
                 func_out.output.get_all_into(canon, &mut candidates);
             }
-            if log {
-                eprintln!("[matching]        output (var={:?}): canon={} -> {} candidates", &atom.output, canon, candidates.len());
-            }
+            debug_println!(27, 0, "[matching]        output (var={:?}): canon={} -> {} candidates", &atom.output, canon, candidates.len());
             if candidates.is_empty() {
                 return vec![];
             }
@@ -502,9 +499,7 @@ fn get_candidates(
                         candidates.extend(ts.all());
                     }
                 }
-                if log {
-                    eprintln!("[matching]        NO BOUND VARS: full scan {} candidates from {} eclasses", candidates.len(), func_out.output.index.len());
-                }
+                debug_println!(27, 0, "[matching]        NO BOUND VARS: full scan {} candidates from {} eclasses", candidates.len(), func_out.output.index.len());
                 debug_println!(26, 0, "      full scan for '{}': {} candidates (uids={:?}), delta_only={}, index has {} eclasses, matching_round={}", atom.func, candidates.len(), candidates, delta_only, func_out.output.index.len(), matching_round);
                 candidates
             } else {
@@ -568,18 +563,31 @@ fn execute_join(
         let step_t0 = log.then(Instant::now);
         let input_count = bindings.len();
         let mut total_candidates = 0usize;
+        let mut candidates_time = std::time::Duration::ZERO;
+        let mut try_extend_time = std::time::Duration::ZERO;
+        let mut get_candidates_calls = 0u64;
+        let mut try_extend_calls = 0u64;
 
         let mut new_bindings = Vec::new();
         for binding in &bindings {
-            let candidates = get_candidates(atom, binding, use_delta, egraph, var_index, log);
+            let gc_start = log.then(Instant::now);
+            let candidates = get_candidates(atom, binding, use_delta, egraph, var_index);
+            if let Some(t) = gc_start {
+                candidates_time += t.elapsed();
+                get_candidates_calls += 1;
+            }
             debug_println!(27, 0, "We have the following candidates for atom {}", atom);
             total_candidates += candidates.len();
             for fnode_uid in candidates {
                 debug_println!(27, 4, "{}", egraph.get_term(fnode_uid));
                 if let Some(raw_args) = raw_lookup.get(&fnode_uid) {
-                    if let Some(new_binding) =
-                        try_extend_binding(binding, atom, fnode_uid, raw_args, egraph, var_index)
-                    {
+                    let te_start = log.then(Instant::now);
+                    let ext = try_extend_binding(binding, atom, fnode_uid, raw_args, egraph, var_index);
+                    if let Some(t) = te_start {
+                        try_extend_time += t.elapsed();
+                        try_extend_calls += 1;
+                    }
+                    if let Some(new_binding) = ext {
                         new_bindings.push(new_binding);
                     } else {
                         debug_println!(26, 0, "      try_extend_binding FAILED for uid={} ({}) raw_args={:?}", fnode_uid, egraph.get_term(fnode_uid), raw_args);
@@ -596,20 +604,36 @@ fn execute_join(
         // classes produce duplicate bindings that explode across subsequent join
         // steps. We keep one representative per canonical equivalence class,
         // preserving raw uids in the binding so substitution later uses literal
-        // subterms (matching the classic matcher).
-        // Dedup directly on the precomputed roots vector (no `find()` calls).
+        // subterms (matching the classic matcher). Dedup directly on the
+        // precomputed roots vector (no `find()` calls).
+        let dedup_start = log.then(Instant::now);
         let before_dedup = new_bindings.len();
         new_bindings.sort_unstable_by(|a, b| a.roots.cmp(&b.roots));
         new_bindings.dedup_by(|a, b| a.roots == b.roots);
         bindings = new_bindings;
+        let dedup_elapsed = dedup_start.map(|t| t.elapsed()).unwrap_or_default();
 
         if let Some(t0) = step_t0 {
-            eprintln!(
-                "[matching]   step {} atom '{}'{}: {} input, {} cand, {} pre-dedup, {} out, {:.3}ms",
+            let step_elapsed = t0.elapsed();
+            let mut pt = egraph.datalog_phase_timers.borrow_mut();
+            pt.get_candidates_time += candidates_time;
+            pt.get_candidates_calls += get_candidates_calls;
+            pt.try_extend_time += try_extend_time;
+            pt.try_extend_calls += try_extend_calls;
+            pt.dedup_time += dedup_elapsed;
+            pt.dedup_calls += 1;
+            drop(pt);
+            debug_println!(
+                27,
+                0,
+                "[matching]   step {} atom '{}'{}: {} input, {} cand, {} pre-dedup, {} out, {:.3}ms (cand={:.3}ms ext={:.3}ms dedup={:.3}ms)",
                 pos, atom.func,
                 if use_delta { " [delta]" } else { "" },
                 input_count, total_candidates, before_dedup, bindings.len(),
-                t0.elapsed().as_secs_f64() * 1000.0
+                step_elapsed.as_secs_f64() * 1000.0,
+                candidates_time.as_secs_f64() * 1000.0,
+                try_extend_time.as_secs_f64() * 1000.0,
+                dedup_elapsed.as_secs_f64() * 1000.0,
             );
         }
 
@@ -688,9 +712,22 @@ fn evaluate_multipattern(
     }
 
     // Build variable index: maps each FlatVar to a slot number
+    let vi_start = log.then(Instant::now);
     let var_index = build_var_index(atoms);
+    if let Some(t) = vi_start {
+        let mut pt = egraph.datalog_phase_timers.borrow_mut();
+        pt.var_index_time += t.elapsed();
+        pt.var_index_calls += 1;
+    }
 
-    let order = match compute_join_order(atoms, egraph) {
+    let jo_start = log.then(Instant::now);
+    let join_order_result = compute_join_order(atoms, egraph);
+    if let Some(t) = jo_start {
+        let mut pt = egraph.datalog_phase_timers.borrow_mut();
+        pt.join_order_time += t.elapsed();
+        pt.join_order_calls += 1;
+    }
+    let order = match join_order_result {
         Some(o) => o,
         None => {
             // Some atom has zero entries — the join is guaranteed empty.
@@ -725,6 +762,7 @@ fn evaluate_multipattern(
 
     // Initialize binding with ground variables: store the raw uid and its
     // canonical root so subsequent matching steps can use the root directly.
+    let ib_start = log.then(Instant::now);
     let mut initial_binding = Binding::new(num_vars);
     for atom in atoms {
         for var in atom.args.iter().chain(std::iter::once(&atom.output)) {
@@ -732,6 +770,11 @@ fn evaluate_multipattern(
                 initial_binding.set(var_index[var], egraph.find(*uid), *uid);
             }
         }
+    }
+    if let Some(t) = ib_start {
+        let mut pt = egraph.datalog_phase_timers.borrow_mut();
+        pt.init_binding_time += t.elapsed();
+        pt.init_binding_calls += 1;
     }
 
     // Dedup helper: canonical key for a binding
@@ -774,11 +817,11 @@ fn evaluate_multipattern(
         // Full pass: single join with no delta filtering
         debug_println!(26, 0, "  running full pass (no delta filtering)");
         debug_println!(28, 0, "  --- Full pass (all entries, no delta filtering) ---");
-        if log { eprintln!("[matching]  full pass ({} atoms):", atoms.len()); }
+        debug_println!(27, 0, "[matching]  full pass ({} atoms):", atoms.len());
         let pass_t0 = log.then(Instant::now);
         let bindings = execute_join(&order, atoms, None, initial_binding, egraph, &var_index, log);
         if let Some(t0) = pass_t0 {
-            eprintln!("[matching]  full pass done: {} bindings, {:.3}ms", bindings.len(), t0.elapsed().as_secs_f64() * 1000.0);
+            debug_println!(27, 0, "[matching]  full pass done: {} bindings, {:.3}ms", bindings.len(), t0.elapsed().as_secs_f64() * 1000.0);
         }
         debug_println!(26, 0, "    join produced {} raw bindings", bindings.len());
         debug_println!(28, 0, "  Full pass produced {} bindings", bindings.len());
@@ -821,12 +864,12 @@ fn evaluate_multipattern(
             );
             debug_println!(28, 0, "  Pass {}/{}: atom[{}] {} -- delta atom for this pass", pos + 1, order.len(), atom_idx, atoms[atom_idx]);
 
-            if log { eprintln!("[matching]  semi-naive pass {}/{}: delta atom '{}'", pos + 1, order.len(), func); }
+            debug_println!(27, 0, "[matching]  semi-naive pass {}/{}: delta atom '{}'", pos + 1, order.len(), func);
             let pass_t0 = log.then(Instant::now);
             let bindings =
                 execute_join(&order, atoms, Some(pos), initial_binding.clone(), egraph, &var_index, log);
             if let Some(t0) = pass_t0 {
-                eprintln!("[matching]  pass {}/{} done: {} bindings, {:.3}ms", pos + 1, order.len(), bindings.len(), t0.elapsed().as_secs_f64() * 1000.0);
+                debug_println!(27, 0, "[matching]  pass {}/{} done: {} bindings, {:.3}ms", pos + 1, order.len(), bindings.len(), t0.elapsed().as_secs_f64() * 1000.0);
             }
             debug_println!(
                 26,
@@ -855,7 +898,11 @@ pub fn datalog_check_backtrack(_egraph: &mut Egraph) {}
 pub fn datalog_find_assignments(
     egraph: &mut Egraph,
 ) -> Vec<(u64, Vec<DeterministicHashMap<String, Term>>)> {
-    let log =  false; // egraph.log_matching_time;
+    let log = egraph.log_matching_time;
+    if log {
+        egraph.datalog_phase_timers.borrow_mut().reset();
+    }
+
     // Collect per-quantifier info before the immutable borrow
     let quant_info: Vec<(u64, Vec<String>, bool)> = egraph
         .quantifiers
@@ -881,6 +928,7 @@ pub fn datalog_find_assignments(
                 // This avoids `build_var_index`, `compute_join_order`, and binding
                 // allocations for the overwhelming majority of quantifiers in a
                 // typical matching round.
+                let pc_start = log.then(Instant::now);
                 let mut any_zero = false;
                 let mut any_delta = false;
                 for atom in atoms {
@@ -893,7 +941,16 @@ pub fn datalog_find_assignments(
                         any_delta = true;
                     }
                 }
-                if any_zero || (!*needs_full_pass && !any_delta) {
+                let skip = any_zero || (!*needs_full_pass && !any_delta);
+                if let Some(t) = pc_start {
+                    let mut pt = egraph.datalog_phase_timers.borrow_mut();
+                    pt.precheck_time += t.elapsed();
+                    pt.precheck_calls += 1;
+                    if skip {
+                        pt.precheck_skipped += 1;
+                    }
+                }
+                if skip {
                     debug_println!(
                         26,
                         0,
@@ -924,15 +981,21 @@ pub fn datalog_find_assignments(
                 }
                 debug_println!(28, 0, "  Mode: {}", if *needs_full_pass { "FULL PASS (new quantifier)" } else { "SEMI-NAIVE" });
 
-                if log {
-                    eprintln!("[matching] quantifier '{}': {} atoms, mode={}",
+                if crate::log::is_important(27) {
+                    debug_println!(27, 0, "[matching] quantifier '{}': {} atoms, mode={}",
                         egraph.get_term(*qid), atoms.len(),
                         if *needs_full_pass { "full" } else { "semi-naive" });
                     for (i, atom) in atoms.iter().enumerate() {
-                        eprintln!("[matching]   atom[{}]: {} (table_size={})", i, atom, table_size(egraph, &atom.func));
+                        debug_println!(27, 0, "[matching]   atom[{}]: {} (table_size={})", i, atom, table_size(egraph, &atom.func));
                     }
                 }
+                let em_start = log.then(Instant::now);
                 let (bindings, var_index) = evaluate_multipattern(atoms, *needs_full_pass, egraph, log);
+                if let Some(t) = em_start {
+                    let mut pt = egraph.datalog_phase_timers.borrow_mut();
+                    pt.evaluate_multipattern_time += t.elapsed();
+                    pt.evaluate_multipattern_calls += 1;
+                }
 
                 debug_println!(28, 0, "  Result: {} total bindings", bindings.len());
                 // Show final bindings (quantified variables only) at level 28
@@ -953,6 +1016,7 @@ pub fn datalog_find_assignments(
                 }
                 debug_println!(28, 0, "");
 
+                let ex_start = log.then(Instant::now);
                 for binding in bindings {
                     let mut assignment = DeterministicHashMap::new();
                     for (var, &idx) in &var_index {
@@ -966,6 +1030,11 @@ pub fn datalog_find_assignments(
                     if variables.iter().all(|v| assignment.contains_key(v)) {
                         quant_assignments.push(assignment);
                     }
+                }
+                if let Some(t) = ex_start {
+                    let mut pt = egraph.datalog_phase_timers.borrow_mut();
+                    pt.extract_assignments_time += t.elapsed();
+                    pt.extract_assignments_calls += 1;
                 }
             }
 
@@ -988,6 +1057,10 @@ pub fn datalog_find_assignments(
     // Clear needs_full_pass for all quantifiers after the matching round
     for quantifier in &mut egraph.quantifiers {
         quantifier.needs_full_pass = false;
+    }
+
+    if log {
+        egraph.datalog_phase_timers.borrow().report(egraph.matching_round);
     }
 
     results
