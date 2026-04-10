@@ -251,9 +251,9 @@ fn compute_join_order(atoms: &[FlatAtom], egraph: &Egraph) -> Vec<usize> {
 /// Try to extend a binding with a candidate fnode for a given atom.
 /// Returns None if the candidate is inconsistent with the current binding.
 ///
-/// The binding stores **raw** UIDs (actual terms in the egraph). Consistency is
-/// checked using canonical e-classes (via `find()`), but new variables are bound
-/// to the raw UIDs from the entry.
+/// The binding stores **canonical e-class** UIDs. Multiple fnodes sharing the same
+/// canonical argument/output classes produce identical bindings, so the caller can
+/// dedup them to avoid cartesian blowups across join steps.
 fn try_extend_binding(
     binding: &Binding,
     atom: &FlatAtom,
@@ -264,27 +264,27 @@ fn try_extend_binding(
 ) -> Option<Binding> {
     let mut new_binding = binding.clone();
 
-    // Check/bind each argument: compare canonically, bind raw
+    // Check/bind each argument: compare and store canonically
     for (var, &raw_uid) in atom.args.iter().zip(raw_args.iter()) {
         let idx = var_index[var];
         let canon_eclass = egraph.find(raw_uid);
         match new_binding.get(idx) {
-            Some(bound) if egraph.find(bound) == canon_eclass => {} // consistent
-            Some(_) => return None,                                  // conflict
+            Some(bound) if bound == canon_eclass => {} // consistent (already canonical)
+            Some(_) => return None,                     // conflict
             None => {
-                new_binding.set(idx, raw_uid);
+                new_binding.set(idx, canon_eclass);
             }
         }
     }
 
-    // Check/bind output: compare canonically, bind raw
+    // Check/bind output: compare and store canonically
     let out_idx = var_index[&atom.output];
     let canon_output = egraph.find(fnode_uid);
     match new_binding.get(out_idx) {
-        Some(bound) if egraph.find(bound) == canon_output => {} // consistent
-        Some(_) => return None,                                  // conflict
+        Some(bound) if bound == canon_output => {} // consistent (already canonical)
+        Some(_) => return None,                     // conflict
         None => {
-            new_binding.set(out_idx, fnode_uid);
+            new_binding.set(out_idx, canon_output);
         }
     }
 
@@ -337,6 +337,7 @@ fn get_candidates(
     delta_only: bool,
     egraph: &Egraph,
     var_index: &HashMap<FlatVar, usize>,
+    log: bool,
 ) -> Vec<u64> {
     let mut result: Option<Vec<u64>> = None;
     let matching_round = egraph.matching_round;
@@ -355,6 +356,9 @@ fn get_candidates(
                     arg_idx.args[i].get_delta_into(canon, matching_round, &mut candidates);
                 } else {
                     arg_idx.args[i].get_all_into(canon, &mut candidates);
+                }
+                if log {
+                    eprintln!("[matching]        arg[{}] {} (var={:?}): raw={} canon={} -> {} candidates", i, var, var_index.get(var), raw_uid, canon, candidates.len());
                 }
                 debug_println!(
                     26,
@@ -387,6 +391,9 @@ fn get_candidates(
             } else {
                 func_out.output.get_all_into(canon, &mut candidates);
             }
+            if log {
+                eprintln!("[matching]        output (var={:?}): raw={} canon={} -> {} candidates", &atom.output, raw_uid, canon, candidates.len());
+            }
             if candidates.is_empty() {
                 return vec![];
             }
@@ -410,6 +417,9 @@ fn get_candidates(
                     for ts in func_out.output.index.values() {
                         candidates.extend(ts.all());
                     }
+                }
+                if log {
+                    eprintln!("[matching]        NO BOUND VARS: full scan {} candidates from {} eclasses", candidates.len(), func_out.output.index.len());
                 }
                 debug_println!(26, 0, "      full scan for '{}': {} candidates (uids={:?}), delta_only={}, index has {} eclasses, matching_round={}", atom.func, candidates.len(), candidates, delta_only, func_out.output.index.len(), matching_round);
                 candidates
@@ -477,7 +487,7 @@ fn execute_join(
 
         let mut new_bindings = Vec::new();
         for binding in &bindings {
-            let candidates = get_candidates(atom, binding, use_delta, egraph, var_index);
+            let candidates = get_candidates(atom, binding, use_delta, egraph, var_index, log);
             debug_println!(27, 0, "We have the following candidates for atom {}", atom);
             total_candidates += candidates.len();
             for fnode_uid in candidates {
@@ -496,14 +506,21 @@ fn execute_join(
             }
         }
 
+        // Dedup bindings: canonical slot vectors with identical contents represent
+        // the same semantic assignment. Without this, multiple fnodes sharing the
+        // same canonical arg/output classes produce duplicate bindings that explode
+        // across subsequent join steps.
+        let before_dedup = new_bindings.len();
+        new_bindings.sort_unstable_by(|a, b| a.slots.cmp(&b.slots));
+        new_bindings.dedup_by(|a, b| a.slots == b.slots);
         bindings = new_bindings;
 
         if let Some(t0) = step_t0 {
             eprintln!(
-                "[matching]   step {} atom '{}'{}: {} input bindings, {} candidates, {} output bindings, {:.3}ms",
+                "[matching]   step {} atom '{}'{}: {} input, {} cand, {} pre-dedup, {} out, {:.3}ms",
                 pos, atom.func,
                 if use_delta { " [delta]" } else { "" },
-                input_count, total_candidates, bindings.len(),
+                input_count, total_candidates, before_dedup, bindings.len(),
                 t0.elapsed().as_secs_f64() * 1000.0
             );
         }
@@ -611,12 +628,12 @@ fn evaluate_multipattern(
     //     .collect();
     // quant_slots.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Initialize binding with ground variables
+    // Initialize binding with ground variables (store canonically, matching try_extend_binding)
     let mut initial_binding = Binding::new(num_vars);
     for atom in atoms {
         for var in atom.args.iter().chain(std::iter::once(&atom.output)) {
             if let FlatVar::Ground(uid) = var {
-                initial_binding.set(var_index[var], *uid);
+                initial_binding.set(var_index[var], egraph.find(*uid));
             }
         }
     }
