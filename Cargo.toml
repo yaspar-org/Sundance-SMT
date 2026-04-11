@@ -30,6 +30,7 @@ serde_json = "1.0"
 slotmap = "^1.0"
 z3 = { version = "0.19.8", optional = true }
 num = "0.4.3"
+rustc-hash = "2.0"
 
 [dev-dependencies]
 serde_json = "1.0"

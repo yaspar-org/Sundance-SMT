@@ -5,7 +5,9 @@
 
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::egraphs::proofforest::ProofForestEdge;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet, fmt_termlist};
+use crate::utils::{
+    DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, fmt_termlist,
+};
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
     FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Term, TermAllocator,
@@ -1022,29 +1024,35 @@ fn union_predecessors(
         )
     );
 
-    let predecessors_u = egraph.predecessors[u as usize].clone();
-    let predecessors_v = egraph.predecessors[v as usize].clone();
+    // Move u's and v's predecessor maps out of the egraph so we can iterate
+    // without cloning. Both slots are restored before any re-entrant call
+    // (add_predecessor / union_process_assignment) can observe them.
+    let mut predecessors_u = std::mem::take(&mut egraph.predecessors[u as usize]);
+    let predecessors_v = std::mem::take(&mut egraph.predecessors[v as usize]);
 
-    let mut canonical_forms_u: DeterministicHashMap<_, Vec<(Vec<u64>, u64)>> =
-        DeterministicHashMap::default();
+    let mut canonical_forms_u: FastDeterministicHashMap<_, Vec<(Vec<u64>, u64)>> =
+        FastDeterministicHashMap::default();
 
-    // BTreeMap already provides deterministic iteration order
-    for (pred_u_key, predecessor_u) in predecessors_u.iter() {
-        if !egraph.valid_hash(predecessor_u.hash, predecessor_u.level) {
+    // Stale entries are dropped in-place via retain before iterating.
+    predecessors_u.retain(|_, p| {
+        let keep = egraph.valid_hash(p.hash, p.level);
+        if !keep {
             debug_println!(
                 11,
                 2,
                 "CANONICAL_FORMS_U: Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
-                egraph.get_term(predecessor_u.predecessor),
+                egraph.get_term(p.predecessor),
                 egraph.get_term(u),
-                egraph.get_term(predecessor_u.inner_term),
-                predecessor_u.hash,
-                predecessor_u.level,
-                egraph.predecessor_level[predecessor_u.level]
+                egraph.get_term(p.inner_term),
+                p.hash,
+                p.level,
+                egraph.predecessor_level[p.level]
             );
-            egraph.predecessors[u as usize].remove(pred_u_key);
-            continue;
         }
+        keep
+    });
+
+    for (_pred_u_key, predecessor_u) in predecessors_u.iter() {
         debug_println!(
             11,
             2,
@@ -1093,28 +1101,28 @@ fn union_predecessors(
         canonical_forms_u
     );
 
+    // Restore u's slot before calling add_predecessor below, which writes to it.
+    egraph.predecessors[u as usize] = predecessors_u;
+
     // basically the issue was that in `union_predecessors` when you create a `canonical_term_u`,
     // you fix it, but then you compare to a for loop iterating through all terms in v and iteratively
     // computing the canonical_term_v, but this could change as you are iterating through the loop
-    // so we want to precompute the canonical terms of v
-    let predecessor_v_canonical_forms = predecessors_v
-        .iter()
-        .map(|(pred_v_key, predecessor_v)| {
-            (
-                pred_v_key,
-                predecessor_v,
-                egraph.get_canonical_form(predecessor_v.predecessor, level),
-            )
-        })
-        .collect::<Vec<_>>();
+    // so we want to precompute the canonical terms of v.
+    // Owned tuples here so we can restore predecessors_v before union_process_assignment
+    // runs (which can re-enter and read egraph.predecessors[v]).
+    let mut predecessor_v_canonical_forms = Vec::with_capacity(predecessors_v.len());
+    for (pred_v_key, predecessor_v) in predecessors_v.iter() {
+        let canonical_form = egraph.get_canonical_form(predecessor_v.predecessor, level);
+        predecessor_v_canonical_forms.push((*pred_v_key, predecessor_v.clone(), canonical_form));
+    }
 
     // moving predecessors from v to u
-    for (pred_key, pred_val) in predecessors_v.clone() {
+    for (pred_key, pred_val) in predecessors_v.iter() {
         debug_println!(
             11,
             0,
             "We are are adding predecessor {} (of  {}) to {} [level: {}, hash: {}]",
-            egraph.get_term(pred_key),
+            egraph.get_term(*pred_key),
             egraph.get_term(pred_val.inner_term),
             egraph.get_term(u),
             level,
@@ -1123,11 +1131,14 @@ fn union_predecessors(
         let new_pred = Predecessor {
             level,
             hash: egraph.predecessor_hash,
-            predecessor: pred_key,
+            predecessor: *pred_key,
             inner_term: pred_val.inner_term,
         };
-        egraph.add_predecessor(u, pred_key, new_pred);
+        egraph.add_predecessor(u, *pred_key, new_pred);
     }
+
+    // Restore v before the recursive union_process_assignment calls below.
+    egraph.predecessors[v as usize] = predecessors_v;
 
     for (pred_v_key, predecessor_v, canonical_form_v) in predecessor_v_canonical_forms {
         if !egraph.valid_hash(predecessor_v.hash, predecessor_v.level) {
@@ -1149,7 +1160,7 @@ fn union_predecessors(
                 level,
                 egraph.predecessor_hash
             );
-            egraph.predecessors[v as usize].remove(pred_v_key);
+            egraph.predecessors[v as usize].remove(&pred_v_key);
             continue;
         }
         debug_println!(

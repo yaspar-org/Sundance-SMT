@@ -10,7 +10,7 @@ use crate::egraphs::datastructures::{
 };
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
 use sat_interface::Formula;
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
@@ -216,7 +216,7 @@ pub struct Egraph {
     /// keeps track of a stack of "edges" to backtrack on
     pub proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u64, ProofForestEdge)>,
     /// this is a map from terms (u64) -> (term in the same egraph, predecesssor of term in same egraph)
-    pub predecessors: Vec<DeterministicHashMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
+    pub predecessors: Vec<FastDeterministicHashMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
     /// number to keep track of the current hash
     pub predecessor_hash: u64,
     /// mapping from levels -> corresponding hash
@@ -278,7 +278,7 @@ impl Egraph {
             }], // think about whether using a vector or hashmap is better here
             // note: this is an option because if you are a subterm of a quantifier, you are not in the proof forest. TODO: maybe there is a better way to think about this
             proof_forest_backtrack_stack: Vec::new(),
-            predecessors: vec![DeterministicHashMap::new()],
+            predecessors: vec![FastDeterministicHashMap::default()],
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
             assertions: vec![],
@@ -341,8 +341,11 @@ impl Egraph {
     }
 
     pub fn get_term(&self, num: u64) -> Term {
-        debug_println!(6, 0, "here3 with {}", num);
         self.terms_list[num as usize].clone().unwrap()
+    }
+
+    pub fn get_term_reference(&self, num: u64) -> &Term {
+        &self.terms_list[num as usize].unwrap()
     }
 
     pub fn get_term_safe(&self, num: u64) -> TermOption {
@@ -434,7 +437,7 @@ impl Egraph {
                 },
             );
             self.predecessors
-                .resize(self.predecessors.len() * 2, DeterministicHashMap::new());
+                .resize(self.predecessors.len() * 2, FastDeterministicHashMap::default());
         }
 
         // if this has already been inserted, then we don't need to do anything
@@ -605,7 +608,7 @@ impl Egraph {
                 },
             );
             self.predecessors
-                .resize(self.predecessors.len() * 2, DeterministicHashMap::new());
+                .resize(self.predecessors.len() * 2, FastDeterministicHashMap::default());
         }
 
         // if this has already been inserted, then we don't need to do anything

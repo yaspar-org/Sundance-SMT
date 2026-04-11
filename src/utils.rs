@@ -3,13 +3,23 @@
 
 //! A file containting functions that may be useful elswhere
 
-use std::collections::{BTreeMap, BTreeSet};
+use rustc_hash::FxHasher;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::BuildHasherDefault;
 use yaspar_ir::ast::Term;
 
-// For collections that need deterministic iteration, we use BTreeMap/BTreeSet
-// These maintain sorted order naturally, so iteration is always deterministic
+// Sorted-order deterministic map. Iteration order is canonical (sorted by key),
+// so these also implement Hash and can be used as keys in other hash-based
+// containers. Use this when you need canonical equality or sorted iteration.
 pub type DeterministicHashMap<K, V> = BTreeMap<K, V>;
 pub type DeterministicHashSet<T> = BTreeSet<T>;
+
+// Hash-based deterministic map using a fixed-seed FxHash. O(1) average ops
+// and deterministic across runs (unlike std's RandomState), but iteration
+// order depends on insertion sequence and these do not implement Hash.
+// Prefer this on hot paths where sorted iteration is not required.
+pub type FastDeterministicHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
+pub type FastDeterministicHashSet<T> = HashSet<T, BuildHasherDefault<FxHasher>>;
 
 // Takes in a List of terms and returns a String (useful for debugging)
 pub fn fmt_termlist(terms: Vec<Term>) -> String {
