@@ -6,7 +6,8 @@ use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::union;
 use crate::egraphs::datastructures::{
-    Assertion, ConstructorType, DisequalTerm, Polarity::*, Predecessor, Quantifier, TermOption,
+    Assertion, CanonicalOp, ConstructorType, DisequalTerm, Polarity::*, Predecessor, Quantifier,
+    TermOption,
 };
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
@@ -343,6 +344,13 @@ impl Egraph {
     pub fn get_term(&self, num: u64) -> Term {
         debug_println!(6, 0, "here3 with {}", num);
         self.terms_list[num as usize].clone().unwrap()
+    }
+
+    pub fn get_term_ref(&self, num: u64) -> &Term {
+        match &self.terms_list[num as usize] {
+            TermOption::Some(term) | TermOption::Uninitialized(term) => term,
+            TermOption::None => panic!("called `get_term_ref` on a None value"),
+        }
     }
     
 
@@ -1273,7 +1281,7 @@ impl Egraph {
         &mut self,
         term_num: u64,
         _level: usize,
-    ) -> Option<(Vec<u64>, String, Vec<u64>)> {
+    ) -> Option<(Vec<u64>, CanonicalOp, Vec<u64>)> {
         debug_println!(
             5,
             0,
@@ -1282,38 +1290,36 @@ impl Egraph {
             self.get_term(term_num)
         );
         debug_println!(6, 0, "before11");
-        let term = self.get_term(term_num);
-        match term.repr() {
-            App(func, subterms, ..) => {
-                let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
-                let canonical_subterms = subterms_u64
-                    .clone()
-                    .into_iter()
-                    .map(|t| self.find(t))
-                    .collect::<Vec<_>>();
-                Some((subterms_u64, func.to_string(), canonical_subterms))
+
+        // Extract subterm uids and the operation identifier without cloning the Term.
+        // The inner block holds a borrow of self.terms_list via get_term_ref;
+        // it ends before we need &mut self for self.find(...).
+        //
+        // CanonicalOp replaces the old String-based identifier so that HashMap keys
+        // compare/hash as u64 (via hash-consed uids) instead of allocating and
+        // hashing String bytes per call.
+        let (subterms_u64, op) = {
+            let term = self.get_term_ref(term_num);
+            match term.repr() {
+                App(func, subterms, ..) => {
+                    let uids: Vec<u64> = subterms.iter().map(|t| t.uid()).collect();
+                    // Clone the full QualifiedIdentifier so we preserve both
+                    // the symbol AND any sort/index annotations — without them
+                    // polymorphic constructor instances collide in the
+                    // canonical-form HashMap.
+                    (uids, CanonicalOp::App(func.clone()))
+                }
+                Eq(left, right) => (vec![left.uid(), right.uid()], CanonicalOp::Eq),
+                Ite(b, t1, t2) => {
+                    (vec![b.uid(), t1.uid(), t2.uid()], CanonicalOp::Ite)
+                }
+                _ => return None,
             }
-            Eq(left, right) => {
-                let canonical_left = self.find(left.uid());
-                let canonical_right = self.find(right.uid());
-                Some((
-                    vec![left.uid(), right.uid()],
-                    "=".to_string(),
-                    vec![canonical_left, canonical_right],
-                ))
-            }
-            Ite(b, t1, t2) => {
-                let canonical_b = self.find(b.uid());
-                let canonical_left = self.find(t1.uid());
-                let canonical_right = self.find(t2.uid());
-                Some((
-                    vec![b.uid(), t1.uid(), t2.uid()],
-                    "ite".to_string(),
-                    vec![canonical_b, canonical_left, canonical_right],
-                ))
-            }
-            _ => None,
-        }
+        };
+
+        let canonical_subterms: Vec<u64> =
+            subterms_u64.iter().map(|&t| self.find(t)).collect();
+        Some((subterms_u64, op, canonical_subterms))
     }
 
     /// Checks if the hash is still valid at the given level

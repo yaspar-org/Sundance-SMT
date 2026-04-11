@@ -4,7 +4,7 @@
 //! Important datastructures that are used elsewhere
 use std::{cmp::Ordering, fmt};
 
-use yaspar_ir::ast::{Str, Term};
+use yaspar_ir::ast::{QualifiedIdentifier, Str, Term};
 
 /// Keeps track of disequalities used between multiple terms
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,6 +24,21 @@ impl fmt::Display for DisequalTerm {
             self.term, self.level, self.hash, self.original_disequality
         )
     }
+}
+
+/// Identifies the "operator" of a canonical term form for the purposes of
+/// congruence-closure lookup. Replaces a previous `String`-based encoding.
+///
+/// For App terms, carries the full `QualifiedIdentifier` (symbol + indices +
+/// optional sort), which is required to distinguish polymorphic constructor
+/// instances like `(as nil (List Int))` vs `(as nil (List Bool))`. Hashing
+/// and equality are cheap because the inner `Str` and `Sort` types are
+/// hash-consed and hash/compare by uid.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CanonicalOp {
+    App(QualifiedIdentifier),
+    Eq,
+    Ite,
 }
 
 /// Represents a predecessor of a term
