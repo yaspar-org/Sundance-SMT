@@ -1341,71 +1341,57 @@ impl Egraph {
             self.get_term(new_pred_key),
             new_pred
         );
-        // if let Some(original_pred) = self.predecessors[term as usize].get(&new_pred_key) {
-        //     if (!self.valid_hash(original_pred.hash, original_pred.level)
-        //         || new_pred.level <= original_pred.level)
-        //         && self.valid_hash(new_pred.hash, new_pred.level)
-        //     {
-        //          debug_println!(
-        //             11,
-        //             0,
-        //             "For term {}, we are replacing the predecessor {} [level {}, hash {}] with predecessor {} [level {}, hash {}]",
-        //             self.get_term(term),
-        //             self.get_term(original_pred.predecessor),
-        //             original_pred.level,
-        //             original_pred.hash,
-        //             self.get_term(new_pred_key),
-        //             new_pred.level,
-        //             new_pred.hash
-        //         );
-        //         self.predecessors[term as usize].insert(new_pred_key, new_pred);
-        //     }
-        // } else {
-        //      debug_println!(
-        //         11,
-        //         0,
-        //         "For term {}, we are adding the predecessor {} [level {}, hash {}]",
-        //         self.get_term(term),
-        //         self.get_term(new_pred_key),
-        //         new_pred.level,
-        //         new_pred.hash
-        //     );
-        //     self.predecessors[term as usize].insert(new_pred_key, new_pred);
-        // }
-        // debug_println!(20, 0, "We have predecessor list size {}", self.predecessors[term as usize].len());
-        let (new_pred_hash, new_pred_level) = (new_pred.hash, new_pred.level);
-        if let Some(original_pred) = self.predecessors[term as usize].insert(new_pred_key, new_pred)
-        {
-            if !((!self.valid_hash(original_pred.hash, original_pred.level)
-                || new_pred_level <= original_pred.level)
-                && self.valid_hash(new_pred_hash, new_pred_level))
-            {
-                // if the old predecessor was valid, we want to keep it
-                self.predecessors[term as usize].insert(new_pred_key, original_pred);
-            } else {
+
+        // Compute new_pred validity before entering the Entry so we don't
+        // re-borrow self while holding an occupied slot.
+        let new_valid = self.valid_hash(new_pred.hash, new_pred.level);
+        let new_pred_level = new_pred.level;
+        let new_pred_hash = new_pred.hash;
+
+        use std::collections::hash_map::Entry;
+        match self.predecessors[term as usize].entry(new_pred_key) {
+            Entry::Vacant(slot) => {
+                slot.insert(new_pred);
                 debug_println!(
                     11,
                     0,
-                    "For term {}, we are replacing the predecessor {} [level {}, hash {}] with predecessor {} [level {}, hash {}]",
+                    "For term {}, we are adding the predecessor {} [level {}, hash {}]",
                     self.get_term(term),
-                    self.get_term(original_pred.predecessor),
-                    original_pred.level,
-                    original_pred.hash,
                     self.get_term(new_pred_key),
                     new_pred_level,
                     new_pred_hash
                 );
             }
-        } else {
-            debug_println!(
-                11,
-                0,
-                "For term {}, we are adding the predecessor {} [level {}, hash {}]",
-                self.get_term(term),
-                self.get_term(new_pred_key),
-                new_pred_level,
-                new_pred_hash
-            );
+            Entry::Occupied(mut slot) => {
+                // Inline valid_hash for the original so we don't need &self inside
+                // the occupied borrow. Matches valid_hash's body exactly (minus
+                // its debug_println at level 5, which has no functional effect).
+                let original = slot.get();
+                let orig_valid = original.hash >= self.predecessor_level[original.level]
+                    || original.hash == 0
+                    || original.level == 0;
+                let orig_level = original.level;
+                let orig_hash = original.hash;
+                let orig_predecessor = original.predecessor;
+                let should_replace =
+                    (!orig_valid || new_pred_level <= orig_level) && new_valid;
+                if should_replace {
+                    slot.insert(new_pred);
+                    debug_println!(
+                        11,
+                        0,
+                        "For term {}, we are replacing the predecessor {} [level {}, hash {}] with predecessor {} [level {}, hash {}]",
+                        self.get_term(term),
+                        self.get_term(orig_predecessor),
+                        orig_level,
+                        orig_hash,
+                        self.get_term(new_pred_key),
+                        new_pred_level,
+                        new_pred_hash
+                    );
+                }
+                // Keep-old case: zero inserts, no debug output (matches original).
+            }
         }
     }
 
