@@ -341,12 +341,10 @@ impl Egraph {
     }
 
     pub fn get_term(&self, num: u64) -> Term {
+        debug_println!(6, 0, "here3 with {}", num);
         self.terms_list[num as usize].clone().unwrap()
     }
-
-    pub fn get_term_reference(&self, num: u64) -> &Term {
-        &self.terms_list[num as usize].unwrap()
-    }
+    
 
     pub fn get_term_safe(&self, num: u64) -> TermOption {
         if self.terms_list.len() <= num as usize {
