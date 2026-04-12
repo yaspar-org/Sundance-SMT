@@ -41,10 +41,11 @@ pub fn check_integer_constraints_satisfiable_lia(
     // For each var we create in the arithmetic solver, track the literals that were used to justify
     // it. This is used later for translating an "infeasible" outcome into an unsat core.
     let mut slack_to_lits: HashMap<Var, Vec<i32>> = HashMap::new();
+    let mut lca_cache: DeterministicHashMap<u64, Vec<i32>> = DeterministicHashMap::new();
 
     for term_id in egraph.arithmetic_terms.clone() {
         if let ProofForestEdge::Root { .. } = &egraph.proof_forest[term_id as usize] {
-            let (expr, additional_constraints) = extract_linear_expression(term_id, egraph);
+            let (expr, additional_constraints) = extract_linear_expression(term_id, egraph, &mut lca_cache);
             let root_var = *var_map.entry(term_id).or_insert_with(|| {
                 ctx.allocate_var(&format!("!ext_var_{}", term_id), VarType::Int)
             });

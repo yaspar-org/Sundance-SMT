@@ -68,13 +68,14 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
     // also save the roots
     // todo: might be able to move this later
     let mut roots = vec![];
+    let mut lca_cache: DeterministicHashMap<u64, Vec<i32>> = DeterministicHashMap::new();
     for term_id in egraph.arithmetic_terms.clone() {
         // todo: see if I can avoid cloning
         if let ProofForestEdge::Root { .. } = &egraph.proof_forest[term_id as usize] {
             let left_expr = Int::new_const(format!("var_{}", term_id));
 
             roots.push((term_id, left_expr.clone()));
-            let (right, literals) = extract_linear_expression(term_id, egraph);
+            let (right, literals) = extract_linear_expression(term_id, egraph, &mut lca_cache);
 
             // Build the right-hand side expression
             let mut right_expr = Int::from_i64(0);
