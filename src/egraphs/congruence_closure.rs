@@ -38,8 +38,6 @@ pub fn process_assignment(
     debug_println!(24, 1, "Term: {}", term);
     let assertion = find_if_eq_diseq(&term, sign, egraph, level, fixed);
 
-    let mut tracker = ProofTracker::new();
-
     if let Some(t) = egraph.cnf_cache.var_map_reverse.get(&lit) {
         let res = if let Some(r) = reason.clone() {
             r
@@ -231,8 +229,10 @@ pub fn process_assignment(
             );
             debug_println!(10, 0, "{}", egraph);
 
+            debug_println!(26, 0, "[LCA from CC/disequality] {} (id={}) =?= {} (id={})",
+                egraph.get_term(t1), t1, egraph.get_term(t2), t2);
             if let Some(negated_model) =
-                leastcommonancestor(t1, t2, egraph, &mut ProofTracker::new())
+                leastcommonancestor(t1, t2, egraph)
             {
                 let mut model_terms: Vec<i32> = negated_model
                     .into_iter()
@@ -267,8 +267,10 @@ pub fn process_assignment(
                         level,
                         hash
                     );
+                    debug_println!(26, 0, "[LCA from CC/distinct] {} (id={}) =?= {} (id={})",
+                        egraph.get_term(t1), t1, egraph.get_term(t2), t2);
                     if let Some(negated_model) =
-                        leastcommonancestor(t1, t2, egraph, &mut ProofTracker::new())
+                        leastcommonancestor(t1, t2, egraph)
                     {
                         let mut model_terms: Vec<i32> = negated_model
                             .into_iter()
@@ -306,8 +308,11 @@ pub fn process_assignment(
     );
     //  debug_println!(4, 0, "{}", egraph);
     debug_println!(10, 0, "Checking if true = false {}", egraph);
+    debug_println!(26, 0, "[LCA from CC/true=false] {} (id={}) =?= {} (id={})",
+        egraph.get_term(egraph.true_term), egraph.true_term,
+        egraph.get_term(egraph.false_term), egraph.false_term);
     if let Some(negated_model) =
-        leastcommonancestor(egraph.true_term, egraph.false_term, egraph, &mut tracker)
+        leastcommonancestor(egraph.true_term, egraph.false_term, egraph)
     {
         let negated_model_terms: Vec<i32> = negated_model
             .into_iter()
@@ -446,6 +451,10 @@ fn leastcommonancestor_helper(
     tracker: &mut ProofTracker,
     indent: usize,
 ) -> Option<Vec<(u64, u64)>> {
+    if u == v {
+        return Some(vec![]);
+    }
+
     debug_println!(
         20,
         indent,
@@ -598,8 +607,11 @@ pub fn leastcommonancestor(
     u: u64,
     v: u64,
     egraph: &Egraph,
-    tracker: &mut ProofTracker,
 ) -> Option<Vec<(u64, u64)>> {
+    // Fast path: if u and v aren't in the same equivalence class, no proof exists
+    if egraph.find(u) != egraph.find(v) {
+        return None;
+    }
     debug_println!(
         11,
         1,
@@ -607,7 +619,8 @@ pub fn leastcommonancestor(
         egraph.get_term(u),
         egraph.get_term(v)
     );
-    leastcommonancestor_helper(u, v, egraph, tracker, 0)
+    let mut tracker = ProofTracker::new();
+    leastcommonancestor_helper(u, v, egraph, &mut tracker, 0)
 }
 
 pub fn add_parent(
@@ -880,13 +893,13 @@ pub fn union(
             egraph.get_term(disequality.original_disequality.0),
             egraph.get_term(disequality.original_disequality.1)
         );
-        let mut tracker = ProofTracker::new();
-        // tracker.initialize_tracker(egraph.num_vars as u64);
+        debug_println!(26, 0, "[LCA from CC/diseq-check] {} (id={}) =?= {} (id={})",
+            egraph.get_term(disequality.original_disequality.0), disequality.original_disequality.0,
+            egraph.get_term(disequality.original_disequality.1), disequality.original_disequality.1);
         if let Some(negated_model) = leastcommonancestor(
             disequality.original_disequality.0,
             disequality.original_disequality.1,
             egraph,
-            &mut tracker,
         ) {
             let mut model_terms: Vec<i32> = negated_model
                 .into_iter()
