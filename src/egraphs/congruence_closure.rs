@@ -580,6 +580,10 @@ fn leastcommonancestor_helper(
     // need to handle equalities first then congurences
     for pairs in proof_congruences {
         for pair in pairs {
+            // Skip if we've already proven these equal
+            if tracker.find(pair.0) == tracker.find(pair.1) {
+                continue;
+            }
             if let Some(subproof) =
                 leastcommonancestor_helper(pair.0, pair.1, egraph, tracker, indent + 1)
             {

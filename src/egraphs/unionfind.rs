@@ -114,7 +114,7 @@ impl ProofTracker {
         true
     }
 
-    fn find(&mut self, x: u64) -> u64 {
+    pub fn find(&mut self, x: u64) -> u64 {
         debug_println!(
             5,
             0,
