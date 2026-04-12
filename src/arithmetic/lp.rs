@@ -9,7 +9,6 @@ use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::leastcommonancestor;
 use crate::egraphs::egraph::Egraph;
-use crate::egraphs::unionfind::ProofTracker;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use clap::ValueEnum;
 use dashu::Integer;
@@ -146,10 +145,11 @@ pub fn extract_linear_constraints(
 ) -> (Vec<LinearConstraint>, Vec<i32>) {
     let mut constraints = Vec::new();
     let mut arithmetic_literals = vec![];
+    let mut lca_cache: DeterministicHashMap<u64, Vec<i32>> = DeterministicHashMap::new();
 
     for &lit in terms {
         let (term_id, polarity) = egraph.get_u64_from_lit_with_polarity(lit);
-        if let Some(constraint) = extract_constraint_from_term(term_id, polarity, egraph) {
+        if let Some(constraint) = extract_constraint_from_term(term_id, polarity, egraph, &mut lca_cache) {
             debug_println!(21, 4, "We get the constraint {:?}", constraint);
             constraints.push(constraint);
             arithmetic_literals.push(-lit);
@@ -164,6 +164,7 @@ fn extract_constraint_from_term(
     term_id: u64,
     polarity: bool,
     egraph: &mut crate::egraphs::egraph::Egraph,
+    lca_cache: &mut DeterministicHashMap<u64, Vec<i32>>,
 ) -> Option<LinearConstraint> {
     let term = egraph.get_term(term_id);
     debug_println!(
@@ -191,9 +192,9 @@ fn extract_constraint_from_term(
                 return None;
             }
             let (left_expr, additional_constraint_l) =
-                extract_linear_expression(args[0].uid(), egraph);
+                extract_linear_expression(args[0].uid(), egraph, lca_cache);
             let (right_expr, additional_constraint_r) =
-                extract_linear_expression(args[1].uid(), egraph);
+                extract_linear_expression(args[1].uid(), egraph, lca_cache);
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
@@ -249,9 +250,9 @@ fn extract_constraint_from_term(
                 return None;
             }
             let (left_expr, additional_constraint_l) =
-                extract_linear_expression(args[0].uid(), egraph);
+                extract_linear_expression(args[0].uid(), egraph, lca_cache);
             let (right_expr, additional_constraint_r) =
-                extract_linear_expression(args[1].uid(), egraph);
+                extract_linear_expression(args[1].uid(), egraph, lca_cache);
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
@@ -291,8 +292,8 @@ fn extract_constraint_from_term(
                 "[ARITH CHECK] Extracting linear constraint for EQ term {}",
                 term
             );
-            let (left_expr, additional_constraint_l) = extract_linear_expression(a.uid(), egraph);
-            let (right_expr, additional_constraint_r) = extract_linear_expression(b.uid(), egraph);
+            let (left_expr, additional_constraint_l) = extract_linear_expression(a.uid(), egraph, lca_cache);
+            let (right_expr, additional_constraint_r) = extract_linear_expression(b.uid(), egraph, lca_cache);
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
@@ -316,6 +317,7 @@ fn extract_constraint_from_term(
 pub fn extract_linear_expression(
     term_id: u64,
     egraph: &mut crate::egraphs::egraph::Egraph,
+    lca_cache: &mut DeterministicHashMap<u64, Vec<i32>>,
 ) -> (DeterministicHashMap<Coefficient, Integer>, Vec<i32>) {
     debug_println!(
         21,
@@ -348,7 +350,7 @@ pub fn extract_linear_expression(
                     // Addition: sum all arguments
                     for arg_id in args.iter() {
                         let (arg_expr, additional_const) =
-                            extract_linear_expression(arg_id.uid(), egraph);
+                            extract_linear_expression(arg_id.uid(), egraph, lca_cache);
                         additional_constraints.extend(additional_const);
                         for (var, coeff) in arg_expr {
                             if var != Coefficient::Constant {
@@ -363,9 +365,9 @@ pub fn extract_linear_expression(
                     // Multiplication: handle simple cases like c * x or x * c
                     if args.len() == 2 {
                         let (left_expr, additional_const_l) =
-                            extract_linear_expression(args[0].uid(), egraph);
+                            extract_linear_expression(args[0].uid(), egraph, lca_cache);
                         let (right_expr, additional_const_r) =
-                            extract_linear_expression(args[1].uid(), egraph);
+                            extract_linear_expression(args[1].uid(), egraph, lca_cache);
 
                         additional_constraints.extend(additional_const_l);
                         additional_constraints.extend(additional_const_r);
@@ -392,7 +394,7 @@ pub fn extract_linear_expression(
                     if args.len() == 1 {
                         // Unary minus: -expr
                         let (arg_expr, additional_const) =
-                            extract_linear_expression(args[0].uid(), egraph);
+                            extract_linear_expression(args[0].uid(), egraph, lca_cache);
                         additional_constraints.extend(additional_const);
                         for (var, coeff) in arg_expr {
                             expr.insert(var, -coeff);
@@ -400,9 +402,9 @@ pub fn extract_linear_expression(
                     } else if args.len() == 2 {
                         // Binary minus: left - right
                         let (left_expr, additional_const_l) =
-                            extract_linear_expression(args[0].uid(), egraph);
+                            extract_linear_expression(args[0].uid(), egraph, lca_cache);
                         let (right_expr, additional_const_r) =
-                            extract_linear_expression(args[1].uid(), egraph);
+                            extract_linear_expression(args[1].uid(), egraph, lca_cache);
                         additional_constraints.extend(additional_const_l);
                         additional_constraints.extend(additional_const_r);
                         // Add left expression
@@ -419,16 +421,18 @@ pub fn extract_linear_expression(
                 _ => {
                     let root_id = egraph.find(term_id);
 
-                    let mut tracker = ProofTracker::new();
-                    if let Some(negated_model) =
-                        leastcommonancestor(root_id, term_id, egraph, &mut tracker)
-                    {
-                        let model_terms: Vec<i32> = negated_model
-                            .into_iter()
-                            .map(|x| -egraph.make_eq(x.0, x.1))
-                            .collect();
+                    let model_terms = lca_cache.entry(term_id).or_insert_with(|| {
+                        if let Some(negated_model) = leastcommonancestor(root_id, term_id, egraph) {
+                            negated_model
+                                .into_iter()
+                                .map(|x| -egraph.make_eq(x.0, x.1))
+                                .collect()
+                        } else {
+                            vec![]
+                        }
+                    }).clone();
 
-                        // For other operations, we treat as uninterpreted expr
+                    if !model_terms.is_empty() {
                         debug_println!(
                             21,
                             10,
@@ -437,22 +441,26 @@ pub fn extract_linear_expression(
                             term
                         );
                         additional_constraints.extend(model_terms);
-                        expr.insert(Coefficient::Term(root_id), IBig::from(1));
                     }
+                    expr.insert(Coefficient::Term(root_id), IBig::from(1));
                 }
             }
         }
         _ => {
             let root_id = egraph.find(term_id);
-            let mut tracker = ProofTracker::new();
-            if let Some(negated_model) = leastcommonancestor(root_id, term_id, egraph, &mut tracker)
-            {
-                let model_terms: Vec<i32> = negated_model
-                    .into_iter()
-                    .map(|x| -egraph.make_eq(x.0, x.1))
-                    .collect();
 
-                // For other operations, we treat as uninterpreted expr
+            let model_terms = lca_cache.entry(term_id).or_insert_with(|| {
+                if let Some(negated_model) = leastcommonancestor(root_id, term_id, egraph) {
+                    negated_model
+                        .into_iter()
+                        .map(|x| -egraph.make_eq(x.0, x.1))
+                        .collect()
+                } else {
+                    vec![]
+                }
+            }).clone();
+
+            if !model_terms.is_empty() {
                 debug_println!(
                     21,
                     10,
@@ -461,8 +469,8 @@ pub fn extract_linear_expression(
                     term
                 );
                 additional_constraints.extend(model_terms);
-                expr.insert(Coefficient::Term(root_id), IBig::from(1));
             }
+            expr.insert(Coefficient::Term(root_id), IBig::from(1));
         }
     }
 
