@@ -464,8 +464,8 @@ fn leastcommonancestor_helper(
     );
     let mut visited = DeterministicHashSet::default();
 
-    // Follow and record the path from u to its root
-    let mut path_from_u = vec![];
+    // Follow and record the path from u to its root (store node IDs, not cloned edges)
+    let mut path_from_u: Vec<u64> = vec![];
     let mut curr = u;
 
     if indent > 100 {
@@ -473,80 +473,58 @@ fn leastcommonancestor_helper(
         panic!("Should not have this many recusive calls to LCH");
     }
     loop {
-        // debug_println!(16, 0, "curr {}", egraph.get_term(curr));
-        let parent = egraph.proof_forest[curr as usize].clone();
         visited.insert(curr);
-        if let ProofForestEdge::Root {
-            size: _,
-            child: _,
-            disequalities: _,
-            children: _,
-        } = parent
-        {
-            visited.insert(curr);
+        if matches!(egraph.proof_forest[curr as usize], ProofForestEdge::Root { .. }) {
             break;
         }
-        curr = get_parent(&parent);
-        path_from_u.push(parent);
+        path_from_u.push(curr);
+        curr = get_parent(&egraph.proof_forest[curr as usize]);
     }
 
     // Follow path from v until we hit a node visited by u's path
-    let mut path_from_v = vec![];
+    let mut path_from_v: Vec<u64> = vec![];
     curr = v;
-    let mut parent: ProofForestEdge;
     loop {
-        // debug_println!(16, 0, "curr [round 2] {}: {}", egraph.get_term(curr), curr);
-        parent = egraph.proof_forest[curr as usize].clone();
         if visited.contains(&curr) {
             break;
         }
-        if let ProofForestEdge::Root {
-            size: _,
-            child: _,
-            disequalities: _,
-            children: _,
-        } = parent
-        {
-            // if this happens, they are not in the same equivalence class and thus unequal
+        if matches!(egraph.proof_forest[curr as usize], ProofForestEdge::Root { .. }) {
+            // not in the same equivalence class
             return None;
         }
-        curr = get_parent(&parent);
-        path_from_v.push(parent);
+        path_from_v.push(curr);
+        curr = get_parent(&egraph.proof_forest[curr as usize]);
     }
+    // curr is now the LCA node
+    let lca_node = curr;
 
-    let mut proof: Vec<ProofForestEdge> = Vec::new();
-    proof.extend(
-        path_from_u
-            .iter()
-            .take_while(|x| **x != parent)
-            .cloned()
-            .collect::<Vec<ProofForestEdge>>(),
-    );
-    proof.extend(path_from_v);
+    // Build the combined proof path as node IDs:
+    // - from path_from_u, take nodes before the LCA
+    // - then all of path_from_v
+    let proof_nodes: Vec<u64> = path_from_u
+        .iter()
+        .take_while(|&&node| node != lca_node)
+        .copied()
+        .chain(path_from_v.iter().copied())
+        .collect();
 
-    assert!(visited.contains(&curr));
+    assert!(visited.contains(&lca_node));
 
     let mut final_proof = vec![];
-    let mut proof_congruences = vec![];
+    let mut proof_congruences: Vec<Vec<(u64, u64)>> = vec![];
 
-    debug_println!(11, indent + 1, "We get the unprocessed proof {:?}", proof);
-    debug_println!(16, indent + 1, "We have the proof:");
-    // For each pair in the proof path
-    for proof_term in proof {
-        match proof_term {
-            ProofForestEdge::Root {
-                size: _,
-                child: _,
-                disequalities: _,
-                children: _,
-            } => {
+    // Process each edge by borrowing from the proof forest
+    for &node in &proof_nodes {
+        let edge = &egraph.proof_forest[node as usize];
+        match edge {
+            ProofForestEdge::Root { .. } => {
                 eprintln!("ERROR: Root should not be processed");
                 std::process::exit(1);
             }
             ProofForestEdge::Congruence { pairs, .. } => {
                 if is_important(20) {
                     debug_println!(20, indent + 12, "Congruence ");
-                    for (t1, t2) in pairs.clone() {
+                    for &(t1, t2) in pairs {
                         debug_println!(
                             20,
                             indent + 12,
@@ -558,7 +536,7 @@ fn leastcommonancestor_helper(
                         );
                     }
                 }
-                proof_congruences.push(pairs);
+                proof_congruences.push(pairs.clone());
             }
             ProofForestEdge::Equality { term, .. } => {
                 if let Some((t1, t2)) = term {
@@ -567,13 +545,13 @@ fn leastcommonancestor_helper(
                         20,
                         indent + 12,
                         "Equality {} [{}] = {} [{}]",
-                        egraph.get_term(t1),
+                        egraph.get_term(*t1),
                         t1,
-                        egraph.get_term(t2),
+                        egraph.get_term(*t2),
                         t2
                     );
-                    if tracker.union(t1, t2) {
-                        final_proof.push((t1, t2));
+                    if tracker.union(*t1, *t2) {
+                        final_proof.push((*t1, *t2));
                     }
                     debug_println!(
                         11,
