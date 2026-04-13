@@ -14,7 +14,9 @@ use yaspar_ir::ast::{
 };
 
 use crate::debug_println;
-use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
+use crate::egraphs::datastructures::{
+    Assertion, CanonicalOp, ConstructorType::*, DisequalTerm, Predecessor,
+};
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
@@ -1110,10 +1112,15 @@ fn union_predecessors(
     // so we want to precompute the canonical terms of v.
     // Owned tuples here so we can restore predecessors_v before union_process_assignment
     // runs (which can re-enter and read egraph.predecessors[v]).
-    let mut predecessor_v_canonical_forms = Vec::with_capacity(predecessors_v.len());
+    // Precompute canonical forms for v's predecessors. Only store the key
+    // and the canonical form — predecessor data is looked up from the egraph
+    // later (after predecessors_v is restored), avoiding a Predecessor clone
+    // per entry.
+    let mut predecessor_v_canonical_forms: Vec<(u64, Option<(Vec<u64>, CanonicalOp, Vec<u64>)>)> =
+        Vec::with_capacity(predecessors_v.len());
     for (pred_v_key, predecessor_v) in predecessors_v.iter() {
         let canonical_form = egraph.get_canonical_form(predecessor_v.predecessor, level);
-        predecessor_v_canonical_forms.push((*pred_v_key, predecessor_v.clone(), canonical_form));
+        predecessor_v_canonical_forms.push((*pred_v_key, canonical_form));
     }
 
     // moving predecessors from v to u
@@ -1140,7 +1147,12 @@ fn union_predecessors(
     // Restore v before the recursive union_process_assignment calls below.
     egraph.predecessors[v as usize] = predecessors_v;
 
-    for (pred_v_key, predecessor_v, canonical_form_v) in predecessor_v_canonical_forms {
+    for (pred_v_key, canonical_form_v) in predecessor_v_canonical_forms {
+        // Look up the predecessor from the restored v slot instead of cloning earlier.
+        let predecessor_v = match egraph.predecessors[v as usize].get(&pred_v_key) {
+            Some(p) => p.clone(),
+            None => continue, // removed by a prior iteration
+        };
         if !egraph.valid_hash(predecessor_v.hash, predecessor_v.level) {
             debug_println!(
                 11,
