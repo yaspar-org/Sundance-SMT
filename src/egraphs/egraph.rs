@@ -391,12 +391,51 @@ pub struct DatalogPhaseTimers {
     /// get_candidates: index lookups for one atom given a binding.
     pub get_candidates_time: std::time::Duration,
     pub get_candidates_calls: u64,
-    /// try_extend_binding: consistency check and slot update.
-    pub try_extend_time: std::time::Duration,
+    /// intersect_candidates: the sort+merge used to narrow the candidate set.
+    pub intersect_candidates_time: std::time::Duration,
+    pub intersect_candidates_calls: u64,
+    /// try_extend_binding: consistency check and slot update. Call count only;
+    /// wall time is rolled up into candidates_iter_time (per-call Instant::now
+    /// would dominate the actual work cost).
     pub try_extend_calls: u64,
     /// Per-step canonical dedup on the binding set.
     pub dedup_time: std::time::Duration,
     pub dedup_calls: u64,
+    /// raw_lookup access inside execute_join (function_entries.get(func)
+    /// probed once per step). Inner per-candidate probes are count-only (see
+    /// raw_lookup_inner_calls below).
+    pub raw_lookup_time: std::time::Duration,
+    pub raw_lookup_calls: u64,
+    /// Wall time of the entire execute_join function (one call per pass).
+    pub execute_join_time: std::time::Duration,
+    pub execute_join_calls: u64,
+    /// Wall time of a single join step inside execute_join (one call per
+    /// atom position in the join order). Sums to <= execute_join_time.
+    /// The difference `execute_join_time - sum(step_work_time)` is overhead
+    /// outside the per-step loop body (setup, final bindings assignment, etc.).
+    pub step_work_time: std::time::Duration,
+    pub step_work_calls: u64,
+    /// Count of Vec::push into new_bindings. Wall time is rolled up into
+    /// candidates_iter_time.
+    pub new_bindings_push_calls: u64,
+    /// Wall time of the candidates-iteration loop inside a step — wraps the
+    /// per-candidate raw_lookup probe, try_extend_binding call, and Vec push.
+    /// This is the effective "inner loop" time including all per-candidate
+    /// work. Per-candidate sub-phases below are tracked by count only.
+    pub candidates_iter_time: std::time::Duration,
+    pub candidates_iter_calls: u64,
+    /// Wall time of the outer `for binding in &bindings` loop inside a step.
+    /// Wraps get_candidates + candidates_iter across all input bindings.
+    /// The gap between this and step_work_time is the setup cost (outer
+    /// raw_lookup probe, variable initialization, final dedup, debug blocks).
+    pub binding_loop_time: std::time::Duration,
+    pub binding_loop_calls: u64,
+    /// Wall time of the full-pass branch of evaluate_multipattern.
+    pub full_pass_time: std::time::Duration,
+    pub full_pass_calls: u64,
+    /// Wall time of the semi-naive branch of evaluate_multipattern (all passes).
+    pub semi_naive_time: std::time::Duration,
+    pub semi_naive_calls: u64,
     /// Converting the final Binding set into Vec<DeterministicHashMap<String, Term>>.
     pub extract_assignments_time: std::time::Duration,
     pub extract_assignments_calls: u64,
@@ -423,10 +462,26 @@ impl DatalogPhaseTimers {
         self.init_binding_calls += other.init_binding_calls;
         self.get_candidates_time += other.get_candidates_time;
         self.get_candidates_calls += other.get_candidates_calls;
-        self.try_extend_time += other.try_extend_time;
+        self.intersect_candidates_time += other.intersect_candidates_time;
+        self.intersect_candidates_calls += other.intersect_candidates_calls;
         self.try_extend_calls += other.try_extend_calls;
         self.dedup_time += other.dedup_time;
         self.dedup_calls += other.dedup_calls;
+        self.raw_lookup_time += other.raw_lookup_time;
+        self.raw_lookup_calls += other.raw_lookup_calls;
+        self.execute_join_time += other.execute_join_time;
+        self.execute_join_calls += other.execute_join_calls;
+        self.step_work_time += other.step_work_time;
+        self.step_work_calls += other.step_work_calls;
+        self.new_bindings_push_calls += other.new_bindings_push_calls;
+        self.candidates_iter_time += other.candidates_iter_time;
+        self.candidates_iter_calls += other.candidates_iter_calls;
+        self.binding_loop_time += other.binding_loop_time;
+        self.binding_loop_calls += other.binding_loop_calls;
+        self.full_pass_time += other.full_pass_time;
+        self.full_pass_calls += other.full_pass_calls;
+        self.semi_naive_time += other.semi_naive_time;
+        self.semi_naive_calls += other.semi_naive_calls;
         self.extract_assignments_time += other.extract_assignments_time;
         self.extract_assignments_calls += other.extract_assignments_calls;
         self.evaluate_multipattern_time += other.evaluate_multipattern_time;
@@ -434,26 +489,80 @@ impl DatalogPhaseTimers {
     }
 
     pub fn report(&self, round: usize) {
-        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
         eprintln!("[matching] === datalog phase breakdown for round {} ===", round);
-        eprintln!("[matching]   precheck:           {:>8.3} ms  ({:>6} calls, {:>6} skipped)",
-            ms(self.precheck_time), self.precheck_calls, self.precheck_skipped);
-        eprintln!("[matching]   var_index_build:    {:>8.3} ms  ({:>6} calls)",
-            ms(self.var_index_time), self.var_index_calls);
-        eprintln!("[matching]   join_order:         {:>8.3} ms  ({:>6} calls)",
-            ms(self.join_order_time), self.join_order_calls);
-        eprintln!("[matching]   init_binding:       {:>8.3} ms  ({:>6} calls)",
-            ms(self.init_binding_time), self.init_binding_calls);
-        eprintln!("[matching]   get_candidates:     {:>8.3} ms  ({:>6} calls)",
-            ms(self.get_candidates_time), self.get_candidates_calls);
-        eprintln!("[matching]   try_extend_binding: {:>8.3} ms  ({:>6} calls)",
-            ms(self.try_extend_time), self.try_extend_calls);
-        eprintln!("[matching]   dedup:              {:>8.3} ms  ({:>6} calls)",
-            ms(self.dedup_time), self.dedup_calls);
-        eprintln!("[matching]   extract_assignments:{:>8.3} ms  ({:>6} calls)",
-            ms(self.extract_assignments_time), self.extract_assignments_calls);
-        eprintln!("[matching]   evaluate_multipatn: {:>8.3} ms  ({:>6} calls) [includes sub-phases]",
-            ms(self.evaluate_multipattern_time), self.evaluate_multipattern_calls);
+        self.report_tree("[matching] ");
+    }
+
+    /// Print the datalog phase timers as a nested tree. Each child is indented
+    /// beneath its parent so the containment relationship is obvious. The
+    /// `prefix` is prepended to each line so callers can attach tags like
+    /// "[matching] " or "[matching]   " for cumulative reports.
+    ///
+    /// Some sub-phases inside the inner candidate loop are tracked by **count
+    /// only**, with no time. Their wall time is rolled up into the enclosing
+    /// `candidates_iter` measurement so that per-candidate Instant::now()
+    /// calls don't dominate the actual work cost. Those rows display as
+    /// `(N calls, no time tracked)` in the output.
+    pub fn report_tree(&self, prefix: &str) {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        // Each row: (indent, label, Option<time>, calls, Option<extra>)
+        // An absent time means the phase is tracked by count only.
+        // Indent 0 = top level (phases inside evaluate_multipattern called once per quantifier).
+        // Indent 1 = branch (full_pass / semi_naive).
+        // Indent 2 = step-level phases inside execute_join.
+        // Indent 3+ = fine-grained sub-phases inside step-level phases.
+        let rows: Vec<(usize, &str, Option<std::time::Duration>, u64, Option<String>)> = vec![
+            (0, "evaluate_multipattern",   Some(self.evaluate_multipattern_time),   self.evaluate_multipattern_calls, Some("includes all sub-phases below".to_string())),
+            (1, "precheck",                Some(self.precheck_time),                self.precheck_calls, Some(format!("{} skipped", self.precheck_skipped))),
+            (1, "var_index_build",         Some(self.var_index_time),               self.var_index_calls, None),
+            (1, "join_order",              Some(self.join_order_time),              self.join_order_calls, None),
+            (1, "init_binding",            Some(self.init_binding_time),            self.init_binding_calls, None),
+            (1, "full_pass",               Some(self.full_pass_time),               self.full_pass_calls, None),
+            (1, "semi_naive",              Some(self.semi_naive_time),              self.semi_naive_calls, None),
+            (2, "execute_join",            Some(self.execute_join_time),            self.execute_join_calls, Some("wall time of each pass".to_string())),
+            (3, "step_work",               Some(self.step_work_time),               self.step_work_calls, Some("per-step loop body".to_string())),
+            (4, "raw_lookup (outer)",      Some(self.raw_lookup_time),              self.raw_lookup_calls, Some("outer per-step probe; inner probes count-only".to_string())),
+            (4, "binding_loop",            Some(self.binding_loop_time),            self.binding_loop_calls, Some("outer `for binding in &bindings`".to_string())),
+            (5, "get_candidates",          Some(self.get_candidates_time),          self.get_candidates_calls, None),
+            (6, "intersect_candidates",    Some(self.intersect_candidates_time),    self.intersect_candidates_calls, None),
+            (5, "candidates_iter",         Some(self.candidates_iter_time),         self.candidates_iter_calls, Some("inner `for fnode_uid in candidates`".to_string())),
+            (6, "try_extend_binding",      None,                                    self.try_extend_calls,           None),
+            (6, "new_bindings_push",       None,                                    self.new_bindings_push_calls,    None),
+            (4, "dedup",                   Some(self.dedup_time),                   self.dedup_calls, None),
+            (1, "extract_assignments",     Some(self.extract_assignments_time),     self.extract_assignments_calls, None),
+        ];
+        // Determine the widest label (including indent) for alignment.
+        let max_label_width = rows
+            .iter()
+            .map(|(ind, label, _, _, _)| ind * 2 + label.len())
+            .max()
+            .unwrap_or(0);
+        for (indent, label, time_opt, calls, extra) in rows {
+            let indented_label = format!("{:indent$}{}", "", label, indent = indent * 2);
+            let extra_str = match extra {
+                Some(e) => format!("  [{}]", e),
+                None => String::new(),
+            };
+            match time_opt {
+                Some(time) => eprintln!(
+                    "{}{:<width$}  {:>9.3} ms  ({:>7} calls){}",
+                    prefix,
+                    indented_label,
+                    ms(time),
+                    calls,
+                    extra_str,
+                    width = max_label_width,
+                ),
+                None => eprintln!(
+                    "{}{:<width$}       (none)  ({:>7} calls){}",
+                    prefix,
+                    indented_label,
+                    calls,
+                    extra_str,
+                    width = max_label_width,
+                ),
+            }
+        }
     }
 }
 
@@ -490,44 +599,36 @@ impl MatchingCumulativeStats {
     pub fn report(&self, total_matching_time: std::time::Duration) {
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
         eprintln!("[matching] === cumulative stats across all {} rounds ===", self.rounds);
-        eprintln!("[matching]   total ematching time:         {:>10.3} ms", ms(total_matching_time));
-        eprintln!("[matching]   classic match_term:           {:>10.3} ms  ({} assignments)",
+        eprintln!("[matching]   total ematching time:        {:>10.3} ms", ms(total_matching_time));
+        eprintln!("[matching]");
+        eprintln!("[matching]   -- matcher phases --");
+        eprintln!("[matching]   classic match_term:          {:>10.3} ms  ({} assignments)",
             ms(self.classic_match_time), self.classic_match_assignments);
-        eprintln!("[matching]   datalog_find_assignments:     {:>10.3} ms",
+        eprintln!("[matching]   datalog_find_assignments:    {:>10.3} ms",
             ms(self.datalog_find_assignments_time));
-        eprintln!("[matching]   -- datalog sub-phases --");
-        eprintln!("[matching]     precheck:                   {:>10.3} ms  ({} calls, {} skipped)",
-            ms(self.datalog_phases.precheck_time),
-            self.datalog_phases.precheck_calls,
-            self.datalog_phases.precheck_skipped);
-        eprintln!("[matching]     var_index_build:            {:>10.3} ms  ({} calls)",
-            ms(self.datalog_phases.var_index_time), self.datalog_phases.var_index_calls);
-        eprintln!("[matching]     join_order:                 {:>10.3} ms  ({} calls)",
-            ms(self.datalog_phases.join_order_time), self.datalog_phases.join_order_calls);
-        eprintln!("[matching]     init_binding:               {:>10.3} ms  ({} calls)",
-            ms(self.datalog_phases.init_binding_time), self.datalog_phases.init_binding_calls);
-        eprintln!("[matching]     get_candidates:             {:>10.3} ms  ({} calls)",
-            ms(self.datalog_phases.get_candidates_time), self.datalog_phases.get_candidates_calls);
-        eprintln!("[matching]     try_extend_binding:         {:>10.3} ms  ({} calls)",
-            ms(self.datalog_phases.try_extend_time), self.datalog_phases.try_extend_calls);
-        eprintln!("[matching]     dedup:                      {:>10.3} ms  ({} calls)",
-            ms(self.datalog_phases.dedup_time), self.datalog_phases.dedup_calls);
-        eprintln!("[matching]     extract_assignments:        {:>10.3} ms  ({} calls)",
-            ms(self.datalog_phases.extract_assignments_time),
-            self.datalog_phases.extract_assignments_calls);
-        eprintln!("[matching]     evaluate_multipattern:      {:>10.3} ms  ({} calls) [includes sub-phases]",
-            ms(self.datalog_phases.evaluate_multipattern_time),
-            self.datalog_phases.evaluate_multipattern_calls);
+        self.datalog_phases.report_tree("[matching]   ");
+        eprintln!("[matching]");
         eprintln!("[matching]   -- post-match phases ({} instantiations, {} dedup-skipped) --",
             self.post_instantiation_count, self.post_dedup_skipped);
-        eprintln!("[matching]     dedup_check:                {:>10.3} ms", ms(self.post_dedup_time));
-        eprintln!("[matching]     substitution:               {:>10.3} ms", ms(self.post_subst_time));
-        eprintln!("[matching]     let_elim:                   {:>10.3} ms", ms(self.post_let_elim_time));
-        eprintln!("[matching]     nnf:                        {:>10.3} ms", ms(self.post_nnf_time));
-        eprintln!("[matching]     insert_predecessor:         {:>10.3} ms", ms(self.post_insert_pred_time));
-        eprintln!("[matching]     cnf_tseitin:                {:>10.3} ms", ms(self.post_cnf_time));
-        eprintln!("[matching]     bool_check:                 {:>10.3} ms", ms(self.post_bool_check_time));
-        eprintln!("[matching]     clause_assembly:            {:>10.3} ms", ms(self.post_clause_assembly_time));
+        // Align post-match labels the same way as the datalog tree so the
+        // report is visually consistent.
+        let post_rows: Vec<(&str, std::time::Duration)> = vec![
+            ("dedup_check",        self.post_dedup_time),
+            ("substitution",       self.post_subst_time),
+            ("let_elim",           self.post_let_elim_time),
+            ("nnf",                self.post_nnf_time),
+            ("insert_predecessor", self.post_insert_pred_time),
+            ("cnf_tseitin",        self.post_cnf_time),
+            ("bool_check",         self.post_bool_check_time),
+            ("clause_assembly",    self.post_clause_assembly_time),
+        ];
+        let post_width = post_rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+        for (label, t) in post_rows {
+            eprintln!(
+                "[matching]   {:<width$}  {:>10.3} ms",
+                label, ms(t), width = post_width,
+            );
+        }
     }
 }
 

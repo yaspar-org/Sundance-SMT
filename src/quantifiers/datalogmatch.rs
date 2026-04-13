@@ -426,12 +426,16 @@ fn get_candidates(
     delta_only: bool,
     egraph: &Egraph,
     var_index: &HashMap<FlatVar, usize>,
+    log: bool,
 ) -> Vec<u64> {
     let mut result: Option<Vec<u64>> = None;
     let matching_round = egraph.matching_round;
     let mut candidates: Vec<u64> = Vec::new();
+    let mut ic_time = std::time::Duration::ZERO;
+    let mut ic_calls = 0u64;
 
     // Check argument indices using pre-computed canonical roots
+    // todo: dont do function index lookup and pick the specific variables of which you are joining on
     if let Some(arg_idx) = egraph.function_indices.get(&atom.func) {
         debug_println!(26, 0, "      get_candidates for '{}': found in function_indices, arity={}", atom.func, arg_idx.args.len());
         for (i, var) in atom.args.iter().enumerate() {
@@ -456,10 +460,25 @@ fn get_candidates(
                     delta_only
                 );
                 if candidates.is_empty() {
+                    if log {
+                        let mut pt = egraph.datalog_phase_timers.borrow_mut();
+                        pt.intersect_candidates_time += ic_time;
+                        pt.intersect_candidates_calls += ic_calls;
+                    }
                     return vec![];
                 }
+                let ic_start = log.then(Instant::now);
                 intersect_candidates(&mut result, &mut candidates);
+                if let Some(t) = ic_start {
+                    ic_time += t.elapsed();
+                    ic_calls += 1;
+                }
                 if result.as_ref().unwrap().is_empty() {
+                    if log {
+                        let mut pt = egraph.datalog_phase_timers.borrow_mut();
+                        pt.intersect_candidates_time += ic_time;
+                        pt.intersect_candidates_calls += ic_calls;
+                    }
                     return vec![];
                 }
             }
@@ -476,10 +495,26 @@ fn get_candidates(
             }
             debug_println!(27, 0, "[matching]        output (var={:?}): canon={} -> {} candidates", &atom.output, canon, candidates.len());
             if candidates.is_empty() {
+                if log {
+                    let mut pt = egraph.datalog_phase_timers.borrow_mut();
+                    pt.intersect_candidates_time += ic_time;
+                    pt.intersect_candidates_calls += ic_calls;
+                }
                 return vec![];
             }
+            let ic_start = log.then(Instant::now);
             intersect_candidates(&mut result, &mut candidates);
+            if let Some(t) = ic_start {
+                ic_time += t.elapsed();
+                ic_calls += 1;
+            }
         }
+    }
+
+    if log {
+        let mut pt = egraph.datalog_phase_timers.borrow_mut();
+        pt.intersect_candidates_time += ic_time;
+        pt.intersect_candidates_calls += ic_calls;
     }
 
     match result {
@@ -537,12 +572,18 @@ fn execute_join(
     //     lookups
     // };
 
+    let ej_start = log.then(Instant::now);
     let mut bindings = vec![initial_binding];
 
     for (pos, &atom_idx) in order.iter().enumerate() {
+        // Wrap the whole iteration body with a step_work timer so we can
+        // compare execute_join_time against sum(step_work). The gap between
+        // the two is purely loop-iteration overhead and RefCell commit cost.
+        let step_body_start = log.then(Instant::now);
         let atom = &atoms[atom_idx];
         let use_delta = delta_position == Some(pos);
 
+        let rl_outer_start = log.then(Instant::now);
         let raw_lookup = match egraph.function_entries.get(atom.func.as_str()) {
             Some(l) => {
                 // debug_println!(26, 0, "    raw_lookup for '{}': {} entries, keys={:?}", atom.func, l.len(), l.keys().collect::<Vec<_>>());
@@ -556,39 +597,66 @@ fn execute_join(
                     atom.func,
                     atom
                 );
+                if let Some(t) = rl_outer_start {
+                    let mut pt = egraph.datalog_phase_timers.borrow_mut();
+                    pt.raw_lookup_time += t.elapsed();
+                    pt.raw_lookup_calls += 1;
+                }
+                if let Some(t) = ej_start {
+                    let mut pt = egraph.datalog_phase_timers.borrow_mut();
+                    pt.execute_join_time += t.elapsed();
+                    pt.execute_join_calls += 1;
+                }
                 return vec![];
             }, // Function not in egraph
         };
+        let outer_rl_elapsed = rl_outer_start.map(|t| t.elapsed()).unwrap_or_default();
 
-        let step_t0 = log.then(Instant::now);
-        let input_count = bindings.len();
-        let mut total_candidates = 0usize;
+        let _input_count = bindings.len();
+        let mut _total_candidates = 0usize;
         let mut candidates_time = std::time::Duration::ZERO;
-        let mut try_extend_time = std::time::Duration::ZERO;
+        let mut raw_lookup_inner_calls = 0u64;
         let mut get_candidates_calls = 0u64;
         let mut try_extend_calls = 0u64;
+        let mut new_bindings_push_calls = 0u64;
+        let mut candidates_iter_time = std::time::Duration::ZERO;
+        let mut candidates_iter_calls = 0u64;
 
+        let bl_start = log.then(Instant::now);
         let mut new_bindings = Vec::new();
         for binding in &bindings {
             let gc_start = log.then(Instant::now);
-            let candidates = get_candidates(atom, binding, use_delta, egraph, var_index);
+            let candidates = get_candidates(atom, binding, use_delta, egraph, var_index, log);
             if let Some(t) = gc_start {
                 candidates_time += t.elapsed();
                 get_candidates_calls += 1;
             }
             debug_println!(27, 0, "We have the following candidates for atom {}", atom);
-            total_candidates += candidates.len();
+            _total_candidates += candidates.len();
+            // Time the candidates-iteration loop as a whole: it wraps the
+            // per-candidate raw_lookup probe, try_extend_binding call, and Vec
+            // push. We intentionally avoid per-candidate Instant::now() calls
+            // here because the timer overhead would dominate the actual work
+            // (each candidate does a few dozen nanoseconds of real work;
+            // Instant::now pairs cost 100-500 ns on macOS). Counts are still
+            // tracked so we can see throughput.
+            let iter_start = log.then(Instant::now);
             for fnode_uid in candidates {
                 debug_println!(27, 4, "{}", egraph.get_term(fnode_uid));
-                if let Some(raw_args) = raw_lookup.get(&fnode_uid) {
-                    let te_start = log.then(Instant::now);
+                let raw_args_opt = raw_lookup.get(&fnode_uid);
+                if log {
+                    raw_lookup_inner_calls += 1;
+                }
+                if let Some(raw_args) = raw_args_opt {
                     let ext = try_extend_binding(binding, atom, fnode_uid, raw_args, egraph, var_index);
-                    if let Some(t) = te_start {
-                        try_extend_time += t.elapsed();
+                    if log {
                         try_extend_calls += 1;
                     }
                     if let Some(new_binding) = ext {
                         new_bindings.push(new_binding);
+                        if log {
+                            new_bindings_push_calls += 1;
+                        }
                     } else {
                         debug_println!(26, 0, "      try_extend_binding FAILED for uid={} ({}) raw_args={:?}", fnode_uid, egraph.get_term(fnode_uid), raw_args);
                     }
@@ -596,7 +664,12 @@ fn execute_join(
                     debug_println!(26, 0, "      uid={} NOT in raw_lookup for '{}'", fnode_uid, atom.func);
                 }
             }
+            if let Some(t) = iter_start {
+                candidates_iter_time += t.elapsed();
+                candidates_iter_calls += 1;
+            }
         }
+        let binding_loop_elapsed = bl_start.map(|t| t.elapsed()).unwrap_or_default();
 
         // Dedup bindings on canonical key: bindings that differ only in which raw
         // representative they picked for each e-class are semantically the same
@@ -607,34 +680,31 @@ fn execute_join(
         // subterms (matching the classic matcher). Dedup directly on the
         // precomputed roots vector (no `find()` calls).
         let dedup_start = log.then(Instant::now);
-        let before_dedup = new_bindings.len();
+        let _before_dedup = new_bindings.len();
         new_bindings.sort_unstable_by(|a, b| a.roots.cmp(&b.roots));
         new_bindings.dedup_by(|a, b| a.roots == b.roots);
         bindings = new_bindings;
         let dedup_elapsed = dedup_start.map(|t| t.elapsed()).unwrap_or_default();
 
-        if let Some(t0) = step_t0 {
-            let step_elapsed = t0.elapsed();
+        if log {
             let mut pt = egraph.datalog_phase_timers.borrow_mut();
+            pt.binding_loop_time += binding_loop_elapsed;
+            pt.binding_loop_calls += 1;
             pt.get_candidates_time += candidates_time;
             pt.get_candidates_calls += get_candidates_calls;
-            pt.try_extend_time += try_extend_time;
+            pt.candidates_iter_time += candidates_iter_time;
+            pt.candidates_iter_calls += candidates_iter_calls;
+            // Per-candidate sub-phases inside the iteration loop are tracked
+            // by count only. Their wall time is captured in aggregate by
+            // candidates_iter_time (no per-call Instant::now() to avoid the
+            // observation overhead dominating real work).
             pt.try_extend_calls += try_extend_calls;
+            pt.new_bindings_push_calls += new_bindings_push_calls;
             pt.dedup_time += dedup_elapsed;
             pt.dedup_calls += 1;
+            pt.raw_lookup_time += outer_rl_elapsed;
+            pt.raw_lookup_calls += 1 + raw_lookup_inner_calls;
             drop(pt);
-            debug_println!(
-                27,
-                0,
-                "[matching]   step {} atom '{}'{}: {} input, {} cand, {} pre-dedup, {} out, {:.3}ms (cand={:.3}ms ext={:.3}ms dedup={:.3}ms)",
-                pos, atom.func,
-                if use_delta { " [delta]" } else { "" },
-                input_count, total_candidates, before_dedup, bindings.len(),
-                step_elapsed.as_secs_f64() * 1000.0,
-                candidates_time.as_secs_f64() * 1000.0,
-                try_extend_time.as_secs_f64() * 1000.0,
-                dedup_elapsed.as_secs_f64() * 1000.0,
-            );
         }
 
         // Level 28: show binding set after this join step
@@ -655,9 +725,24 @@ fn execute_join(
             }
         }
 
+        // Commit step_work time — wraps everything from the start of the
+        // iteration body (incl. outer raw_lookup, the inner step work, dedup,
+        // and the RefCell commit above) so the gap between execute_join_time
+        // and step_work_time is purely the `for` loop iteration overhead.
+        if let Some(t) = step_body_start {
+            egraph.datalog_phase_timers.borrow_mut().step_work_time += t.elapsed();
+            egraph.datalog_phase_timers.borrow_mut().step_work_calls += 1;
+        }
+
         if bindings.is_empty() {
             break;
         }
+    }
+
+    if let Some(t) = ej_start {
+        let mut pt = egraph.datalog_phase_timers.borrow_mut();
+        pt.execute_join_time += t.elapsed();
+        pt.execute_join_calls += 1;
     }
 
     bindings
@@ -818,6 +903,7 @@ fn evaluate_multipattern(
         debug_println!(26, 0, "  running full pass (no delta filtering)");
         debug_println!(28, 0, "  --- Full pass (all entries, no delta filtering) ---");
         debug_println!(27, 0, "[matching]  full pass ({} atoms):", atoms.len());
+        let fp_start = log.then(Instant::now);
         let pass_t0 = log.then(Instant::now);
         let bindings = execute_join(&order, atoms, None, initial_binding, egraph, &var_index, log);
         if let Some(t0) = pass_t0 {
@@ -826,7 +912,13 @@ fn evaluate_multipattern(
         debug_println!(26, 0, "    join produced {} raw bindings", bindings.len());
         debug_println!(28, 0, "  Full pass produced {} bindings", bindings.len());
         add_bindings(bindings, &mut all_bindings);
+        if let Some(t) = fp_start {
+            let mut pt = egraph.datalog_phase_timers.borrow_mut();
+            pt.full_pass_time += t.elapsed();
+            pt.full_pass_calls += 1;
+        }
     } else {
+        let sn_start = log.then(Instant::now);
         // Semi-naive: check if any atom has delta entries
         let any_has_delta = order
             .iter()
@@ -834,6 +926,11 @@ fn evaluate_multipattern(
 
         if !any_has_delta {
             debug_println!(26, 0, "  no delta entries for any atom, skipping");
+            if let Some(t) = sn_start {
+                let mut pt = egraph.datalog_phase_timers.borrow_mut();
+                pt.semi_naive_time += t.elapsed();
+                pt.semi_naive_calls += 1;
+            }
             return (vec![], var_index);
         }
 
@@ -880,6 +977,11 @@ fn evaluate_multipattern(
             );
             debug_println!(28, 0, "    -> pass produced {} bindings", bindings.len());
             add_bindings(bindings, &mut all_bindings);
+        }
+        if let Some(t) = sn_start {
+            let mut pt = egraph.datalog_phase_timers.borrow_mut();
+            pt.semi_naive_time += t.elapsed();
+            pt.semi_naive_calls += 1;
         }
     }
 
