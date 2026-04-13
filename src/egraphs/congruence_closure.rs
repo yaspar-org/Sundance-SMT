@@ -1113,11 +1113,18 @@ fn union_predecessors(
     //
     // Precompute: store (key, predecessor_id, canonical_form) per entry.
     // No Predecessor clone — just the scalar `predecessor` field needed downstream.
-    let mut predecessor_v_canonical_forms: Vec<(u64, u64, Option<(Vec<u64>, CanonicalOp, Vec<u64>)>)> =
-        Vec::with_capacity(predecessors_v.len());
+    let mut predecessor_v_canonical_forms: Vec<(
+        u64,
+        u64,
+        Option<(Vec<u64>, CanonicalOp, Vec<u64>)>,
+    )> = Vec::with_capacity(predecessors_v.len());
     for (pred_v_key, predecessor_v) in predecessors_v.iter() {
         let canonical_form = egraph.get_canonical_form(predecessor_v.predecessor, level);
-        predecessor_v_canonical_forms.push((*pred_v_key, predecessor_v.predecessor, canonical_form));
+        predecessor_v_canonical_forms.push((
+            *pred_v_key,
+            predecessor_v.predecessor,
+            canonical_form,
+        ));
     }
 
     // moving predecessors from v to u
