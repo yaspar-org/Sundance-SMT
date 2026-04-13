@@ -14,7 +14,9 @@ use yaspar_ir::ast::{
 };
 
 use crate::debug_println;
-use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
+use crate::egraphs::datastructures::{
+    Assertion, CanonicalOp, ConstructorType::*, DisequalTerm, Predecessor,
+};
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
@@ -1108,6 +1110,16 @@ fn union_predecessors(
     // you fix it, but then you compare to a for loop iterating through all terms in v and iteratively
     // computing the canonical_term_v, but this could change as you are iterating through the loop
     // so we want to precompute the canonical terms of v.
+    //
+    // Precompute: store (key, predecessor_id, canonical_form) per entry.
+    // No Predecessor clone — just the scalar `predecessor` field needed downstream.
+    let mut predecessor_v_canonical_forms: Vec<(u64, u64, Option<(Vec<u64>, CanonicalOp, Vec<u64>)>)> =
+        Vec::with_capacity(predecessors_v.len());
+    for (pred_v_key, predecessor_v) in predecessors_v.iter() {
+        let canonical_form = egraph.get_canonical_form(predecessor_v.predecessor, level);
+        predecessor_v_canonical_forms.push((*pred_v_key, predecessor_v.predecessor, canonical_form));
+    }
+
     // moving predecessors from v to u
     for (pred_key, pred_val) in predecessors_v.iter() {
         debug_println!(
@@ -1133,16 +1145,12 @@ fn union_predecessors(
     // re-enter and read/write egraph.predecessors[v].
     egraph.predecessors[v as usize] = predecessors_v;
 
-    // Collect just the keys (Vec<u64>) so we can iterate without holding a
-    // borrow on egraph. Predecessor data and canonical forms are looked up
-    // inline — get_canonical_form is &self so no precomputation needed.
-    let predecessor_v_keys: Vec<u64> = egraph.predecessors[v as usize].keys().copied().collect();
-
-    for pred_v_key in predecessor_v_keys {
-        // Extract only the scalar fields we need — no Predecessor clone.
-        let (pred_hash, pred_level, pred_predecessor, pred_inner_term) =
+    for (pred_v_key, pred_predecessor, canonical_form_v) in predecessor_v_canonical_forms {
+        // Look up the predecessor's validity from the restored v slot.
+        // Extract only scalar fields — no Predecessor clone.
+        let (pred_hash, pred_level, pred_inner_term) =
             match egraph.predecessors[v as usize].get(&pred_v_key) {
-                Some(p) => (p.hash, p.level, p.predecessor, p.inner_term),
+                Some(p) => (p.hash, p.level, p.inner_term),
                 None => continue, // removed by a prior iteration
             };
         if !egraph.valid_hash(pred_hash, pred_level) {
@@ -1173,10 +1181,6 @@ fn union_predecessors(
             "L. We are in union_predecessors trying to get term for {}",
             egraph.get_term(pred_predecessor)
         );
-
-        // Compute canonical form inline — no precomputation needed since
-        // get_canonical_form is &self.
-        let canonical_form_v = egraph.get_canonical_form(pred_predecessor, level);
 
         if let Some((original_subterms, func, roots)) = canonical_form_v {
             let canonical_form = (func, roots);
