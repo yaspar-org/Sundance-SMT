@@ -352,7 +352,6 @@ impl Egraph {
             TermOption::None => panic!("called `get_term_ref` on a None value"),
         }
     }
-    
 
     pub fn get_term_safe(&self, num: u64) -> TermOption {
         if self.terms_list.len() <= num as usize {
@@ -442,8 +441,10 @@ impl Egraph {
                     children: DeterministicHashSet::new(),
                 },
             );
-            self.predecessors
-                .resize(self.predecessors.len() * 2, FastDeterministicHashMap::default());
+            self.predecessors.resize(
+                self.predecessors.len() * 2,
+                FastDeterministicHashMap::default(),
+            );
         }
 
         // if this has already been inserted, then we don't need to do anything
@@ -613,8 +614,10 @@ impl Egraph {
                     children: DeterministicHashSet::new(),
                 },
             );
-            self.predecessors
-                .resize(self.predecessors.len() * 2, FastDeterministicHashMap::default());
+            self.predecessors.resize(
+                self.predecessors.len() * 2,
+                FastDeterministicHashMap::default(),
+            );
         }
 
         // if this has already been inserted, then we don't need to do anything
@@ -1310,15 +1313,12 @@ impl Egraph {
                     (uids, CanonicalOp::App(func.clone()))
                 }
                 Eq(left, right) => (vec![left.uid(), right.uid()], CanonicalOp::Eq),
-                Ite(b, t1, t2) => {
-                    (vec![b.uid(), t1.uid(), t2.uid()], CanonicalOp::Ite)
-                }
+                Ite(b, t1, t2) => (vec![b.uid(), t1.uid(), t2.uid()], CanonicalOp::Ite),
                 _ => return None,
             }
         };
 
-        let canonical_subterms: Vec<u64> =
-            subterms_u64.iter().map(|&t| self.find(t)).collect();
+        let canonical_subterms: Vec<u64> = subterms_u64.iter().map(|&t| self.find(t)).collect();
         Some((subterms_u64, op, canonical_subterms))
     }
 
@@ -1379,8 +1379,7 @@ impl Egraph {
                 let orig_level = original.level;
                 let orig_hash = original.hash;
                 let orig_predecessor = original.predecessor;
-                let should_replace =
-                    (!orig_valid || new_pred_level <= orig_level) && new_valid;
+                let should_replace = (!orig_valid || new_pred_level <= orig_level) && new_valid;
                 if should_replace {
                     slot.insert(new_pred);
                     debug_println!(
