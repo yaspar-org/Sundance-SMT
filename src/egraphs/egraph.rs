@@ -1281,7 +1281,7 @@ impl Egraph {
     /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  
     /// TODO: I don't support canonical forms for non-app, non-eq terms, non-ite terms, but will have to do that eventually
     pub fn get_canonical_form(
-        &mut self,
+        &self,
         term_num: u64,
         _level: usize,
     ) -> Option<(Vec<u64>, CanonicalOp, Vec<u64>)> {
@@ -1290,7 +1290,7 @@ impl Egraph {
             0,
             "We are in get_canonical_form with term_num {} and term {}",
             term_num,
-            self.get_term(term_num)
+            self.get_term_ref(term_num)
         );
         debug_println!(6, 0, "before11");
 

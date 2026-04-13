@@ -14,9 +14,7 @@ use yaspar_ir::ast::{
 };
 
 use crate::debug_println;
-use crate::egraphs::datastructures::{
-    Assertion, CanonicalOp, ConstructorType::*, DisequalTerm, Predecessor,
-};
+use crate::egraphs::datastructures::{Assertion, ConstructorType::*, DisequalTerm, Predecessor};
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
@@ -1110,19 +1108,6 @@ fn union_predecessors(
     // you fix it, but then you compare to a for loop iterating through all terms in v and iteratively
     // computing the canonical_term_v, but this could change as you are iterating through the loop
     // so we want to precompute the canonical terms of v.
-    // Owned tuples here so we can restore predecessors_v before union_process_assignment
-    // runs (which can re-enter and read egraph.predecessors[v]).
-    // Precompute canonical forms for v's predecessors. Only store the key
-    // and the canonical form — predecessor data is looked up from the egraph
-    // later (after predecessors_v is restored), avoiding a Predecessor clone
-    // per entry.
-    let mut predecessor_v_canonical_forms: Vec<(u64, Option<(Vec<u64>, CanonicalOp, Vec<u64>)>)> =
-        Vec::with_capacity(predecessors_v.len());
-    for (pred_v_key, predecessor_v) in predecessors_v.iter() {
-        let canonical_form = egraph.get_canonical_form(predecessor_v.predecessor, level);
-        predecessor_v_canonical_forms.push((*pred_v_key, canonical_form));
-    }
-
     // moving predecessors from v to u
     for (pred_key, pred_val) in predecessors_v.iter() {
         debug_println!(
@@ -1144,26 +1129,33 @@ fn union_predecessors(
         egraph.add_predecessor(u, *pred_key, new_pred);
     }
 
-    // Restore v before the recursive union_process_assignment calls below.
+    // Restore v before the consuming loop — union_process_assignment can
+    // re-enter and read/write egraph.predecessors[v].
     egraph.predecessors[v as usize] = predecessors_v;
 
-    for (pred_v_key, canonical_form_v) in predecessor_v_canonical_forms {
-        // Look up the predecessor from the restored v slot instead of cloning earlier.
-        let predecessor_v = match egraph.predecessors[v as usize].get(&pred_v_key) {
-            Some(p) => p.clone(),
-            None => continue, // removed by a prior iteration
-        };
-        if !egraph.valid_hash(predecessor_v.hash, predecessor_v.level) {
+    // Collect just the keys (Vec<u64>) so we can iterate without holding a
+    // borrow on egraph. Predecessor data and canonical forms are looked up
+    // inline — get_canonical_form is &self so no precomputation needed.
+    let predecessor_v_keys: Vec<u64> = egraph.predecessors[v as usize].keys().copied().collect();
+
+    for pred_v_key in predecessor_v_keys {
+        // Extract only the scalar fields we need — no Predecessor clone.
+        let (pred_hash, pred_level, pred_predecessor, pred_inner_term) =
+            match egraph.predecessors[v as usize].get(&pred_v_key) {
+                Some(p) => (p.hash, p.level, p.predecessor, p.inner_term),
+                None => continue, // removed by a prior iteration
+            };
+        if !egraph.valid_hash(pred_hash, pred_level) {
             debug_println!(
                 11,
                 5,
                 "Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
-                egraph.get_term(predecessor_v.predecessor),
+                egraph.get_term(pred_predecessor),
                 egraph.get_term(v),
-                egraph.get_term(predecessor_v.inner_term),
-                predecessor_v.hash,
-                predecessor_v.level,
-                egraph.predecessor_level[predecessor_v.level]
+                egraph.get_term(pred_inner_term),
+                pred_hash,
+                pred_level,
+                egraph.predecessor_level[pred_level]
             );
             debug_println!(
                 11,
@@ -1179,23 +1171,12 @@ fn union_predecessors(
             11,
             3,
             "L. We are in union_predecessors trying to get term for {}",
-            egraph.get_term(predecessor_v.predecessor)
+            egraph.get_term(pred_predecessor)
         );
 
-        // checking if the ite leads to a contradiction
-        // if let Some(negated_model) =
-        //     union_process_ite(&egraph.get_term(predecessor_v.predecessor), egraph, level, from_quantifier)
-        // {
-        //      debug_println!(
-        //         11,
-        //         4,
-        //         "N. [exiting union_pred] of {} andn {} Contradiction found in union_predecessors, we have the following negated_model: {:?}",
-        //         egraph.get_term(u),
-        //         egraph.get_term(v),
-        //         negated_model
-        //     );
-        //     return Some(negated_model);
-        // }
+        // Compute canonical form inline — no precomputation needed since
+        // get_canonical_form is &self.
+        let canonical_form_v = egraph.get_canonical_form(pred_predecessor, level);
 
         if let Some((original_subterms, func, roots)) = canonical_form_v {
             let canonical_form = (func, roots);
@@ -1204,7 +1185,7 @@ fn union_predecessors(
                 6,
                 "3. We are in union_predecessors for v and have canonical form {:?} for {}",
                 canonical_form,
-                egraph.get_term(predecessor_v.predecessor)
+                egraph.get_term(pred_predecessor)
             );
             if let Some(u_forms) = canonical_forms_u.get(&canonical_form) {
                 debug_println!(5, 0, "We have the following u_forms {:?}", u_forms);
@@ -1214,7 +1195,7 @@ fn union_predecessors(
                         0,
                         "We are actually merging the two predecessors {} and {}",
                         egraph.get_term(*canonical_form_u),
-                        egraph.get_term(predecessor_v.predecessor)
+                        egraph.get_term(pred_predecessor)
                     );
                     if is_important(16) {
                         debug_println!(16, 0, "We have u_original_subterms: ");
@@ -1248,7 +1229,7 @@ fn union_predecessors(
                         // u_original,
                         // v_original,
                         *canonical_form_u,
-                        predecessor_v.predecessor,
+                        pred_predecessor,
                         egraph,
                         proof_parent,
                         level,
