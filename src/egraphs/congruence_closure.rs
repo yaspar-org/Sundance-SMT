@@ -459,7 +459,7 @@ fn leastcommonancestor_helper(
     let mut path_from_u = vec![];
     let mut curr = u;
 
-    if indent > 100 {
+    if indent > 1000 {
         debug_println!(11, 0, "We have the proof forest :{}", egraph);
         panic!("Should not have this many recusive calls to LCH");
     }
