@@ -206,6 +206,50 @@ impl fmt::Display for Egraph {
     }
 }
 
+/// Cumulative timing breakdown for the main solver phases. Accumulated
+/// across the entire solve and printed once at the end when `--log-timing`
+/// is enabled. All durations are in seconds (use `as_secs_f64() * 1000.0`
+/// for ms). The phases cover the CaDiCaL propagator callbacks: every call
+/// to `notify_assignment` (which runs `process_assignment` per literal),
+/// `notify_backtrack`, and `cb_check_found_model` (which runs
+/// `check_integer_constraints_satisfiable` and `instantiate_quantifiers`).
+#[derive(Clone, Debug, Default)]
+pub struct SolverTimers {
+    /// Total time in `process_assignment` (congruence closure per fixed literal).
+    pub process_assignment: std::time::Duration,
+    pub process_assignment_calls: u64,
+    /// Total time in `notify_backtrack` (proof-forest backtrack + predecessor re-insertion).
+    pub backtrack: std::time::Duration,
+    pub backtrack_calls: u64,
+    /// Total time in `check_integer_constraints_satisfiable`.
+    pub arith_check: std::time::Duration,
+    pub arith_check_calls: u64,
+    /// Total time in `instantiate_quantifiers`.
+    pub instantiate_quantifiers: std::time::Duration,
+    pub instantiate_quantifiers_calls: u64,
+    /// Total time in `cb_check_found_model` (includes arith_check + instantiate_quantifiers
+    /// + nelson-oppen + clause assembly overhead).
+    pub check_model: std::time::Duration,
+    pub check_model_calls: u64,
+}
+
+impl SolverTimers {
+    pub fn report(&self) {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        eprintln!("[timing] === solver phase breakdown ===");
+        eprintln!("[timing]   process_assignment:            {:>10.3} ms  ({} calls)",
+            ms(self.process_assignment), self.process_assignment_calls);
+        eprintln!("[timing]   backtrack:                     {:>10.3} ms  ({} calls)",
+            ms(self.backtrack), self.backtrack_calls);
+        eprintln!("[timing]   check_model (total):           {:>10.3} ms  ({} calls)",
+            ms(self.check_model), self.check_model_calls);
+        eprintln!("[timing]     arith_check:                 {:>10.3} ms  ({} calls)",
+            ms(self.arith_check), self.arith_check_calls);
+        eprintln!("[timing]     instantiate_quantifiers:     {:>10.3} ms  ({} calls)",
+            ms(self.instantiate_quantifiers), self.instantiate_quantifiers_calls);
+    }
+}
+
 /// The egraph datastructure that keeps track of terms, equalities and parents
 pub struct Egraph {
     pub context: Context,
@@ -259,10 +303,14 @@ pub struct Egraph {
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
     pub decision_level: usize,
+    /// user flag for whether to log timing breakdown at end of solve
+    pub log_timing: bool,
+    /// cumulative timing breakdown for key solver phases
+    pub timers: SolverTimers,
 }
 
 impl Egraph {
-    pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
+    pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool, log_timing: bool) -> Self {
         let tru = context.get_true();
         let fal = context.get_false();
         let datatype_info = DatatypeInfo::from_context(&context);
@@ -300,6 +348,8 @@ impl Egraph {
             eager_skolem,
             cnf_cache: Default::default(),
             decision_level: 0,
+            log_timing,
+            timers: SolverTimers::default(),
         }
     }
 

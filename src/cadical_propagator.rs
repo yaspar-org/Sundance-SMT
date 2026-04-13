@@ -19,6 +19,7 @@ use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Instant;
 
 /// Should we keep backtracking on stack at level
 ///
@@ -137,8 +138,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             self.add_lit_to_proof_tracker(*lit); // adding the literal to the proof_tracker
 
+            let pa_t0 = self.egraph.log_timing.then(Instant::now);
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.egraph, self.decision_level, false, false, None);
+            if let Some(t) = pa_t0 {
+                self.egraph.timers.process_assignment += t.elapsed();
+                self.egraph.timers.process_assignment_calls += 1;
+            }
 
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
@@ -255,6 +261,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn notify_backtrack(&mut self, level: usize) {
+        let bt_t0 = self.egraph.log_timing.then(Instant::now);
         debug_println!(
             23,
             0,
@@ -412,9 +419,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(16, 0, "Ending backtracking at level {}", level);
 
         debug_println!(11, 0, "{}", self.egraph);
+
+        if let Some(t) = bt_t0 {
+            self.egraph.timers.backtrack += t.elapsed();
+            self.egraph.timers.backtrack_calls += 1;
+        }
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        let cm_t0 = self.egraph.log_timing.then(Instant::now);
         debug_println!(
             24,
             0,
@@ -430,13 +443,24 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         //      debug_println!(11, 4, "{}", self.egraph.get_term_from_lit(*lit))
         // }
 
+        // Macro to record check_model elapsed time before each return.
+        macro_rules! cm_return {
+            ($val:expr) => {{
+                if let Some(t) = cm_t0 {
+                    self.egraph.timers.check_model += t.elapsed();
+                    self.egraph.timers.check_model_calls += 1;
+                }
+                return $val;
+            }};
+        }
+
         if !self.disequalities.borrow_mut().is_empty() {
             debug_println!(
                 24,
                 0,
                 "Trying to check model when the disequalities are not empty"
             );
-            return false;
+            cm_return!(false);
         }
 
         for term in model {
@@ -456,7 +480,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // Check arithmetic consistency before instantiating quantifiers
         debug_println!(21, 0, "Starting arithmetic check",);
 
-        match check_integer_constraints_satisfiable(&self.arithmetic, model, self.egraph) {
+        let ac_t0 = self.egraph.log_timing.then(Instant::now);
+        let arith_result = check_integer_constraints_satisfiable(&self.arithmetic, model, self.egraph);
+        if let Some(t) = ac_t0 {
+            self.egraph.timers.arith_check += t.elapsed();
+            self.egraph.timers.arith_check_calls += 1;
+        }
+        match arith_result {
             ArithResult::Unsat(arithmetic_literals) => {
                 {
                     debug_println!(
@@ -467,7 +497,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     );
                     // let negated_arithmetic_literals = arithmetic_literals.iter().map(|x| -x).collect();
                     self.disequalities.borrow_mut().push(arithmetic_literals);
-                    return false;
+                    cm_return!(false);
                 }
             }
             ArithResult::Sat(literals) => {
@@ -552,16 +582,21 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // }
 
         if !self.disequalities.borrow().is_empty() {
-            return false;
+            cm_return!(false);
         }
 
         debug_println!(11, 0, "Starting quantifier instantiations");
+        let qi_t0 = self.egraph.log_timing.then(Instant::now);
         let quantifier_instantiations = instantiate_quantifiers(
             self.egraph,
             &self.proof_tracker,
             &self.assignments,
             self.decision_level,
         );
+        if let Some(t) = qi_t0 {
+            self.egraph.timers.instantiate_quantifiers += t.elapsed();
+            self.egraph.timers.instantiate_quantifiers_calls += 1;
+        }
         debug_println!(
             11,
             0,
@@ -573,7 +608,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             debug_println!(10, 0, "{}", self.egraph);
             assert!(self.disequalities.borrow().is_empty());
 
-            return true;
+            cm_return!(true);
         }
 
         // Add each quantifier instantiation as an instantiation clause to the proof tracker
@@ -602,7 +637,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         debug_println!(4, 0, "Returning false in cb_check_found_model");
-        false
+        cm_return!(false);
     }
 
     fn cb_decide(&mut self) -> i32 {

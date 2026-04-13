@@ -73,7 +73,7 @@ fn main() -> Result<(), String> {
     assertions.push(true_term.clone());
     assertions.push(not_false_term);
 
-    let mut egraph = Egraph::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
+    let mut egraph = Egraph::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem, args.log_timing);
 
     egraph.insert_predecessor(&false_term, None, None, false, None);
     egraph.insert_predecessor(&true_term, None, None, false, None);
@@ -190,6 +190,10 @@ fn main() -> Result<(), String> {
         args.arithmetic,
         args.timeout,
     );
+
+    if args.log_timing {
+        egraph.timers.report();
+    }
 
     match return_value {
         Status::SATISFIABLE => {

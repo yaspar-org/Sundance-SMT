@@ -41,4 +41,7 @@ pub struct Args {
     /// Set timeout in seconds (0 means no timeout)
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,
+    /// Log cumulative timing breakdown for key solver phases to stderr at end of solve
+    #[arg(long, default_value_t = false)]
+    pub log_timing: bool,
 }
