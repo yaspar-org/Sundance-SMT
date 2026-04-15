@@ -6,8 +6,8 @@ use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::union;
 use crate::egraphs::datastructures::{
-    Assertion, CanonicalOp, ConstructorType, DisequalTerm, Polarity::*, Predecessor, Quantifier,
-    TermOption,
+    Assertion, CanonicalForm, CanonicalOp, ConstructorType, DisequalTerm, Polarity::*, Predecessor,
+    Quantifier, TermOption,
 };
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
@@ -1280,11 +1280,7 @@ impl Egraph {
     /// Get the canonical form for some term
     /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  
     /// TODO: I don't support canonical forms for non-app, non-eq terms, non-ite terms, but will have to do that eventually
-    pub fn get_canonical_form(
-        &self,
-        term_num: u64,
-        _level: usize,
-    ) -> Option<(Vec<u64>, CanonicalOp, Vec<u64>)> {
+    pub fn get_canonical_form(&self, term_num: u64, _level: usize) -> Option<CanonicalForm> {
         debug_println!(
             5,
             0,
@@ -1296,12 +1292,12 @@ impl Egraph {
 
         // Extract subterm uids and the operation identifier without cloning the Term.
         // The inner block holds a borrow of self.terms_list via get_term_ref;
-        // it ends before we need &mut self for self.find(...).
+        // it ends before we need &self for self.find(...).
         //
         // CanonicalOp replaces the old String-based identifier so that HashMap keys
         // compare/hash as u64 (via hash-consed uids) instead of allocating and
         // hashing String bytes per call.
-        let (subterms_u64, op) = {
+        let (original_subterms, op) = {
             let term = self.get_term_ref(term_num);
             match term.repr() {
                 App(func, subterms, ..) => {
@@ -1318,8 +1314,13 @@ impl Egraph {
             }
         };
 
-        let canonical_subterms: Vec<u64> = subterms_u64.iter().map(|&t| self.find(t)).collect();
-        Some((subterms_u64, op, canonical_subterms))
+        let canonical_subterms: Vec<u64> =
+            original_subterms.iter().map(|&t| self.find(t)).collect();
+        Some(CanonicalForm {
+            original_subterms,
+            op,
+            canonical_subterms,
+        })
     }
 
     /// Adds a predecessor to a term (for example f(x) to x)
@@ -1416,7 +1417,7 @@ where
 }
 
 /// Checks if the hash is still valid at the given level
-pub fn valid_hash(hash: u64, level: usize, predecessor_level: &Vec<u64>) -> bool {
+pub fn valid_hash(hash: u64, level: usize, predecessor_level: &[u64]) -> bool {
     debug_println!(
         5,
         0,
