@@ -41,6 +41,24 @@ pub enum CanonicalOp {
     Ite,
 }
 
+/// The canonical form of a term, produced by `Egraph::get_canonical_form`.
+///
+/// Represents how the term looks after walking each subterm's union-find root,
+/// which is what congruence closure uses to detect "same operator, same
+/// equivalent arguments" matches between two terms.
+#[derive(Debug, Clone)]
+pub struct CanonicalForm {
+    /// Raw uids of the term's subterms (not canonicalized). Used to build
+    /// pairwise term equalities for the congruence proof.
+    pub original_subterms: Vec<u64>,
+    /// The operator (function name / Eq / Ite).
+    pub op: CanonicalOp,
+    /// The union-find roots of each subterm. Together with `op` these form
+    /// the congruence key — two terms with the same `op` and `canonical_subterms`
+    /// must be equal by congruence.
+    pub canonical_subterms: Vec<u64>,
+}
+
 /// Represents a predecessor of a term
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct Predecessor {

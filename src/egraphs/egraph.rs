@@ -6,8 +6,8 @@ use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::union;
 use crate::egraphs::datastructures::{
-    Assertion, CanonicalOp, ConstructorType, DisequalTerm, Polarity::*, Predecessor, Quantifier,
-    TermOption,
+    Assertion, CanonicalForm, CanonicalOp, ConstructorType, DisequalTerm, Polarity::*, Predecessor,
+    Quantifier, TermOption,
 };
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
@@ -675,7 +675,7 @@ impl Egraph {
         for (pred_key, pred) in subterm_root_predecessor {
             debug_println!(6, 0, "before9");
             // if the predecessor is not valid, then we can remove it from the predecessors list (this can happen because of backtracking) and continue
-            if !self.valid_hash(pred.hash, pred.level) {
+            if !valid_hash(pred.hash, pred.level, &self.predecessor_level) {
                 self.predecessors[subterm_root as usize].remove(pred_key);
                 debug_println!(
                     16,
@@ -1184,7 +1184,7 @@ impl Egraph {
         // sorted_disequalities.sort_by_key(|(key, _)| **key);
 
         for (key, disequality) in sorted_disequalities {
-            if !self.valid_hash(disequality.hash, disequality.level) {
+            if !valid_hash(disequality.hash, disequality.level, &self.predecessor_level) {
                 debug_println!(
                     19,
                     0,
@@ -1280,11 +1280,7 @@ impl Egraph {
     /// Get the canonical form for some term
     /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  
     /// TODO: I don't support canonical forms for non-app, non-eq terms, non-ite terms, but will have to do that eventually
-    pub fn get_canonical_form(
-        &self,
-        term_num: u64,
-        _level: usize,
-    ) -> Option<(Vec<u64>, CanonicalOp, Vec<u64>)> {
+    pub fn get_canonical_form(&self, term_num: u64, _level: usize) -> Option<CanonicalForm> {
         debug_println!(
             5,
             0,
@@ -1296,12 +1292,12 @@ impl Egraph {
 
         // Extract subterm uids and the operation identifier without cloning the Term.
         // The inner block holds a borrow of self.terms_list via get_term_ref;
-        // it ends before we need &mut self for self.find(...).
+        // it ends before we need &self for self.find(...).
         //
         // CanonicalOp replaces the old String-based identifier so that HashMap keys
         // compare/hash as u64 (via hash-consed uids) instead of allocating and
         // hashing String bytes per call.
-        let (subterms_u64, op) = {
+        let (original_subterms, op) = {
             let term = self.get_term_ref(term_num);
             match term.repr() {
                 App(func, subterms, ..) => {
@@ -1318,20 +1314,13 @@ impl Egraph {
             }
         };
 
-        let canonical_subterms: Vec<u64> = subterms_u64.iter().map(|&t| self.find(t)).collect();
-        Some((subterms_u64, op, canonical_subterms))
-    }
-
-    /// Checks if the hash is still valid at the given level
-    pub fn valid_hash(&self, hash: u64, level: usize) -> bool {
-        debug_println!(
-            5,
-            0,
-            "We are in valid_hash with hash {} and level {}",
-            hash,
-            level
-        );
-        hash >= self.predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
+        let canonical_subterms: Vec<u64> =
+            original_subterms.iter().map(|&t| self.find(t)).collect();
+        Some(CanonicalForm {
+            original_subterms,
+            op,
+            canonical_subterms,
+        })
     }
 
     /// Adds a predecessor to a term (for example f(x) to x)
@@ -1350,7 +1339,7 @@ impl Egraph {
 
         // Compute new_pred validity before entering the Entry so we don't
         // re-borrow self while holding an occupied slot.
-        let new_valid = self.valid_hash(new_pred.hash, new_pred.level);
+        let new_valid = valid_hash(new_pred.hash, new_pred.level, &self.predecessor_level);
         let new_pred_level = new_pred.level;
         let new_pred_hash = new_pred.hash;
 
@@ -1373,9 +1362,10 @@ impl Egraph {
                 // the occupied borrow. Matches valid_hash's body exactly (minus
                 // its debug_println at level 5, which has no functional effect).
                 let original = slot.get();
-                let orig_valid = original.hash >= self.predecessor_level[original.level]
-                    || original.hash == 0
-                    || original.level == 0;
+                let orig_valid = valid_hash(original.hash, original.level, &self.predecessor_level);
+                // original.hash >= self.predecessor_level[original.level]
+                //     || original.hash == 0
+                //     || original.level == 0;
                 let orig_level = original.level;
                 let orig_hash = original.hash;
                 let orig_predecessor = original.predecessor;
@@ -1424,6 +1414,18 @@ where
     fn nnf(&self, env: &mut Egraph) -> Self {
         self.nnf(&mut env.cnf_env())
     }
+}
+
+/// Checks if the hash is still valid at the given level
+pub fn valid_hash(hash: u64, level: usize, predecessor_level: &[u64]) -> bool {
+    debug_println!(
+        5,
+        0,
+        "We are in valid_hash with hash {} and level {}",
+        hash,
+        level
+    );
+    hash >= predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
 }
 
 // check that every variable occurs in each multipattern
