@@ -231,11 +231,16 @@ pub fn process_assignment(
             );
             debug_println!(10, 0, "{}", egraph);
 
-            debug_println!(26, 0, "[LCA from CC/disequality] {} (id={}) =?= {} (id={})",
-                egraph.get_term(t1), t1, egraph.get_term(t2), t2);
-            if let Some(negated_model) =
-                leastcommonancestor(t1, t2, egraph)
-            {
+            debug_println!(
+                26,
+                0,
+                "[LCA from CC/disequality] {} (id={}) =?= {} (id={})",
+                egraph.get_term(t1),
+                t1,
+                egraph.get_term(t2),
+                t2
+            );
+            if let Some(negated_model) = leastcommonancestor(t1, t2, egraph) {
                 let mut model_terms: Vec<i32> = negated_model
                     .into_iter()
                     .map(|x| -egraph.make_eq(x.0, x.1))
@@ -269,11 +274,16 @@ pub fn process_assignment(
                         level,
                         hash
                     );
-                    debug_println!(26, 0, "[LCA from CC/distinct] {} (id={}) =?= {} (id={})",
-                        egraph.get_term(t1), t1, egraph.get_term(t2), t2);
-                    if let Some(negated_model) =
-                        leastcommonancestor(t1, t2, egraph)
-                    {
+                    debug_println!(
+                        26,
+                        0,
+                        "[LCA from CC/distinct] {} (id={}) =?= {} (id={})",
+                        egraph.get_term(t1),
+                        t1,
+                        egraph.get_term(t2),
+                        t2
+                    );
+                    if let Some(negated_model) = leastcommonancestor(t1, t2, egraph) {
                         let mut model_terms: Vec<i32> = negated_model
                             .into_iter()
                             .map(|x| -egraph.make_eq(x.0, x.1))
@@ -310,12 +320,16 @@ pub fn process_assignment(
     );
     //  debug_println!(4, 0, "{}", egraph);
     debug_println!(10, 0, "Checking if true = false {}", egraph);
-    debug_println!(26, 0, "[LCA from CC/true=false] {} (id={}) =?= {} (id={})",
-        egraph.get_term(egraph.true_term), egraph.true_term,
-        egraph.get_term(egraph.false_term), egraph.false_term);
-    if let Some(negated_model) =
-        leastcommonancestor(egraph.true_term, egraph.false_term, egraph)
-    {
+    debug_println!(
+        26,
+        0,
+        "[LCA from CC/true=false] {} (id={}) =?= {} (id={})",
+        egraph.get_term(egraph.true_term),
+        egraph.true_term,
+        egraph.get_term(egraph.false_term),
+        egraph.false_term
+    );
+    if let Some(negated_model) = leastcommonancestor(egraph.true_term, egraph.false_term, egraph) {
         let negated_model_terms: Vec<i32> = negated_model
             .into_iter()
             .map(|x| -egraph.make_eq(x.0, x.1))
@@ -477,7 +491,10 @@ fn leastcommonancestor_helper(
     }
     loop {
         visited.insert(curr);
-        if matches!(egraph.proof_forest[curr as usize], ProofForestEdge::Root { .. }) {
+        if matches!(
+            egraph.proof_forest[curr as usize],
+            ProofForestEdge::Root { .. }
+        ) {
             break;
         }
         path_from_u.push(curr);
@@ -491,7 +508,10 @@ fn leastcommonancestor_helper(
         if visited.contains(&curr) {
             break;
         }
-        if matches!(egraph.proof_forest[curr as usize], ProofForestEdge::Root { .. }) {
+        if matches!(
+            egraph.proof_forest[curr as usize],
+            ProofForestEdge::Root { .. }
+        ) {
             // not in the same equivalence class
             return None;
         }
@@ -584,11 +604,7 @@ fn leastcommonancestor_helper(
     Some(final_proof)
 }
 
-pub fn leastcommonancestor(
-    u: u64,
-    v: u64,
-    egraph: &Egraph,
-) -> Option<Vec<(u64, u64)>> {
+pub fn leastcommonancestor(u: u64, v: u64, egraph: &Egraph) -> Option<Vec<(u64, u64)>> {
     // Fast path: if u and v aren't in the same equivalence class, no proof exists
     if egraph.find(u) != egraph.find(v) {
         return None;
@@ -874,9 +890,15 @@ pub fn union(
             egraph.get_term(disequality.original_disequality.0),
             egraph.get_term(disequality.original_disequality.1)
         );
-        debug_println!(26, 0, "[LCA from CC/diseq-check] {} (id={}) =?= {} (id={})",
-            egraph.get_term(disequality.original_disequality.0), disequality.original_disequality.0,
-            egraph.get_term(disequality.original_disequality.1), disequality.original_disequality.1);
+        debug_println!(
+            26,
+            0,
+            "[LCA from CC/diseq-check] {} (id={}) =?= {} (id={})",
+            egraph.get_term(disequality.original_disequality.0),
+            disequality.original_disequality.0,
+            egraph.get_term(disequality.original_disequality.1),
+            disequality.original_disequality.1
+        );
         if let Some(negated_model) = leastcommonancestor(
             disequality.original_disequality.0,
             disequality.original_disequality.1,

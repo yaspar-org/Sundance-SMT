@@ -46,7 +46,8 @@ pub fn check_integer_constraints_satisfiable_lia(
 
     for term_id in egraph.arithmetic_terms.clone() {
         if let ProofForestEdge::Root { .. } = &egraph.proof_forest[term_id as usize] {
-            let (expr, additional_constraints) = extract_linear_expression(term_id, egraph, &mut lca_cache);
+            let (expr, additional_constraints) =
+                extract_linear_expression(term_id, egraph, &mut lca_cache);
             let root_var = *var_map.entry(term_id).or_insert_with(|| {
                 ctx.allocate_var(&format!("!ext_var_{}", term_id), VarType::Int)
             });

@@ -149,7 +149,9 @@ pub fn extract_linear_constraints(
 
     for &lit in terms {
         let (term_id, polarity) = egraph.get_u64_from_lit_with_polarity(lit);
-        if let Some(constraint) = extract_constraint_from_term(term_id, polarity, egraph, &mut lca_cache) {
+        if let Some(constraint) =
+            extract_constraint_from_term(term_id, polarity, egraph, &mut lca_cache)
+        {
             debug_println!(21, 4, "We get the constraint {:?}", constraint);
             constraints.push(constraint);
             arithmetic_literals.push(-lit);
@@ -292,8 +294,10 @@ fn extract_constraint_from_term(
                 "[ARITH CHECK] Extracting linear constraint for EQ term {}",
                 term
             );
-            let (left_expr, additional_constraint_l) = extract_linear_expression(a.uid(), egraph, lca_cache);
-            let (right_expr, additional_constraint_r) = extract_linear_expression(b.uid(), egraph, lca_cache);
+            let (left_expr, additional_constraint_l) =
+                extract_linear_expression(a.uid(), egraph, lca_cache);
+            let (right_expr, additional_constraint_r) =
+                extract_linear_expression(b.uid(), egraph, lca_cache);
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
@@ -421,16 +425,21 @@ pub fn extract_linear_expression(
                 _ => {
                     let root_id = egraph.find(term_id);
 
-                    let model_terms = lca_cache.entry(term_id).or_insert_with(|| {
-                        if let Some(negated_model) = leastcommonancestor(root_id, term_id, egraph) {
-                            negated_model
-                                .into_iter()
-                                .map(|x| -egraph.make_eq(x.0, x.1))
-                                .collect()
-                        } else {
-                            vec![]
-                        }
-                    }).clone();
+                    let model_terms = lca_cache
+                        .entry(term_id)
+                        .or_insert_with(|| {
+                            if let Some(negated_model) =
+                                leastcommonancestor(root_id, term_id, egraph)
+                            {
+                                negated_model
+                                    .into_iter()
+                                    .map(|x| -egraph.make_eq(x.0, x.1))
+                                    .collect()
+                            } else {
+                                vec![]
+                            }
+                        })
+                        .clone();
 
                     if !model_terms.is_empty() {
                         debug_println!(
@@ -449,16 +458,19 @@ pub fn extract_linear_expression(
         _ => {
             let root_id = egraph.find(term_id);
 
-            let model_terms = lca_cache.entry(term_id).or_insert_with(|| {
-                if let Some(negated_model) = leastcommonancestor(root_id, term_id, egraph) {
-                    negated_model
-                        .into_iter()
-                        .map(|x| -egraph.make_eq(x.0, x.1))
-                        .collect()
-                } else {
-                    vec![]
-                }
-            }).clone();
+            let model_terms = lca_cache
+                .entry(term_id)
+                .or_insert_with(|| {
+                    if let Some(negated_model) = leastcommonancestor(root_id, term_id, egraph) {
+                        negated_model
+                            .into_iter()
+                            .map(|x| -egraph.make_eq(x.0, x.1))
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                })
+                .clone();
 
             if !model_terms.is_empty() {
                 debug_println!(
