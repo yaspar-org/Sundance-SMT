@@ -420,12 +420,21 @@ fn intersect_candidates(result: &mut Option<Vec<u64>>, candidates: &mut Vec<u64>
 /// we fall back to returning all fnode UIDs for the function — the only constraint is
 /// the function symbol itself. `try_extend_binding` then does all the work of binding
 /// variables and checking consistency.
+/// `get_candidates` for a single atom, given a binding and *already looked up*
+/// index tables for the atom's function. This avoids rehashing `atom.func`
+/// once per frontier binding per step: the caller hoists the lookups out of
+/// the per-binding loop and passes the results here.
+///
+/// - `arg_idx`  — `egraph.function_indices.get(&atom.func)` (arg index)
+/// - `func_out` — `egraph.function_maps.get(&atom.func)` (output index)
 fn get_candidates(
     atom: &FlatAtom,
     binding: &Binding,
     delta_only: bool,
     egraph: &Egraph,
     var_index: &HashMap<FlatVar, usize>,
+    arg_idx: Option<&crate::egraphs::egraph::FunctionArgIndex>,
+    func_out: Option<&crate::egraphs::egraph::FunctionOutputIndex>,
     log: bool,
 ) -> Vec<u64> {
     let mut result: Option<Vec<u64>> = None;
@@ -435,8 +444,7 @@ fn get_candidates(
     let mut ic_calls = 0u64;
 
     // Check argument indices using pre-computed canonical roots
-    // todo: dont do function index lookup and pick the specific variables of which you are joining on
-    if let Some(arg_idx) = egraph.function_indices.get(&atom.func) {
+    if let Some(arg_idx) = arg_idx {
         debug_println!(26, 0, "      get_candidates for '{}': found in function_indices, arity={}", atom.func, arg_idx.args.len());
         for (i, var) in atom.args.iter().enumerate() {
             if i >= arg_idx.args.len() {
@@ -487,7 +495,7 @@ fn get_candidates(
 
     // Check output index using pre-computed root
     if let Some(canon) = binding.root(var_index[&atom.output]) {
-        if let Some(func_out) = egraph.function_maps.get(&atom.func) {
+        if let Some(func_out) = func_out {
             if delta_only {
                 func_out.output.get_delta_into(canon, matching_round, &mut candidates);
             } else {
@@ -523,7 +531,7 @@ fn get_candidates(
             // No bound variables — full scan: return all fnode UIDs for this function.
             // This happens for the first atom in the join order when it has no ground
             // constants. try_extend_binding will bind all unbound variables.
-            if let Some(func_out) = egraph.function_maps.get(&atom.func) {
+            if let Some(func_out) = func_out {
                 candidates.clear();
                 if delta_only {
                     for ts in func_out.output.index.values() {
@@ -583,12 +591,13 @@ fn execute_join(
         let atom = &atoms[atom_idx];
         let use_delta = delta_position == Some(pos);
 
+        // Hoist per-atom hashmap lookups out of the per-binding loop below.
+        // Previously `get_candidates` re-hashed `atom.func` into `function_maps`
+        // and `function_indices` once per frontier binding; now we do each
+        // lookup exactly once per join step and pass the references down.
         let rl_outer_start = log.then(Instant::now);
         let raw_lookup = match egraph.function_entries.get(atom.func.as_str()) {
-            Some(l) => {
-                // debug_println!(26, 0, "    raw_lookup for '{}': {} entries, keys={:?}", atom.func, l.len(), l.keys().collect::<Vec<_>>());
-                l
-            },
+            Some(l) => l,
             None => {
                 debug_println!(
                     26,
@@ -608,8 +617,10 @@ fn execute_join(
                     pt.execute_join_calls += 1;
                 }
                 return vec![];
-            }, // Function not in egraph
+            }
         };
+        let arg_idx_ref = egraph.function_indices.get(&atom.func);
+        let func_out_ref = egraph.function_maps.get(&atom.func);
         let outer_rl_elapsed = rl_outer_start.map(|t| t.elapsed()).unwrap_or_default();
 
         let _input_count = bindings.len();
@@ -626,7 +637,16 @@ fn execute_join(
         let mut new_bindings = Vec::new();
         for binding in &bindings {
             let gc_start = log.then(Instant::now);
-            let candidates = get_candidates(atom, binding, use_delta, egraph, var_index, log);
+            let candidates = get_candidates(
+                atom,
+                binding,
+                use_delta,
+                egraph,
+                var_index,
+                arg_idx_ref,
+                func_out_ref,
+                log,
+            );
             if let Some(t) = gc_start {
                 candidates_time += t.elapsed();
                 get_candidates_calls += 1;
