@@ -7,6 +7,7 @@ use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::frontend;
 use crate::arithmetic::lia::linear_system::{Mon, Rel};
 use crate::arithmetic::lia::solver_result::SolverDecision;
+use crate::arithmetic::lia::tableau::TableauKind;
 use crate::arithmetic::lia::variables::{Var, VarType};
 use crate::arithmetic::lp::{
     ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
@@ -93,7 +94,7 @@ pub fn check_integer_constraints_satisfiable_lia(
         slack_to_lits.insert(slack, lits);
     }
 
-    match frontend::solve_ctx_raw(&mut ctx) {
+    match frontend::solve_ctx_raw(&mut ctx, TableauKind::Dense) {
         Ok(SolverDecision::FEASIBLE(assignment)) => {
             let mut model_hashmap: DeterministicHashMap<i64, DeterministicHashSet<u64>> =
                 DeterministicHashMap::new();
