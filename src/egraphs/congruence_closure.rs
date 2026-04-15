@@ -17,7 +17,7 @@ use crate::debug_println;
 use crate::egraphs::datastructures::{
     Assertion, CanonicalOp, ConstructorType::*, DisequalTerm, Predecessor,
 };
-use crate::egraphs::egraph::Egraph;
+use crate::egraphs::egraph::{Egraph, valid_hash};
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
 use yaspar_ir::ast::ATerm::*;
@@ -131,7 +131,7 @@ pub fn process_assignment(
                     tester_term,
                     hash,
                     level,
-                } if egraph.valid_hash(*hash, *level) => {
+                } if valid_hash(*hash, *level, &egraph.predecessor_level) => {
                     debug_println!(
                         11,
                         2,
@@ -461,7 +461,8 @@ fn leastcommonancestor_helper(
     let mut path_from_u = vec![];
     let mut curr = u;
 
-    if indent > 1000 {
+    let max_recursion_depth = 100;
+    if indent > max_recursion_depth {
         debug_println!(11, 0, "We have the proof forest :{}", egraph);
         panic!("Should not have this many recusive calls to LCH");
     }
@@ -1026,6 +1027,10 @@ fn union_predecessors(
         )
     );
 
+    debug_assert!(u != v);
+    debug_assert!(egraph.find(u) == u);
+    debug_assert!(egraph.find(v) == v);
+
     // Move u's and v's predecessor maps out of the egraph so we can iterate
     // without cloning. Both slots are restored before any re-entrant call
     // (add_predecessor / union_process_assignment) can observe them.
@@ -1037,7 +1042,7 @@ fn union_predecessors(
 
     // Stale entries are dropped in-place via retain before iterating.
     predecessors_u.retain(|_, p| {
-        let keep = egraph.valid_hash(p.hash, p.level);
+        let keep = valid_hash(p.hash, p.level, &egraph.predecessor_level);
         if !keep {
             debug_println!(
                 11,
@@ -1160,7 +1165,7 @@ fn union_predecessors(
                 Some(p) => (p.hash, p.level, p.inner_term),
                 None => continue, // removed by a prior iteration
             };
-        if !egraph.valid_hash(pred_hash, pred_level) {
+        if !valid_hash(pred_hash, pred_level, &egraph.predecessor_level) {
             debug_println!(
                 11,
                 5,
@@ -1416,7 +1421,7 @@ pub fn proof_forest_backtrack(
     // we are adding disequalities from the "parent" edge to the child
     let mut new_disequalities = DeterministicHashMap::new();
     for (k, v) in child_edge.disequalities().iter() {
-        if egraph.valid_hash(v.hash, v.level) {
+        if valid_hash(v.hash, v.level, &egraph.predecessor_level) {
             debug_println!(11, 0, "Keeping disequality {}: {} in {}", k, v, child);
             new_disequalities.insert(*k, v.clone());
         } else {

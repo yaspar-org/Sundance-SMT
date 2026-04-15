@@ -675,7 +675,7 @@ impl Egraph {
         for (pred_key, pred) in subterm_root_predecessor {
             debug_println!(6, 0, "before9");
             // if the predecessor is not valid, then we can remove it from the predecessors list (this can happen because of backtracking) and continue
-            if !self.valid_hash(pred.hash, pred.level) {
+            if !valid_hash(pred.hash, pred.level, &self.predecessor_level) {
                 self.predecessors[subterm_root as usize].remove(pred_key);
                 debug_println!(
                     16,
@@ -1184,7 +1184,7 @@ impl Egraph {
         // sorted_disequalities.sort_by_key(|(key, _)| **key);
 
         for (key, disequality) in sorted_disequalities {
-            if !self.valid_hash(disequality.hash, disequality.level) {
+            if !valid_hash(disequality.hash, disequality.level, &self.predecessor_level) {
                 debug_println!(
                     19,
                     0,
@@ -1322,18 +1322,6 @@ impl Egraph {
         Some((subterms_u64, op, canonical_subterms))
     }
 
-    /// Checks if the hash is still valid at the given level
-    pub fn valid_hash(&self, hash: u64, level: usize) -> bool {
-        debug_println!(
-            5,
-            0,
-            "We are in valid_hash with hash {} and level {}",
-            hash,
-            level
-        );
-        hash >= self.predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
-    }
-
     /// Adds a predecessor to a term (for example f(x) to x)
     ///
     /// TODO: right now this is preferring the smallest level, but this might not always be
@@ -1350,7 +1338,7 @@ impl Egraph {
 
         // Compute new_pred validity before entering the Entry so we don't
         // re-borrow self while holding an occupied slot.
-        let new_valid = self.valid_hash(new_pred.hash, new_pred.level);
+        let new_valid = valid_hash(new_pred.hash, new_pred.level, &self.predecessor_level);
         let new_pred_level = new_pred.level;
         let new_pred_hash = new_pred.hash;
 
@@ -1373,9 +1361,10 @@ impl Egraph {
                 // the occupied borrow. Matches valid_hash's body exactly (minus
                 // its debug_println at level 5, which has no functional effect).
                 let original = slot.get();
-                let orig_valid = original.hash >= self.predecessor_level[original.level]
-                    || original.hash == 0
-                    || original.level == 0;
+                let orig_valid = valid_hash(original.hash, original.level, &self.predecessor_level);
+                // original.hash >= self.predecessor_level[original.level]
+                //     || original.hash == 0
+                //     || original.level == 0;
                 let orig_level = original.level;
                 let orig_hash = original.hash;
                 let orig_predecessor = original.predecessor;
@@ -1424,6 +1413,18 @@ where
     fn nnf(&self, env: &mut Egraph) -> Self {
         self.nnf(&mut env.cnf_env())
     }
+}
+
+/// Checks if the hash is still valid at the given level
+pub fn valid_hash(hash: u64, level: usize, predecessor_level: &Vec<u64>) -> bool {
+    debug_println!(
+        5,
+        0,
+        "We are in valid_hash with hash {} and level {}",
+        hash,
+        level
+    );
+    hash >= predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
 }
 
 // check that every variable occurs in each multipattern
