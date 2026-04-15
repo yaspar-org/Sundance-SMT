@@ -1025,155 +1025,24 @@ pub fn datalog_find_assignments(
         egraph.datalog_phase_timers.borrow_mut().reset();
     }
 
-    // Collect per-quantifier info before the immutable borrow
+    // Collect per-quantifier info before the immutable borrow. We clone the
+    // needed fields here so the per-quantifier helper can run against a plain
+    // `&mut Egraph` without holding an outer borrow on `egraph.quantifiers`.
     let quant_info: Vec<(u64, Vec<String>, bool)> = egraph
         .quantifiers
         .iter()
         .map(|q| (q.id, q.variables.clone(), q.needs_full_pass))
         .collect();
 
-    let flat_patterns = &egraph.flat_patterns;
-    let mut results = Vec::new();
-
+    let mut results = Vec::with_capacity(quant_info.len());
     for (qid, variables, needs_full_pass) in &quant_info {
-        if let Some(multipatterns) = flat_patterns.get(qid) {
-            let mut quant_assignments = Vec::new();
-            let quant_start = if crate::log::is_important(28) { Some(Instant::now()) } else { None };
-
-            for atoms in multipatterns {
-                // Fast pre-check: skip the quantifier entirely before touching any
-                // per-quantifier state if the join is guaranteed to produce no new
-                // bindings. Two conditions let us bail out:
-                //   1. Some atom has zero entries in the egraph — join is empty.
-                //   2. In semi-naive mode, no atom has delta entries — no new
-                //      bindings since the last round.
-                // This avoids `build_var_index`, `compute_join_order`, and binding
-                // allocations for the overwhelming majority of quantifiers in a
-                // typical matching round.
-                let pc_start = log.then(Instant::now);
-                let mut any_zero = false;
-                let mut any_delta = false;
-                for atom in atoms {
-                    let size = table_size(egraph, &atom.func);
-                    if size == 0 {
-                        any_zero = true;
-                        break;
-                    }
-                    if !*needs_full_pass && func_has_delta(egraph, &atom.func) {
-                        any_delta = true;
-                    }
-                }
-                let skip = any_zero || (!*needs_full_pass && !any_delta);
-                if let Some(t) = pc_start {
-                    let mut pt = egraph.datalog_phase_timers.borrow_mut();
-                    pt.precheck_time += t.elapsed();
-                    pt.precheck_calls += 1;
-                    if skip {
-                        pt.precheck_skipped += 1;
-                    }
-                }
-                if skip {
-                    debug_println!(
-                        26,
-                        0,
-                        "Skipping quantifier {}: {}",
-                        egraph.get_term(*qid),
-                        if any_zero { "atom with table_size=0" } else { "no delta entries in semi-naive mode" }
-                    );
-                    continue;
-                }
-
-                debug_println!(
-                    26,
-                    0,
-                    "Matching quantifier {} with {} atoms {:?} (needs_full_pass={})",
-                    egraph.get_term(*qid),
-                    atoms.len(),
-                    atoms,
-                    needs_full_pass
-                );
-
-                // Level 28: high-level overview of the flattened pattern
-                debug_println!(28, 0, "");
-                debug_println!(28, 0, "=== Relational Match for quantifier {} ===", egraph.get_term(*qid));
-                debug_println!(28, 0, "  Flattened pattern ({} atoms):", atoms.len());
-                for (i, atom) in atoms.iter().enumerate() {
-                    let has_delta = func_has_delta(egraph, &atom.func);
-                    debug_println!(28, 0, "    [{}] {}  {}", i, atom, if has_delta { "<-- DELTA" } else { "" });
-                }
-                debug_println!(28, 0, "  Mode: {}", if *needs_full_pass { "FULL PASS (new quantifier)" } else { "SEMI-NAIVE" });
-
-                if crate::log::is_important(27) {
-                    debug_println!(27, 0, "[matching] quantifier '{}': {} atoms, mode={}",
-                        egraph.get_term(*qid), atoms.len(),
-                        if *needs_full_pass { "full" } else { "semi-naive" });
-                    for (i, atom) in atoms.iter().enumerate() {
-                        debug_println!(27, 0, "[matching]   atom[{}]: {} (table_size={})", i, atom, table_size(egraph, &atom.func));
-                    }
-                }
-                let em_start = log.then(Instant::now);
-                let (bindings, var_index) = evaluate_multipattern(atoms, *needs_full_pass, egraph, log);
-                if let Some(t) = em_start {
-                    let mut pt = egraph.datalog_phase_timers.borrow_mut();
-                    pt.evaluate_multipattern_time += t.elapsed();
-                    pt.evaluate_multipattern_calls += 1;
-                }
-
-                debug_println!(28, 0, "  Result: {} total bindings", bindings.len());
-                // Show final bindings (quantified variables only) at level 28
-                for (bi, binding) in bindings.iter().enumerate().take(10) {
-                    let qvars: Vec<String> = var_index.iter()
-                        .filter_map(|(var, &idx)| {
-                            if let FlatVar::Quantified(name) = var {
-                                binding.raw(idx).map(|uid| format!("?{}={}", name, egraph.get_term(uid)))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    debug_println!(28, 0, "    [{}] {{ {} }}", bi, qvars.join(", "));
-                }
-                if bindings.len() > 10 {
-                    debug_println!(28, 0, "    ... and {} more", bindings.len() - 10);
-                }
-                debug_println!(28, 0, "");
-
-                let ex_start = log.then(Instant::now);
-                for binding in bindings {
-                    let mut assignment = DeterministicHashMap::new();
-                    for (var, &idx) in &var_index {
-                        if let FlatVar::Quantified(name) = var {
-                            if let Some(raw) = binding.raw(idx) {
-                                assignment.insert(name.clone(), egraph.get_term(raw));
-                            }
-                        }
-                    }
-
-                    if variables.iter().all(|v| assignment.contains_key(v)) {
-                        quant_assignments.push(assignment);
-                    }
-                }
-                if let Some(t) = ex_start {
-                    let mut pt = egraph.datalog_phase_timers.borrow_mut();
-                    pt.extract_assignments_time += t.elapsed();
-                    pt.extract_assignments_calls += 1;
-                }
-            }
-
-            debug_println!(
-                26,
-                0,
-                "Datalog matcher found {} assignments for quantifier {}",
-                quant_assignments.len(),
-                egraph.get_term(*qid)
-            );
-            if let Some(start) = quant_start {
-                let quant_elapsed = start.elapsed();
-                debug_println!(28, 0, "=== Quantifier {}: {} assignments in {:.3}ms ===",
-                    egraph.get_term(*qid), quant_assignments.len(), quant_elapsed.as_secs_f64() * 1000.0);
-            }
-            results.push((*qid, quant_assignments));
-        }
+        let quant_assignments = datalog_find_assignments_for_quantifier(
+            egraph,
+            *qid,
+            variables,
+            *needs_full_pass,
+        );
+        results.push((*qid, quant_assignments));
     }
 
     // Clear needs_full_pass for all quantifiers after the matching round
@@ -1186,6 +1055,175 @@ pub fn datalog_find_assignments(
     }
 
     results
+}
+
+
+/// Run datalog matching for a single quantifier and return its new variable
+/// assignments. Factored out of `datalog_find_assignments` so callers that
+/// only need one quantifier's bindings don't have to run the whole matching
+/// round.
+///
+/// - `qid`             — uid of the quantifier term.
+/// - `variables`       — quantifier-bound variable names; each final
+///                       assignment must bind all of these.
+/// - `needs_full_pass` — whether to run a full-pass (no delta filtering) vs
+///                       semi-naive evaluation.
+///
+/// Note: this does NOT reset per-round phase timers or clear
+/// `needs_full_pass` on the quantifier — those are round-level concerns
+/// handled by `datalog_find_assignments`.
+pub fn datalog_find_assignments_for_quantifier(
+    egraph: &mut Egraph,
+    qid: u64,
+    variables: &[String],
+    needs_full_pass: bool,
+) -> Vec<DeterministicHashMap<String, Term>> {
+    let log = egraph.log_matching_time;
+
+    // Look up the flattened multipatterns for this quantifier. If it has
+    // none registered (shouldn't happen in normal flow), return empty.
+    let multipatterns = match egraph.flat_patterns.get(&qid) {
+        Some(mp) => mp.clone(),
+        None => return Vec::new(),
+    };
+
+    let mut quant_assignments = Vec::new();
+    let quant_start = if crate::log::is_important(28) { Some(Instant::now()) } else { None };
+
+    for atoms in &multipatterns {
+        // Fast pre-check: skip the quantifier entirely before touching any
+        // per-quantifier state if the join is guaranteed to produce no new
+        // bindings. Two conditions let us bail out:
+        //   1. Some atom has zero entries in the egraph — join is empty.
+        //   2. In semi-naive mode, no atom has delta entries — no new
+        //      bindings since the last round.
+        // This avoids `build_var_index`, `compute_join_order`, and binding
+        // allocations for the overwhelming majority of quantifiers in a
+        // typical matching round.
+        let pc_start = log.then(Instant::now);
+        let mut any_zero = false;
+        let mut any_delta = false;
+        for atom in atoms {
+            let size = table_size(egraph, &atom.func);
+            if size == 0 {
+                any_zero = true;
+                break;
+            }
+            if !needs_full_pass && func_has_delta(egraph, &atom.func) {
+                any_delta = true;
+            }
+        }
+        let skip = any_zero || (!needs_full_pass && !any_delta);
+        if let Some(t) = pc_start {
+            let mut pt = egraph.datalog_phase_timers.borrow_mut();
+            pt.precheck_time += t.elapsed();
+            pt.precheck_calls += 1;
+            if skip {
+                pt.precheck_skipped += 1;
+            }
+        }
+        if skip {
+            debug_println!(
+                26,
+                0,
+                "Skipping quantifier {}: {}",
+                egraph.get_term(qid),
+                if any_zero { "atom with table_size=0" } else { "no delta entries in semi-naive mode" }
+            );
+            continue;
+        }
+
+        debug_println!(
+            26,
+            0,
+            "Matching quantifier {} with {} atoms {:?} (needs_full_pass={})",
+            egraph.get_term(qid),
+            atoms.len(),
+            atoms,
+            needs_full_pass
+        );
+
+        // Level 28: high-level overview of the flattened pattern
+        debug_println!(28, 0, "");
+        debug_println!(28, 0, "=== Relational Match for quantifier {} ===", egraph.get_term(qid));
+        debug_println!(28, 0, "  Flattened pattern ({} atoms):", atoms.len());
+        for (i, atom) in atoms.iter().enumerate() {
+            let has_delta = func_has_delta(egraph, &atom.func);
+            debug_println!(28, 0, "    [{}] {}  {}", i, atom, if has_delta { "<-- DELTA" } else { "" });
+        }
+        debug_println!(28, 0, "  Mode: {}", if needs_full_pass { "FULL PASS (new quantifier)" } else { "SEMI-NAIVE" });
+
+        if crate::log::is_important(27) {
+            debug_println!(27, 0, "[matching] quantifier '{}': {} atoms, mode={}",
+                egraph.get_term(qid), atoms.len(),
+                if needs_full_pass { "full" } else { "semi-naive" });
+            for (i, atom) in atoms.iter().enumerate() {
+                debug_println!(27, 0, "[matching]   atom[{}]: {} (table_size={})", i, atom, table_size(egraph, &atom.func));
+            }
+        }
+        let em_start = log.then(Instant::now);
+        let (bindings, var_index) = evaluate_multipattern(atoms, needs_full_pass, egraph, log);
+        if let Some(t) = em_start {
+            let mut pt = egraph.datalog_phase_timers.borrow_mut();
+            pt.evaluate_multipattern_time += t.elapsed();
+            pt.evaluate_multipattern_calls += 1;
+        }
+
+        debug_println!(28, 0, "  Result: {} total bindings", bindings.len());
+        // Show final bindings (quantified variables only) at level 28
+        for (bi, binding) in bindings.iter().enumerate().take(10) {
+            let qvars: Vec<String> = var_index.iter()
+                .filter_map(|(var, &idx)| {
+                    if let FlatVar::Quantified(name) = var {
+                        binding.raw(idx).map(|uid| format!("?{}={}", name, egraph.get_term(uid)))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            debug_println!(28, 0, "    [{}] {{ {} }}", bi, qvars.join(", "));
+        }
+        if bindings.len() > 10 {
+            debug_println!(28, 0, "    ... and {} more", bindings.len() - 10);
+        }
+        debug_println!(28, 0, "");
+
+        let ex_start = log.then(Instant::now);
+        for binding in bindings {
+            let mut assignment = DeterministicHashMap::new();
+            for (var, &idx) in &var_index {
+                if let FlatVar::Quantified(name) = var {
+                    if let Some(raw) = binding.raw(idx) {
+                        assignment.insert(name.clone(), egraph.get_term(raw));
+                    }
+                }
+            }
+
+            if variables.iter().all(|v| assignment.contains_key(v)) {
+                quant_assignments.push(assignment);
+            }
+        }
+        if let Some(t) = ex_start {
+            let mut pt = egraph.datalog_phase_timers.borrow_mut();
+            pt.extract_assignments_time += t.elapsed();
+            pt.extract_assignments_calls += 1;
+        }
+    }
+
+    debug_println!(
+        26,
+        0,
+        "Datalog matcher found {} assignments for quantifier {}",
+        quant_assignments.len(),
+        egraph.get_term(qid)
+    );
+    if let Some(start) = quant_start {
+        let quant_elapsed = start.elapsed();
+        debug_println!(28, 0, "=== Quantifier {}: {} assignments in {:.3}ms ===",
+            egraph.get_term(qid), quant_assignments.len(), quant_elapsed.as_secs_f64() * 1000.0);
+    }
+
+    quant_assignments
 }
 
 /// Increment matching_round after each matching round for semi-naive evaluation.

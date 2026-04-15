@@ -15,7 +15,6 @@ use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::datalogmatch;
 use crate::quantifiers::skolem::skolemize;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
-use std::collections::HashMap;
 
 use crate::debug_println;
 use crate::log::is_important;
@@ -60,20 +59,17 @@ pub fn instantiate_quantifiers(
     // Matching time for the classic path, accumulated across per-quantifier
     // match_term calls. Datalog's time is measured separately via `dfa_elapsed`.
     let mut classic_match_time = std::time::Duration::ZERO;
+    let mut dfa_elapsed = std::time::Duration::ZERO;
     let mut classic_match_assignments = 0u64;
 
-    // If datalog is enabled, pre-compute all assignments via relational matching
-    let dfa_t0 = log_phases.then(Instant::now);
-    let datalog_assignments: Option<HashMap<u64, Vec<DeterministicHashMap<String, Term>>>> =
-        if egraph.datalog {
-            datalogmatch::datalog_check_backtrack(egraph);
-            let results = datalogmatch::datalog_find_assignments(egraph);
-            datalogmatch::datalog_update_watermarks(egraph);
-            Some(results.into_iter().collect())
-        } else {
-            None
-        };
-    let dfa_elapsed = dfa_t0.map(|t| t.elapsed()).unwrap_or_default();
+
+    // note: this does nothing right now, but could do something in the future ...
+    if egraph.datalog {
+        datalogmatch::datalog_check_backtrack(egraph)
+        // let results = datalogmatch::datalog_find_assignments(egraph);
+        // datalogmatch::datalog_update_watermarks(egraph);
+        // Some(results.into_iter().collect())
+    };
 
     for quantifier in quantifiers {
         debug_println!(
@@ -219,12 +215,20 @@ pub fn instantiate_quantifiers(
         );
 
         // Phase: Find all variable assignments via matching
-        let list_assignments: Vec<(DeterministicHashMap<String, Term>, usize)> =
-            if let Some(ref dl) = datalog_assignments {
+        let list_assignments: Vec<DeterministicHashMap<String, Term>> =
+            if egraph.datalog {
                 // Datalog path: use pre-computed relational matching results
-                dl.get(&quantifier.id)
-                    .map(|v| v.iter().map(|a| (a.clone(), 0usize)).collect())
-                    .unwrap_or_default()
+                // dl.get(&quantifier.id)
+                //     .map(|v| v.iter().map(|a| (a.clone(), 0usize)).collect())
+                //     .unwrap_or_default()
+
+
+                let dfa_t0 = log_phases.then(Instant::now);
+                let datalog_assignments = datalogmatch::datalog_find_assignments_for_quantifier(egraph, quantifier.id, &quantifier.variables, quantifier.needs_full_pass);
+                datalogmatch::datalog_update_watermarks(egraph);
+                let dfa_elapsed_delta = dfa_t0.map(|t| t.elapsed()).unwrap_or_default();
+                dfa_elapsed += dfa_elapsed_delta;
+                datalog_assignments
             } else {
                 // Classic path: per-multipattern recursive matching
                 let cm_t0 = log_phases.then(Instant::now);
@@ -258,7 +262,7 @@ pub fn instantiate_quantifiers(
 
             debug_println!(7, 0, "We have the following list of assignments:");
             let mut substitutions = vec![];
-            for (subs, activation_depth) in list_assignments.iter() {
+            for subs in list_assignments.iter() {
                 let dedup_t0 = log_phases.then(Instant::now);
                 let already_seen = egraph
                     .added_instantiations
@@ -293,7 +297,7 @@ pub fn instantiate_quantifiers(
                 );
                 let substituted_term = term.subst(&substitution, &mut egraph.context);
                 if let Some(t) = subst_t0 { post_subst_time += t.elapsed(); }
-                substitutions.push((substituted_term, activation_depth, subs));
+                substitutions.push((substituted_term, subs));
             }
 
             if substitutions.is_empty() {
@@ -308,7 +312,7 @@ pub fn instantiate_quantifiers(
 
             debug_println!(6, 0, "Starting to look at substitutions");
             debug_println!(6, 0, "{}", egraph);
-            for (t, &activation_depth, _) in substitutions {
+            for (t, _) in substitutions {
                 post_instantiation_count += 1;
                 let t = if quantifier.polarity == Polarity::Existential {
                     egraph.context.not(t)
@@ -334,10 +338,9 @@ pub fn instantiate_quantifiers(
                 debug_println!(
                     8,
                     0,
-                    "{} is an instantiation of {} at depth {}",
+                    "{} is an instantiation of {}",
                     let_elim_term,
                     egraph.get_term(quantifier.id),
-                    activation_depth
                 );
 
                 let nnf_t0 = log_phases.then(Instant::now);
@@ -473,7 +476,7 @@ pub fn match_term<'a>(
     assignment: &'a mut DeterministicHashMap<String, Term>,
     trigger_term_pairs: Vec<(u64, Option<u64>)>,
     egraph: &'a mut Egraph,
-) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
+) -> Vec<DeterministicHashMap<String, Term>> {
     if trigger_term_pairs.is_empty() {
         debug_println!(
             6,
@@ -481,7 +484,7 @@ pub fn match_term<'a>(
             "We have reached the bottom case with assignment {:?}",
             assignment
         );
-        return vec![(assignment.clone(), 0)];
+        return vec![assignment.clone()];
     }
     let (trigger, term) = trigger_term_pairs[0];
     debug_println!(6, 0, "before13");
@@ -575,9 +578,6 @@ pub fn match_term<'a>(
                     // }
 
                     new_assignments
-                        .iter()
-                        .map(|(a, d)| (a.clone(), usize::max(*d, 0))) // note can get rid of this 0 it represents activation depth which we are not using
-                        .collect::<Vec<_>>()
                 }
                 Some(v) if egraph.find(v.uid()) == egraph.find(term.unwrap()) => {
                     debug_println!(6, 0, "The local term matches the assignment");
@@ -632,7 +632,7 @@ fn find_assignments_on_term(
     trigger_term_pairs: Vec<(u64, Option<u64>)>,
     assignment: &mut DeterministicHashMap<String, Term>,
     egraph: &mut Egraph,
-) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
+) -> Vec<DeterministicHashMap<String, Term>> {
     let _ = args
         .iter()
         .map(|a| debug_println!(6, 0, "{}", egraph.get_term(a.uid())))
@@ -693,9 +693,7 @@ fn find_assignments_on_term(
             let new_assignments = match_term(&mut assignment.clone(), new_pairs, egraph);
             debug_println!(6, 0, "We have the new assignments {:?}", new_assignments);
 
-            list_assignments.extend(
-                new_assignments.iter().map(|(a, _)| (a.clone(), 0)), // todo the 0 here comes from activation depth, we can get rid of it
-            );
+            list_assignments.extend(new_assignments);
         }
     }
     debug_println!(
