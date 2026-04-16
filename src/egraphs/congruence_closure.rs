@@ -1232,7 +1232,7 @@ fn union_predecessors(
                     let terms_pairwise = u_original_subterms
                         .clone()
                         .into_iter()
-                        .zip(original_subterms.clone().into_iter())
+                        .zip(original_subterms.clone())
                         .collect::<Vec<(u64, u64)>>();
                     let proof_parent = ProofForestEdge::Congruence {
                         size: 0,
