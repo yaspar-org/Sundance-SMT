@@ -4,7 +4,7 @@
 //! Important datastructures that are used elsewhere
 use std::{cmp::Ordering, fmt};
 
-use yaspar_ir::ast::{Str, Term};
+use yaspar_ir::ast::{QualifiedIdentifier, Str, Term};
 
 /// Keeps track of disequalities used between multiple terms
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,6 +24,39 @@ impl fmt::Display for DisequalTerm {
             self.term, self.level, self.hash, self.original_disequality
         )
     }
+}
+
+/// Identifies the "operator" of a canonical term form for the purposes of
+/// congruence-closure lookup. Replaces a previous `String`-based encoding.
+///
+/// For App terms, carries the full `QualifiedIdentifier` (symbol + indices +
+/// optional sort), which is required to distinguish polymorphic constructor
+/// instances like `(as nil (List Int))` vs `(as nil (List Bool))`. Hashing
+/// and equality are cheap because the inner `Str` and `Sort` types are
+/// hash-consed and hash/compare by uid.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CanonicalOp {
+    App(QualifiedIdentifier),
+    Eq,
+    Ite,
+}
+
+/// The canonical form of a term, produced by `Egraph::get_canonical_form`.
+///
+/// Represents how the term looks after walking each subterm's union-find root,
+/// which is what congruence closure uses to detect "same operator, same
+/// equivalent arguments" matches between two terms.
+#[derive(Debug, Clone)]
+pub struct CanonicalForm {
+    /// Raw uids of the term's subterms (not canonicalized). Used to build
+    /// pairwise term equalities for the congruence proof.
+    pub original_subterms: Vec<u64>,
+    /// The operator (function name / Eq / Ite).
+    pub op: CanonicalOp,
+    /// The union-find roots of each subterm. Together with `op` these form
+    /// the congruence key — two terms with the same `op` and `canonical_subterms`
+    /// must be equal by congruence.
+    pub canonical_subterms: Vec<u64>,
 }
 
 /// Represents a predecessor of a term

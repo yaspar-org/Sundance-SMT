@@ -6,11 +6,12 @@ use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::union;
 use crate::egraphs::datastructures::{
-    Assertion, ConstructorType, DisequalTerm, Polarity::*, Predecessor, Quantifier, TermOption,
+    Assertion, CanonicalForm, CanonicalOp, ConstructorType, DisequalTerm, Polarity::*, Predecessor,
+    Quantifier, TermOption,
 };
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
 use sat_interface::Formula;
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
@@ -216,7 +217,7 @@ pub struct Egraph {
     /// keeps track of a stack of "edges" to backtrack on
     pub proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u64, ProofForestEdge)>,
     /// this is a map from terms (u64) -> (term in the same egraph, predecesssor of term in same egraph)
-    pub predecessors: Vec<DeterministicHashMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
+    pub predecessors: Vec<FastDeterministicHashMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
     /// number to keep track of the current hash
     pub predecessor_hash: u64,
     /// mapping from levels -> corresponding hash
@@ -278,7 +279,7 @@ impl Egraph {
             }], // think about whether using a vector or hashmap is better here
             // note: this is an option because if you are a subterm of a quantifier, you are not in the proof forest. TODO: maybe there is a better way to think about this
             proof_forest_backtrack_stack: Vec::new(),
-            predecessors: vec![DeterministicHashMap::new()],
+            predecessors: vec![FastDeterministicHashMap::default()],
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
             assertions: vec![],
@@ -343,6 +344,13 @@ impl Egraph {
     pub fn get_term(&self, num: u64) -> Term {
         debug_println!(6, 0, "here3 with {}", num);
         self.terms_list[num as usize].clone().unwrap()
+    }
+
+    pub fn get_term_ref(&self, num: u64) -> &Term {
+        match &self.terms_list[num as usize] {
+            TermOption::Some(term) | TermOption::Uninitialized(term) => term,
+            TermOption::None => panic!("called `get_term_ref` on a None value"),
+        }
     }
 
     pub fn get_term_safe(&self, num: u64) -> TermOption {
@@ -433,8 +441,10 @@ impl Egraph {
                     children: DeterministicHashSet::new(),
                 },
             );
-            self.predecessors
-                .resize(self.predecessors.len() * 2, DeterministicHashMap::new());
+            self.predecessors.resize(
+                self.predecessors.len() * 2,
+                FastDeterministicHashMap::default(),
+            );
         }
 
         // if this has already been inserted, then we don't need to do anything
@@ -604,8 +614,10 @@ impl Egraph {
                     children: DeterministicHashSet::new(),
                 },
             );
-            self.predecessors
-                .resize(self.predecessors.len() * 2, DeterministicHashMap::new());
+            self.predecessors.resize(
+                self.predecessors.len() * 2,
+                FastDeterministicHashMap::default(),
+            );
         }
 
         // if this has already been inserted, then we don't need to do anything
@@ -663,7 +675,7 @@ impl Egraph {
         for (pred_key, pred) in subterm_root_predecessor {
             debug_println!(6, 0, "before9");
             // if the predecessor is not valid, then we can remove it from the predecessors list (this can happen because of backtracking) and continue
-            if !self.valid_hash(pred.hash, pred.level) {
+            if !valid_hash(pred.hash, pred.level, &self.predecessor_level) {
                 self.predecessors[subterm_root as usize].remove(pred_key);
                 debug_println!(
                     16,
@@ -1172,7 +1184,7 @@ impl Egraph {
         // sorted_disequalities.sort_by_key(|(key, _)| **key);
 
         for (key, disequality) in sorted_disequalities {
-            if !self.valid_hash(disequality.hash, disequality.level) {
+            if !valid_hash(disequality.hash, disequality.level, &self.predecessor_level) {
                 debug_println!(
                     19,
                     0,
@@ -1268,63 +1280,47 @@ impl Egraph {
     /// Get the canonical form for some term
     /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  
     /// TODO: I don't support canonical forms for non-app, non-eq terms, non-ite terms, but will have to do that eventually
-    pub fn get_canonical_form(
-        &mut self,
-        term_num: u64,
-        _level: usize,
-    ) -> Option<(Vec<u64>, String, Vec<u64>)> {
+    pub fn get_canonical_form(&self, term_num: u64, _level: usize) -> Option<CanonicalForm> {
         debug_println!(
             5,
             0,
             "We are in get_canonical_form with term_num {} and term {}",
             term_num,
-            self.get_term(term_num)
+            self.get_term_ref(term_num)
         );
         debug_println!(6, 0, "before11");
-        let term = self.get_term(term_num);
-        match term.repr() {
-            App(func, subterms, ..) => {
-                let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
-                let canonical_subterms = subterms_u64
-                    .clone()
-                    .into_iter()
-                    .map(|t| self.find(t))
-                    .collect::<Vec<_>>();
-                Some((subterms_u64, func.to_string(), canonical_subterms))
-            }
-            Eq(left, right) => {
-                let canonical_left = self.find(left.uid());
-                let canonical_right = self.find(right.uid());
-                Some((
-                    vec![left.uid(), right.uid()],
-                    "=".to_string(),
-                    vec![canonical_left, canonical_right],
-                ))
-            }
-            Ite(b, t1, t2) => {
-                let canonical_b = self.find(b.uid());
-                let canonical_left = self.find(t1.uid());
-                let canonical_right = self.find(t2.uid());
-                Some((
-                    vec![b.uid(), t1.uid(), t2.uid()],
-                    "ite".to_string(),
-                    vec![canonical_b, canonical_left, canonical_right],
-                ))
-            }
-            _ => None,
-        }
-    }
 
-    /// Checks if the hash is still valid at the given level
-    pub fn valid_hash(&self, hash: u64, level: usize) -> bool {
-        debug_println!(
-            5,
-            0,
-            "We are in valid_hash with hash {} and level {}",
-            hash,
-            level
-        );
-        hash >= self.predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
+        // Extract subterm uids and the operation identifier without cloning the Term.
+        // The inner block holds a borrow of self.terms_list via get_term_ref;
+        // it ends before we need &self for self.find(...).
+        //
+        // CanonicalOp replaces the old String-based identifier so that HashMap keys
+        // compare/hash as u64 (via hash-consed uids) instead of allocating and
+        // hashing String bytes per call.
+        let (original_subterms, op) = {
+            let term = self.get_term_ref(term_num);
+            match term.repr() {
+                App(func, subterms, ..) => {
+                    let uids: Vec<u64> = subterms.iter().map(|t| t.uid()).collect();
+                    // Clone the full QualifiedIdentifier so we preserve both
+                    // the symbol AND any sort/index annotations — without them
+                    // polymorphic constructor instances collide in the
+                    // canonical-form HashMap.
+                    (uids, CanonicalOp::App(func.clone()))
+                }
+                Eq(left, right) => (vec![left.uid(), right.uid()], CanonicalOp::Eq),
+                Ite(b, t1, t2) => (vec![b.uid(), t1.uid(), t2.uid()], CanonicalOp::Ite),
+                _ => return None,
+            }
+        };
+
+        let canonical_subterms: Vec<u64> =
+            original_subterms.iter().map(|&t| self.find(t)).collect();
+        Some(CanonicalForm {
+            original_subterms,
+            op,
+            canonical_subterms,
+        })
     }
 
     /// Adds a predecessor to a term (for example f(x) to x)
@@ -1340,71 +1336,57 @@ impl Egraph {
             self.get_term(new_pred_key),
             new_pred
         );
-        // if let Some(original_pred) = self.predecessors[term as usize].get(&new_pred_key) {
-        //     if (!self.valid_hash(original_pred.hash, original_pred.level)
-        //         || new_pred.level <= original_pred.level)
-        //         && self.valid_hash(new_pred.hash, new_pred.level)
-        //     {
-        //          debug_println!(
-        //             11,
-        //             0,
-        //             "For term {}, we are replacing the predecessor {} [level {}, hash {}] with predecessor {} [level {}, hash {}]",
-        //             self.get_term(term),
-        //             self.get_term(original_pred.predecessor),
-        //             original_pred.level,
-        //             original_pred.hash,
-        //             self.get_term(new_pred_key),
-        //             new_pred.level,
-        //             new_pred.hash
-        //         );
-        //         self.predecessors[term as usize].insert(new_pred_key, new_pred);
-        //     }
-        // } else {
-        //      debug_println!(
-        //         11,
-        //         0,
-        //         "For term {}, we are adding the predecessor {} [level {}, hash {}]",
-        //         self.get_term(term),
-        //         self.get_term(new_pred_key),
-        //         new_pred.level,
-        //         new_pred.hash
-        //     );
-        //     self.predecessors[term as usize].insert(new_pred_key, new_pred);
-        // }
-        // debug_println!(20, 0, "We have predecessor list size {}", self.predecessors[term as usize].len());
-        let (new_pred_hash, new_pred_level) = (new_pred.hash, new_pred.level);
-        if let Some(original_pred) = self.predecessors[term as usize].insert(new_pred_key, new_pred)
-        {
-            if !((!self.valid_hash(original_pred.hash, original_pred.level)
-                || new_pred_level <= original_pred.level)
-                && self.valid_hash(new_pred_hash, new_pred_level))
-            {
-                // if the old predecessor was valid, we want to keep it
-                self.predecessors[term as usize].insert(new_pred_key, original_pred);
-            } else {
+
+        // Compute new_pred validity before entering the Entry so we don't
+        // re-borrow self while holding an occupied slot.
+        let new_valid = valid_hash(new_pred.hash, new_pred.level, &self.predecessor_level);
+        let new_pred_level = new_pred.level;
+        let new_pred_hash = new_pred.hash;
+
+        use std::collections::hash_map::Entry;
+        match self.predecessors[term as usize].entry(new_pred_key) {
+            Entry::Vacant(slot) => {
+                slot.insert(new_pred);
                 debug_println!(
                     11,
                     0,
-                    "For term {}, we are replacing the predecessor {} [level {}, hash {}] with predecessor {} [level {}, hash {}]",
+                    "For term {}, we are adding the predecessor {} [level {}, hash {}]",
                     self.get_term(term),
-                    self.get_term(original_pred.predecessor),
-                    original_pred.level,
-                    original_pred.hash,
                     self.get_term(new_pred_key),
                     new_pred_level,
                     new_pred_hash
                 );
             }
-        } else {
-            debug_println!(
-                11,
-                0,
-                "For term {}, we are adding the predecessor {} [level {}, hash {}]",
-                self.get_term(term),
-                self.get_term(new_pred_key),
-                new_pred_level,
-                new_pred_hash
-            );
+            Entry::Occupied(mut slot) => {
+                // Inline valid_hash for the original so we don't need &self inside
+                // the occupied borrow. Matches valid_hash's body exactly (minus
+                // its debug_println at level 5, which has no functional effect).
+                let original = slot.get();
+                let orig_valid = valid_hash(original.hash, original.level, &self.predecessor_level);
+                // original.hash >= self.predecessor_level[original.level]
+                //     || original.hash == 0
+                //     || original.level == 0;
+                let orig_level = original.level;
+                let orig_hash = original.hash;
+                let orig_predecessor = original.predecessor;
+                let should_replace = (!orig_valid || new_pred_level <= orig_level) && new_valid;
+                if should_replace {
+                    slot.insert(new_pred);
+                    debug_println!(
+                        11,
+                        0,
+                        "For term {}, we are replacing the predecessor {} [level {}, hash {}] with predecessor {} [level {}, hash {}]",
+                        self.get_term(term),
+                        self.get_term(orig_predecessor),
+                        orig_level,
+                        orig_hash,
+                        self.get_term(new_pred_key),
+                        new_pred_level,
+                        new_pred_hash
+                    );
+                }
+                // Keep-old case: zero inserts, no debug output (matches original).
+            }
         }
     }
 
@@ -1432,6 +1414,18 @@ where
     fn nnf(&self, env: &mut Egraph) -> Self {
         self.nnf(&mut env.cnf_env())
     }
+}
+
+/// Checks if the hash is still valid at the given level
+pub fn valid_hash(hash: u64, level: usize, predecessor_level: &[u64]) -> bool {
+    debug_println!(
+        5,
+        0,
+        "We are in valid_hash with hash {} and level {}",
+        hash,
+        level
+    );
+    hash >= predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
 }
 
 // check that every variable occurs in each multipattern
