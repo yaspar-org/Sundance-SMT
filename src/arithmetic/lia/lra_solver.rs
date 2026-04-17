@@ -15,8 +15,9 @@ use crate::arithmetic::lia::bounds::Bounds;
 use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::solver_result::{
-    Assignment, Conflict, SolverDecision, SolverError, SolverResult,
+    Assignment, Conflict, SolverDecision, SolverError, SolverResult, SolverReturn,
 };
+use crate::arithmetic::lia::stats::Stats;
 use crate::arithmetic::lia::tableau::{Tableau, TableauImpl, TableauKind};
 use crate::arithmetic::lia::types::Rational;
 use crate::arithmetic::lia::variables::{Owner, Var, VarInfo};
@@ -628,7 +629,7 @@ impl LRASolver {
     /// Perform the general simplex algorithm to find a feasible solution.
     ///
     /// TODO: add configuration options for termination
-    pub fn solve(&mut self) -> SolverResult<SolverDecision> {
+    pub fn solve(&mut self) -> SolverResult<SolverReturn> {
         let mut i: usize = 0;
         loop {
             debug_println!(21, 0, "lia::lra_solver: Stepping simplex, iteration {}", i);
@@ -644,7 +645,11 @@ impl LRASolver {
                         "lia::lra_solver::solve: simplex complete, num iterations = {}",
                         i
                     );
-                    return Ok(SolverDecision::FEASIBLE(assg));
+                    let stats = Stats {
+                        num_lra_solve: 1,
+                        num_simplex_steps: i,
+                    };
+                    return Ok(SolverReturn::new(SolverDecision::FEASIBLE(assg), stats));
                 }
                 Ok(SimplexStepResult::Infeasible(v)) => {
                     let conflict = self.compute_conflict(v)?;
@@ -654,7 +659,14 @@ impl LRASolver {
                         "lia::lra_solver::solve: simplex complete, num iterations = {}",
                         i
                     );
-                    return Ok(SolverDecision::INFEASIBLE(conflict));
+                    let stats = Stats {
+                        num_lra_solve: 1,
+                        num_simplex_steps: i,
+                    };
+                    return Ok(SolverReturn::new(
+                        SolverDecision::INFEASIBLE(conflict),
+                        stats,
+                    ));
                 }
                 Err(e) => return Err(e), // error
             }
@@ -1151,7 +1163,7 @@ mod tests {
         // s2 | 2 -1    0 <= s2
         // s3 |-1  2    1 <= s3
         let mut solver = ex_5_6_tableau();
-        let result = solver.solve().expect("Failed to run simplex");
+        let result = solver.solve().expect("Failed to run simplex").decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
         if let SolverDecision::FEASIBLE(ass) = result {
             assert_eq!(ass.nvars(), 5);
@@ -1184,14 +1196,14 @@ mod tests {
     #[test]
     fn ex_triangle_hole_run_simplex() {
         let mut tableau = ex_triangle_hole_infeasible();
-        let result = tableau.solve().expect("Failed to run simplex");
+        let result = tableau.solve().expect("Failed to run simplex").decision;
         assert!(matches!(result, SolverDecision::INFEASIBLE(_)));
     }
 
     #[test]
     fn ex_triangle_hole_run_simplex_conflict() {
         let mut tableau = ex_triangle_hole_infeasible();
-        match tableau.solve().expect("Failed to run simplex") {
+        match tableau.solve().expect("Failed to run simplex").decision {
             SolverDecision::INFEASIBLE(conflict) => {
                 assert_eq!(conflict.len(), 3);
             }
@@ -1202,7 +1214,10 @@ mod tests {
     #[test]
     fn ex_5_6_assert_lower() {
         let mut solver = ex_5_6_tableau();
-        let result = solver.solve().expect("Failed to run simplex, first run");
+        let result = solver
+            .solve()
+            .expect("Failed to run simplex, first run")
+            .decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
         // x (Var(4, Real)) is assigned 1, so we expect asserting lower bound zero to satisfy the current
         // assignment
@@ -1211,7 +1226,7 @@ mod tests {
             Some(true)
         );
 
-        let result = solver.solve().expect("Failed to run simplex");
+        let result = solver.solve().expect("Failed to run simplex").decision;
         assert!(
             matches!(result, SolverDecision::FEASIBLE(_)),
             "unexpected result when x >= 0 is asserted"
@@ -1224,7 +1239,7 @@ mod tests {
         );
 
         // still feasible: system has solutions where x is unbounded
-        let result = solver.solve().expect("Failed to run simplex");
+        let result = solver.solve().expect("Failed to run simplex").decision;
         assert!(
             matches!(result, SolverDecision::FEASIBLE(_)),
             "unexpected result when x >= 100 is asserted"
@@ -1236,7 +1251,7 @@ mod tests {
             solver.assert_lower(&Var::real(2), &2i32.into()).unwrap(),
             Some(true)
         );
-        let result = solver.solve().expect("Failed to run simplex");
+        let result = solver.solve().expect("Failed to run simplex").decision;
         assert!(
             matches!(result, SolverDecision::FEASIBLE(_)),
             "unexpected result when y >= 100 is asserted"
@@ -1246,7 +1261,7 @@ mod tests {
     #[test]
     fn ex_5_6_backtrack_from_unsat() {
         let mut solver = ex_5_6_tableau();
-        let result = solver.solve().unwrap();
+        let result = solver.solve().unwrap().decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
 
         // set a backtrack point and assert x <= 0 which makes the system infeasible
@@ -1257,12 +1272,12 @@ mod tests {
             solver.assert_upper(&Var::real(4), &0i32.into()).unwrap(),
             None
         );
-        let result = solver.solve().unwrap();
+        let result = solver.solve().unwrap().decision;
         assert!(matches!(result, SolverDecision::INFEASIBLE(_)));
 
         // backtrack to level 0 and assert that the system is feasible again
         solver.backtrack(level);
-        let result = solver.solve().unwrap();
+        let result = solver.solve().unwrap().decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
     }
 }

@@ -95,26 +95,32 @@ pub fn check_integer_constraints_satisfiable_lia(
     }
 
     match frontend::solve_ctx_raw(&mut ctx, TableauKind::Dense) {
-        Ok(SolverDecision::FEASIBLE(assignment)) => {
-            let mut model_hashmap: DeterministicHashMap<i64, DeterministicHashSet<u64>> =
-                DeterministicHashMap::new();
-            for (term_id, root_var) in &roots {
-                if let Some(value) = assignment.get(root_var) {
-                    let val_i64: i64 = value.to_int().value().try_into().unwrap_or(i64::MAX);
-                    model_hashmap.entry(val_i64).or_default().insert(*term_id);
+        Ok(ret) => {
+            debug_println!(25, 4, "lia::frontend: stats: {:?}", ret.stats);
+            match ret.decision {
+                SolverDecision::FEASIBLE(assignment) => {
+                    let mut model_hashmap: DeterministicHashMap<i64, DeterministicHashSet<u64>> =
+                        DeterministicHashMap::new();
+                    for (term_id, root_var) in &roots {
+                        if let Some(value) = assignment.get(root_var) {
+                            let val_i64: i64 =
+                                value.to_int().value().try_into().unwrap_or(i64::MAX);
+                            model_hashmap.entry(val_i64).or_default().insert(*term_id);
+                        }
+                    }
+                    ArithResult::Sat(model_hashmap)
                 }
+                SolverDecision::INFEASIBLE(conflict) => {
+                    let unsat_core_literals: Vec<i32> = conflict
+                        .iter()
+                        .flat_map(|var| slack_to_lits.get(var).into_iter().flatten().copied())
+                        .collect();
+                    debug_println!(21, 4, "LIA: Unsat core literals: {:?}", unsat_core_literals);
+                    ArithResult::Unsat(unsat_core_literals)
+                }
+                SolverDecision::UNKNOWN => ArithResult::None,
             }
-            ArithResult::Sat(model_hashmap)
         }
-        Ok(SolverDecision::INFEASIBLE(conflict)) => {
-            let unsat_core_literals: Vec<i32> = conflict
-                .iter()
-                .flat_map(|var| slack_to_lits.get(var).into_iter().flatten().copied())
-                .collect();
-            debug_println!(21, 4, "LIA: Unsat core literals: {:?}", unsat_core_literals);
-            ArithResult::Unsat(unsat_core_literals)
-        }
-        Ok(SolverDecision::UNKNOWN) => ArithResult::None,
         Err(e) => panic!("lialp: unexpected error: {e:?}"),
     }
 }

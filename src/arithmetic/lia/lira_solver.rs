@@ -12,7 +12,8 @@ use slotmap;
 use crate::arithmetic::lia::bounds::Bounds;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::qdelta::QDelta;
-use crate::arithmetic::lia::solver_result::{Conflict, SolverDecision, SolverResult};
+use crate::arithmetic::lia::solver_result::{Conflict, SolverDecision, SolverResult, SolverReturn};
+use crate::arithmetic::lia::stats::Stats;
 use crate::arithmetic::lia::variables::{Var, VarType};
 use crate::debug_println;
 
@@ -179,6 +180,8 @@ pub struct LIRASolver {
     lra_solver: LRASolver,
     /// Stack of variable bounds for tracking during solving
     explorer: BrtExplorer,
+    /// Runtime statistics
+    stats: Stats,
 }
 
 impl LIRASolver {
@@ -192,6 +195,7 @@ impl LIRASolver {
         Self {
             lra_solver,
             explorer: BrtExplorer::new(root),
+            stats: Stats::new(),
         }
     }
 
@@ -289,17 +293,12 @@ impl LIRASolver {
     ///
     /// TODO: lira_solver::solve: document branch-and-bound algorithm using incremental simplex
     /// TODO: lira_solver::solve: clean up debug statements
-    pub fn solve(&mut self) -> SolverResult<SolverDecision> {
-        debug_println!(
-            21,
-            0,
-            "lia::lira_solver: starting LIRASolver with lra_solver: {:?}",
-            self.lra_solver
-        );
+    pub fn solve(&mut self) -> SolverResult<SolverReturn> {
+        debug_println!(21, 0, "lia::lira_solver: starting LIRASolver");
 
         while let Some(current_k) = self.explorer.active.pop() {
             debug_println!(
-                15,
+                21,
                 0,
                 "lia::lira_solver::solve: pop & setup node {:?}",
                 self.explorer.arena[current_k]
@@ -316,7 +315,10 @@ impl LIRASolver {
 
             // setup done, now solve and update state and active
             debug_println!(21, 0, "lia::lira_solver: solving over Q");
-            match self.lra_solver.solve()? {
+            let ret = self.lra_solver.solve()?;
+            // this also bumps num_lra_solve by 1
+            self.stats.combine(&ret.stats);
+            match ret.decision {
                 SolverDecision::INFEASIBLE(cs) => {
                     debug_println!(
                         15,
@@ -342,7 +344,12 @@ impl LIRASolver {
                     );
                     // identify the first integer type variable whose assigned value is not integral
                     let (x, val) = match self.find_next_int_var() {
-                        None => return Ok(SolverDecision::FEASIBLE(assg)), // rational solution meets all type constraints
+                        None => {
+                            return Ok(SolverReturn::new(
+                                SolverDecision::FEASIBLE(assg),
+                                self.stats.clone(),
+                            ));
+                        } // rational solution meets all type constraints
                         Some((x, val)) => {
                             debug_println!(
                                 15,
@@ -412,7 +419,10 @@ impl LIRASolver {
             .get(root_k)
             .unwrap_or_else(|| panic!("invalid root key {root_k:?}"));
         match &root.state {
-            BrtNodeState::Pruned(conflict) => Ok(SolverDecision::INFEASIBLE(conflict.clone())),
+            BrtNodeState::Pruned(conflict) => Ok(SolverReturn::new(
+                SolverDecision::INFEASIBLE(conflict.clone()),
+                self.stats.clone(),
+            )),
             state => unreachable!("invalid final root node state {state:?}"),
         }
     }
@@ -478,7 +488,7 @@ mod tests {
             "#;
         let mut solver =
             smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
-        let ass = match solver.solve().unwrap() {
+        let ass = match solver.solve().unwrap().decision {
             SolverDecision::FEASIBLE(ass) => ass,
             _ => unreachable!(),
         };
@@ -508,7 +518,7 @@ mod tests {
         );
         // lower branch is infeasible
         assert!(matches!(
-            solver.solve().unwrap(),
+            solver.solve().unwrap().decision,
             SolverDecision::INFEASIBLE(_)
         ));
 
@@ -523,7 +533,7 @@ mod tests {
         );
         // upper branch is infeasible
         assert!(matches!(
-            solver.solve().unwrap(),
+            solver.solve().unwrap().decision,
             SolverDecision::INFEASIBLE(_)
         ));
 
@@ -548,8 +558,8 @@ mod tests {
             smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
         let mut lira_solver = LIRASolver::new(lra_solver);
         assert!(matches!(
-            lira_solver.solve(),
-            Ok(SolverDecision::INFEASIBLE(_))
+            lira_solver.solve().unwrap().decision,
+            SolverDecision::INFEASIBLE(_)
         ));
     }
 
@@ -580,8 +590,8 @@ mod tests {
 
         // Assert that the system is INFEASIBLE
         assert!(matches!(
-            lira_solver.solve(),
-            Ok(SolverDecision::INFEASIBLE(_))
+            lira_solver.solve().unwrap().decision,
+            SolverDecision::INFEASIBLE(_)
         ));
     }
 
@@ -647,8 +657,8 @@ mod tests {
 
         // Assert that the system is INFEASIBLE
         assert!(matches!(
-            lira_solver.solve(),
-            Ok(SolverDecision::INFEASIBLE(_))
+            lira_solver.solve().unwrap().decision,
+            SolverDecision::INFEASIBLE(_)
         ));
     }
 

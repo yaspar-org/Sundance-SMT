@@ -17,6 +17,7 @@ pub mod qdelta;
 pub mod solver_result;
 pub mod solver_result_api;
 pub mod sparse;
+pub mod stats;
 pub mod tableau;
 pub mod tableau_dense;
 pub mod tableau_sparse;
