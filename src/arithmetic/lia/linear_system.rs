@@ -1101,7 +1101,7 @@ mod tests {
             .expect("failed to build solver");
 
         assert!(solver.is_valid());
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
 
         // Same test but with sparse tableau
@@ -1111,7 +1111,7 @@ mod tests {
             .expect("failed to build solver");
 
         assert!(solver.is_valid());
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
     }
 
@@ -1141,7 +1141,7 @@ mod tests {
             .expect("failed to build solver");
 
         assert!(solver.is_valid());
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         // TODO: check all assignments are ZERO
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
         if let SolverDecision::FEASIBLE(assg) = result {
@@ -1158,7 +1158,7 @@ mod tests {
                 .expect("bound assertion failed"),
             Some(true)
         );
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
         if let SolverDecision::FEASIBLE(assg) = result {
             assert!(assg.iter().all(|(_, val)| val.is_zero()));
@@ -1204,7 +1204,7 @@ mod tests {
             .expect("failed to build solver");
         assert!(solver.is_valid());
         assert!(matches!(
-            solver.solve().expect("simplex failed"),
+            solver.solve().expect("simplex failed").decision,
             SolverDecision::INFEASIBLE(_)
         ));
     }
@@ -1275,7 +1275,7 @@ mod tests {
             .to_lra_solver(true, TableauKind::Dense)
             .expect("failed to build solver");
         assert!(solver.is_valid());
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         // validate the assignment
         if let SolverDecision::FEASIBLE(assg) = result {
             // Find the value of x_59 and assert it is strictly positive
@@ -1292,7 +1292,7 @@ mod tests {
             .to_lra_solver(true, TableauKind::Sparse)
             .expect("failed to build solver");
         assert!(solver.is_valid());
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         // validate the assignment
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
     }
@@ -1359,7 +1359,7 @@ mod tests {
             .to_lra_solver(true, TableauKind::Dense)
             .expect("failed to build solver");
         assert!(solver.is_valid());
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         // validate the assignment
         if let SolverDecision::FEASIBLE(assg) = result {
             // the system is feasible, but only via some values being non-integral. For example:
@@ -1379,7 +1379,7 @@ mod tests {
             .to_lra_solver(true, TableauKind::Sparse)
             .expect("failed to build solver");
         assert!(solver.is_valid());
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         // validate the assignment
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
     }
@@ -1402,7 +1402,7 @@ mod tests {
             .expect("failed to build solver");
 
         assert!(solver.is_valid());
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         assert!(matches!(result, SolverDecision::INFEASIBLE(_)));
     }
 
@@ -1443,7 +1443,7 @@ mod tests {
     #[test]
     fn solve_strict_system_strictly_in_unit_cube() {
         let (mut solver, _x, _y) = open_polytope_in_unit_cube();
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         if let SolverDecision::FEASIBLE(assg) = result {
             // the system is feasible, but only via *all* variables being non-integral
             assert!(assg.iter().all(|(_, val)| !val.is_int()));
@@ -1457,7 +1457,7 @@ mod tests {
     fn solve_strict_system_strictly_in_unit_cube_then_assert_lower() {
         let (mut solver, x, _y) = open_polytope_in_unit_cube();
         assert!(matches!(
-            solver.solve().expect("simplex failed"),
+            solver.solve().expect("simplex failed").decision,
             SolverDecision::FEASIBLE(_)
         ));
 
@@ -1467,7 +1467,7 @@ mod tests {
             solver.assert_lower(&x, &rbig!(1 / 10).into()).unwrap(),
             Some(true)
         );
-        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed") {
+        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed").decision {
             assert_eq!(ass.get(&x).unwrap(), &rbig!(7 / 18));
         } else {
             unreachable!()
@@ -1481,7 +1481,7 @@ mod tests {
             None, // feasibility is now unknown
         );
         // the new lower bound pushed x up to its lower bound
-        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed") {
+        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed").decision {
             assert_eq!(ass.get(&x).unwrap(), &rbig!(5 / 9));
         } else {
             unreachable!()
@@ -1494,7 +1494,7 @@ mod tests {
         );
         // system is now infeasible
         assert!(matches!(
-            solver.solve().expect("simplex failed"),
+            solver.solve().expect("simplex failed").decision,
             SolverDecision::INFEASIBLE(_)
         ));
     }
@@ -1502,7 +1502,7 @@ mod tests {
     #[test]
     fn solve_strict_system_strictly_in_unit_cube_then_assert_upper() {
         let (mut solver, x, y) = open_polytope_in_unit_cube();
-        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed") {
+        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed").decision {
             // test x and y's values
             assert!(rbig!(1 / 3) <= *ass.get(&x).unwrap() && *ass.get(&x).unwrap() <= rbig!(2 / 3));
             assert!(rbig!(1 / 3) <= *ass.get(&y).unwrap() && *ass.get(&y).unwrap() <= rbig!(2 / 3));
@@ -1516,7 +1516,7 @@ mod tests {
             solver.assert_upper(&y, &rbig!(199 / 300).into()).unwrap(),
             Some(true)
         );
-        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed") {
+        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed").decision {
             assert!(
                 rbig!(1 / 3) <= *ass.get(&y).unwrap() && *ass.get(&y).unwrap() <= rbig!(199 / 300)
             );
@@ -1534,7 +1534,7 @@ mod tests {
         let assert_upper_2_result = solver.assert_upper(&y, &rbig!(1001 / 3000).into()).unwrap();
         assert_ne!(assert_upper_2_result, Some(false)); // either None or Some(true)
 
-        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed") {
+        if let SolverDecision::FEASIBLE(ass) = solver.solve().expect("simplex failed").decision {
             assert!(
                 rbig!(1 / 3) <= *ass.get(&y).unwrap()
                     && *ass.get(&y).unwrap() <= rbig!(1001 / 3000)
@@ -1550,7 +1550,7 @@ mod tests {
         );
         // system is now infeasible
         assert!(matches!(
-            solver.solve().expect("simplex failed"),
+            solver.solve().expect("simplex failed").decision,
             SolverDecision::INFEASIBLE(_)
         ));
     }
@@ -1572,7 +1572,7 @@ mod tests {
         let sys = LinearSystem::new(ctx);
         let mut solver = sys.to_lra_solver(true, TableauKind::Dense).unwrap();
 
-        let result = solver.solve().unwrap();
+        let result = solver.solve().unwrap().decision;
         if let SolverDecision::FEASIBLE(assg) = result {
             // the system is feasible, but only via *all* original variables being non-integral
             assert!(!assg.get(&x).unwrap().is_int() && !assg.get(&y).unwrap().is_int());
@@ -1599,7 +1599,7 @@ mod tests {
         let sys = LinearSystem::new(ctx);
         let mut solver = sys.to_lra_solver(true, TableauKind::Dense).unwrap();
         assert!(matches!(
-            solver.solve().unwrap(),
+            solver.solve().unwrap().decision,
             SolverDecision::INFEASIBLE(_)
         ));
 
@@ -1615,7 +1615,7 @@ mod tests {
         let sys = LinearSystem::new(ctx);
         let mut solver = sys.to_lra_solver(true, TableauKind::Dense).unwrap();
         assert!(matches!(
-            solver.solve().unwrap(),
+            solver.solve().unwrap().decision,
             SolverDecision::INFEASIBLE(_)
         ));
     }
@@ -1653,7 +1653,7 @@ mod tests {
             .to_lra_solver(true, TableauKind::Dense)
             .expect("failed to build tableau");
         assert!(solver.is_valid());
-        let result = solver.solve().expect("simplex failed");
+        let result = solver.solve().expect("simplex failed").decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
     }
 
@@ -1681,7 +1681,7 @@ mod tests {
         let mut solver = sys
             .to_lra_solver(true, TableauKind::Dense)
             .expect("failed to build solver");
-        let result = solver.solve().expect("solver failed");
+        let result = solver.solve().expect("solver failed").decision;
         assert!(matches!(result, SolverDecision::INFEASIBLE(_)));
     }
 }
