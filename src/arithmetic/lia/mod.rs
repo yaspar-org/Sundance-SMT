@@ -7,6 +7,7 @@
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
 
 pub mod bounds;
+pub mod config;
 pub mod context;
 pub mod frontend;
 pub mod linear_system;

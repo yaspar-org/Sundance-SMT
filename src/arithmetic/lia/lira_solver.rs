@@ -10,6 +10,7 @@ use dashu::{Integer, Rational};
 use slotmap;
 
 use crate::arithmetic::lia::bounds::Bounds;
+use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::solver_result::{Conflict, SolverDecision, SolverResult, SolverReturn};
@@ -180,13 +181,15 @@ pub struct LIRASolver {
     lra_solver: LRASolver,
     /// Stack of variable bounds for tracking during solving
     explorer: BrtExplorer,
+    /// Solver configuration
+    config: SolverConfig,
     /// Runtime statistics
     stats: Stats,
 }
 
 impl LIRASolver {
     /// Create a new LIRASolver with the given LRASolver
-    pub fn new(lra_solver: LRASolver) -> Self {
+    pub fn new(lra_solver: LRASolver, config: SolverConfig) -> Self {
         let root = BrtNode {
             level: Some(0usize),
             state: BrtNodeState::Active(BrtAction::NoOp),
@@ -195,6 +198,7 @@ impl LIRASolver {
         Self {
             lra_solver,
             explorer: BrtExplorer::new(root),
+            config,
             stats: Stats::new(),
         }
     }
@@ -318,6 +322,14 @@ impl LIRASolver {
             let ret = self.lra_solver.solve()?;
             // this also bumps num_lra_solve by 1
             self.stats.combine(&ret.stats);
+            if let Some(max) = self.config.max_lra_solve_calls
+                && self.stats.num_lra_solve > max
+            {
+                return Ok(SolverReturn::new(
+                    SolverDecision::UNKNOWN,
+                    self.stats.clone(),
+                ));
+            }
             match ret.decision {
                 SolverDecision::INFEASIBLE(cs) => {
                     debug_println!(
@@ -468,11 +480,11 @@ impl LIRASolver {
 mod tests {
     use dashu::{Rational, rbig};
 
+    use crate::arithmetic::lia::config::SolverConfig;
     use crate::arithmetic::lia::frontend::{smt_to_lra_solver, solve_smtlib};
     use crate::arithmetic::lia::lira_solver::LIRASolver;
     use crate::arithmetic::lia::solver_result::SolverDecision;
     use crate::arithmetic::lia::solver_result_api::SolverDecisionApi;
-    use crate::arithmetic::lia::tableau::TableauKind;
 
     /// Execute branch and bound manually on an UNSAT QF_LIA problem
     #[test]
@@ -486,8 +498,8 @@ mod tests {
         (assert (>= x (/ (to_real 1) (to_real 3))))  ; x >= 1/3
         (assert (<= (to_real y) (/ (to_real 2) (to_real 3))))  ; y <= 2/3
             "#;
-        let mut solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
+        let mut solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
         let ass = match solver.solve().unwrap().decision {
             SolverDecision::FEASIBLE(ass) => ass,
             _ => unreachable!(),
@@ -554,9 +566,9 @@ mod tests {
         (assert (>= x (/ (to_real 1) (to_real 3))))  ; x >= 1/3
         (assert (<= (to_real y) (/ (to_real 2) (to_real 3))))  ; y <= 2/3
             "#;
-        let lra_solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
-        let mut lira_solver = LIRASolver::new(lra_solver);
+        let lra_solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
+        let mut lira_solver = LIRASolver::new(lra_solver, SolverConfig::default());
         assert!(matches!(
             lira_solver.solve().unwrap().decision,
             SolverDecision::INFEASIBLE(_)
@@ -584,9 +596,9 @@ mod tests {
         (check-sat)
         "#;
 
-        let lra_solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
-        let mut lira_solver = LIRASolver::new(lra_solver);
+        let lra_solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
+        let mut lira_solver = LIRASolver::new(lra_solver, SolverConfig::default());
 
         // Assert that the system is INFEASIBLE
         assert!(matches!(
@@ -651,9 +663,9 @@ mod tests {
         (assert (>= (+ (+ 1 (* (- 1) x)) (+ 1 (* (- 1) y)) (+ 1 (* (- 1) z))) 1))
         "#;
 
-        let lra_solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
-        let mut lira_solver = LIRASolver::new(lra_solver);
+        let lra_solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
+        let mut lira_solver = LIRASolver::new(lra_solver, SolverConfig::default());
 
         // Assert that the system is INFEASIBLE
         assert!(matches!(
@@ -677,12 +689,12 @@ mod tests {
         (check-sat)
         "#;
         // first 3 constraints are sat
-        let result = solve_smtlib(smt1, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt1, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)));
 
         // all 4 constraints are sat
         let smt2 = smt1.to_string() + "(assert (> (- (* 7 x) (* 9 y)) 4))";
-        let result2 = solve_smtlib(&smt2, TableauKind::Dense).expect("solver failed");
+        let result2 = solve_smtlib(&smt2, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result2, SolverDecisionApi::FEASIBLE(_)));
 
         // now prove validity
@@ -694,7 +706,7 @@ mod tests {
         // forall (x y: Int) -(C1 and C2 and C3) or C4
         // negate: exists (x y: Int) (C1 and ... and C3) and (-C4)
         let smt3 = smt1.to_string() + "(assert (not (> (- (* 7 x) (* 9 y)) 4)))";
-        let result3 = solve_smtlib(&smt3, TableauKind::Dense).expect("solver failed");
+        let result3 = solve_smtlib(&smt3, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result3, SolverDecisionApi::INFEASIBLE(_)));
     }
 
@@ -709,7 +721,7 @@ mod tests {
         (assert (not (>= (+ (* 2 a) b) (+ b a a))))
         (check-sat)
         "#;
-        let result = solve_smtlib(smt, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)),);
         if let SolverDecisionApi::INFEASIBLE(conflict) = result {
             assert_eq!(conflict.len(), 1);
@@ -730,7 +742,7 @@ mod tests {
         (assert (not (<= (* 2 a) (* 3 c))))
         (check-sat)
         "#;
-        let result = solve_smtlib(smt, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)),);
         if let SolverDecisionApi::INFEASIBLE(conflict) = result {
             assert_eq!(conflict.len(), 3); // every subset of 2 assertions is feasible
@@ -763,7 +775,7 @@ mod tests {
         (assert (< (+ a b (* 3.0 c) d (* 2.0 e)) 0.0))  ; x
         (check-sat)
         "#;
-        let result = solve_smtlib(smt, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)),);
         if let SolverDecisionApi::INFEASIBLE(conflict) = result {
             assert_eq!(conflict.len(), 6);
@@ -787,7 +799,7 @@ mod tests {
         (assert (< (+ a b (* 3.0 c) d (* 2.0 e)) 0.0))  ; x
         (check-sat)
         "#;
-        let result = solve_smtlib(smt_conflict, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt_conflict, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)),);
 
         // Sanity check that the conflict is minimal; not a proof of such, just
@@ -807,7 +819,7 @@ mod tests {
         (assert (< (+ a b (* 3.0 c) d (* 2.0 e)) 0.0))  ; x
         (check-sat)
         "#;
-        let result = solve_smtlib(smt_conflict, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt_conflict, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)),);
     }
 
@@ -827,7 +839,7 @@ mod tests {
         (assert (< (- b) 1))
         (check-sat)
         "#;
-        let result = solve_smtlib(smt, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)),);
         if let SolverDecisionApi::INFEASIBLE(conflict) = result {
             assert_eq!(conflict.len(), 2);
@@ -844,7 +856,7 @@ mod tests {
         (assert (= (* 2 x) 3))
         (check-sat)
         "#;
-        let result = solve_smtlib(smt, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)),);
         if let SolverDecisionApi::FEASIBLE(assg) = result {
             let (_, val) = assg.iter().next().unwrap();
