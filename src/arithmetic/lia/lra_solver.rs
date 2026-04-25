@@ -47,6 +47,13 @@ enum SimplexStepResult {
     Unknown,
 }
 
+/// Whether a basic variable needs to increase (below lower bound)
+/// or decrease (above upper bound) to become feasible.
+enum PivotDirection {
+    Increase,
+    Decrease,
+}
+
 /// Linear real arithmetic solver
 pub struct LRASolver {
     /// Variable info for all original and slack variables. The vector itself should be immutable,
@@ -519,6 +526,65 @@ impl LRASolver {
         d0
     }
 
+    /// Helper function for `step_simplex` that finds a non-basic variable to pivot on.
+    fn find_pivot_and_update(
+        &mut self,
+        row: usize,
+        var_idx: usize,
+        direction: PivotDirection,
+    ) -> SolverResult<SimplexStepResult> {
+        let target_bound = match direction {
+            PivotDirection::Increase => self.variables[var_idx]
+                .bounds
+                .lower
+                .as_ref()
+                .unwrap()
+                .clone(),
+            PivotDirection::Decrease => self.variables[var_idx]
+                .bounds
+                .upper
+                .as_ref()
+                .unwrap()
+                .clone(),
+        };
+
+        for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
+            let non_basic_var = &self.variables[*non_basic_idx];
+            let a_i_j = self.tableau.get(row, col).unwrap();
+
+            let eligible = match direction {
+                PivotDirection::Increase => {
+                    (a_i_j > &Rational::ZERO && !non_basic_var.at_upper())
+                        || (a_i_j < &Rational::ZERO && !non_basic_var.at_lower())
+                }
+                PivotDirection::Decrease => {
+                    (a_i_j > &Rational::ZERO && !non_basic_var.at_lower())
+                        || (a_i_j < &Rational::ZERO && !non_basic_var.at_upper())
+                }
+            };
+
+            if eligible {
+                debug_println!(
+                    15,
+                    0,
+                    "lia::lra_solver: pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
+                    row,
+                    self.variables[var_idx],
+                    col,
+                    self.variables[self.non_basic[col]],
+                    target_bound
+                );
+                self.pivot_and_update(row, col, &target_bound)?;
+                // Invariant: in `step_simplex` or `find_pivot_and_update` => `self.state ==
+                // LRASolverState::Unknown`
+                return Ok(SimplexStepResult::Unknown);
+            }
+        }
+
+        self.state = LRASolverState::Unsat;
+        Ok(SimplexStepResult::Infeasible(self.variables[var_idx].var))
+    }
+
     /// Perform one simplex step on self.
     ///
     /// Roughly, find the first (in order) basic variable that doesn't satisfy its
@@ -527,7 +593,8 @@ impl LRASolver {
     /// range and make the adjustment, pivoting the two variables in the process.
     /// Otherwise, the system of inequalities is UNSAT.
     ///
-    /// TODO: simplify step_simplex
+    /// Find a suitable non-basic pivot variable and perform the pivot, or return
+    /// `Infeasible` if no eligible non-basic variable exists.
     fn step_simplex(&mut self) -> SolverResult<SimplexStepResult> {
         // TODO: step_simplex: Use the violated-variable priority queue technique
         // TODO: step_simplex: The way the variable loops are setup here implicitly implements
@@ -541,8 +608,8 @@ impl LRASolver {
         //     coefficients in the tableau, finally by smallest in the order.
         //   2. Switch to Bland's rule
         //
-        for var in self.variables.iter() {
-            let row = match var.is_basic() {
+        for var_idx in 0..self.variables.len() {
+            let row = match self.variables[var_idx].is_basic() {
                 Some(r) => r,
                 None => continue,
             };
@@ -551,74 +618,13 @@ impl LRASolver {
             // 1. v is already in bounds
             // 2. v.val is less than the lower bound
             // 3. v.val is greater than the upper bound
-            if var.in_bounds() {
+            if self.variables[var_idx].in_bounds() {
                 continue;
-            } else if var.below_lower() {
-                // TODO: factor out loop code and simpler helper functions
-                // Try to increase basic_var's assignment to its lower bound
-                for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
-                    let non_basic_var = &self.variables[*non_basic_idx];
-                    let a_i_j = self.tableau.get(row, col).unwrap();
-                    if (a_i_j > &Rational::ZERO && !non_basic_var.at_upper())
-                        || (a_i_j < &Rational::ZERO && !non_basic_var.at_lower())
-                    {
-                        // unwrap is safe because basic_var is below its lower bound
-                        let basic_lower_bound = var.bounds.lower.as_ref().unwrap().clone();
-                        debug_println!(
-                            15,
-                            0,
-                            "lia::lra_solver: pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
-                            row,
-                            var,
-                            col,
-                            self.variables[self.non_basic[col]],
-                            basic_lower_bound
-                        );
-                        self.pivot_and_update(row, col, &basic_lower_bound)?;
-                        return Ok(SimplexStepResult::Unknown);
-                    }
-                }
-                // if no suitable non-basic variable is found, the system is infeasible
-                self.state = LRASolverState::Unsat;
-                return Ok(SimplexStepResult::Infeasible(var.var));
+            } else if self.variables[var_idx].below_lower() {
+                return self.find_pivot_and_update(row, var_idx, PivotDirection::Increase);
             } else {
-                debug_println!(
-                    15,
-                    0,
-                    "lia::lra_solver: basic var (row {}) is above its upper bound: {}",
-                    row,
-                    var
-                );
-                debug_assert!(var.bounds.upper.is_some() && var.above_upper());
-                // Try to decrease basic_var's assignment to its upper bound
-                for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
-                    let non_basic_var = &self.variables[*non_basic_idx];
-                    let a_i_j = self.tableau.get(row, col).unwrap();
-                    // this condition is dual to the one above
-                    if (a_i_j > &Rational::ZERO && !non_basic_var.at_lower())
-                        || (a_i_j < &Rational::ZERO && !non_basic_var.at_upper())
-                    {
-                        // unwrap is safe because basic_var is above its upper bound
-                        let basic_upper_bound = var.bounds.upper.as_ref().unwrap().clone();
-                        // pivot basic_var and non_basic_var, update assignment of
-                        // (previously) basic_var to its lower bound and then adjust all
-                        // basic assignments so the equations hold
-                        debug_println!(
-                            15,
-                            0,
-                            "lia::lra_solver: pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
-                            row,
-                            var,
-                            col,
-                            self.variables[self.non_basic[col]],
-                            basic_upper_bound
-                        );
-                        self.pivot_and_update(row, col, &basic_upper_bound)?;
-                        return Ok(SimplexStepResult::Unknown);
-                    }
-                }
-                self.state = LRASolverState::Unsat;
-                return Ok(SimplexStepResult::Infeasible(var.var));
+                // self.variables[var_idx].above_upper() is true
+                return self.find_pivot_and_update(row, var_idx, PivotDirection::Decrease);
             }
         }
         // No more pivots are required, so the system is feasible.
