@@ -96,6 +96,8 @@ pub struct LRASolver {
     var_to_idx: BTreeMap<Var, usize>,
     /// Conversion context from the frontend including the name <-> Var mapping
     ctx: ConvContext,
+    /// During `solve()`, the current number of simplex steps that have been performed
+    num_simplex_steps: usize,
 }
 
 impl fmt::Debug for LRASolver {
@@ -111,6 +113,7 @@ impl fmt::Debug for LRASolver {
         s.push_str(&format!("Non-Basic pointers:\n  {0:?}\n", self.non_basic));
         s.push_str(&format!("Tableau:\n  {0:?}\n", self.tableau));
         s.push_str(&format!("State: {:?}\n", self.state));
+        s.push_str(&format!("Num simplex steps: {}\n", self.num_simplex_steps));
         // TODO: add the rest of the solver state, including backtracking info
         write!(f, "{}", s)
     }
@@ -122,6 +125,10 @@ impl LRASolver {
     ///
     /// - `row` is the tableau row owned by the basic variable
     /// - `col` is the tableau col owned by the non-basic variable
+    //
+    // Important Note: the order of variables in `self.variables` is not modified in this
+    // procedure. This is neccessary for the implementation of Bland's pivot selection rule to
+    // be correct.
     fn swap(&mut self, row: usize, col: usize) {
         // Swap ownership of row/col
         self.variables[self.basic[row]].owner = Owner::NonBasic(col);
@@ -141,7 +148,6 @@ impl LRASolver {
         //           - mem swap basic[row], non_basic[col]
         //             basic = [0, 3, 4]
         //             non_basic = [2, 1]
-        //
         std::mem::swap(&mut self.basic[row], &mut self.non_basic[col]);
     }
 
@@ -530,17 +536,17 @@ impl LRASolver {
     fn find_pivot_and_update(
         &mut self,
         row: usize,
-        var_idx: usize,
+        row_var_idx: usize,
         direction: PivotDirection,
     ) -> SolverResult<SimplexStepResult> {
         let target_bound = match direction {
-            PivotDirection::Increase => self.variables[var_idx]
+            PivotDirection::Increase => self.variables[row_var_idx]
                 .bounds
                 .lower
                 .as_ref()
                 .unwrap()
                 .clone(),
-            PivotDirection::Decrease => self.variables[var_idx]
+            PivotDirection::Decrease => self.variables[row_var_idx]
                 .bounds
                 .upper
                 .as_ref()
@@ -548,18 +554,22 @@ impl LRASolver {
                 .clone(),
         };
 
-        for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
-            let non_basic_var = &self.variables[*non_basic_idx];
+        // iterate over non_basic (col) variables in the fixed variable ordering
+        for var in self.variables.iter() {
+            let col = match var.is_non_basic() {
+                Some(c) => c,
+                None => continue,
+            };
             let a_i_j = self.tableau.get(row, col).unwrap();
 
             let eligible = match direction {
                 PivotDirection::Increase => {
-                    (a_i_j > &Rational::ZERO && !non_basic_var.at_upper())
-                        || (a_i_j < &Rational::ZERO && !non_basic_var.at_lower())
+                    (a_i_j > &Rational::ZERO && !var.at_upper())
+                        || (a_i_j < &Rational::ZERO && !var.at_lower())
                 }
                 PivotDirection::Decrease => {
-                    (a_i_j > &Rational::ZERO && !non_basic_var.at_lower())
-                        || (a_i_j < &Rational::ZERO && !non_basic_var.at_upper())
+                    (a_i_j > &Rational::ZERO && !var.at_lower())
+                        || (a_i_j < &Rational::ZERO && !var.at_upper())
                 }
             };
 
@@ -569,7 +579,7 @@ impl LRASolver {
                     0,
                     "lia::lra_solver: pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
                     row,
-                    self.variables[var_idx],
+                    self.variables[row_var_idx],
                     col,
                     self.variables[self.non_basic[col]],
                     target_bound
@@ -582,7 +592,9 @@ impl LRASolver {
         }
 
         self.state = LRASolverState::Unsat;
-        Ok(SimplexStepResult::Infeasible(self.variables[var_idx].var))
+        Ok(SimplexStepResult::Infeasible(
+            self.variables[row_var_idx].var,
+        ))
     }
 
     /// Perform one simplex step on self.
@@ -604,10 +616,11 @@ impl LRASolver {
         //   SPASS-SATT heuristic: perform greedy pivots for violated basic variables up to some number of iterations,
         //     e.g. #iterations = #(basic variables).
         //   1. (greedy) For basic variables, prefer smallest one violated in the fixed variable order.
-        //     For non-basic variables, prefer unbounded first, then vars w/ smallest # of non-zero
+        //     For non-basic variables, prefer totally unbounded first, then vars w/ smallest # of non-zero
         //     coefficients in the tableau, finally by smallest in the order.
         //   2. Switch to Bland's rule
         //
+        // iterate over basic (row) variables in the fixed variable ordering
         for var_idx in 0..self.variables.len() {
             let row = match self.variables[var_idx].is_basic() {
                 Some(r) => r,
@@ -636,12 +649,17 @@ impl LRASolver {
     ///
     /// TODO: add configuration options for termination
     pub fn solve(&mut self) -> SolverResult<SolverReturn> {
-        let mut i: usize = 0;
+        self.num_simplex_steps = 0;
         loop {
-            debug_println!(21, 0, "lia::lra_solver: Stepping simplex, iteration {}", i);
+            debug_println!(
+                21,
+                0,
+                "lia::lra_solver: Stepping simplex, iteration {}",
+                self.num_simplex_steps
+            );
             match self.step_simplex() {
                 Ok(SimplexStepResult::Unknown) => {
-                    i += 1;
+                    self.num_simplex_steps += 1;
                 }
                 Ok(SimplexStepResult::Feasible) => {
                     let assg = self.compute_assignment();
@@ -649,11 +667,11 @@ impl LRASolver {
                         21,
                         0,
                         "lia::lra_solver::solve: simplex complete, num iterations = {}",
-                        i
+                        self.num_simplex_steps
                     );
                     let stats = Stats {
                         num_lra_solve: 1,
-                        num_simplex_steps: i,
+                        num_simplex_steps: self.num_simplex_steps,
                     };
                     return Ok(SolverReturn::new(SolverDecision::FEASIBLE(assg), stats));
                 }
@@ -663,11 +681,11 @@ impl LRASolver {
                         21,
                         0,
                         "lia::lra_solver::solve: simplex complete, num iterations = {}",
-                        i
+                        self.num_simplex_steps
                     );
                     let stats = Stats {
                         num_lra_solve: 1,
-                        num_simplex_steps: i,
+                        num_simplex_steps: self.num_simplex_steps,
                     };
                     return Ok(SolverReturn::new(
                         SolverDecision::INFEASIBLE(conflict),
@@ -865,6 +883,7 @@ impl LRASolver {
             old_assignment: None,
             var_to_idx,
             ctx,
+            num_simplex_steps: 0,
         })
     }
 }
