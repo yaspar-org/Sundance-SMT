@@ -15,6 +15,7 @@ use yaspar_ir::ast::{Context, LetElim, Term, Typecheck};
 use yaspar_ir::traits::Repr;
 use yaspar_ir::untyped::{Command, UntypedAst};
 
+use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::linear_system::{
     Addend, Constraint, LinearSystem, LinearSystemError, Rel, combine_terms_helper,
@@ -27,7 +28,6 @@ use crate::arithmetic::lia::solver_result::{
 };
 use crate::arithmetic::lia::solver_result_api::SolverDecisionApi;
 use crate::arithmetic::lia::stats::Stats;
-use crate::arithmetic::lia::tableau::TableauKind;
 use crate::arithmetic::lia::types::{FBig, Integer, Rational, UBig};
 use crate::arithmetic::lia::variables::VarType;
 use crate::debug_println;
@@ -484,21 +484,18 @@ fn convert_terms(terms: &[Term]) -> FrontendResult<ConvContext> {
 }
 
 /// Parse an SMT script and build a QF_LRA solver without preprocessing
-pub fn smt_to_lra_solver(smt_input: &str, tableau_kind: TableauKind) -> FrontendResult<LRASolver> {
+pub fn smt_to_lra_solver(smt_input: &str, config: &SolverConfig) -> FrontendResult<LRASolver> {
     let ctx = convert_smt(smt_input)?;
-    Ok(LinearSystem::new(ctx).to_lra_solver(true, tableau_kind)?)
+    Ok(LinearSystem::new(ctx).to_lra_solver(true, config)?)
 }
 
 /// Top-level arithmetic solving function
 ///
 /// This provides solving a system of linear (in)equalities over the rationals as a single function
 /// call from SMT-LIB text as input.
-pub fn solve_smtlib(
-    smt_input: &str,
-    tableau_kind: TableauKind,
-) -> FrontendResult<SolverDecisionApi> {
+pub fn solve_smtlib(smt_input: &str, config: &SolverConfig) -> FrontendResult<SolverDecisionApi> {
     let ctx = convert_smt(smt_input)?;
-    solve_with_context(ctx, tableau_kind)
+    solve_with_context(ctx, config)
 }
 
 /// Top-level mixed-integer arithmetic solver
@@ -506,23 +503,20 @@ pub fn solve_smtlib(
 /// This version accepts a list of arithmetic literals and returns SAT/UNSAT/UNKNOW
 /// as usual. SAT comes with a satisfying assignment and UNSAT comes with a conflict
 /// set which is guaranteed to be a subset of the input literals.
-pub fn solve(
-    arith_literals: &[Term],
-    tableau_kind: TableauKind,
-) -> FrontendResult<SolverDecisionApi> {
+pub fn solve(arith_literals: &[Term], config: &SolverConfig) -> FrontendResult<SolverDecisionApi> {
     // The context is used to construct a solver below, but also to report conflicts
     // and assignments to the outside in terms of [Term]s rather than internal variables.
     // This value is consumed below, but some of the mappings are cloned for reporting.
     let ctx = convert_terms(arith_literals)?;
-    solve_with_context(ctx, tableau_kind)
+    solve_with_context(ctx, config)
 }
 
 fn solve_with_context(
     mut ctx: ConvContext,
-    tableau_kind: TableauKind,
+    config: &SolverConfig,
 ) -> FrontendResult<SolverDecisionApi> {
     let (_, var_term_map) = ctx.get_term_var_maps(); // this is a clone
-    let decision = solve_ctx_raw(&mut ctx, tableau_kind)?;
+    let decision = solve_ctx_raw(&mut ctx, config)?;
     // TODO: frontend::solve_with_context: return stats through SolverDecisionApi
     Ok(SolverDecisionApi::from_solver_decision(
         &var_term_map,
@@ -531,10 +525,7 @@ fn solve_with_context(
 }
 
 /// Run the solver given the provided context and return the resulting SolverDecision.
-pub fn solve_ctx_raw(
-    ctx: &mut ConvContext,
-    tableau_kind: TableauKind,
-) -> FrontendResult<SolverReturn> {
+pub fn solve_ctx_raw(ctx: &mut ConvContext, config: &SolverConfig) -> FrontendResult<SolverReturn> {
     // preprocess the input relations, detect trivial cases, and otherwise return a [LinearSystem]
     // from which to build a solver.
     let result = preprocess(ctx);
@@ -563,9 +554,9 @@ pub fn solve_ctx_raw(
         PreprocessResult::Unknown => LinearSystem::new(ctx.clone()),
     };
     let lra_solver = sys
-        .to_lra_solver(true, tableau_kind)
+        .to_lra_solver(true, config)
         .map_err(|e| FrontendError(format!("error building lra_solver: {}", e)))?;
-    let mut lira_solver = LIRASolver::new(lra_solver);
+    let mut lira_solver = LIRASolver::new(lra_solver, config.clone());
     debug_println!(25, 0, "lia::frontend::solve_ctx_raw: Starting LIRA solver");
     let start = Instant::now();
     let ret = lira_solver
@@ -583,11 +574,11 @@ pub fn solve_ctx_raw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arithmetic::lia::config::SolverConfig;
     use crate::arithmetic::lia::frontend::{convert_smt, smt_to_lra_solver, solve_smtlib};
     use crate::arithmetic::lia::preprocess::{PreprocessResult, preprocess};
     use crate::arithmetic::lia::solver_result::SolverDecision;
     use crate::arithmetic::lia::solver_result_api::SolverDecisionApi;
-    use crate::arithmetic::lia::tableau::TableauKind;
     use crate::arithmetic::lia::types::{DBig, rbig};
     use crate::arithmetic::lia::variables::Var;
     use std::str::FromStr;
@@ -742,7 +733,7 @@ mod tests {
 (check-sat)
     "#;
         assert!(matches!(
-            solve_smtlib(smt, TableauKind::Dense).unwrap(),
+            solve_smtlib(smt, &SolverConfig::default()).unwrap(),
             SolverDecisionApi::FEASIBLE(_)
         ));
     }
@@ -776,7 +767,7 @@ mod tests {
             unreachable!()
         }
 
-        let result = solve_smtlib(smt_input, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)));
     }
 
@@ -802,7 +793,7 @@ mod tests {
             preprocess(&mut ctx),
             PreprocessResult::TriviallySat
         ));
-        let result = solve_smtlib(smt_input, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)));
     }
 
@@ -827,7 +818,7 @@ mod tests {
             preprocess(&mut ctx),
             PreprocessResult::TriviallyUnsat(_)
         ));
-        let result = solve_smtlib(smt_input, TableauKind::Dense).expect("solver failed");
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
         assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)));
     }
 
@@ -856,8 +847,8 @@ mod tests {
 (check-sat)
     "#;
 
-        let mut solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
+        let mut solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
         let result = solver
             .solve()
             .expect("Failed to run simplex algorithm")
@@ -876,8 +867,8 @@ mod tests {
 (assert (>= (+ x0 x1) 1))
 (check-sat)
     "#;
-        let mut solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
+        let mut solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
         let result = solver
             .solve()
             .expect("Failed to run simplex algorithm")
@@ -897,8 +888,8 @@ mod tests {
 (assert (not b))
 (check-sat)
     "#;
-        let mut solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
+        let mut solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
         let result = solver
             .solve()
             .expect("Failed to run simplex algorithm")
@@ -914,8 +905,8 @@ mod tests {
 (assert (<= (/ x0 2) 0))
 (check-sat)
     "#;
-        let mut solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
+        let mut solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
         let result = solver
             .solve()
             .expect("Failed to run simplex algorithm")
@@ -931,8 +922,8 @@ mod tests {
 (assert (= x (- 1 2 3)))  ; x = (1 - 2) - 3 = -4
 (check-sat)
     "#;
-        let mut solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
+        let mut solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
         let result = solver
             .solve()
             .expect("Failed to run simplex algorithm")
@@ -955,8 +946,8 @@ mod tests {
 (assert (= x (f x)))
 (check-sat)
     "#;
-        let mut solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
+        let mut solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
         let result = solver
             .solve()
             .expect("Failed to run simplex algorithm")
@@ -981,8 +972,8 @@ mod tests {
 (assert (< i j))
 (check-sat)
     "#;
-        let mut solver =
-            smt_to_lra_solver(smt_input, TableauKind::Dense).expect("Failed to create LRA solver");
+        let mut solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
         let result = solver
             .solve()
             .expect("Failed to run simplex algorithm")
