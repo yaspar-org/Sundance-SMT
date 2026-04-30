@@ -152,6 +152,46 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
         constraint_to_literals.insert(constraint_ast, constraint);
     }
 
+    // Emit the SMT-LIB query that would be sent to Z3 at this point. Since we use
+    // `check_assumptions` rather than `assert`, the solver's own `to_smt2` would be empty —
+    // instead we reconstruct an equivalent query from the assumptions and the variables.
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static LIA_CALL_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let idx = LIA_CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+        let mut smt = String::new();
+        smt.push_str("(set-logic QF_LIA)\n");
+        let mut declared: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for var in var_map.keys() {
+            let var_name = match var {
+                Coefficient::Constant => "__constant__".to_string(),
+                Coefficient::Term(id) => format!("var_{}", id),
+            };
+            declared.insert(var_name);
+        }
+        for (term_id, _) in &roots {
+            declared.insert(format!("var_{}", term_id));
+        }
+        for name in &declared {
+            smt.push_str(&format!("(declare-const {} Int)\n", name));
+        }
+        for a in &assumptions {
+            smt.push_str(&format!("(assert {})\n", a));
+        }
+        smt.push_str("(check-sat)\n");
+
+        let dir = std::env::var("SUNDANCE_LIA_DUMP_DIR")
+            .unwrap_or_else(|_| "lia_queries".to_string());
+        let _ = std::fs::create_dir_all(&dir);
+        let path = format!("{}/lia_{:05}.smt2", dir, idx);
+        if let Err(e) = std::fs::write(&path, &smt) {
+            eprintln!("failed to write LIA dump {}: {}", path, e);
+        } else {
+            eprintln!("wrote LIA query {} ({} assumptions)", path, assumptions.len());
+        }
+    }
+
     // Check satisfiability with assumptions
     match solver.check_assumptions(&assumptions) {
         z3::SatResult::Sat => {
