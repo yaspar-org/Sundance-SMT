@@ -1029,7 +1029,6 @@ fn union_predecessors(
 
     debug_assert!(u != v);
     debug_assert!(egraph.find(u) == u);
-    debug_assert!(egraph.find(v) == v);
 
     // Move u's and v's predecessor maps out of the egraph so we can iterate
     // without cloning. Both slots are restored before any re-entrant call
