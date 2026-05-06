@@ -317,11 +317,15 @@ impl LIRASolver {
                 continue;
             }
 
-            // setup done, now solve and update state and active
+            // Solve the rational system
             debug_println!(21, 0, "lia::lira_solver: solving over Q");
             let ret = self.lra_solver.solve()?;
-            // this also bumps num_lra_solve by 1
+
+            // Update stats: LRASolver::solve bumps num_lra_solve by 1
             self.stats.combine(&ret.stats);
+
+            // Depending on current solver config, stop early and return UNKNOWN if we have
+            // made too many LRA solver calls.
             if let Some(max) = self.config.max_lra_solve_calls
                 && self.stats.num_lra_solve > max
             {
@@ -330,6 +334,7 @@ impl LIRASolver {
                     self.stats.clone(),
                 ));
             }
+
             match ret.decision {
                 SolverDecision::INFEASIBLE(cs) => {
                     debug_println!(

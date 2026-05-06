@@ -18,7 +18,7 @@ bundled-z3 = ["z3-solver", "z3/bundled"]
 local-z3 = ["z3-solver"]
 
 [dependencies]
-yaspar-ir = "2.7.2"
+yaspar-ir = "=2.7.2"
 sat-interface = "0.1.1"
 cadical-sys = { version = "0.7.0" }
 
