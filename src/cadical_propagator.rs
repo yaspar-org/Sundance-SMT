@@ -174,7 +174,21 @@ impl<'a> CustomExternalPropagator<'a> {
         }
 
         for t in &eq_diseq_terms {
-            output.push_str(&format!("(assert {})\n", t));
+            // Replace (distinct t1 ... tn) with the pairwise (not (= ti tj))
+            // expansion so the dumped benchmark only contains equalities and
+            // disequalities — easier for a pure CC solver to consume.
+            if let Distinct(ts) = t.repr() {
+                for i in 0..ts.len() {
+                    for j in i + 1..ts.len() {
+                        output.push_str(&format!(
+                            "(assert (not (= {} {})))\n",
+                            ts[i], ts[j]
+                        ));
+                    }
+                }
+            } else {
+                output.push_str(&format!("(assert {})\n", t));
+            }
         }
         output.push_str("(check-sat)\n");
 
