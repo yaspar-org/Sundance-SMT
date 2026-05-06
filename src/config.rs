@@ -41,4 +41,9 @@ pub struct Args {
     /// Set timeout in seconds (0 means no timeout)
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,
+    /// Directory to dump pure congruence-closure SMT benchmarks.
+    /// One file is written per conflict reported by `process_assignment`,
+    /// containing only the equality/disequality literals on the current trail.
+    #[arg(long)]
+    pub cc_log: Option<PathBuf>,
 }

@@ -12,13 +12,17 @@ use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::log::is_important;
-use crate::proof::proof_tracer::SMTProofTracker;
+use crate::proof::proof_tracer::{
+    SMTProofTracker, format_datatype_declaration, format_function_declaration,
+    format_sort_declaration,
+};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
+use yaspar_ir::ast::{ATerm::*, Repr};
 
 /// Should we keep backtracking on stack at level
 ///
@@ -46,6 +50,20 @@ pub struct CustomExternalPropagator<'a> {
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
     pub solver: *mut CaDiCal,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
+    /// Optional directory: if set, every congruence-closure conflict produces
+    /// a pure-CC SMT2 benchmark in this directory.
+    pub cc_log_dir: Option<std::path::PathBuf>,
+    /// Number of CC benchmarks dumped so far for this run (used in the file name).
+    pub cc_log_counter: usize,
+    /// Stem of the input file, used as the benchmark name in dumped files.
+    pub cc_log_benchmark_name: String,
+    /// Sorts of the original problem, emitted in each dumped CC benchmark.
+    pub cc_log_sorts: std::collections::HashMap<yaspar_ir::ast::Str, yaspar_ir::ast::SortDef>,
+    /// Symbol table of the original problem, emitted in each dumped CC benchmark.
+    pub cc_log_symbol_table: std::collections::HashMap<
+        yaspar_ir::ast::Str,
+        Vec<(yaspar_ir::ast::Sig, yaspar_ir::ast::FunctionMeta)>,
+    >,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -99,6 +117,85 @@ impl<'a> CustomExternalPropagator<'a> {
             (*self.solver).add_observed_var(abs_lit);
         }
     }
+
+    /// Write a pure-CC SMT2 benchmark consisting of the equalities and
+    /// disequalities in the current SAT trail. Called when
+    /// `process_assignment` reports a conflict, since such a conflict is by
+    /// construction a congruence-closure conflict.
+    fn dump_cc_benchmark(&mut self) {
+        let dir = match &self.cc_log_dir {
+            Some(d) => d.clone(),
+            None => return,
+        };
+
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            debug_println!(
+                2,
+                0,
+                "cc_log: failed to create directory {}: {}",
+                dir.display(),
+                e
+            );
+            return;
+        }
+
+        // Collect (= a b) / (distinct ...) / (not (= a b)) literals from the trail.
+        let mut eq_diseq_terms: Vec<yaspar_ir::ast::Term> = Vec::new();
+        for i in 1..self.assignments.len() {
+            let signed_level = self.assignments[i];
+            if signed_level == 0 {
+                continue;
+            }
+            let lit = if signed_level > 0 { i as i32 } else { -(i as i32) };
+            let polarized = match self.egraph.get_term_from_lit_safe(lit) {
+                Some(t) => t,
+                None => continue,
+            };
+            let keep = match polarized.repr() {
+                Eq(_, _) | Distinct(_) => true,
+                Not(inner) => matches!(inner.repr(), Eq(_, _)),
+                _ => false,
+            };
+            if keep {
+                eq_diseq_terms.push(polarized);
+            }
+        }
+
+        let mut output = String::new();
+        output.push_str("(set-info :source |Pure congruence-closure benchmark dumped by Sundance|)\n");
+        output.push_str("(set-info :status unsat)\n");
+
+        for (sort, sort_def) in &self.cc_log_sorts {
+            output.push_str(&format_sort_declaration(sort, sort_def));
+        }
+        output.push_str(&format_datatype_declaration(&self.cc_log_sorts));
+        for (symbol, sigs) in &self.cc_log_symbol_table {
+            output.push_str(&format_function_declaration(symbol, sigs));
+        }
+
+        for t in &eq_diseq_terms {
+            output.push_str(&format!("(assert {})\n", t));
+        }
+        output.push_str("(check-sat)\n");
+
+        self.cc_log_counter += 1;
+        let file_name = format!(
+            "{}_cc_{}.smt2",
+            self.cc_log_benchmark_name, self.cc_log_counter
+        );
+        let path = dir.join(&file_name);
+        if let Err(e) = std::fs::write(&path, output) {
+            debug_println!(
+                2,
+                0,
+                "cc_log: failed to write {}: {}",
+                path.display(),
+                e
+            );
+        } else {
+            debug_println!(2, 0, "cc_log: wrote {}", path.display());
+        }
+    }
 }
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
@@ -143,6 +240,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
             {
+                // process_assignment returned a conflict (by invariant, a CC
+                // conflict): dump the eq/diseq portion of the current trail as
+                // a pure-CC SMT2 benchmark if the user enabled cc_log.
+                self.dump_cc_benchmark();
+
                 for constraint in negated_model_or_datatype_constraints {
                     // todo: deleting this ordering thing -> just for debuggin
                     let mut constraint_ordered = constraint.clone();

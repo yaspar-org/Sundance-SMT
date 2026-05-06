@@ -28,12 +28,17 @@ pub fn cdcl_decision_procedure(
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
     _timeout: u64, // todo: add timeout functionality
+    cc_log_dir: Option<PathBuf>,
+    benchmark_name: String,
 ) -> Status {
     let mut solver = CaDiCal::new();
 
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
     // todo: for right now always have hid_quantifiers to be true, need to change this
-    let proof_tracker = Rc::new(RefCell::new(SMTProofTracker::new(sorts, symbol_table)));
+    let proof_tracker = Rc::new(RefCell::new(SMTProofTracker::new(
+        sorts.clone(),
+        symbol_table.clone(),
+    )));
 
     // Connect the proof tracer (must be done in CONFIGURING state)
     solver.connect_proof_tracer1(&mut *proof_tracker.borrow_mut(), true); // true for antecedents
@@ -47,6 +52,11 @@ pub fn cdcl_decision_procedure(
         assignments: vec![0, 0],
         solver: &mut solver as *mut CaDiCal,
         arithmetic,
+        cc_log_dir,
+        cc_log_counter: 0,
+        cc_log_benchmark_name: benchmark_name,
+        cc_log_sorts: sorts,
+        cc_log_symbol_table: symbol_table,
     };
 
     solver.connect_external_propagator(&mut propagator);

@@ -180,6 +180,12 @@ fn main() -> Result<(), String> {
 
     let quantifiers = !egraph.quantifiers.is_empty();
 
+    let benchmark_name = args
+        .smt_file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "benchmark".to_string());
+
     let return_value = cdcl_decision_procedure(
         &mut egraph,
         prop_skeleton,
@@ -189,6 +195,8 @@ fn main() -> Result<(), String> {
         symbol_table,
         args.arithmetic,
         args.timeout,
+        args.cc_log,
+        benchmark_name,
     );
 
     match return_value {

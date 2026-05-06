@@ -78,7 +78,7 @@ pub enum ProofStepData {
 }
 
 /// Format a sort definition as a declare-sort command
-fn format_sort_declaration(sort_name: &Str, sort_def: &SortDef) -> String {
+pub(crate) fn format_sort_declaration(sort_name: &Str, sort_def: &SortDef) -> String {
     match sort_def {
         SortDef::Opaque(_) => String::new(),
         SortDef::OpaqueDeclared(arity) => {
@@ -100,7 +100,7 @@ fn format_sort_declaration(sort_name: &Str, sort_def: &SortDef) -> String {
 }
 
 /// Format a sort definition as a declare-sort command
-fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> String {
+pub(crate) fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> String {
     let mut sort_str = vec![];
     let mut ctor_strs = vec![];
     let mut datatype_funs = HashSet::new();
@@ -131,7 +131,7 @@ fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> String {
 }
 
 /// Format a function signature as a declare-fun command
-fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) -> String {
+pub(crate) fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) -> String {
     // overloading is only possible for generated functions; we skip them.
     if sigs.len() != 1 {
         return String::new();
