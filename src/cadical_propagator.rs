@@ -64,6 +64,13 @@ pub struct CustomExternalPropagator<'a> {
         yaspar_ir::ast::Str,
         Vec<(yaspar_ir::ast::Sig, yaspar_ir::ast::FunctionMeta)>,
     >,
+    /// What event triggers a dump.
+    pub cc_log_mode: crate::config::CcLogMode,
+    /// Set true after a round of quantifier instantiation produced new
+    /// clauses; cleared the next time we see a complete SAT model with the
+    /// disequalities queue empty (i.e. the SAT solver has fully propagated
+    /// the new literals). At that point we dump the trail.
+    pub cc_log_pending_instantiation_dump: bool,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -118,11 +125,40 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
-    /// Write a pure-CC SMT2 benchmark consisting of the equalities and
-    /// disequalities in the current SAT trail. Called when
-    /// `process_assignment` reports a conflict, since such a conflict is by
-    /// construction a congruence-closure conflict.
-    fn dump_cc_benchmark(&mut self) {
+    /// Predicate: this term is an eq, diseq, or distinct literal that we
+    /// can dump in a pure-CC benchmark.
+    fn is_eq_diseq_distinct(t: &yaspar_ir::ast::Term) -> bool {
+        match t.repr() {
+            Eq(_, _) | Distinct(_) => true,
+            Not(inner) => matches!(inner.repr(), Eq(_, _)),
+            _ => false,
+        }
+    }
+
+    /// Walk the SAT trail and collect every assigned literal whose polarised
+    /// term is an equality / disequality / distinct.
+    fn collect_trail_eq_diseq_distinct(&mut self) -> Vec<yaspar_ir::ast::Term> {
+        let mut trail_terms: Vec<yaspar_ir::ast::Term> = Vec::new();
+        for i in 1..self.assignments.len() {
+            let signed_level = self.assignments[i];
+            if signed_level == 0 {
+                continue;
+            }
+            let lit = if signed_level > 0 { i as i32 } else { -(i as i32) };
+            let polarized = match self.egraph.get_term_from_lit_safe(lit) {
+                Some(t) => t,
+                None => continue,
+            };
+            if Self::is_eq_diseq_distinct(&polarized) {
+                trail_terms.push(polarized);
+            }
+        }
+        trail_terms
+    }
+
+    /// Write a pure-CC SMT2 file containing the given terms as `(assert ...)`
+    /// lines plus the original problem's sort/datatype/function declarations.
+    fn write_cc_benchmark(&mut self, terms: &[yaspar_ir::ast::Term]) {
         let dir = match &self.cc_log_dir {
             Some(d) => d.clone(),
             None => return,
@@ -139,32 +175,8 @@ impl<'a> CustomExternalPropagator<'a> {
             return;
         }
 
-        // Collect (= a b) / (distinct ...) / (not (= a b)) literals from the trail.
-        let mut eq_diseq_terms: Vec<yaspar_ir::ast::Term> = Vec::new();
-        for i in 1..self.assignments.len() {
-            let signed_level = self.assignments[i];
-            if signed_level == 0 {
-                continue;
-            }
-            let lit = if signed_level > 0 { i as i32 } else { -(i as i32) };
-            let polarized = match self.egraph.get_term_from_lit_safe(lit) {
-                Some(t) => t,
-                None => continue,
-            };
-            let keep = match polarized.repr() {
-                Eq(_, _) | Distinct(_) => true,
-                Not(inner) => matches!(inner.repr(), Eq(_, _)),
-                _ => false,
-            };
-            if keep {
-                eq_diseq_terms.push(polarized);
-            }
-        }
-
         let mut output = String::new();
         output.push_str("(set-info :source |Pure congruence-closure benchmark dumped by Sundance|)\n");
-        output.push_str("(set-info :status unsat)\n");
-
         for (sort, sort_def) in &self.cc_log_sorts {
             output.push_str(&format_sort_declaration(sort, sort_def));
         }
@@ -172,23 +184,8 @@ impl<'a> CustomExternalPropagator<'a> {
         for (symbol, sigs) in &self.cc_log_symbol_table {
             output.push_str(&format_function_declaration(symbol, sigs));
         }
-
-        for t in &eq_diseq_terms {
-            // Replace (distinct t1 ... tn) with the pairwise (not (= ti tj))
-            // expansion so the dumped benchmark only contains equalities and
-            // disequalities — easier for a pure CC solver to consume.
-            if let Distinct(ts) = t.repr() {
-                for i in 0..ts.len() {
-                    for j in i + 1..ts.len() {
-                        output.push_str(&format!(
-                            "(assert (not (= {} {})))\n",
-                            ts[i], ts[j]
-                        ));
-                    }
-                }
-            } else {
-                output.push_str(&format!("(assert {})\n", t));
-            }
+        for t in terms {
+            output.push_str(&format!("(assert {})\n", t));
         }
         output.push_str("(check-sat)\n");
 
@@ -209,6 +206,13 @@ impl<'a> CustomExternalPropagator<'a> {
         } else {
             debug_println!(2, 0, "cc_log: wrote {}", path.display());
         }
+    }
+
+    /// Conflict-mode dump: just the eq/diseq/distinct portion of the SAT
+    /// trail at the moment of a CC conflict.
+    fn dump_cc_benchmark(&mut self) {
+        let trail = self.collect_trail_eq_diseq_distinct();
+        self.write_cc_benchmark(&trail);
     }
 }
 
@@ -256,8 +260,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             {
                 // process_assignment returned a conflict (by invariant, a CC
                 // conflict): dump the eq/diseq portion of the current trail as
-                // a pure-CC SMT2 benchmark if the user enabled cc_log.
-                self.dump_cc_benchmark();
+                // a pure-CC SMT2 benchmark if the user enabled cc_log in a
+                // mode that includes conflicts.
+                if matches!(
+                    self.cc_log_mode,
+                    crate::config::CcLogMode::Conflict | crate::config::CcLogMode::Both
+                ) {
+                    self.dump_cc_benchmark();
+                }
 
                 for constraint in negated_model_or_datatype_constraints {
                     // todo: deleting this ordering thing -> just for debuggin
@@ -671,6 +681,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
+        // Instantiation-mode dump point: a previous round of quantifier
+        // instantiation has been fully propagated by CaDiCaL (disequalities
+        // queue is empty here), so the current SAT trail contains the
+        // newly-trailed equalities. Dump now and clear the flag.
+        if self.cc_log_pending_instantiation_dump {
+            self.cc_log_pending_instantiation_dump = false;
+            self.dump_cc_benchmark();
+        }
+
         debug_println!(11, 0, "Starting quantifier instantiations");
         let quantifier_instantiations = instantiate_quantifiers(
             self.egraph,
@@ -690,6 +709,19 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             assert!(self.disequalities.borrow().is_empty());
 
             return true;
+        }
+
+        // Instantiation-mode dump scheme: arm a flag now; the *next* time
+        // CaDiCaL calls cb_check_found_model with disequalities-empty, we
+        // dump the eq/diseq portion of the SAT trail. By that point the
+        // SAT solver has fully propagated the literals introduced by this
+        // round of instantiation, so the dumped trail captures the new
+        // equalities the user is interested in.
+        if matches!(
+            self.cc_log_mode,
+            crate::config::CcLogMode::Instantiation | crate::config::CcLogMode::Both
+        ) {
+            self.cc_log_pending_instantiation_dump = true;
         }
 
         // Add each quantifier instantiation as an instantiation clause to the proof tracker

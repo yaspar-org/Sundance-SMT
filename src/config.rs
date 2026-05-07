@@ -42,8 +42,26 @@ pub struct Args {
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,
     /// Directory to dump pure congruence-closure SMT benchmarks.
-    /// One file is written per conflict reported by `process_assignment`,
-    /// containing only the equality/disequality literals on the current trail.
+    /// Files contain only the equality/disequality literals on the current
+    /// trail (Boolean structure is dropped). Trigger points are controlled
+    /// by --cc-log-mode.
     #[arg(long)]
     pub cc_log: Option<PathBuf>,
+    /// When to dump CC benchmarks. `conflict` dumps once per CC conflict
+    /// reported by `process_assignment`. `instantiation` dumps once after
+    /// each quantifier-instantiation round in `cb_check_found_model`.
+    /// `both` enables both triggers.
+    #[arg(long, default_value_t = CcLogMode::Conflict, value_enum)]
+    pub cc_log_mode: CcLogMode,
+}
+
+/// What event triggers a CC benchmark dump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CcLogMode {
+    /// Dump once per CC conflict reported by `process_assignment`.
+    Conflict,
+    /// Dump once per quantifier-instantiation round.
+    Instantiation,
+    /// Dump on both events.
+    Both,
 }

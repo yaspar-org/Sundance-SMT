@@ -4,6 +4,7 @@
 //! Main CDCL decision loop
 use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::CustomExternalPropagator;
+use crate::config::CcLogMode;
 use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
 use crate::proof::proof_tracer::SMTProofTracker;
@@ -30,6 +31,7 @@ pub fn cdcl_decision_procedure(
     _timeout: u64, // todo: add timeout functionality
     cc_log_dir: Option<PathBuf>,
     benchmark_name: String,
+    cc_log_mode: CcLogMode,
 ) -> Status {
     let mut solver = CaDiCal::new();
 
@@ -57,6 +59,8 @@ pub fn cdcl_decision_procedure(
         cc_log_benchmark_name: benchmark_name,
         cc_log_sorts: sorts,
         cc_log_symbol_table: symbol_table,
+        cc_log_mode,
+        cc_log_pending_instantiation_dump: false,
     };
 
     solver.connect_external_propagator(&mut propagator);

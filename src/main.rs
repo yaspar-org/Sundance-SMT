@@ -197,6 +197,7 @@ fn main() -> Result<(), String> {
         args.timeout,
         args.cc_log,
         benchmark_name,
+        args.cc_log_mode,
     );
 
     match return_value {

@@ -34,8 +34,56 @@ implementation.
 
 ### 1. Locate the inputs
 
-The benchmark tree lives **outside** this repo. On the original machine
-it was at `../single_query/QF_UF/`, but the cluster path will differ.
+The corpus is **SMT-COMP single-query non-incremental QF_UF benchmarks**
+(distributed via SMT-LIB / Zenodo). On the original machine it was at
+`../single_query/QF_UF/`, alongside a sibling `single_query.tar.gz`
+containing the unpacked SMT-COMP `.yml` + scrambled-`.smt2` pairs (the
+local `rename_benchmarks.sh` script un-scrambles them back to
+SMT-LIB-style paths). On the cluster the path will differ.
+
+The folder structure mirrors SMT-LIB / SMT-COMP families:
+`20170829-Rodin/`, `2018-Goel-hwbench/`, `20190906-CLEARSY/`, `NEQ/`,
+`PEQ/`, `QG-classification/`, `SEQ/`, `eq_diamond/`. If the agent has
+to fetch the corpus, the canonical sources are the SMT-LIB benchmark
+repository (`https://smtlib.cs.uiowa.edu/`) and the SMT-COMP
+single-query distributions on Zenodo. Either gives the same QF_UF
+subtree.
+
+#### Family provenance (so the agent can reason about which subset to prioritise)
+
+- **20170829-Rodin** — Event-B / B-method proof obligations from the
+  Rodin platform's SMT plug-in (Déharbe, Fontaine et al.). Set theory
+  and arithmetic axiomatised over UF. Mostly unsat. Excluded from
+  SMT-COMP 2018 due to `:named` term issues.
+- **2018-Goel-hwbench** — Word-level IC3 / BMC queries over Verilog
+  RTL from Goel & Sakallah's AVR model-checker. Wide datapath ops
+  kept uninterpreted. Mix of sat / unsat.
+- **20190906-CLEARSY** — Atelier B proof obligations from CLEARSY
+  (French B-method company), translated via their `pptranspog`
+  ppTrans encoder. Industrial SIL4 safety-critical software (e.g.
+  CLEARSY Safety Platform for railway signalling). Predominantly
+  unsat.
+- **NEQ / PEQ / SEQ** — Randomly generated QF_UF formulas (in
+  SMT-LIB since ~2005-2006), designed as equality-reasoning stress
+  tests. NEQ biased toward disequalities, PEQ toward positive
+  equalities, SEQ mixed. Filenames `NEQ041_size7.smt2`
+  parameterise size. Mixed sat / unsat.
+- **QG-classification** — 6,404 instances by Volker Sorge
+  (Birmingham, Nov 2006). Each asks whether a finite quasi-group
+  (Latin-square structure) of a given order with property
+  `qg3`/`qg5`/etc. exists. Heavily axiomatic, one binary UF. Mix of
+  sat / unsat.
+- **eq_diamond** — 100 hand-crafted instances (April 2008).
+  "Diamond" equality chains `x_i = a ∨ x_i = b` that look
+  exponential but collapse under simple preprocessing. All unsat.
+  Famous as a preprocessing-trick benchmark.
+
+For the CC-dump experiment all of these are useful, but expect
+**QG-classification** and **2018-Goel-hwbench** to dominate the
+output volume (lots of equalities flowing through the trail), while
+**eq_diamond** and **NEQ/PEQ/SEQ** mostly produce small dumps
+quickly.
+
 The agent should:
 
 - ask the user / job-config for the path (e.g. `$BENCH_ROOT`), or
@@ -126,7 +174,7 @@ next invocation will skip everything already done.
 
 ### 6. Output layout
 
-```
+```text
 $RESULTS/cc_log_run1/
 ├── progress.json              # source benchmark -> {status, elapsed, n_dumped, ...}
 ├── log.txt                    # one TSV line per processed benchmark
