@@ -71,6 +71,13 @@ where
 
     /// Return the number of columns in the tableau
     fn ncols(&self) -> usize;
+
+    /// Return the number of non-zero entries in the given column
+    fn col_nnz(&self, col: usize) -> usize {
+        (0..self.nrows())
+            .filter(|r| self.get(*r, col).is_ok_and(|v| !v.is_zero()))
+            .count()
+    }
 }
 
 /// Enum-dispatched tableau that selects between dense and sparse at runtime.
@@ -135,6 +142,13 @@ impl Tableau for TableauImpl {
         match self {
             TableauImpl::Dense(t) => t.ncols(),
             TableauImpl::Sparse(t) => t.ncols(),
+        }
+    }
+
+    fn col_nnz(&self, col: usize) -> usize {
+        match self {
+            TableauImpl::Dense(t) => t.col_nnz(col),
+            TableauImpl::Sparse(t) => t.col_nnz(col),
         }
     }
 }

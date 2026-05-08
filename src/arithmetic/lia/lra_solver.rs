@@ -54,6 +54,15 @@ enum PivotDirection {
     Decrease,
 }
 
+/// Current pivot selection heuristic
+#[derive(Debug)]
+enum PivotHeuristic {
+    /// prefers basic variables by order and non-basic variables that are unbounded
+    Greedy,
+    /// prefers both basic and non-basic variables by order
+    Bland,
+}
+
 /// Linear real arithmetic solver
 pub struct LRASolver {
     /// Variable info for all original and slack variables. The vector itself should be immutable,
@@ -90,14 +99,16 @@ pub struct LRASolver {
     backtrack_level: usize,
     /// backup copy of the solver's assignment at some backtracking point
     old_assignment: Option<BTreeMap<Var, QDelta>>,
+    /// Current pivot selection heuristic
+    pivot_heuristic: PivotHeuristic,
+    /// During `solve()`, the current number of simplex steps that have been performed
+    num_simplex_steps: usize,
 
     // -- Mappings for bookkeeping --
     /// mapping from Var to index in `self.variables`
     var_to_idx: BTreeMap<Var, usize>,
     /// Conversion context from the frontend including the name <-> Var mapping
     ctx: ConvContext,
-    /// During `solve()`, the current number of simplex steps that have been performed
-    num_simplex_steps: usize,
 }
 
 impl fmt::Debug for LRASolver {
@@ -113,6 +124,7 @@ impl fmt::Debug for LRASolver {
         s.push_str(&format!("Non-Basic pointers:\n  {0:?}\n", self.non_basic));
         s.push_str(&format!("Tableau:\n  {0:?}\n", self.tableau));
         s.push_str(&format!("State: {:?}\n", self.state));
+        s.push_str(&format!("Pivot heuristic: {:?}\n", self.pivot_heuristic));
         s.push_str(&format!("Num simplex steps: {}\n", self.num_simplex_steps));
         // TODO: add the rest of the solver state, including backtracking info
         write!(f, "{}", s)
@@ -532,6 +544,22 @@ impl LRASolver {
         d0
     }
 
+    /// Implements the SPASS-SATT pivot hueristic: start with Greedy non-basic variable selection
+    /// (see [`LRASolver::find_pivot_and_update`]) and switch to Bland's rule after a fixed number of pivot
+    /// steps.
+    fn update_pivot_heuristic(&mut self) {
+        if let PivotHeuristic::Greedy = self.pivot_heuristic
+            && self.num_simplex_steps > self.basic.len()
+        {
+            debug_println!(
+                25,
+                0,
+                "lia::lra_solver: switching pivot heuristic to Bland's Rule"
+            );
+            self.pivot_heuristic = PivotHeuristic::Bland;
+        }
+    }
+
     /// Helper function for `step_simplex` that finds a non-basic variable to pivot on.
     fn find_pivot_and_update(
         &mut self,
@@ -554,8 +582,84 @@ impl LRASolver {
                 .clone(),
         };
 
-        // iterate over non_basic (col) variables in the fixed variable ordering
-        for var in self.variables.iter() {
+        let non_basics: Vec<_> = self
+            .variables
+            .iter()
+            .filter(|v| v.is_non_basic().is_some())
+            .collect();
+
+        if let PivotHeuristic::Greedy = self.pivot_heuristic {
+            let unbounded_non_basics: Vec<_> = non_basics
+                .iter()
+                .filter(|v| v.is_totally_unbounded())
+                .collect();
+            if !unbounded_non_basics.is_empty() {
+                let col = unbounded_non_basics[0].is_non_basic().unwrap();
+                let a_i_j = self.tableau.get(row, col).unwrap();
+                // as long as a_i_j is non-zero, the non-basic variable is eligible
+                if !a_i_j.is_zero() {
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lra_solver: (greedy) pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
+                        row,
+                        self.variables[row_var_idx],
+                        col,
+                        self.variables[self.non_basic[col]],
+                        target_bound
+                    );
+                    self.pivot_and_update(row, col, &target_bound)?;
+                    // Invariant: in `step_simplex` or `find_pivot_and_update` => `self.state ==
+                    // LRASolverState::Unknown`
+                    return Ok(SimplexStepResult::Unknown);
+                }
+            }
+            // No unbounded non-basic variable found. Select the eligible variable with the
+            // smallest number of non-zero entries in its tableau column. Ties are broken by
+            // the fixed self.variables ordering (iteration order).
+            let mut best: Option<(usize, usize)> = None; // (col, nnz)
+            for var in non_basics.iter() {
+                let col = var.is_non_basic().unwrap();
+                let a_i_j = self.tableau.get(row, col).unwrap();
+
+                let eligible = match direction {
+                    PivotDirection::Increase => {
+                        (a_i_j > &Rational::ZERO && !var.at_upper())
+                            || (a_i_j < &Rational::ZERO && !var.at_lower())
+                    }
+                    PivotDirection::Decrease => {
+                        (a_i_j > &Rational::ZERO && !var.at_lower())
+                            || (a_i_j < &Rational::ZERO && !var.at_upper())
+                    }
+                };
+
+                if eligible {
+                    let nnz = self.tableau.col_nnz(col);
+                    if best.is_none_or(|(_, best_nnz)| nnz < best_nnz) {
+                        best = Some((col, nnz));
+                    }
+                }
+            }
+
+            if let Some((col, _)) = best {
+                debug_println!(
+                    15,
+                    0,
+                    "lia::lra_solver: (greedy/col_nnz) pivot basic (row {}) {} and non-basic (col {}) {}, update non-basic val to {}",
+                    row,
+                    self.variables[row_var_idx],
+                    col,
+                    self.variables[self.non_basic[col]],
+                    target_bound
+                );
+                self.pivot_and_update(row, col, &target_bound)?;
+                return Ok(SimplexStepResult::Unknown);
+            }
+        }
+
+        // Bland's rule fallback: iterate over non_basic (col) variables in the fixed variable
+        // ordering and select the first eligible one.
+        for var in non_basics.iter() {
             let col = match var.is_non_basic() {
                 Some(c) => c,
                 None => continue,
@@ -655,6 +759,8 @@ impl LRASolver {
                 "lia::lra_solver: Stepping simplex, iteration {}",
                 self.num_simplex_steps
             );
+
+            self.update_pivot_heuristic(); // possibly switch heuristics based on the current solver state.
             match self.step_simplex() {
                 Ok(SimplexStepResult::Unknown) => {
                     self.num_simplex_steps += 1;
@@ -960,9 +1066,10 @@ impl LRASolver {
             old_upper_bounds: vec![],
             backtrack_level: 0,
             old_assignment: None,
+            pivot_heuristic: PivotHeuristic::Greedy,
+            num_simplex_steps: 0,
             var_to_idx,
             ctx,
-            num_simplex_steps: 0,
         })
     }
 }

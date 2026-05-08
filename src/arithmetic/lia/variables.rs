@@ -272,6 +272,11 @@ impl<T: Ord> VarInfo<T> {
         self.bounds.upper.as_ref().is_some_and(|u| &self.val > u)
     }
 
+    /// Check if the variable is totally unbounded, i.e. ∞ < x < ∞
+    pub fn is_totally_unbounded(&self) -> bool {
+        self.bounds.lower.is_none() && self.bounds.upper.is_none()
+    }
+
     /// Update the current assignment
     pub fn update_assignment(&mut self, val: impl Into<T>) {
         self.val = val.into()
@@ -308,12 +313,14 @@ mod tests {
         assert!(v.in_bounds());
         v.update_lower(10);
         assert!(!v.in_bounds());
+        assert!(!v.is_totally_unbounded());
     }
 
     #[test]
     fn update_val() {
         let mut v = VarInfo::<Rational>::new(Var::real(0), Owner::Basic(0));
         assert!(v.in_bounds());
+        assert!(v.is_totally_unbounded());
         v.update_assignment(10);
         assert!(v.in_bounds());
         v.update_upper(-10);
