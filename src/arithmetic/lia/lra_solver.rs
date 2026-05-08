@@ -387,6 +387,24 @@ impl LRASolver {
         self.restore_assignment();
     }
 
+    /// Restore the tableau structure (basis, non-basis, coefficients, and variable owners)
+    /// from a saved snapshot. Used by try_unit_cube_test to undo pivots performed during
+    /// speculative solving.
+    fn restore_tableau(
+        &mut self,
+        tableau: &TableauImpl,
+        basic: &[usize],
+        non_basic: &[usize],
+        owners: &[Owner],
+    ) {
+        self.tableau = tableau.clone();
+        self.basic = basic.to_vec();
+        self.non_basic = non_basic.to_vec();
+        for (i, owner) in owners.iter().enumerate() {
+            self.variables[i].owner = owner.clone();
+        }
+    }
+
     /// If the solver is in a SAT state, Get the current assignment of variables to QDelta
     /// values
     //
@@ -770,7 +788,7 @@ impl LRASolver {
                     debug_println!(
                         21,
                         0,
-                        "lia::lra_solver::solve: simplex complete, num iterations = {}",
+                        "lia::lra_solver::solve: simplex complete, Feasible, num iterations = {}",
                         self.num_simplex_steps
                     );
                     let stats = Stats {
@@ -784,7 +802,7 @@ impl LRASolver {
                     debug_println!(
                         21,
                         0,
-                        "lia::lra_solver::solve: simplex complete, num iterations = {}",
+                        "lia::lra_solver::solve: simplex complete, Infeasible, num iterations = {}",
                         self.num_simplex_steps
                     );
                     let stats = Stats {
@@ -891,6 +909,133 @@ impl LRASolver {
                 self.variables[i].update_assignment(val);
             }
             None
+        }
+    }
+
+    /// Attempt the unit cube test
+    ///
+    /// The unit cube tests tightens basic variable bounds by (1/2)*|A_i|_1 and solves the rational
+    /// relaxation of the system. Here, |A_i|_1 means the sum of absolute values along the original
+    /// i-th tableau row. If the tightened system is feasible, rounding all integer variables to
+    /// the nearest integer is guaranteed to produce a valid integer solution.
+    pub fn try_unit_cube_test(&mut self) -> SolverResult<Option<Assignment<Var>>> {
+        let level = self.set_backtrack();
+
+        // Save tableau structure since solve() performs pivots that backtrack() does not undo
+        let saved_tableau = self.tableau.clone();
+        let saved_basic = self.basic.clone();
+        let saved_non_basic = self.non_basic.clone();
+        let saved_owners: Vec<Owner> = self.variables.iter().map(|v| v.owner.clone()).collect();
+
+        let mut trivially_infeasible = false;
+        for row in 0..self.basic.len() {
+            let var_idx = self.basic[row];
+            let v = &self.variables[var_idx];
+
+            let lower = v.bounds.lower.clone();
+            let upper = v.bounds.upper.clone();
+            if lower.is_none() && upper.is_none() {
+                continue;
+            }
+
+            let mut norm_1 = Rational::ZERO;
+            for col in 0..self.non_basic.len() {
+                let coeff = self.tableau.get(row, col).unwrap();
+                norm_1 += coeff.clone().abs();
+            }
+
+            let half_norm = QDelta::from(norm_1 / Rational::from(2));
+            let var = v.var;
+
+            if let Some(l) = lower {
+                let new_lower = l + half_norm.clone();
+                if let Some(false) = self.assert_lower(&var, &new_lower)? {
+                    trivially_infeasible = true;
+                    break;
+                }
+            }
+
+            if let Some(u) = upper {
+                let new_upper = u - half_norm;
+                if let Some(false) = self.assert_upper(&var, &new_upper)? {
+                    trivially_infeasible = true;
+                    break;
+                }
+            }
+        }
+
+        if trivially_infeasible {
+            self.state = LRASolverState::Unknown;
+            self.backtrack(level);
+            self.restore_tableau(
+                &saved_tableau,
+                &saved_basic,
+                &saved_non_basic,
+                &saved_owners,
+            );
+            return Ok(None);
+        }
+
+        let ret = self.solve()?;
+
+        match ret.decision {
+            SolverDecision::FEASIBLE(_) => {
+                let d0 = self.calculate_d0();
+                let mut rounded_assignments = BTreeMap::new();
+                for v in self.variables.iter() {
+                    let val = v.val.instantiate(&d0);
+                    let rounded = if v.var.typ == VarType::Int {
+                        let floor = Rational::from(val.floor());
+                        let ceil = Rational::from(val.ceil());
+                        if (&val - &floor) <= (&ceil - &val) {
+                            floor
+                        } else {
+                            ceil
+                        }
+                    } else {
+                        val
+                    };
+                    rounded_assignments.insert(v.var, rounded);
+                }
+
+                // Verify the rounded assignment satisfies all original bounds
+                for v in self.variables.iter() {
+                    let rounded_val = &rounded_assignments[&v.var];
+                    let rounded_qdelta = QDelta::from(rounded_val.clone());
+                    if !v.bounds.in_bounds(&rounded_qdelta) {
+                        self.state = LRASolverState::Unknown;
+                        self.backtrack(level);
+                        self.restore_tableau(
+                            &saved_tableau,
+                            &saved_basic,
+                            &saved_non_basic,
+                            &saved_owners,
+                        );
+                        return Ok(None);
+                    }
+                }
+
+                self.state = LRASolverState::Sat;
+                self.backtrack(level);
+                self.restore_tableau(
+                    &saved_tableau,
+                    &saved_basic,
+                    &saved_non_basic,
+                    &saved_owners,
+                );
+                Ok(Some(Assignment::new(rounded_assignments)))
+            }
+            _ => {
+                self.state = LRASolverState::Unknown;
+                self.backtrack(level);
+                self.restore_tableau(
+                    &saved_tableau,
+                    &saved_basic,
+                    &saved_non_basic,
+                    &saved_owners,
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -1656,5 +1801,214 @@ mod tests {
         assert!(x_val.is_int(), "integer variable x should be rounded");
         // 7/2 is equidistant from 3 and 4; the implementation picks floor when tied
         assert!(*x_val == rbig!(3), "7/2 rounds to floor (3) on tie");
+    }
+
+    // ─── try_unit_cube_test tests ───────────────────────────────────────────────
+
+    /// Unit cube test succeeds:
+    ///   Tableau: s1 = x + y, s2 = x - y
+    ///   x, y are integer non-basic with bounds [0, 10]
+    ///   s1 is integer basic with bounds [0, 20]
+    ///   s2 is integer basic with bounds [-10, 10]
+    ///
+    ///   |A_1|_1 = |1| + |1| = 2, half = 1, tightened s1 bounds: [1, 19]
+    ///   |A_2|_1 = |1| + |-1| = 2, half = 1, tightened s2 bounds: [-9, 9]
+    ///
+    ///   Initial assignment: x=0, y=0 => s1=0, s2=0.
+    ///   After tightening, simplex should find a feasible rational solution
+    ///   (e.g. x=5, y=5 => s1=10, s2=0) and rounding produces an integer solution.
+    #[test]
+    fn try_unit_cube_test_succeeds() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+            VarInfo::new(Var::int(1), Owner::NonBasic(1))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+        ];
+        let basic = vec![
+            VarInfo::new(Var::int(2), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(20).into()))),
+            VarInfo::new(Var::int(3), Owner::Basic(1))
+                .with_bounds(Bounds::new(Some(rbig!(-10).into()), Some(rbig!(10).into()))),
+        ];
+        // s1 = x + y, s2 = x - y
+        let equations = vec![vec![rbig!(1), rbig!(1)], vec![rbig!(1), rbig!(-1)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        // Solve first to get a feasible assignment
+        // let result = solver.solve().unwrap().decision;
+        // assert!(matches!(result, SolverDecision::FEASIBLE(_)));
+
+        let result = solver.try_unit_cube_test().unwrap();
+        assert!(result.is_some(), "unit cube test should succeed");
+
+        let assg = result.unwrap();
+        // All variables should have integer values
+        for (var, val) in assg.iter() {
+            assert!(
+                val.is_int(),
+                "variable {:?} should have integer value, got {}",
+                var,
+                val
+            );
+        }
+
+        // Verify the tableau equations hold: s1 = x + y, s2 = x - y
+        let x = assg.get(&Var::int(0)).unwrap();
+        let y = assg.get(&Var::int(1)).unwrap();
+        let s1 = assg.get(&Var::int(2)).unwrap();
+        let s2 = assg.get(&Var::int(3)).unwrap();
+        assert_eq!(*s1, x + y);
+        assert_eq!(*s2, x - y);
+
+        // Verify bounds
+        assert!(*x >= rbig!(0) && *x <= rbig!(10));
+        assert!(*y >= rbig!(0) && *y <= rbig!(10));
+        assert!(*s1 >= rbig!(0) && *s1 <= rbig!(20));
+        assert!(*s2 >= rbig!(-10) && *s2 <= rbig!(10));
+
+        // Solver state should be restored after cube test
+        assert!(solver.is_valid());
+    }
+
+    /// Unit cube test fails because tightened bounds make the system infeasible:
+    ///   Tableau: s = 3*x + 3*y
+    ///   x, y are integer non-basic and unbounded
+    ///   s is integer basic with bounds [5, 7]
+    ///
+    ///   |A_1|_1 = |3| + |3| = 6, half = 3
+    ///   Tightened s bounds: [5+3, 7-3] = [8, 4] which is empty (8 > 4)
+    ///   So the cube test should immediately detect trivial infeasibility.
+    #[test]
+    fn try_unit_cube_test_fails_tight_bounds() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0)),
+            VarInfo::new(Var::int(1), Owner::NonBasic(1)),
+        ];
+        let basic = vec![
+            VarInfo::new(Var::int(2), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(5).into()), Some(rbig!(7).into()))),
+        ];
+        // s = 3*x + 3*y
+        let equations = vec![vec![rbig!(3), rbig!(3)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        // Solve first to get a feasible assignment
+
+        let result = solver.try_unit_cube_test().unwrap();
+        assert!(
+            result.is_none(),
+            "unit cube test should fail when tightened bounds are empty"
+        );
+
+        // Solver state should be restored
+        assert!(solver.is_valid());
+    }
+
+    /// Unit cube test fails because the tightened system is infeasible (not trivially, but
+    /// via simplex):
+    ///   Tableau: s1 = 2*x, s2 = 2*y
+    ///   x is integer non-basic with bounds [0, 3]
+    ///   y is integer non-basic with bounds [0, 3]
+    ///   s1 is integer basic with bounds [5, 6]
+    ///   s2 is integer basic with bounds [5, 6]
+    ///
+    ///   |A_1|_1 = 2, half = 1, tightened s1 bounds: [6, 5] => trivially infeasible
+    ///
+    ///   Even though the original system is feasible (x=3, y=3 => s1=6, s2=6),
+    ///   the tightened system has no solution.
+    #[test]
+    fn try_unit_cube_test_fails_simplex_infeasible() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(3).into()))),
+            VarInfo::new(Var::int(1), Owner::NonBasic(1))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(3).into()))),
+        ];
+        let basic = vec![
+            VarInfo::new(Var::int(2), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(5).into()), Some(rbig!(6).into()))),
+            VarInfo::new(Var::int(3), Owner::Basic(1))
+                .with_bounds(Bounds::new(Some(rbig!(5).into()), Some(rbig!(6).into()))),
+        ];
+        // s1 = 2*x, s2 = 2*y
+        let equations = vec![vec![rbig!(2), rbig!(0)], vec![rbig!(0), rbig!(2)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        let result = solver.try_unit_cube_test().unwrap();
+        assert!(result.is_none(), "unit cube test should fail");
+
+        // Solver state should be restored
+        assert!(solver.is_valid());
+    }
+
+    /// Unit cube test succeeds on a system with unbounded non-basic variables where
+    /// pivoting occurs during the initial solve:
+    ///
+    ///   (-3/2)x + y <= -1/4
+    ///   (2/3)x - y <= -1/6
+    ///
+    ///   Tableau: s1 = (-3/2)x + y, s2 = (2/3)x - y
+    ///   x, y are integer non-basic, fully unbounded
+    ///   s1 is real basic with upper bound -1/4 (no lower bound)
+    ///   s2 is real basic with upper bound -1/6 (no lower bound)
+    ///
+    ///   The rational relaxation has solution x=1/2, y=1/2 (not integer). Since the feasible
+    ///   region grows unboundedly, a unit cube exists inside it and the test succeeds.
+    #[test]
+    fn try_unit_cube_test_succeeds_unbounded() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0)).with_bounds(Bounds::unbounded()),
+            VarInfo::new(Var::int(1), Owner::NonBasic(1)).with_bounds(Bounds::unbounded()),
+        ];
+        let basic = vec![
+            // s1 <= -1/4
+            VarInfo::new(Var::real(2), Owner::Basic(0))
+                .with_bounds(Bounds::new(None, Some(QDelta::from(rbig!(-1 / 4))))),
+            // s2 <= -1/6
+            VarInfo::new(Var::real(3), Owner::Basic(1))
+                .with_bounds(Bounds::new(None, Some(QDelta::from(rbig!(-1 / 6))))),
+        ];
+        // s1 = (-3/2)x + y, s2 = (2/3)x - y
+        let equations = vec![vec![rbig!(-3 / 2), rbig!(1)], vec![rbig!(2 / 3), rbig!(-1)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        let result = solver.try_unit_cube_test().unwrap();
+        assert!(
+            result.is_some(),
+            "unit cube test should succeed for unbounded system"
+        );
+
+        let assg = result.unwrap();
+        let x = assg.get(&Var::int(0)).unwrap();
+        let y = assg.get(&Var::int(1)).unwrap();
+        assert!(x.is_int(), "x should be integer, got {}", x);
+        assert!(y.is_int(), "y should be integer, got {}", y);
+
+        // Verify original constraints hold:
+        // (-3/2)x + y <= -1/4
+        let lhs1 = rbig!(-3 / 2) * x + y;
+        assert!(
+            lhs1 <= rbig!(-1 / 4),
+            "constraint 1 violated: {} > -1/4",
+            lhs1
+        );
+        // (2/3)x - y <= -1/6
+        let lhs2 = rbig!(2 / 3) * x - y;
+        assert!(
+            lhs2 <= rbig!(-1 / 6),
+            "constraint 2 violated: {} > -1/6",
+            lhs2
+        );
+
+        assert!(solver.is_valid());
     }
 }

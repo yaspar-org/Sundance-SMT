@@ -303,7 +303,22 @@ impl LIRASolver {
     pub fn solve(&mut self) -> SolverResult<SolverReturn> {
         debug_println!(21, 0, "lia::lira_solver: starting LIRASolver");
 
+        // Try unit cube test
+        debug_println!(21, 0, "lia::lira_solver::solve: trying the unit cube test");
+        if let Some(cube_assg) = self.try_unit_cube_test()? {
+            debug_println!(21, 0, "lia::lira_solver::solve: unit cube test succeeded");
+            return Ok(SolverReturn::new(
+                SolverDecision::FEASIBLE(cube_assg),
+                self.stats.clone(),
+            ));
+        }
+
         // Solve the rational relaxation
+        debug_println!(
+            21,
+            0,
+            "lia::lira_solver::solve: solving the rational relaxation"
+        );
         let ret = self.lra_solver.solve()?;
         self.stats.combine(&ret.stats);
 
@@ -317,6 +332,12 @@ impl LIRASolver {
                 self.stats.clone(),
             )),
             SolverDecision::FEASIBLE(assg) => {
+                debug_println!(
+                    21,
+                    0,
+                    "lia::lira_solver::solve: rational relaxation is feasible with assignment:"
+                );
+                debug_println!(21, 0, "{assg}");
                 // Check if all integer variables already have integer assignments
                 if self.find_next_int_var().is_none() {
                     return Ok(SolverReturn::new(
@@ -326,6 +347,7 @@ impl LIRASolver {
                 }
 
                 // Try rounding heuristic
+                debug_println!(21, 0, "lia::lira_solver::solve: trying rounding heuristic");
                 if let Some(rounded_assg) = self.try_rounding_heuristic() {
                     debug_println!(
                         21,
@@ -337,8 +359,6 @@ impl LIRASolver {
                         self.stats.clone(),
                     ));
                 }
-
-                // TODO: try unit cube test
 
                 // Fall back to branch-and-bound
                 self.branch_and_bound()
@@ -532,6 +552,11 @@ impl LIRASolver {
     fn try_rounding_heuristic(&mut self) -> Option<Assignment<Var>> {
         self.lra_solver.try_rounding_heuristic()
     }
+
+    /// Attempt the unit cube test. Delegates to the underlying LRASolver.
+    fn try_unit_cube_test(&mut self) -> SolverResult<Option<Assignment<Var>>> {
+        self.lra_solver.try_unit_cube_test()
+    }
 }
 
 /// The tests in this module were ported from integration tests. As such, they use the frontend
@@ -626,6 +651,27 @@ mod tests {
         (assert (>= (to_real y) x))                  ; y >= x
         (assert (>= x (/ (to_real 1) (to_real 3))))  ; x >= 1/3
         (assert (<= (to_real y) (/ (to_real 2) (to_real 3))))  ; y <= 2/3
+            "#;
+        let lra_solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
+        let mut lira_solver = LIRASolver::new(lra_solver, SolverConfig::default());
+        assert!(matches!(
+            lira_solver.solve().unwrap().decision,
+            SolverDecision::INFEASIBLE(_)
+        ));
+    }
+
+    // Repeat the `branch_and_bound_triangle` test as purely LIA
+    #[test]
+    fn branch_and_bound_triangle_lia() {
+        // If x, y are Real this problem is FEASBILE, ex. model {x := 1/3, y := 1/3}
+        let smt_input = r#"
+        (set-logic QF_LIA)
+        (declare-fun x () Int)
+        (declare-fun y () Int)
+        (assert (>= y x))        ; y >= x
+        (assert (>= (* 3 x) 1))  ; 3x >= 1
+        (assert (<= (* 3 y) 2))  ; 3y <= 2
             "#;
         let lra_solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
             .expect("Failed to create LRA solver");

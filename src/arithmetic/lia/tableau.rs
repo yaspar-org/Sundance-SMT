@@ -81,7 +81,7 @@ where
 }
 
 /// Enum-dispatched tableau that selects between dense and sparse at runtime.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TableauImpl {
     /// Dense tableau variant
     Dense(TableauDense),
