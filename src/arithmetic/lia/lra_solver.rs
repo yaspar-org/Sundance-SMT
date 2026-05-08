@@ -20,7 +20,7 @@ use crate::arithmetic::lia::solver_result::{
 use crate::arithmetic::lia::stats::Stats;
 use crate::arithmetic::lia::tableau::{Tableau, TableauImpl, TableauKind};
 use crate::arithmetic::lia::types::Rational;
-use crate::arithmetic::lia::variables::{Owner, Var, VarInfo};
+use crate::arithmetic::lia::variables::{Owner, Var, VarInfo, VarType};
 use dashu::base::{Abs, Inverse};
 
 /// Linear arithmetic solver state
@@ -750,8 +750,6 @@ impl LRASolver {
     }
 
     /// Perform the general simplex algorithm to find a feasible solution.
-    ///
-    /// TODO: add configuration options for termination
     pub fn solve(&mut self) -> SolverResult<SolverReturn> {
         self.num_simplex_steps = 0;
         loop {
@@ -768,6 +766,25 @@ impl LRASolver {
                     self.num_simplex_steps += 1;
                 }
                 Ok(SimplexStepResult::Feasible) => {
+                    if let Some(rounded_assg) = self.try_rounding_heuristic() {
+                        debug_println!(
+                            21,
+                            0,
+                            "lia::lra_solver::solve: rounding heuristic succeeded"
+                        );
+                        let stats = Stats {
+                            num_lra_solve: 1,
+                            num_simplex_steps: self.num_simplex_steps,
+                        };
+                        return Ok(SolverReturn::new(
+                            SolverDecision::FEASIBLE(rounded_assg),
+                            stats,
+                        ));
+                    }
+
+                    // TODO: implement the "unit cube test" in order to find integer values for the
+                    // integer type variables.
+
                     let assg = self.compute_assignment();
                     debug_println!(
                         21,
@@ -798,7 +815,7 @@ impl LRASolver {
                         stats,
                     ));
                 }
-                Err(e) => return Err(e), // error
+                Err(e) => return Err(e),
             }
         }
     }
@@ -808,7 +825,6 @@ impl LRASolver {
     ///
     /// The conflict produced is guaranteed to be minimal by Farkas' Lemma.
     pub fn compute_conflict(&self, var: Var) -> SolverResult<Conflict<Var>> {
-        // TODO: get_conflict: implement
         let var_info = &self.variables[*self.var_to_idx.get(&var).unwrap()];
         let row = match var_info.is_basic() {
             Some(r) => r,
@@ -835,7 +851,70 @@ impl LRASolver {
         }
     }
 
-    /// Check the two tableau invariants
+    /// Attempt to round non-basic integer variables to the nearest integer value and check
+    /// whether the resulting assignment (propagated through the tableau) is still feasible.
+    ///
+    /// Returns `Some(assignment)` if rounding succeeds, `None` otherwise (original state restored).
+    fn try_rounding_heuristic(&mut self) -> Option<Assignment<Var>> {
+        let d0 = self.calculate_d0();
+
+        // Identify non-basic integer variables with non-integer values and their rounded targets
+        let rounds: Vec<(usize, QDelta)> = self
+            .non_basic
+            .iter()
+            .enumerate()
+            .flat_map(|(col, &var_idx)| {
+                let v = &self.variables[var_idx];
+                if v.var.typ != VarType::Int {
+                    return None;
+                }
+                let val = v.val.instantiate(&d0);
+                if val.is_int() {
+                    return None;
+                }
+                let floor = Rational::from(val.floor());
+                let ceil = Rational::from(val.ceil());
+                let rounded = if (&val - &floor) <= (&ceil - &val) {
+                    QDelta::from(floor)
+                } else {
+                    QDelta::from(ceil)
+                };
+                if !v.bounds.in_bounds(&rounded) {
+                    return None;
+                }
+                Some((col, rounded))
+            })
+            .collect();
+
+        if rounds.is_empty() {
+            return None; // nothing to round, let caller handle normally
+        }
+
+        // Save snapshot of all variable assignments
+        let snapshot: Vec<QDelta> = self.variables.iter().map(|v| v.val.clone()).collect();
+
+        // Apply rounding via update (preserves tableau equations)
+        for (col, rounded) in &rounds {
+            self.update(*col, rounded);
+        }
+
+        // Check if all variables are still in bounds
+        let feasible = self.variables.iter().all(|v| v.in_bounds());
+
+        if feasible {
+            let assg = self.compute_assignment();
+            Some(assg)
+        } else {
+            // Restore original assignments
+            for (i, val) in snapshot.into_iter().enumerate() {
+                self.variables[i].update_assignment(val);
+            }
+            None
+        }
+    }
+
+    /// Check the two tableau invariants. In particular, this validates that the current assignment
+    /// to variables satisfies the Q_δ form of the original system of inequalities.
     pub fn is_valid(&self) -> bool {
         self.assert_basic_assignments() && self.assert_non_basic_in_bounds()
     }
@@ -1411,5 +1490,190 @@ mod tests {
         solver.backtrack(level);
         let result = solver.solve().unwrap().decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
+    }
+
+    // ─── try_rounding_heuristic tests ───────────────────────────────────────────
+
+    /// Simple system where rounding succeeds:
+    ///   Tableau: s = x + y
+    ///   x, y are integer non-basic with bounds [0, 10]
+    ///   s is a real basic with bounds [0, 20]
+    ///   Set x = 3/2, y = 5/2 => s = 4 (in bounds)
+    ///   Rounding x to 2 and y to 2 (or 3) keeps s in [0,20]
+    #[test]
+    fn try_rounding_heuristic_succeeds() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+            VarInfo::new(Var::int(1), Owner::NonBasic(1))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+        ];
+        let basic = vec![
+            VarInfo::new(Var::real(2), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(20).into()))),
+        ];
+        // s = x + y
+        let equations = vec![vec![rbig!(1), rbig!(1)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        // Assign x = 3/2, y = 5/2
+        solver.update(0, &QDelta::from(rbig!(3 / 2)));
+        solver.update(1, &QDelta::from(rbig!(5 / 2)));
+
+        let result = solver.try_rounding_heuristic();
+        assert!(result.is_some(), "rounding should succeed");
+
+        let assg = result.unwrap();
+        let x_val = assg.get(&Var::int(0)).unwrap();
+        let y_val = assg.get(&Var::int(1)).unwrap();
+        assert!(x_val.is_int(), "x should be integer after rounding");
+        assert!(y_val.is_int(), "y should be integer after rounding");
+
+        // basic variable should still be in bounds
+        let s_val = assg.get(&Var::real(2)).unwrap();
+        assert!(*s_val >= rbig!(0) && *s_val <= rbig!(20));
+    }
+
+    /// Rounding fails because tight basic bounds make it infeasible.
+    ///   Tableau: s = 2*x
+    ///   x is integer non-basic with bounds [0, 10]
+    ///   s is real basic with bounds [3, 3] (tight at 3)
+    ///   Set x = 3/2 => s = 3 (feasible)
+    ///   Rounding x to 1 => s = 2 (below lower bound), or x to 2 => s = 4 (above upper bound)
+    ///   Rounding picks nearest (either direction) but result is infeasible => None
+    #[test]
+    fn try_rounding_heuristic_fails_infeasible() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+        ];
+        let basic = vec![
+            VarInfo::new(Var::real(1), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(3).into()), Some(rbig!(3).into()))),
+        ];
+        // s = 2*x
+        let equations = vec![vec![rbig!(2)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        // Assign x = 3/2 => s = 3 (exactly at bounds)
+        solver.update(0, &QDelta::from(rbig!(3 / 2)));
+        assert!(solver.is_valid());
+
+        let result = solver.try_rounding_heuristic();
+        assert!(
+            result.is_none(),
+            "rounding should fail when basic var goes out of bounds"
+        );
+
+        // Solver state should be restored
+        assert!(solver.is_valid());
+    }
+
+    /// Nothing to round: all non-basic integer variables already have integer values.
+    #[test]
+    fn try_rounding_heuristic_nothing_to_round() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+            VarInfo::new(Var::int(1), Owner::NonBasic(1))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+        ];
+        let basic = vec![
+            VarInfo::new(Var::real(2), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(20).into()))),
+        ];
+        // s = x + y
+        let equations = vec![vec![rbig!(1), rbig!(1)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        // Assign integer values: x = 3, y = 4
+        solver.update(0, &QDelta::from(rbig!(3)));
+        solver.update(1, &QDelta::from(rbig!(4)));
+
+        let result = solver.try_rounding_heuristic();
+        assert!(
+            result.is_none(),
+            "nothing to round when values are already integral"
+        );
+    }
+
+    /// Rounding is skipped for variables whose rounded value would violate their own bounds.
+    ///   x is integer non-basic with bounds [0, 1]
+    ///   Set x = 1/2; floor = 0, ceil = 1 — both in bounds, so rounding proceeds.
+    ///   But if bounds are (1/3, 2/3), neither 0 nor 1 is in bounds => skip that variable.
+    #[test]
+    fn try_rounding_heuristic_skips_out_of_bounds_round() {
+        let non_basic =
+            vec![
+                VarInfo::new(Var::int(0), Owner::NonBasic(0)).with_bounds(Bounds::new(
+                    Some(QDelta::from(rbig!(1 / 3))),
+                    Some(QDelta::from(rbig!(2 / 3))),
+                )),
+            ];
+        let basic = vec![
+            VarInfo::new(Var::real(1), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+        ];
+        // s = x
+        let equations = vec![vec![rbig!(1)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        // Assign x = 1/2 — fractional but floor(0) and ceil(1) are both outside [1/3, 2/3]
+        solver.update(0, &QDelta::from(rbig!(1 / 2)));
+
+        let result = solver.try_rounding_heuristic();
+        assert!(
+            result.is_none(),
+            "should return None when rounded value is out of variable bounds"
+        );
+    }
+
+    /// Mixed system: one integer variable needs rounding, one real variable does not.
+    ///   Tableau: s = x + y
+    ///   x is integer non-basic [0, 10], y is real non-basic [0, 10]
+    ///   s is real basic [0, 20]
+    ///   Set x = 7/2, y = 5/2 => s = 6
+    ///   Only x gets rounded (to 4); y stays at 5/2 since it's real.
+    #[test]
+    fn try_rounding_heuristic_mixed_int_real() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+            VarInfo::new(Var::real(1), Owner::NonBasic(1))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+        ];
+        let basic = vec![
+            VarInfo::new(Var::real(2), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(20).into()))),
+        ];
+        // s = x + y
+        let equations = vec![vec![rbig!(1), rbig!(1)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        // x = 7/2, y = 5/2
+        solver.update(0, &QDelta::from(rbig!(7 / 2)));
+        solver.update(1, &QDelta::from(rbig!(5 / 2)));
+
+        let result = solver.try_rounding_heuristic();
+        assert!(
+            result.is_some(),
+            "rounding should succeed for the integer variable"
+        );
+
+        let assg = result.unwrap();
+        let x_val = assg.get(&Var::int(0)).unwrap();
+        assert!(x_val.is_int(), "integer variable x should be rounded");
+        // 7/2 is equidistant from 3 and 4; the implementation picks floor when tied
+        assert!(*x_val == rbig!(3), "7/2 rounds to floor (3) on tie");
     }
 }
