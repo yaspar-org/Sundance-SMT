@@ -766,25 +766,6 @@ impl LRASolver {
                     self.num_simplex_steps += 1;
                 }
                 Ok(SimplexStepResult::Feasible) => {
-                    if let Some(rounded_assg) = self.try_rounding_heuristic() {
-                        debug_println!(
-                            21,
-                            0,
-                            "lia::lra_solver::solve: rounding heuristic succeeded"
-                        );
-                        let stats = Stats {
-                            num_lra_solve: 1,
-                            num_simplex_steps: self.num_simplex_steps,
-                        };
-                        return Ok(SolverReturn::new(
-                            SolverDecision::FEASIBLE(rounded_assg),
-                            stats,
-                        ));
-                    }
-
-                    // TODO: implement the "unit cube test" in order to find integer values for the
-                    // integer type variables.
-
                     let assg = self.compute_assignment();
                     debug_println!(
                         21,
@@ -855,7 +836,7 @@ impl LRASolver {
     /// whether the resulting assignment (propagated through the tableau) is still feasible.
     ///
     /// Returns `Some(assignment)` if rounding succeeds, `None` otherwise (original state restored).
-    fn try_rounding_heuristic(&mut self) -> Option<Assignment<Var>> {
+    pub fn try_rounding_heuristic(&mut self) -> Option<Assignment<Var>> {
         let d0 = self.calculate_d0();
 
         // Identify non-basic integer variables with non-integer values and their rounded targets

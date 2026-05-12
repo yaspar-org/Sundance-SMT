@@ -13,7 +13,9 @@ use crate::arithmetic::lia::bounds::Bounds;
 use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::qdelta::QDelta;
-use crate::arithmetic::lia::solver_result::{Conflict, SolverDecision, SolverResult, SolverReturn};
+use crate::arithmetic::lia::solver_result::{
+    Assignment, Conflict, SolverDecision, SolverResult, SolverReturn,
+};
 use crate::arithmetic::lia::stats::Stats;
 use crate::arithmetic::lia::variables::{Var, VarType};
 use crate::debug_println;
@@ -293,12 +295,60 @@ impl LIRASolver {
         Ok(())
     }
 
-    /// Solve a mixed-integer system using branch-and-bound
+    /// Solve a mixed-integer system.
     ///
-    /// TODO: lira_solver::solve: document branch-and-bound algorithm using incremental simplex
-    /// TODO: lira_solver::solve: clean up debug statements
+    /// First solves the relaxed rational system. If feasible with all integer variables
+    /// assigned integer values, returns immediately. Otherwise attempts heuristics
+    /// (rounding, unit cube test) before falling back to branch-and-bound.
     pub fn solve(&mut self) -> SolverResult<SolverReturn> {
         debug_println!(21, 0, "lia::lira_solver: starting LIRASolver");
+
+        // Solve the rational relaxation
+        let ret = self.lra_solver.solve()?;
+        self.stats.combine(&ret.stats);
+
+        match ret.decision {
+            SolverDecision::INFEASIBLE(cs) => Ok(SolverReturn::new(
+                SolverDecision::INFEASIBLE(cs),
+                self.stats.clone(),
+            )),
+            SolverDecision::UNKNOWN => Ok(SolverReturn::new(
+                SolverDecision::UNKNOWN,
+                self.stats.clone(),
+            )),
+            SolverDecision::FEASIBLE(assg) => {
+                // Check if all integer variables already have integer assignments
+                if self.find_next_int_var().is_none() {
+                    return Ok(SolverReturn::new(
+                        SolverDecision::FEASIBLE(assg),
+                        self.stats.clone(),
+                    ));
+                }
+
+                // Try rounding heuristic
+                if let Some(rounded_assg) = self.try_rounding_heuristic() {
+                    debug_println!(
+                        21,
+                        0,
+                        "lia::lira_solver::solve: rounding heuristic succeeded"
+                    );
+                    return Ok(SolverReturn::new(
+                        SolverDecision::FEASIBLE(rounded_assg),
+                        self.stats.clone(),
+                    ));
+                }
+
+                // TODO: try unit cube test
+
+                // Fall back to branch-and-bound
+                self.branch_and_bound()
+            }
+        }
+    }
+
+    /// Solve a mixed-integer system using branch-and-bound
+    fn branch_and_bound(&mut self) -> SolverResult<SolverReturn> {
+        debug_println!(21, 0, "lia::lira_solver: starting branch-and-bound");
 
         while let Some(current_k) = self.explorer.active.pop() {
             debug_println!(
@@ -475,6 +525,12 @@ impl LIRASolver {
 
         // No integer variables with non-integer values found
         None
+    }
+
+    /// Attempt to round non-basic integer variables to the nearest integer value.
+    /// Delegates to the underlying LRASolver.
+    fn try_rounding_heuristic(&mut self) -> Option<Assignment<Var>> {
+        self.lra_solver.try_rounding_heuristic()
     }
 }
 
