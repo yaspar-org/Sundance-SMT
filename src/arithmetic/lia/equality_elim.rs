@@ -207,9 +207,9 @@ fn apply_substitution(rel: &mut Rel<Rational>, subst: &Substitution) {
 ///
 /// Pre-condition: all relations have been normalized (i.e., `preprocess` has run).
 /// Post-condition: all extractable simple equalities have been substituted away.
+/// Provenance is stored in `ctx` for later conflict expansion.
 pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
-    // Provenance tracks which equality relations have been folded into each relation.
-    // When a conflict is detected, the conflict set = {relation} ∪ provenance[relation].
+    // Local provenance tracker; will be flushed into ctx at the end or on early return.
     let mut provenance: HashMap<Var, BTreeSet<Var>> = HashMap::new();
 
     for _iteration in 0..MAX_ITERATIONS {
@@ -256,8 +256,8 @@ pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
             }
         }
 
-        // Update provenance for all relations that contain the target variable
-        // (apply_substitution already handled the structural change; we track dependencies here)
+        // Update provenance for all relations (the source equality's provenance
+        // is inherited by every relation it was substituted into)
         for (_rel, var) in ctx.get_relations() {
             let var_copy = *var;
             if var_copy != src_var {
@@ -298,6 +298,11 @@ pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
             debug_println!(21, 0, "lia::equality_elim: system is trivially SAT");
             return EqualityElimResult::TriviallySat;
         }
+    }
+
+    // Store provenance in the context for later conflict expansion by the solver
+    for (var, sources) in &provenance {
+        ctx.add_provenance(*var, sources);
     }
 
     EqualityElimResult::Unknown

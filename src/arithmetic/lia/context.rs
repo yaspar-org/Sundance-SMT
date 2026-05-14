@@ -3,7 +3,7 @@
 
 //! Context tracked during SMT to [crate::arithmetic::lia::linear_system::LinearSystem] conversion
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use dashu::Rational;
 
@@ -68,6 +68,9 @@ pub struct ConvContext {
     all_variables: HashSet<Var>,
     /// Substitutions applied during equality elimination, for model back-substitution
     eliminated_substitutions: Vec<Substitution>,
+    /// Provenance: maps each relation's slack var to the set of equality slack vars
+    /// that have been substituted into it during equality elimination
+    provenance: HashMap<Var, BTreeSet<Var>>,
 }
 
 impl ConvContext {
@@ -83,6 +86,7 @@ impl ConvContext {
             relation_vars: Vec::new(),
             all_variables: HashSet::new(),
             eliminated_substitutions: Vec::new(),
+            provenance: HashMap::new(),
         }
     }
 
@@ -270,6 +274,16 @@ impl ConvContext {
     /// Get recorded substitutions for model back-substitution
     pub fn get_substitutions(&self) -> &[Substitution] {
         &self.eliminated_substitutions
+    }
+
+    /// Add provenance: record that `sources` were folded into the relation with slack var `target`
+    pub fn add_provenance(&mut self, target: Var, sources: &BTreeSet<Var>) {
+        self.provenance.entry(target).or_default().extend(sources);
+    }
+
+    /// Get the provenance (set of equality vars folded in) for a relation's slack var
+    pub fn get_provenance(&self, var: &Var) -> Option<&BTreeSet<Var>> {
+        self.provenance.get(var)
     }
 }
 
