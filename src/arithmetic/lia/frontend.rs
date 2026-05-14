@@ -517,18 +517,11 @@ fn solve_with_context(
     config: &SolverConfig,
 ) -> FrontendResult<SolverDecisionApi> {
     let (_, var_term_map) = ctx.get_term_var_maps(); // this is a clone
-    let decision = solve_ctx_raw(&mut ctx, config)?;
-    let decision = match decision.decision {
-        SolverDecision::FEASIBLE(mut model) => {
-            back_substitute_model(&mut model, ctx.get_substitutions());
-            SolverDecision::FEASIBLE(model)
-        }
-        other => other,
-    };
+    let ret = solve_ctx_raw(&mut ctx, config)?;
     // TODO: frontend::solve_with_context: return stats through SolverDecisionApi
     Ok(SolverDecisionApi::from_solver_decision(
         &var_term_map,
-        decision,
+        ret.decision,
     )?)
 }
 
@@ -600,8 +593,10 @@ pub fn solve_ctx_raw(ctx: &mut ConvContext, config: &SolverConfig) -> FrontendRe
     );
     match elim_result {
         EqualityElimResult::TriviallySat => {
+            let mut model = default_model(ctx.get_all_vars());
+            back_substitute_model(&mut model, ctx.get_substitutions());
             return Ok(SolverReturn::new(
-                SolverDecision::FEASIBLE(default_model(ctx.get_all_vars())),
+                SolverDecision::FEASIBLE(model),
                 Stats::new(),
             ));
         }
@@ -632,16 +627,22 @@ pub fn solve_ctx_raw(ctx: &mut ConvContext, config: &SolverConfig) -> FrontendRe
         "lia::frontend::solve_ctx_raw: LIRA solver finished, duration: {duration:?}"
     );
 
-    // Expand conflict set with equality elimination provenance
-    if let SolverDecision::INFEASIBLE(ref mut conflict) = ret.decision {
-        let vars_to_expand: Vec<Var> = conflict.iter().copied().collect();
-        for var in vars_to_expand {
-            if let Some(prov) = ctx.get_provenance(&var) {
-                for src in prov {
-                    conflict.insert(*src);
+    // Post-process solver result with equality elimination information
+    match ret.decision {
+        SolverDecision::FEASIBLE(ref mut model) => {
+            back_substitute_model(model, ctx.get_substitutions());
+        }
+        SolverDecision::INFEASIBLE(ref mut conflict) => {
+            let vars_to_expand: Vec<Var> = conflict.iter().copied().collect();
+            for var in vars_to_expand {
+                if let Some(prov) = ctx.get_provenance(&var) {
+                    for src in prov {
+                        conflict.insert(*src);
+                    }
                 }
             }
         }
+        SolverDecision::UNKNOWN => {}
     }
 
     Ok(ret)
