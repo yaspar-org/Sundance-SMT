@@ -7,10 +7,11 @@
 //! them throughout the system, eliminating variables before the simplex solver is invoked.
 
 use dashu::Rational;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::linear_system::{Mon, Rel, combine_terms_helper};
+use crate::arithmetic::lia::solver_result::Conflict;
 use crate::arithmetic::lia::variables::Var;
 use crate::debug_println;
 
@@ -51,8 +52,8 @@ pub enum EqualityElimResult {
     Unknown,
     /// System became trivially SAT after elimination
     TriviallySat,
-    /// System became trivially UNSAT after elimination
-    TriviallyUnsat(Var),
+    /// System became trivially UNSAT after elimination; includes all contributing relations
+    TriviallyUnsat(Conflict<Var>),
 }
 
 /// Attempt to extract a substitution from a normalized equality relation.
@@ -207,17 +208,21 @@ fn apply_substitution(rel: &mut Rel<Rational>, subst: &Substitution) {
 /// Pre-condition: all relations have been normalized (i.e., `preprocess` has run).
 /// Post-condition: all extractable simple equalities have been substituted away.
 pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
+    // Provenance tracks which equality relations have been folded into each relation.
+    // When a conflict is detected, the conflict set = {relation} ∪ provenance[relation].
+    let mut provenance: HashMap<Var, BTreeSet<Var>> = HashMap::new();
+
     for _iteration in 0..MAX_ITERATIONS {
-        // Find a usable substitution
-        let mut found_subst: Option<(usize, Substitution)> = None;
-        for (idx, (rel, _var)) in ctx.get_relations().enumerate() {
+        // Find a usable substitution and its source relation's slack var
+        let mut found_subst: Option<(usize, Var, Substitution)> = None;
+        for (idx, (rel, var)) in ctx.get_relations().enumerate() {
             if let Some(subst) = detect_substitution(rel) {
-                found_subst = Some((idx, subst));
+                found_subst = Some((idx, *var, subst));
                 break;
             }
         }
 
-        let (source_idx, subst) = match found_subst {
+        let (source_idx, src_var, subst) = match found_subst {
             Some(s) => s,
             None => break, // no more substitutions available
         };
@@ -229,17 +234,37 @@ pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
             subst
         );
 
+        // Compute the full provenance of the source equality (itself + its own provenance)
+        let mut src_provenance = BTreeSet::new();
+        src_provenance.insert(src_var);
+        if let Some(existing) = provenance.get(&src_var) {
+            src_provenance.extend(existing.iter().copied());
+        }
+
         // Apply the substitution to all other relations
         let mut to_remove = HashSet::new();
         let mut found_unsat: Option<Var> = None;
 
         for (rel, var) in ctx.get_relations_mut() {
+            let var_copy = *var;
             apply_substitution(rel, &subst);
             if rel.is_trivial_sat() {
-                to_remove.insert(*var);
+                to_remove.insert(var_copy);
             } else if rel.is_trivial_unsat() {
-                found_unsat = Some(*var);
+                found_unsat = Some(var_copy);
                 break;
+            }
+        }
+
+        // Update provenance for all relations that contain the target variable
+        // (apply_substitution already handled the structural change; we track dependencies here)
+        for (_rel, var) in ctx.get_relations() {
+            let var_copy = *var;
+            if var_copy != src_var {
+                provenance
+                    .entry(var_copy)
+                    .or_default()
+                    .extend(src_provenance.iter().copied());
             }
         }
 
@@ -249,7 +274,13 @@ pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
                 0,
                 "lia::equality_elim: substitution produced UNSAT"
             );
-            return EqualityElimResult::TriviallyUnsat(conflict_var);
+            // Build conflict: the contradicted relation + all equalities folded into it
+            let mut conflict_set = BTreeSet::new();
+            conflict_set.insert(conflict_var);
+            if let Some(prov) = provenance.get(&conflict_var) {
+                conflict_set.extend(prov.iter().copied());
+            }
+            return EqualityElimResult::TriviallyUnsat(Conflict::from_set(conflict_set));
         }
 
         // Also mark the source equality for removal (it becomes 0 = 0 after self-substitution)
@@ -480,15 +511,23 @@ mod tests {
     fn test_equality_eliminate_produces_unsat() {
         // System: x = 3, x >= 5
         // After substitution: 0 >= 2 which is trivially unsat
+        // Conflict must include both the equality and the inequality
         let mut ctx = ConvContext::new();
         let x = ctx.allocate_var("x", VarType::Real);
-        let _s1 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, x)], 3));
-        let _s2 = ctx.allocate_relation(Rel::mk_ge(vec![Mon::new(1, x)], 5));
+        let s1 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, x)], 3));
+        let s2 = ctx.allocate_relation(Rel::mk_ge(vec![Mon::new(1, x)], 5));
 
         preprocess(&mut ctx);
         let result = equality_eliminate(&mut ctx);
 
-        assert!(matches!(result, EqualityElimResult::TriviallyUnsat(_)));
+        match result {
+            EqualityElimResult::TriviallyUnsat(conflict) => {
+                assert!(conflict.contains(&s1), "conflict must include the source equality");
+                assert!(conflict.contains(&s2), "conflict must include the contradicted relation");
+                assert_eq!(conflict.len(), 2);
+            }
+            _ => panic!("expected TriviallyUnsat"),
+        }
     }
 
     #[test]
@@ -529,5 +568,65 @@ mod tests {
         // x34 = x13 and x66 = 8 should be eliminated, leaving only x59 > 0
         assert_eq!(ctx.num_relations(), 1);
         assert_eq!(ctx.get_substitutions().len(), 2);
+    }
+
+    /// Regression test based on equality_elim_conflict_regression.smt2
+    ///
+    /// v_3 + 1 = 5 (i.e., v_3 = 4) and v_3 < 4 conflict.
+    /// The conflict must include both the source equality and the contradicted inequality.
+    #[test]
+    fn test_equality_elim_conflict_includes_source_equality() {
+        let mut ctx = ConvContext::new();
+        let v3 = ctx.allocate_var("v3", VarType::Int);
+        let s1 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, v3)], 4)); // v3 = 4
+        let s2 = ctx.allocate_relation(Rel::mk_lt(vec![Mon::new(1, v3)], 4)); // v3 < 4
+
+        preprocess(&mut ctx);
+        let result = equality_eliminate(&mut ctx);
+
+        match result {
+            EqualityElimResult::TriviallyUnsat(conflict) => {
+                assert!(
+                    conflict.contains(&s1),
+                    "conflict must include the source equality"
+                );
+                assert!(
+                    conflict.contains(&s2),
+                    "conflict must include the contradicted relation"
+                );
+                assert_eq!(conflict.len(), 2);
+            }
+            _ => panic!("expected TriviallyUnsat"),
+        }
+    }
+
+    /// Regression test for transitive equality chains producing conflicts.
+    ///
+    /// x = y, y = 5, x > 5  →  after elimination: 5 > 5 (unsat)
+    /// Conflict must include all three relations.
+    #[test]
+    fn test_equality_elim_conflict_transitive_chain() {
+        let mut ctx = ConvContext::new();
+        let x = ctx.allocate_var("x", VarType::Real);
+        let y = ctx.allocate_var("y", VarType::Real);
+        let s1 = ctx.allocate_relation(Rel::mk_eq(
+            vec![Mon::new(1, x), Mon::new(-1, y)],
+            0,
+        )); // x = y
+        let s2 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, y)], 5)); // y = 5
+        let s3 = ctx.allocate_relation(Rel::mk_gt(vec![Mon::new(1, x)], 5)); // x > 5
+
+        preprocess(&mut ctx);
+        let result = equality_eliminate(&mut ctx);
+
+        match result {
+            EqualityElimResult::TriviallyUnsat(conflict) => {
+                assert!(conflict.contains(&s1), "conflict must include x = y");
+                assert!(conflict.contains(&s2), "conflict must include y = 5");
+                assert!(conflict.contains(&s3), "conflict must include x > 5");
+                assert_eq!(conflict.len(), 3);
+            }
+            _ => panic!("expected TriviallyUnsat"),
+        }
     }
 }

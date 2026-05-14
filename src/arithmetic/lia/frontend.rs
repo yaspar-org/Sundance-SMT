@@ -605,11 +605,9 @@ pub fn solve_ctx_raw(ctx: &mut ConvContext, config: &SolverConfig) -> FrontendRe
                 Stats::new(),
             ));
         }
-        EqualityElimResult::TriviallyUnsat(v) => {
-            let mut conflict = collections::BTreeSet::new();
-            conflict.insert(v);
+        EqualityElimResult::TriviallyUnsat(conflict) => {
             return Ok(SolverReturn::new(
-                SolverDecision::INFEASIBLE(Conflict::from_set(conflict)),
+                SolverDecision::INFEASIBLE(conflict),
                 Stats::new(),
             ));
         }
