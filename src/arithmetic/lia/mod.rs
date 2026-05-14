@@ -9,6 +9,7 @@
 pub mod bounds;
 pub mod config;
 pub mod context;
+pub mod equality_elim;
 pub mod frontend;
 pub mod linear_system;
 pub mod lira_solver;

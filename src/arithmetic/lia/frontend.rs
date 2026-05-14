@@ -17,6 +17,7 @@ use yaspar_ir::untyped::{Command, UntypedAst};
 
 use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::context::ConvContext;
+use crate::arithmetic::lia::equality_elim::{EqualityElimResult, Substitution, equality_eliminate};
 use crate::arithmetic::lia::linear_system::{
     Addend, Constraint, LinearSystem, LinearSystemError, Rel, combine_terms_helper,
 };
@@ -24,12 +25,12 @@ use crate::arithmetic::lia::lira_solver::LIRASolver;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::preprocess::{PreprocessResult, preprocess};
 use crate::arithmetic::lia::solver_result::{
-    Conflict, SolverDecision, SolverError, SolverReturn, default_model,
+    Assignment, Conflict, SolverDecision, SolverError, SolverReturn, default_model,
 };
 use crate::arithmetic::lia::solver_result_api::SolverDecisionApi;
 use crate::arithmetic::lia::stats::Stats;
 use crate::arithmetic::lia::types::{FBig, Integer, Rational, UBig};
-use crate::arithmetic::lia::variables::VarType;
+use crate::arithmetic::lia::variables::{Var, VarType};
 use crate::debug_println;
 
 /// Error type for conversion issues from [Term] to [Rel]
@@ -517,17 +518,51 @@ fn solve_with_context(
 ) -> FrontendResult<SolverDecisionApi> {
     let (_, var_term_map) = ctx.get_term_var_maps(); // this is a clone
     let decision = solve_ctx_raw(&mut ctx, config)?;
+    let decision = match decision.decision {
+        SolverDecision::FEASIBLE(mut model) => {
+            back_substitute_model(&mut model, ctx.get_substitutions());
+            SolverDecision::FEASIBLE(model)
+        }
+        other => other,
+    };
     // TODO: frontend::solve_with_context: return stats through SolverDecisionApi
     Ok(SolverDecisionApi::from_solver_decision(
         &var_term_map,
-        decision.decision,
+        decision,
     )?)
+}
+
+/// Recover eliminated variables' values by applying substitutions in reverse order.
+fn back_substitute_model(model: &mut Assignment<Var>, substitutions: &[Substitution]) {
+    for subst in substitutions.iter().rev() {
+        match subst {
+            Substitution::Constant { target, value } => {
+                model.insert(*target, value.clone());
+            }
+            Substitution::Variable {
+                target,
+                replacement,
+            } => {
+                if let Some(val) = model.get(replacement).cloned() {
+                    model.insert(*target, val);
+                }
+            }
+            Substitution::Affine {
+                target,
+                replacement,
+                offset,
+            } => {
+                if let Some(val) = model.get(replacement).cloned() {
+                    model.insert(*target, val + offset);
+                }
+            }
+        }
+    }
 }
 
 /// Run the solver given the provided context and return the resulting SolverDecision.
 pub fn solve_ctx_raw(ctx: &mut ConvContext, config: &SolverConfig) -> FrontendResult<SolverReturn> {
-    // preprocess the input relations, detect trivial cases, and otherwise return a [LinearSystem]
-    // from which to build a solver.
+    // Phase 1: normalize, remove trivial-sat, detect trivial-unsat
     let result = preprocess(ctx);
     debug_println!(
         21,
@@ -536,7 +571,7 @@ pub fn solve_ctx_raw(ctx: &mut ConvContext, config: &SolverConfig) -> FrontendRe
         ctx.num_variables(),
         ctx.num_relations()
     );
-    let sys = match result {
+    match result {
         PreprocessResult::TriviallySat => {
             return Ok(SolverReturn::new(
                 SolverDecision::FEASIBLE(default_model(ctx.get_all_vars())),
@@ -551,8 +586,38 @@ pub fn solve_ctx_raw(ctx: &mut ConvContext, config: &SolverConfig) -> FrontendRe
                 Stats::new(),
             ));
         }
-        PreprocessResult::Unknown => LinearSystem::new(ctx.clone()),
-    };
+        PreprocessResult::Unknown => {}
+    }
+
+    // Phase 2: equality elimination
+    let elim_result = equality_eliminate(ctx);
+    debug_println!(
+        21,
+        0,
+        "lia::frontend: after equality_elim: num_relations = {}, num_substitutions = {}",
+        ctx.num_relations(),
+        ctx.get_substitutions().len()
+    );
+    match elim_result {
+        EqualityElimResult::TriviallySat => {
+            return Ok(SolverReturn::new(
+                SolverDecision::FEASIBLE(default_model(ctx.get_all_vars())),
+                Stats::new(),
+            ));
+        }
+        EqualityElimResult::TriviallyUnsat(v) => {
+            let mut conflict = collections::BTreeSet::new();
+            conflict.insert(v);
+            return Ok(SolverReturn::new(
+                SolverDecision::INFEASIBLE(Conflict::from_set(conflict)),
+                Stats::new(),
+            ));
+        }
+        EqualityElimResult::Unknown => {}
+    }
+
+    // Phase 3: build system and solve
+    let sys = LinearSystem::new(ctx.clone());
     let lra_solver = sys
         .to_lra_solver(true, config)
         .map_err(|e| FrontendError(format!("error building lra_solver: {}", e)))?;

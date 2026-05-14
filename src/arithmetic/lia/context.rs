@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use dashu::Rational;
 
+use crate::arithmetic::lia::equality_elim::Substitution;
 use crate::arithmetic::lia::linear_system::Rel;
 use crate::arithmetic::lia::variables::{Var, VarType};
 use yaspar_ir::ast::{self, Sort};
@@ -65,6 +66,8 @@ pub struct ConvContext {
     relation_vars: Vec<Var>,
     /// All variables in the context, no matter how they are allocated
     all_variables: HashSet<Var>,
+    /// Substitutions applied during equality elimination, for model back-substitution
+    eliminated_substitutions: Vec<Substitution>,
 }
 
 impl ConvContext {
@@ -79,6 +82,7 @@ impl ConvContext {
             relations: Vec::new(),
             relation_vars: Vec::new(),
             all_variables: HashSet::new(),
+            eliminated_substitutions: Vec::new(),
         }
     }
 
@@ -256,6 +260,16 @@ impl ConvContext {
     /// Return the [ast::Term] <-> [Var] mappings
     pub fn get_term_var_maps(&self) -> (HashMap<ast::Term, Var>, HashMap<Var, ast::Term>) {
         (self.term_to_var.clone(), self.var_to_term.clone())
+    }
+
+    /// Record a substitution applied during equality elimination
+    pub fn record_substitution(&mut self, subst: Substitution) {
+        self.eliminated_substitutions.push(subst);
+    }
+
+    /// Get recorded substitutions for model back-substitution
+    pub fn get_substitutions(&self) -> &[Substitution] {
+        &self.eliminated_substitutions
     }
 }
 
