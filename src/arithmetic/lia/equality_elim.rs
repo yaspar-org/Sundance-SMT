@@ -12,7 +12,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::linear_system::{Mon, Rel, combine_terms_helper};
 use crate::arithmetic::lia::solver_result::Conflict;
-use crate::arithmetic::lia::variables::Var;
+use crate::arithmetic::lia::variables::{Var, VarType};
 use crate::debug_println;
 
 const MAX_ITERATIONS: usize = 255;
@@ -56,12 +56,22 @@ pub enum EqualityElimResult {
     TriviallyUnsat(Conflict<Var>),
 }
 
+/// Result of attempting to detect a substitution from an equality
+enum DetectResult {
+    /// A valid substitution was found
+    Found(Substitution),
+    /// The equality is trivially unsatisfiable (e.g., 2*x = 1 with Int x)
+    Unsat,
+    /// No substitution could be extracted
+    None,
+}
+
 /// Attempt to extract a substitution from a normalized equality relation.
 ///
 /// Pre-condition: `rel` is normalized (combined terms, integral, positive leading coeff).
-fn detect_substitution(rel: &Rel<Rational>) -> Option<Substitution> {
+fn detect_substitution(rel: &Rel<Rational>) -> DetectResult {
     if !rel.is_equality() {
-        return None;
+        return DetectResult::None;
     }
 
     let terms = rel.terms_ref();
@@ -72,7 +82,10 @@ fn detect_substitution(rel: &Rel<Rational>) -> Option<Substitution> {
             let var = terms[0].var();
             let coeff = terms[0].coeff_ref();
             let value = Rational::from(rel.constant_ref().clone()) / coeff;
-            Some(Substitution::Constant { target: var, value })
+            if var.typ == VarType::Int && !value.is_int() {
+                return DetectResult::Unsat;
+            }
+            DetectResult::Found(Substitution::Constant { target: var, value })
         }
         // a*x + b*y = c
         // After normalization: leading coeff is positive and integral.
@@ -85,7 +98,7 @@ fn detect_substitution(rel: &Rel<Rational>) -> Option<Substitution> {
 
             // Check for unit coefficients +1 and -1
             if *coeff_a != Rational::ONE || *coeff_b != -Rational::ONE {
-                return None;
+                return DetectResult::None;
             }
 
             // Normalized form: 1*x + (-1)*y = c, i.e., x - y = c, i.e., x = y + c
@@ -96,12 +109,12 @@ fn detect_substitution(rel: &Rel<Rational>) -> Option<Substitution> {
                 // target = var_a, replacement = var_b
                 // var_a = var_b + c
                 if constant.is_zero() {
-                    Some(Substitution::Variable {
+                    DetectResult::Found(Substitution::Variable {
                         target: var_a,
                         replacement: var_b,
                     })
                 } else {
-                    Some(Substitution::Affine {
+                    DetectResult::Found(Substitution::Affine {
                         target: var_a,
                         replacement: var_b,
                         offset: constant,
@@ -111,12 +124,12 @@ fn detect_substitution(rel: &Rel<Rational>) -> Option<Substitution> {
                 // target = var_b, replacement = var_a
                 // From x - y = c: y = x - c
                 if constant.is_zero() {
-                    Some(Substitution::Variable {
+                    DetectResult::Found(Substitution::Variable {
                         target: var_b,
                         replacement: var_a,
                     })
                 } else {
-                    Some(Substitution::Affine {
+                    DetectResult::Found(Substitution::Affine {
                         target: var_b,
                         replacement: var_a,
                         offset: -constant,
@@ -124,7 +137,7 @@ fn detect_substitution(rel: &Rel<Rational>) -> Option<Substitution> {
                 }
             }
         }
-        _ => None,
+        _ => DetectResult::None,
     }
 }
 
@@ -216,9 +229,25 @@ pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
         // Find a usable substitution and its source relation's slack var
         let mut found_subst: Option<(usize, Var, Substitution)> = None;
         for (idx, (rel, var)) in ctx.get_relations().enumerate() {
-            if let Some(subst) = detect_substitution(rel) {
-                found_subst = Some((idx, *var, subst));
-                break;
+            match detect_substitution(rel) {
+                DetectResult::Found(subst) => {
+                    found_subst = Some((idx, *var, subst));
+                    break;
+                }
+                DetectResult::Unsat => {
+                    debug_println!(
+                        21,
+                        0,
+                        "lia::equality_elim: integrality conflict detected"
+                    );
+                    let mut conflict_set = BTreeSet::new();
+                    conflict_set.insert(*var);
+                    if let Some(prov) = provenance.get(var) {
+                        conflict_set.extend(prov.iter().copied());
+                    }
+                    return EqualityElimResult::TriviallyUnsat(Conflict::from_set(conflict_set));
+                }
+                DetectResult::None => {}
             }
         }
 
@@ -321,13 +350,12 @@ mod tests {
     fn test_detect_x_eq_const() {
         // 2x = 6  (normalized)
         let rel: Rel<Rational> = Rel::mk_eq(vec![Mon::new(rbig!(2), Var::real(0))], rbig!(6));
-        let subst = detect_substitution(&rel).unwrap();
-        match subst {
-            Substitution::Constant { target, value } => {
+        match detect_substitution(&rel) {
+            DetectResult::Found(Substitution::Constant { target, value }) => {
                 assert_eq!(target, Var::real(0));
                 assert_eq!(value, rbig!(3));
             }
-            _ => panic!("expected Constant substitution"),
+            _ => panic!("expected Found(Constant) substitution"),
         }
     }
 
@@ -338,13 +366,12 @@ mod tests {
             vec![Mon::new(rbig!(1), Var::real(0)), Mon::new(rbig!(-1), Var::real(1))],
             rbig!(0),
         );
-        let subst = detect_substitution(&rel).unwrap();
-        match subst {
-            Substitution::Variable { target, replacement } => {
+        match detect_substitution(&rel) {
+            DetectResult::Found(Substitution::Variable { target, replacement }) => {
                 assert_eq!(target, Var::real(1));
                 assert_eq!(replacement, Var::real(0));
             }
-            _ => panic!("expected Variable substitution"),
+            _ => panic!("expected Found(Variable) substitution"),
         }
     }
 
@@ -355,20 +382,19 @@ mod tests {
             vec![Mon::new(rbig!(1), Var::real(0)), Mon::new(rbig!(-1), Var::real(3))],
             rbig!(5),
         );
-        let subst = detect_substitution(&rel).unwrap();
-        match subst {
-            Substitution::Affine {
+        match detect_substitution(&rel) {
+            DetectResult::Found(Substitution::Affine {
                 target,
                 replacement,
                 offset,
-            } => {
+            }) => {
                 // var 3 > var 0, so target = var(3), replacement = var(0)
                 // from x0 - x3 = 5: x3 = x0 - 5
                 assert_eq!(target, Var::real(3));
                 assert_eq!(replacement, Var::real(0));
                 assert_eq!(offset, rbig!(-5));
             }
-            _ => panic!("expected Affine substitution"),
+            _ => panic!("expected Found(Affine) substitution"),
         }
     }
 
@@ -379,7 +405,14 @@ mod tests {
             vec![Mon::new(rbig!(2), Var::real(0)), Mon::new(rbig!(-3), Var::real(1))],
             rbig!(5),
         );
-        assert!(detect_substitution(&rel).is_none());
+        assert!(matches!(detect_substitution(&rel), DetectResult::None));
+    }
+
+    #[test]
+    fn test_detect_int_non_integral_returns_unsat() {
+        // 2x = 1 with Int x: x = 1/2 is not integral, so UNSAT
+        let rel: Rel<Rational> = Rel::mk_eq(vec![Mon::new(rbig!(2), Var::int(0))], rbig!(1));
+        assert!(matches!(detect_substitution(&rel), DetectResult::Unsat));
     }
 
     #[test]
