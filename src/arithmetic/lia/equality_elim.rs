@@ -15,6 +15,7 @@ use crate::arithmetic::lia::solver_result::Conflict;
 use crate::arithmetic::lia::variables::{Var, VarType};
 use crate::debug_println;
 
+// Maximum number of eliminations to perform
 const MAX_ITERATIONS: usize = 255;
 
 /// A substitution extracted from an equality relation
@@ -52,7 +53,8 @@ pub enum EqualityElimResult {
     Unknown,
     /// System became trivially SAT after elimination
     TriviallySat,
-    /// System became trivially UNSAT after elimination; includes all contributing relations
+    /// System became trivially UNSAT after elimination; conflict includes all contributing
+    /// relations
     TriviallyUnsat(Conflict<Var>),
 }
 
@@ -60,7 +62,8 @@ pub enum EqualityElimResult {
 enum DetectResult {
     /// A valid substitution was found
     Found(Substitution),
-    /// The equality is trivially unsatisfiable (e.g., 2*x = 1 with Int x)
+    /// The equality is trivially unsatisfiable (e.g., 2*x = 1 with Int x); eliminating
+    /// x in this case can be unsound
     Unsat,
     /// No substitution could be extracted
     None,
@@ -69,6 +72,9 @@ enum DetectResult {
 /// Attempt to extract a substitution from a normalized equality relation.
 ///
 /// Pre-condition: `rel` is normalized (combined terms, integral, positive leading coeff).
+///
+/// The pre-condition is satisfied if the [`crate::arithmetic::lia::preprocess`]ing pass is
+/// performed directly before equality elimination.
 fn detect_substitution(rel: &Rel<Rational>) -> DetectResult {
     if !rel.is_equality() {
         return DetectResult::None;
@@ -90,6 +96,8 @@ fn detect_substitution(rel: &Rel<Rational>) -> DetectResult {
         // a*x + b*y = c
         // After normalization: leading coeff is positive and integral.
         // We match unit coefficients: +1*x + (-1)*y = c  means x = y + c
+        //
+        // TODO: lia::equality_elim::detect_substitution: support non-unit two-term substitutions
         2 => {
             let var_a = terms[0].var();
             let coeff_a = terms[0].coeff_ref();
@@ -180,6 +188,7 @@ fn apply_substitution(rel: &mut Rel<Rational>, subst: &Substitution) {
                 .iter()
                 .map(|mon| {
                     if mon.var() == target {
+                        // a * target => a * replacement
                         Mon::new(mon.coeff_ref().clone(), *replacement)
                     } else {
                         Mon::new(mon.coeff_ref().clone(), mon.var())
@@ -316,7 +325,11 @@ pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
         ctx.record_substitution(subst);
 
         if ctx.num_relations() == 0 {
-            debug_println!(21, 0, "lia::equality_elim: system is trivially SAT");
+            debug_println!(
+                21,
+                0,
+                "lia::equality_elim: empty system after equality elimination: system is trivially SAT"
+            );
             return EqualityElimResult::TriviallySat;
         }
     }
@@ -389,7 +402,7 @@ mod tests {
                 replacement,
                 offset,
             }) => {
-                // var 3 > var 0, so target = var(3), replacement = var(0)
+                // var(3) > var(0), so target = var(3), replacement = var(0)
                 // from x0 - x3 = 5: x3 = x0 - 5
                 assert_eq!(target, Var::real(3));
                 assert_eq!(replacement, Var::real(0));
@@ -412,6 +425,7 @@ mod tests {
         assert!(matches!(detect_substitution(&rel), DetectResult::None));
     }
 
+    // regression test from original equality elimination impl bug
     #[test]
     fn test_detect_int_non_integral_returns_unsat() {
         // 2x = 1 with Int x: x = 1/2 is not integral, so UNSAT
@@ -445,7 +459,7 @@ mod tests {
     fn test_apply_variable_substitution() {
         // Substitution: x1 = x0
         // Relation: 2*x0 + 3*x1 <= 10
-        // Result: 5*x0 <= 10 (i.e., x0 <= 2)
+        // Result: 5*x0 <= 10 (after normalization, x0 <= 2)
         let subst = Substitution::Variable {
             target: Var::real(1),
             replacement: Var::real(0),

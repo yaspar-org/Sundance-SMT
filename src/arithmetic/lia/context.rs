@@ -117,13 +117,13 @@ impl ConvContext {
     where
         P: Fn(&Var) -> bool,
     {
-        // TODO: filter_vars: find a better solution to var/relation filtering
+        // TODO: lia::context::filter_vars: find a better solution to var/relation filtering
         let mut new_relations = Vec::new();
         let mut new_relation_vars = Vec::new();
         for (i, v) in self.relation_vars.iter().enumerate() {
             if pred(v) {
                 new_relation_vars.push(*v);
-                new_relations.push(self.relations[i].clone()); // TODO: don't clone
+                new_relations.push(self.relations[i].clone()); // TODO: lia::context::filter_vars: don't clone
             }
         }
         self.relations = new_relations;
