@@ -235,11 +235,7 @@ pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
                     break;
                 }
                 DetectResult::Unsat => {
-                    debug_println!(
-                        21,
-                        0,
-                        "lia::equality_elim: integrality conflict detected"
-                    );
+                    debug_println!(21, 0, "lia::equality_elim: integrality conflict detected");
                     let mut conflict_set = BTreeSet::new();
                     conflict_set.insert(*var);
                     if let Some(prov) = provenance.get(var) {
@@ -298,11 +294,7 @@ pub fn equality_eliminate(ctx: &mut ConvContext) -> EqualityElimResult {
         }
 
         if let Some(conflict_var) = found_unsat {
-            debug_println!(
-                21,
-                0,
-                "lia::equality_elim: substitution produced UNSAT"
-            );
+            debug_println!(21, 0, "lia::equality_elim: substitution produced UNSAT");
             // Build conflict: the contradicted relation + all equalities folded into it
             let mut conflict_set = BTreeSet::new();
             conflict_set.insert(conflict_var);
@@ -363,11 +355,17 @@ mod tests {
     fn test_detect_x_eq_y() {
         // x - y = 0 (normalized: leading coeff positive)
         let rel: Rel<Rational> = Rel::mk_eq(
-            vec![Mon::new(rbig!(1), Var::real(0)), Mon::new(rbig!(-1), Var::real(1))],
+            vec![
+                Mon::new(rbig!(1), Var::real(0)),
+                Mon::new(rbig!(-1), Var::real(1)),
+            ],
             rbig!(0),
         );
         match detect_substitution(&rel) {
-            DetectResult::Found(Substitution::Variable { target, replacement }) => {
+            DetectResult::Found(Substitution::Variable {
+                target,
+                replacement,
+            }) => {
                 assert_eq!(target, Var::real(1));
                 assert_eq!(replacement, Var::real(0));
             }
@@ -379,7 +377,10 @@ mod tests {
     fn test_detect_x_eq_y_plus_c() {
         // x - y = 5 (normalized)
         let rel: Rel<Rational> = Rel::mk_eq(
-            vec![Mon::new(rbig!(1), Var::real(0)), Mon::new(rbig!(-1), Var::real(3))],
+            vec![
+                Mon::new(rbig!(1), Var::real(0)),
+                Mon::new(rbig!(-1), Var::real(3)),
+            ],
             rbig!(5),
         );
         match detect_substitution(&rel) {
@@ -402,7 +403,10 @@ mod tests {
     fn test_detect_non_unit_coefficients_returns_none() {
         // 2x - 3y = 5: coefficients are not unit, so no substitution
         let rel: Rel<Rational> = Rel::mk_eq(
-            vec![Mon::new(rbig!(2), Var::real(0)), Mon::new(rbig!(-3), Var::real(1))],
+            vec![
+                Mon::new(rbig!(2), Var::real(0)),
+                Mon::new(rbig!(-3), Var::real(1)),
+            ],
             rbig!(5),
         );
         assert!(matches!(detect_substitution(&rel), DetectResult::None));
@@ -425,7 +429,10 @@ mod tests {
             value: rbig!(3),
         };
         let mut rel: Rel<Rational> = Rel::mk_le(
-            vec![Mon::new(rbig!(1), Var::real(0)), Mon::new(rbig!(2), Var::real(1))],
+            vec![
+                Mon::new(rbig!(1), Var::real(0)),
+                Mon::new(rbig!(2), Var::real(1)),
+            ],
             rbig!(10),
         );
         apply_substitution(&mut rel, &subst);
@@ -444,7 +451,10 @@ mod tests {
             replacement: Var::real(0),
         };
         let mut rel: Rel<Rational> = Rel::mk_le(
-            vec![Mon::new(rbig!(2), Var::real(0)), Mon::new(rbig!(3), Var::real(1))],
+            vec![
+                Mon::new(rbig!(2), Var::real(0)),
+                Mon::new(rbig!(3), Var::real(1)),
+            ],
             rbig!(10),
         );
         apply_substitution(&mut rel, &subst);
@@ -464,7 +474,10 @@ mod tests {
             offset: rbig!(2),
         };
         let mut rel: Rel<Rational> = Rel::mk_le(
-            vec![Mon::new(rbig!(1), Var::real(0)), Mon::new(rbig!(1), Var::real(1))],
+            vec![
+                Mon::new(rbig!(1), Var::real(0)),
+                Mon::new(rbig!(1), Var::real(1)),
+            ],
             rbig!(10),
         );
         apply_substitution(&mut rel, &subst);
@@ -501,10 +514,7 @@ mod tests {
         let mut ctx = ConvContext::new();
         let x = ctx.allocate_var("x", VarType::Real);
         let y = ctx.allocate_var("y", VarType::Real);
-        let _s1 = ctx.allocate_relation(Rel::mk_eq(
-            vec![Mon::new(1, x), Mon::new(-1, y)],
-            0,
-        ));
+        let _s1 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, x), Mon::new(-1, y)], 0));
         let _s2 = ctx.allocate_relation(Rel::mk_le(vec![Mon::new(1, x), Mon::new(1, y)], 10));
 
         preprocess(&mut ctx);
@@ -525,14 +535,8 @@ mod tests {
         let x = ctx.allocate_var("x", VarType::Real);
         let y = ctx.allocate_var("y", VarType::Real);
         let z = ctx.allocate_var("z", VarType::Real);
-        let _s1 = ctx.allocate_relation(Rel::mk_eq(
-            vec![Mon::new(1, x), Mon::new(-1, y)],
-            0,
-        ));
-        let _s2 = ctx.allocate_relation(Rel::mk_eq(
-            vec![Mon::new(1, y), Mon::new(-1, z)],
-            0,
-        ));
+        let _s1 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, x), Mon::new(-1, y)], 0));
+        let _s2 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, y), Mon::new(-1, z)], 0));
         let _s3 = ctx.allocate_relation(Rel::mk_ge(vec![Mon::new(1, z)], 1));
 
         preprocess(&mut ctx);
@@ -560,8 +564,14 @@ mod tests {
 
         match result {
             EqualityElimResult::TriviallyUnsat(conflict) => {
-                assert!(conflict.contains(&s1), "conflict must include the source equality");
-                assert!(conflict.contains(&s2), "conflict must include the contradicted relation");
+                assert!(
+                    conflict.contains(&s1),
+                    "conflict must include the source equality"
+                );
+                assert!(
+                    conflict.contains(&s2),
+                    "conflict must include the contradicted relation"
+                );
                 assert_eq!(conflict.len(), 2);
             }
             _ => panic!("expected TriviallyUnsat"),
@@ -594,8 +604,7 @@ mod tests {
         let x59 = ctx.allocate_var("x59", VarType::Real);
         let x66 = ctx.allocate_var("x66", VarType::Real);
 
-        let _r1 =
-            ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, x34), Mon::new(-1, x13)], 0));
+        let _r1 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, x34), Mon::new(-1, x13)], 0));
         let _r2 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, x66)], 8));
         let _r3 = ctx.allocate_relation(Rel::mk_gt(vec![Mon::new(1, x59)], 0));
 
@@ -647,10 +656,7 @@ mod tests {
         let mut ctx = ConvContext::new();
         let x = ctx.allocate_var("x", VarType::Real);
         let y = ctx.allocate_var("y", VarType::Real);
-        let s1 = ctx.allocate_relation(Rel::mk_eq(
-            vec![Mon::new(1, x), Mon::new(-1, y)],
-            0,
-        )); // x = y
+        let s1 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, x), Mon::new(-1, y)], 0)); // x = y
         let s2 = ctx.allocate_relation(Rel::mk_eq(vec![Mon::new(1, y)], 5)); // y = 5
         let s3 = ctx.allocate_relation(Rel::mk_gt(vec![Mon::new(1, x)], 5)); // x > 5
 
