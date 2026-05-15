@@ -1,3 +1,6 @@
+; Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+; SPDX-License-Identifier: Apache-2.0
+ 
 (set-logic QF_LIA)
 (declare-const var_1 Int)
 (declare-const var_13 Int)
