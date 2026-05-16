@@ -263,6 +263,34 @@ impl ops::Sub for QDelta {
     }
 }
 
+impl ops::AddAssign<&QDelta> for QDelta {
+    fn add_assign(&mut self, rhs: &QDelta) {
+        self.rat += &rhs.rat;
+        self.inf += &rhs.inf;
+    }
+}
+
+impl ops::AddAssign for QDelta {
+    fn add_assign(&mut self, rhs: QDelta) {
+        self.rat += rhs.rat;
+        self.inf += rhs.inf;
+    }
+}
+
+impl ops::SubAssign<&QDelta> for QDelta {
+    fn sub_assign(&mut self, rhs: &QDelta) {
+        self.rat -= &rhs.rat;
+        self.inf -= &rhs.inf;
+    }
+}
+
+impl ops::SubAssign for QDelta {
+    fn sub_assign(&mut self, rhs: QDelta) {
+        self.rat -= rhs.rat;
+        self.inf -= rhs.inf;
+    }
+}
+
 /// Multiply a Q_δ on the left by a rational: a * d for a in Q, d in Q_δ
 ///
 /// ```rust
