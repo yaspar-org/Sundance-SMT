@@ -5,13 +5,14 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 /// Statistics about the solver run
+#[derive(Debug)]
 pub struct SolverStats {
     start_time: Instant,
 
     pub decisions: u64,
     pub backtracks: u64,
-    pub theory_lemmas: u64,
     pub arith_checks: u64,
+    pub instantiations: u64,
 }
 
 impl SolverStats {
@@ -20,8 +21,8 @@ impl SolverStats {
             start_time: Instant::now(),
             decisions: 0,
             backtracks: 0,
-            theory_lemmas: 0,
             arith_checks: 0,
+            instantiations: 0,
         }
     }
 
@@ -42,9 +43,9 @@ impl fmt::Display for SolverStats {
         write!(f, "{{\n")?;
         writeln!(f, "  \"decisions\": {},", self.decisions)?;
         writeln!(f, "  \"backtracks\": {},", self.backtracks)?;
-        writeln!(f, "  \"theory_lemmas\": {},", self.theory_lemmas)?;
         writeln!(f, "  \"arith_checks\": {},", self.arith_checks)?;
-        writeln!(f, "  \"time\": {:.3}", elapsed.as_secs_f64())?;
+        writeln!(f, "  \"instantiations\": {},", self.instantiations)?;
+        writeln!(f, "  \"solve_time\": {:.3}", elapsed.as_secs_f64())?;
         write!(f, "}}")
     }
 }

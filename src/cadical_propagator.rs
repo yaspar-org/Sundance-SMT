@@ -214,7 +214,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     //     .add_theory_clause(shrunk_constraint.clone(), theory_reason);
 
                     self.disequalities.borrow_mut().push(shrunk_constraint);
-                    self.stats.theory_lemmas += 1;
                     debug_println!(
                         14 - 3,
                         0,
@@ -595,6 +594,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
                     // TODO: since I am adding literals, I might have to add them as observed literals
                     self.disequalities.borrow_mut().push(clause.clone());
+                    self.stats.instantiations += 1;
                 }
                 Skolemization { clause } => {
                     for lit in clause {
