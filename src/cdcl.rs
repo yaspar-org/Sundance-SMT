@@ -7,6 +7,7 @@ use crate::cadical_propagator::CustomExternalPropagator;
 use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
 use crate::proof::proof_tracer::SMTProofTracker;
+use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, Status};
 use std::cell::RefCell;
@@ -28,7 +29,7 @@ pub fn cdcl_decision_procedure(
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
     _timeout: u64, // todo: add timeout functionality
-) -> Status {
+) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
 
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
@@ -47,6 +48,7 @@ pub fn cdcl_decision_procedure(
         assignments: vec![0, 0],
         solver: &mut solver as *mut CaDiCal,
         arithmetic,
+        stats: SolverStats::new(),
     };
 
     solver.connect_external_propagator(&mut propagator);
@@ -108,7 +110,7 @@ pub fn cdcl_decision_procedure(
             debug_println!(2, 0, "eDRAT proof written to: {}", p.display());
         }
     }
-    result
+    (result, propagator.stats)
 }
 
 fn solve(solver: &mut CaDiCal) -> Status {

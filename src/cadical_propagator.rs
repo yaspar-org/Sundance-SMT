@@ -15,6 +15,7 @@ use crate::log::is_important;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
+use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
@@ -46,6 +47,7 @@ pub struct CustomExternalPropagator<'a> {
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
     pub solver: *mut CaDiCal,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
+    pub stats: SolverStats,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -212,6 +214,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     //     .add_theory_clause(shrunk_constraint.clone(), theory_reason);
 
                     self.disequalities.borrow_mut().push(shrunk_constraint);
+                    self.stats.theory_lemmas += 1;
                     debug_println!(
                         14 - 3,
                         0,
@@ -224,6 +227,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn notify_new_decision_level(&mut self) {
+        self.stats.decisions += 1;
         debug_println!(
             11,
             0,
@@ -255,6 +259,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn notify_backtrack(&mut self, level: usize) {
+        self.stats.backtracks += 1;
         debug_println!(
             23,
             0,
@@ -455,6 +460,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // Check arithmetic consistency before instantiating quantifiers
         debug_println!(21, 0, "Starting arithmetic check",);
+        self.stats.arith_checks += 1;
 
         match check_integer_constraints_satisfiable(&self.arithmetic, model, self.egraph) {
             ArithResult::Unsat(arithmetic_literals) => {
