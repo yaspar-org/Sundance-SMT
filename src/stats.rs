@@ -40,7 +40,7 @@ impl Default for SolverStats {
 impl fmt::Display for SolverStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let elapsed = self.elapsed();
-        write!(f, "{{\n")?;
+        writeln!(f, "{{")?;
         writeln!(f, "  \"decisions\": {},", self.decisions)?;
         writeln!(f, "  \"backtracks\": {},", self.backtracks)?;
         writeln!(f, "  \"arith_checks\": {},", self.arith_checks)?;
