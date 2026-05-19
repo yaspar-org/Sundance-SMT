@@ -9,9 +9,13 @@ use std::time::{Duration, Instant};
 pub struct SolverStats {
     start_time: Instant,
 
+    /// Number of new decision levels created by CaDiCaL (notify_new_decision_level calls)
     pub decisions: u64,
+    /// Number of backtrack notifications from CaDiCaL (notify_backtrack calls)
     pub backtracks: u64,
+    /// Number of calls to the arithmetic theory solver (check_integer_constraints_satisfiable)
     pub arith_checks: u64,
+    /// Number of quantifier instantiations added as clauses to CaDiCaL
     pub instantiations: u64,
 }
 
