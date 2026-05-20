@@ -1072,7 +1072,7 @@ impl LRASolver {
         let mut rhs = QDelta::ZERO;
         for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
             // TODO: getting the whole row at once may be faster here
-            rhs = rhs + &self.variables[*non_basic_idx].val * self.tableau.get(row, col).unwrap();
+            rhs += &self.variables[*non_basic_idx].val * self.tableau.get(row, col).unwrap();
         }
         rhs
     }

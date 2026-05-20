@@ -180,7 +180,7 @@ fn main() -> Result<(), String> {
 
     let quantifiers = !egraph.quantifiers.is_empty();
 
-    let return_value = cdcl_decision_procedure(
+    let (return_value, stats) = cdcl_decision_procedure(
         &mut egraph,
         prop_skeleton,
         boolean_dt_constraints,
@@ -202,5 +202,10 @@ fn main() -> Result<(), String> {
         Status::UNSATISFIABLE => println!("unsat"),
         Status::UNKNOWN => println!("unknown"),
     }
+
+    if args.stats {
+        eprintln!("{stats}");
+    }
+
     Ok(())
 }
