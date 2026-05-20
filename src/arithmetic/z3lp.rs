@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::arithmetic::lia::stats::Stats as LiaStats;
 use crate::egraphs::egraph::Egraph;
 use crate::{
     arithmetic::lp::{
@@ -166,7 +167,7 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
                 let model_val_i64 = model_val.as_i64().unwrap_or(i64::MAX);
                 model_hashmap.entry(model_val_i64).or_default().insert(var);
             }
-            ArithResult::Sat(model_hashmap)
+            ArithResult::Sat(model_hashmap, LiaStats::new())
         }
         z3::SatResult::Unsat => {
             // Unsatisfiable - return the arithmetic literals that caused the conflict
@@ -182,7 +183,7 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
                 .iter()
                 .flat_map(|ast| constraint_to_literals.get(ast).unwrap().clone())
                 .collect();
-            ArithResult::Unsat(unsat_core_literals)
+            ArithResult::Unsat(unsat_core_literals, LiaStats::new())
         }
         z3::SatResult::Unknown => {
             // Z3 couldn't determine satisfiability - treat as satisfiable for now

@@ -3,6 +3,7 @@
 
 use dashu::integer::IBig;
 // use z3::{ast::{Ast, Bool, Int}, Context, Solver};
+use crate::arithmetic::lia::stats::Stats as LiaStats;
 use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
 #[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
@@ -57,9 +58,11 @@ impl fmt::Display for ArithSolverParseError {
 }
 
 pub enum ArithResult {
-    Unsat(Vec<i32>), // conflict clause
-    // Sat(Vec<i32>),    // literals that correspond to inequalities <= where the two terms are equal
-    Sat(DeterministicHashMap<i64, DeterministicHashSet<u64>>), // literals that correspond to inequalities <= where the two terms are equal
+    Unsat(Vec<i32>, LiaStats), // conflict clause
+    Sat(
+        DeterministicHashMap<i64, DeterministicHashSet<u64>>,
+        LiaStats,
+    ), // literals that correspond to inequalities <= where the two terms are equal
     None,
 }
 
