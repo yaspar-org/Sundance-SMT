@@ -97,6 +97,7 @@ pub fn check_integer_constraints_satisfiable_lia(
     match frontend::solve_ctx_raw(&mut ctx, &SolverConfig::default()) {
         Ok(ret) => {
             debug_println!(25, 4, "lia::frontend: stats: {:?}", ret.stats);
+            let stats = ret.stats;
             match ret.decision {
                 SolverDecision::FEASIBLE(assignment) => {
                     let mut model_hashmap: DeterministicHashMap<i64, DeterministicHashSet<u64>> =
@@ -108,7 +109,7 @@ pub fn check_integer_constraints_satisfiable_lia(
                             model_hashmap.entry(val_i64).or_default().insert(*term_id);
                         }
                     }
-                    ArithResult::Sat(model_hashmap)
+                    ArithResult::Sat(model_hashmap, stats)
                 }
                 SolverDecision::INFEASIBLE(conflict) => {
                     let unsat_core_literals: Vec<i32> = conflict
@@ -116,7 +117,7 @@ pub fn check_integer_constraints_satisfiable_lia(
                         .flat_map(|var| slack_to_lits.get(var).into_iter().flatten().copied())
                         .collect();
                     debug_println!(21, 4, "LIA: Unsat core literals: {:?}", unsat_core_literals);
-                    ArithResult::Unsat(unsat_core_literals)
+                    ArithResult::Unsat(unsat_core_literals, stats)
                 }
                 SolverDecision::UNKNOWN => ArithResult::None,
             }
