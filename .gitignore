@@ -5,3 +5,8 @@ target/
 .DS_Store
 .z3-trace
 .vscode
+
+# eDRAT proof files
+*.edrat
+*.drat
+*.lrat
