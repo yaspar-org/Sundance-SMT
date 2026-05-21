@@ -6,7 +6,10 @@
 use crate::debug_println;
 use cadical_sys::ProofTracer;
 use core::panic;
+use std::cmp::Eq;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
+use std::ops::Neg;
 use yaspar_ir::ast::{
     ATerm::*, Context, FunctionMeta, ObjectAllocatorExt, Repr, Sig, Sort, SortDef, Str, Term,
 };
@@ -53,6 +56,23 @@ fn polarize_term(term: &Term, polarity: bool) -> Term {
     }
 }
 
+/// Returns true if the clause contains a literal and its negation (i.e., both `x` and `-x`).
+/// Written for generic iterators, since clauses in this file are both `Vec`s and `&[i32]` arrays.
+fn clause_is_tautology<'a, I, T>(clause: I) -> bool
+where
+    I: IntoIterator<Item = &'a T>,
+    T: 'a + Copy + Eq + Hash + Neg<Output = T>,
+{
+    let mut seen = HashSet::new();
+    for &lit in clause {
+        if seen.contains(&-lit) {
+            return true;
+        }
+        seen.insert(lit);
+    }
+    false
+}
+
 /// Represents a single step in the proof
 #[derive(Debug, Clone)]
 pub enum ProofStepData {
@@ -73,8 +93,10 @@ pub enum ProofStepData {
     //     clause: Vec<i32>,
     //     // skolemized: bool,
     // },
-    /// Clause deletion
-    Deletion { id: u64 },
+    /// DRAT-style clause deletion.
+    /// Despite CaDiCaL returning a clause ID, we store the entire clause.
+    /// TODO: Any way to store an index into `proof_steps`? It'll save on memory
+    Deletion { clause: Vec<i32> },
 }
 
 /// Format a sort definition as a declare-sort command
@@ -284,6 +306,11 @@ impl SMTProofTracker {
                         output.push_str(&format!("{} ", lit));
                     }
                     output.push_str("0\n");
+
+                    // Stop adding proof steps to the output once the empty clause is derived
+                    if clause.is_empty() {
+                        return output;
+                    }
                 }
                 ProofStepData::TheoryClause { clause, .. } => {
                     self.introduce_literals(clause, &mut output);
@@ -312,8 +339,13 @@ impl SMTProofTracker {
                     }
                     output.push_str("0\n");
                 }
-                ProofStepData::Deletion { id } => {
-                    output.push_str(&format!("d {} 0\n", id));
+                ProofStepData::Deletion { clause } => {
+                    // Emit a DRAT-style deletion, which includes all literals in the clause
+                    output.push_str("d ");
+                    for &lit in clause {
+                        output.push_str(&format!("{} ", lit));
+                    }
+                    output.push_str("0\n");
                 }
             }
         }
@@ -324,6 +356,9 @@ impl SMTProofTracker {
 impl ProofTracer for SMTProofTracker {
     fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], _restored: bool) {
         if self.skolemizations.contains(clause) {
+            return;
+        }
+        if clause_is_tautology(clause) {
             return;
         }
         if !self.finished_original_clauses {
@@ -352,13 +387,22 @@ impl ProofTracer for SMTProofTracker {
         debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
+        if clause_is_tautology(clause) {
+            return;
+        }
+
         self.proof_steps.push(ProofStepData::SATClause {
             clause: clause.to_vec(),
         });
     }
 
-    fn delete_clause(&mut self, id: u64, _redundant: bool, _clause: &[i32]) {
-        self.proof_steps.push(ProofStepData::Deletion { id });
+    fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {
+        if clause_is_tautology(clause) {
+            return;
+        }
+        self.proof_steps.push(ProofStepData::Deletion {
+            clause: clause.to_vec(),
+        });
     }
 
     fn weaken_minus(&mut self, _id: u64, _clause: &[i32]) {
