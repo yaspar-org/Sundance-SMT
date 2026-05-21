@@ -25,7 +25,7 @@ use crate::arithmetic::lia::types::Rational;
 /// [TableauSparse] wraps a sparse matrix over the [Rational]s and implements
 /// the [Tableau] interface.
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TableauSparse {
     matrix: sparse::Matrix<Rational>,
 }

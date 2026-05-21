@@ -290,6 +290,8 @@
     "arithmetic/test.smt2": "unsat", 
     "arithmetic/test_plus_pattern.smt2": "unsat",  
     "arithmetic/albion_divideby0.smt2": "sat", 
+    "arithmetic/unit_cube_regression_1_ddsmt.smt2": "sat", 
+    "arithmetic/unit_cube_regression_2_ddsmt.smt2": "sat", 
     "20170829-Rodin-noannotations/smt4458073420585573738.smt2": "unsat",
     "20170829-Rodin-noannotations/smt7665342989239969743.smt2": "unsat",
     "20170829-Rodin-noannotations/smt6739662804326223632.smt2": "unsat",

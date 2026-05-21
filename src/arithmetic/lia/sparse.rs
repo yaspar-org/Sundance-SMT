@@ -43,7 +43,7 @@ pub type SparseResult<T> = Result<T, SparseError>;
 type K = slotmap::DefaultKey;
 
 /// Sparse matrix node
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Node<V> {
     // Some if the node is not a column header
     row: Option<usize>,
@@ -57,6 +57,7 @@ struct Node<V> {
 }
 
 /// todo:
+#[derive(Clone)]
 pub struct Matrix<V> {
     arena: slotmap::SlotMap<K, Node<V>>,
     baserows: Vec<K>, // length = # rows
