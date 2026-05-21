@@ -462,7 +462,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.stats.arith_checks += 1;
 
         match check_integer_constraints_satisfiable(&self.arithmetic, model, self.egraph) {
-            ArithResult::Unsat(arithmetic_literals) => {
+            ArithResult::Unsat(arithmetic_literals, arith_stats) => {
+                self.stats.arith.accumulate(&arith_stats);
                 {
                     debug_println!(
                         21,
@@ -475,7 +476,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     return false;
                 }
             }
-            ArithResult::Sat(literals) => {
+            ArithResult::Sat(literals, arith_stats) => {
+                self.stats.arith.accumulate(&arith_stats);
                 for set in literals.values() {
                     let mut t = set.iter();
                     let first = t.next().unwrap();

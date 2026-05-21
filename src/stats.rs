@@ -4,6 +4,24 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::arithmetic::lia::stats::Stats as LiaStats;
+
+/// Accumulated statistics from the arithmetic sub-solver
+#[derive(Debug, Default)]
+pub struct ArithStats {
+    /// Total number of simplex pivots across all arithmetic checks
+    pub num_simplex_steps: usize,
+    /// Total number of LRA solver invocations across all arithmetic checks
+    pub num_lra_solve: usize,
+}
+
+impl ArithStats {
+    pub fn accumulate(&mut self, lia_stats: &LiaStats) {
+        self.num_simplex_steps += lia_stats.num_simplex_steps;
+        self.num_lra_solve += lia_stats.num_lra_solve;
+    }
+}
+
 /// Statistics about the solver run
 #[derive(Debug)]
 pub struct SolverStats {
@@ -17,6 +35,8 @@ pub struct SolverStats {
     pub arith_checks: u64,
     /// Number of quantifier instantiations added as clauses to CaDiCaL
     pub instantiations: u64,
+    /// Accumulated arithmetic sub-solver statistics
+    pub arith: ArithStats,
 }
 
 impl SolverStats {
@@ -27,6 +47,7 @@ impl SolverStats {
             backtracks: 0,
             arith_checks: 0,
             instantiations: 0,
+            arith: ArithStats::default(),
         }
     }
 
@@ -49,6 +70,14 @@ impl fmt::Display for SolverStats {
         writeln!(f, "  \"backtracks\": {},", self.backtracks)?;
         writeln!(f, "  \"arith_checks\": {},", self.arith_checks)?;
         writeln!(f, "  \"instantiations\": {},", self.instantiations)?;
+        writeln!(f, "  \"arith\": {{")?;
+        writeln!(
+            f,
+            "    \"simplex_steps\": {},",
+            self.arith.num_simplex_steps
+        )?;
+        writeln!(f, "    \"lra_solve_calls\": {}", self.arith.num_lra_solve)?;
+        writeln!(f, "  }},")?;
         writeln!(f, "  \"solve_time\": {:.3}", elapsed.as_secs_f64())?;
         write!(f, "}}")
     }
