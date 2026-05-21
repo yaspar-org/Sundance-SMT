@@ -71,7 +71,11 @@ impl QDelta {
 
     /// Instantiate at a concrete value of delta
     pub fn instantiate(&self, delta: &Rational) -> Rational {
-        self.rat.clone() + self.inf.clone() * delta
+        if self.inf.is_zero() {
+            self.rat.clone()
+        } else {
+            self.rat.clone() + self.inf.clone() * delta
+        }
     }
 
     /// Value has zero infinitesimal part and rational part zero
@@ -228,7 +232,6 @@ impl ops::Add for &QDelta {
     }
 }
 
-/// TODO: dry
 impl ops::Add for QDelta {
     type Output = QDelta;
 
@@ -251,7 +254,6 @@ impl ops::Sub for &QDelta {
     }
 }
 
-/// TODO: dry
 impl ops::Sub for QDelta {
     type Output = QDelta;
 
@@ -311,7 +313,6 @@ impl ops::Mul<&Rational> for QDelta {
     }
 }
 
-/// TODO: dry
 impl ops::Mul<&Rational> for &QDelta {
     type Output = QDelta;
 
