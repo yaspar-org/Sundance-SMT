@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Global debug level - controls which debug messages are printed
-static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(0);
+static DEBUG_LEVEL: AtomicU8 = AtomicU8::new(30);
 
 pub fn set_debug_level(level: u8) {
     DEBUG_LEVEL.store(level, Ordering::SeqCst);
