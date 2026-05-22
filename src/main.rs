@@ -27,9 +27,8 @@ fn main() -> Result<(), String> {
             "Debug mode enabled (level {})",
             log::get_debug_level()
         );
-    } else {
-        log::set_debug_level(30);
     }
+    // else the default is set in `crate::log`
 
     // Enable debug output for proof tracking if proof file is specified
     if args.proof.is_some() {
