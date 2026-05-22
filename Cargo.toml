@@ -54,3 +54,7 @@ name = "sundance-smt"
 [[bench]]
 name = "tableau_benchmarks"
 harness = false
+
+[[bench]]
+name = "lia_benchmarks"
+harness = false
