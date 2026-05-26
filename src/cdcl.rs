@@ -9,12 +9,23 @@ use crate::egraphs::egraph::Egraph;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
-use cadical_sys::{CaDiCal, Status};
+use cadical_sys::{CaDiCal, Status, Terminator};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Instant;
 use yaspar_ir::ast::{FunctionMeta, Sig, SortDef, Str};
+
+struct DeadlineTerminator {
+    deadline: Instant,
+}
+
+impl Terminator for DeadlineTerminator {
+    fn terminated(&mut self) -> bool {
+        Instant::now() >= self.deadline
+    }
+}
 
 /// Main CDCL decision loop
 ///
@@ -28,7 +39,7 @@ pub fn cdcl_decision_procedure(
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
-    _timeout: u64, // todo: add timeout functionality
+    timeout: u64,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
 
@@ -38,6 +49,17 @@ pub fn cdcl_decision_procedure(
 
     // Connect the proof tracer (must be done in CONFIGURING state)
     solver.connect_proof_tracer1(&mut *proof_tracker.borrow_mut(), true); // true for antecedents
+
+    let mut terminator = if timeout > 0 {
+        Some(DeadlineTerminator {
+            deadline: Instant::now() + std::time::Duration::from_secs(timeout),
+        })
+    } else {
+        None
+    };
+    if let Some(ref mut t) = terminator {
+        solver.connect_terminator(t);
+    }
 
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,

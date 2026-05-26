@@ -388,8 +388,10 @@ impl ProofTracer for SMTProofTracker {
     }
 
     fn reset_assumptions(&mut self) {
-        // Optional: track assumption resets
-        panic!("Do not currently support assumptions")
+        // We are still not supporting assumptions, but unlike in add_assumption_clause we do not
+        // panic here. CaDiCaL rel 2.1.3 hits this in Solver::call_external_solve_and_check_results
+        // https://github.com/arminbiere/cadical/blob/rel-2.1.3/src/solver.cpp#L758-L759
+        // Specifically this happens when we get unknown, for example when we run with a timeout.
     }
 
     fn add_assumption_clause(&mut self, _id: u64, _clause: &[i32], _antecedents: &[u64]) {
