@@ -3,6 +3,8 @@
 
 //! Classic congruence closure algorithm
 
+use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy;
+use crate::cnf::CNFConversion as _;
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::utils::{
@@ -444,7 +446,7 @@ pub fn find_if_eq_diseq<'a>(
 fn leastcommonancestor_helper(
     u: u64,
     v: u64,
-    egraph: &Egraph,
+    egraph: &mut Egraph,
     tracker: &mut ProofTracker,
     indent: usize,
 ) -> Option<Vec<(u64, u64)>> {
@@ -577,6 +579,38 @@ fn leastcommonancestor_helper(
                     )
                 }
             }
+            ProofForestEdge::Arithmetic { term: (t1, t2), .. } => {
+                debug_println!(
+                    20,
+                    indent + 12,
+                    "Arithmetic {} [{}] = {} [{}]",
+                    egraph.get_term(t1),
+                    t1,
+                    egraph.get_term(t2),
+                    t2
+                );
+                if tracker.union(t1, t2) {
+                    final_proof.push((t1, t2));
+                }
+                // The caller is about to build the conflict clause and will
+                // call `make_eq(t1, t2)`, which requires `eq(t1, t2)` to be a
+                // known SAT literal. Eagerly build the trichotomy term and run
+                // cnf_tseitin — this registers `eq(t1, t2)`, `t1 < t2`,
+                // `t1 > t2` in var_map and produces the Tseitin clauses. We
+                // queue the clauses on the egraph; the propagator drains them
+                // alongside the conflict clause it returns.
+                let key = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+                if !egraph.trichotomies_emitted.contains(&key) {
+                    egraph.trichotomies_emitted.insert(key);
+                    let trichotomy = nelson_oppen_trichotomy(t1, t2, egraph);
+                    let trichotomy_nnf = trichotomy.nnf(egraph);
+                    egraph.insert_predecessor(&trichotomy_nnf, None, None, true, None);
+                    let trichotomy_cnf = trichotomy.cnf_tseitin(egraph);
+                    for clause in trichotomy_cnf {
+                        egraph.pending_trichotomies.push(clause.0);
+                    }
+                }
+            }
         }
     }
 
@@ -596,7 +630,7 @@ fn leastcommonancestor_helper(
 pub fn leastcommonancestor(
     u: u64,
     v: u64,
-    egraph: &Egraph,
+    egraph: &mut Egraph,
     tracker: &mut ProofTracker,
 ) -> Option<Vec<(u64, u64)>> {
     debug_println!(
@@ -657,6 +691,22 @@ pub fn add_parent(
             hash,
             children,
         },
+        ProofForestEdge::Arithmetic {
+            size,
+            term,
+            disequalities,
+            children,
+            ..
+        } => ProofForestEdge::Arithmetic {
+            size,
+            term,
+            parent,
+            child: new_child,
+            disequalities,
+            level,
+            hash,
+            children,
+        },
     }
 }
 
@@ -674,6 +724,10 @@ pub fn get_parent(proof_parent: &ProofForestEdge) -> u64 {
             parent: proof_parent,
             ..
         } => *proof_parent,
+        ProofForestEdge::Arithmetic {
+            parent: proof_parent,
+            ..
+        } => *proof_parent,
     }
 }
 
@@ -686,6 +740,7 @@ pub fn get_child(proof_parent: &ProofForestEdge) -> u64 {
         } => *child,
         ProofForestEdge::Congruence { child, .. } => *child,
         ProofForestEdge::Equality { child, .. } => *child,
+        ProofForestEdge::Arithmetic { child, .. } => *child,
     }
 }
 
@@ -971,6 +1026,33 @@ fn make_root(vertex: u64, proof_parent: ProofForestEdge, egraph: &mut Egraph) {
             make_root(
                 parent,
                 ProofForestEdge::Equality {
+                    size: 0,
+                    term,
+                    parent: vertex,
+                    child: parent,
+                    disequalities: DeterministicHashMap::new(),
+                    level,
+                    hash,
+                    children,
+                },
+                egraph,
+            );
+            disequalities
+        }
+        ProofForestEdge::Arithmetic {
+            term,
+            parent,
+            child,
+            disequalities,
+            level,
+            hash,
+            children,
+            ..
+        } => {
+            assert_eq!(child, vertex);
+            make_root(
+                parent,
+                ProofForestEdge::Arithmetic {
                     size: 0,
                     term,
                     parent: vertex,

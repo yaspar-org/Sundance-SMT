@@ -147,6 +147,32 @@ impl fmt::Display for Egraph {
                             children
                         )?;
                     }
+                    ProofForestEdge::Arithmetic {
+                        term: (t1, t2),
+                        size,
+                        parent,
+                        child,
+                        disequalities,
+                        level,
+                        hash,
+                        children,
+                    } => {
+                        writeln!(
+                            f,
+                            "  {} -> {} [Arithmetic {} = {} (size: {}, parent: {}, child: {}, disequalities: {:?}, level: {}, hash: {}, children: {:?})]",
+                            self.get_term(term_id as u64),
+                            self.get_term(*parent),
+                            self.get_term(*t1),
+                            self.get_term(*t2),
+                            size,
+                            self.get_term(*parent),
+                            self.get_term(*child),
+                            disequalities,
+                            level,
+                            hash,
+                            children
+                        )?;
+                    }
                 }
             }
         }
@@ -244,8 +270,18 @@ pub struct Egraph {
     pub term_constructors: DeterministicHashMap<u64, ConstructorType>, // maps all terms to the correct constructor (using Hashmap because I don't anticipate a lot of datatype terms relative to total # of terms)
     /// if a quantifier instantiates (f t) and t = s, then we want to add  (f.uid(), "f", [t.uid()])
     pub union_to_eclass: DeterministicHashSet<(u64, String, Vec<u64>)>, // todo: use identifier instead of String
-    /// remember pairs of terms for which we have learnt  x = y \/ x > y \/ x < y
-    pub nelson_oppen_ineq_literals: HashSet<(u64, u64)>,
+    /// Trichotomy clauses queued for emission to the SAT solver. Each entry is
+    /// one clause (as a list of literals). When `leastcommonancestor_helper`
+    /// traverses a `ProofForestEdge::Arithmetic` edge for the first time, it
+    /// eagerly registers the `eq(x, y)` literal (and the `x < y`, `y < x`
+    /// literals) via cnf_tseitin and pushes the resulting Tseitin clauses here
+    /// so the SAT-clause caller's `make_eq` can find them. The propagator
+    /// drains this after the conflict clause is built.
+    pub pending_trichotomies: Vec<Vec<i32>>,
+    /// Pairs (x, y) for which the trichotomy `x = y \/ x < y \/ x > y` has
+    /// already been emitted. Persists across backtracks since the clause stays
+    /// asserted globally in the SAT solver.
+    pub trichotomies_emitted: HashSet<(u64, u64)>,
     /// remember terms for which we have learnt datatype axioms
     pub datatype_axioms_applied: HashSet<u64>,
     /// user flag for whether to instantiate some datatype axioms lazily
@@ -293,7 +329,8 @@ impl Egraph {
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             union_to_eclass: DeterministicHashSet::new(),
-            nelson_oppen_ineq_literals: HashSet::new(),
+            pending_trichotomies: Vec::new(),
+            trichotomies_emitted: HashSet::new(),
             datatype_axioms_applied: HashSet::new(),
             lazy_dt,
             arithmetic_terms: vec![],
@@ -945,7 +982,8 @@ impl Egraph {
         match p {
             ProofForestEdge::Root { .. } => x,
             ProofForestEdge::Congruence { parent: p, .. }
-            | ProofForestEdge::Equality { parent: p, .. } => self.find(*p),
+            | ProofForestEdge::Equality { parent: p, .. }
+            | ProofForestEdge::Arithmetic { parent: p, .. } => self.find(*p),
         }
     }
 
@@ -968,6 +1006,12 @@ impl Egraph {
                 ..
             }
             | ProofForestEdge::Equality {
+                parent: p,
+                level,
+                hash,
+                ..
+            }
+            | ProofForestEdge::Arithmetic {
                 parent: p,
                 level,
                 hash,
@@ -1004,6 +1048,12 @@ impl Egraph {
                     level,
                     hash,
                     ..
+                }
+                | ProofForestEdge::Arithmetic {
+                    parent: p,
+                    level,
+                    hash,
+                    ..
                 } => {
                     if level > highest_level_x {
                         (highest_level_x, highest_hash_x) = (level, hash);
@@ -1031,6 +1081,12 @@ impl Egraph {
                     ..
                 }
                 | ProofForestEdge::Equality {
+                    parent: p,
+                    level,
+                    hash,
+                    ..
+                }
+                | ProofForestEdge::Arithmetic {
                     parent: p,
                     level,
                     hash,
@@ -1083,6 +1139,12 @@ impl Egraph {
                         level,
                         hash,
                         ..
+                    }
+                    | ProofForestEdge::Arithmetic {
+                        parent: p,
+                        level,
+                        hash,
+                        ..
                     } => {
                         if level > highest_level {
                             (highest_level, highest_hash) = (level, hash);
@@ -1105,6 +1167,12 @@ impl Egraph {
                         ..
                     }
                     | ProofForestEdge::Equality {
+                        parent: p,
+                        level,
+                        hash,
+                        ..
+                    }
+                    | ProofForestEdge::Arithmetic {
                         parent: p,
                         level,
                         hash,

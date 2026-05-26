@@ -41,6 +41,20 @@ pub enum ProofForestEdge {
         hash: u64,
         children: DeterministicHashSet<u64>,
     },
+    /// Represents an equality propagated by the arithmetic theory (model-based
+    /// Nelson-Oppen, Yices CAV'14). When used in a conflict, the splitting
+    /// clause `term.0 = term.1 \/ term.0 < term.1 \/ term.0 > term.1` is
+    /// emitted lazily.
+    Arithmetic {
+        term: (u64, u64),
+        size: u64,
+        parent: u64,
+        child: u64,
+        disequalities: DeterministicHashMap<u64, DisequalTerm>,
+        level: usize,
+        hash: u64,
+        children: DeterministicHashSet<u64>,
+    },
 }
 
 impl fmt::Display for ProofForestEdge {
@@ -106,6 +120,22 @@ impl fmt::Display for ProofForestEdge {
                     pairs, size, parent, child, disequalities, level, hash, children
                 )
             }
+            ProofForestEdge::Arithmetic {
+                term: (t1, t2),
+                size,
+                parent,
+                child,
+                disequalities,
+                level,
+                hash,
+                children,
+            } => {
+                write!(
+                    f,
+                    "Arithmetic({} = {}, size : {}, parent: {}, child : {:?}, disequalities: {:?}, level : {}, hash: {}, children : {:?})",
+                    t1, t2, size, parent, child, disequalities, level, hash, children
+                )
+            }
         }
     }
 }
@@ -144,6 +174,20 @@ impl PartialEq for ProofForestEdge {
                     ..
                 },
             ) => parent1 == parent2 && child1 == child2,
+            (
+                ProofForestEdge::Arithmetic {
+                    term: term1,
+                    parent: parent1,
+                    child: child1,
+                    ..
+                },
+                ProofForestEdge::Arithmetic {
+                    term: term2,
+                    parent: parent2,
+                    child: child2,
+                    ..
+                },
+            ) => term1 == term2 && parent1 == parent2 && child1 == child2,
             _ => false,
         }
     }
@@ -155,7 +199,8 @@ impl ProofForestEdge {
         match self {
             ProofForestEdge::Root { child, .. }
             | ProofForestEdge::Equality { child, .. }
-            | ProofForestEdge::Congruence { child, .. } => *child,
+            | ProofForestEdge::Congruence { child, .. }
+            | ProofForestEdge::Arithmetic { child, .. } => *child,
         }
     }
 
@@ -164,7 +209,8 @@ impl ProofForestEdge {
         match self {
             ProofForestEdge::Root { .. } => panic!("Root does not have a parent"),
             ProofForestEdge::Equality { parent, .. }
-            | ProofForestEdge::Congruence { parent, .. } => *parent,
+            | ProofForestEdge::Congruence { parent, .. }
+            | ProofForestEdge::Arithmetic { parent, .. } => *parent,
         }
     }
 
@@ -174,6 +220,7 @@ impl ProofForestEdge {
             ProofForestEdge::Root { disequalities, .. } => disequalities,
             ProofForestEdge::Equality { disequalities, .. } => disequalities,
             ProofForestEdge::Congruence { disequalities, .. } => disequalities,
+            ProofForestEdge::Arithmetic { disequalities, .. } => disequalities,
         }
     }
 
@@ -182,7 +229,8 @@ impl ProofForestEdge {
         match self {
             ProofForestEdge::Root { children, .. }
             | ProofForestEdge::Equality { children, .. }
-            | ProofForestEdge::Congruence { children, .. } => children,
+            | ProofForestEdge::Congruence { children, .. }
+            | ProofForestEdge::Arithmetic { children, .. } => children,
         }
     }
 
@@ -192,6 +240,7 @@ impl ProofForestEdge {
             ProofForestEdge::Root { disequalities, .. } => disequalities,
             ProofForestEdge::Equality { disequalities, .. } => disequalities,
             ProofForestEdge::Congruence { disequalities, .. } => disequalities,
+            ProofForestEdge::Arithmetic { disequalities, .. } => disequalities,
         }
     }
 
@@ -250,6 +299,25 @@ impl ProofForestEdge {
                 disequalities: diseq,
                 children,
             },
+            ProofForestEdge::Arithmetic {
+                term,
+                size,
+                parent,
+                child,
+                level,
+                hash,
+                children,
+                ..
+            } => ProofForestEdge::Arithmetic {
+                term,
+                size,
+                parent,
+                child,
+                level,
+                hash,
+                disequalities: diseq,
+                children,
+            },
         }
     }
 
@@ -259,6 +327,7 @@ impl ProofForestEdge {
             ProofForestEdge::Root { disequalities, .. } => disequalities, // TODO: not sure if I want this clone here, but its kind've hard to do references for disequalities
             ProofForestEdge::Equality { disequalities, .. } => disequalities,
             ProofForestEdge::Congruence { disequalities, .. } => disequalities,
+            ProofForestEdge::Arithmetic { disequalities, .. } => disequalities,
         };
         // will only insert a disequality if is not already in the map
         // or if the hash is outdated (i.e. we have already backtracked on this disequality)

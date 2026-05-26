@@ -78,13 +78,11 @@ pub fn nelson_oppen_clause(literal: i32, egraph: &mut Egraph) -> Option<Term> {
 //     }
 // }
 
-// learn the clause x = y \/ x > y \/ x < y
-pub fn nelson_oppen_clause_pair(x: u64, y: u64, egraph: &mut Egraph) -> Option<Term> {
-    if egraph.nelson_oppen_ineq_literals.contains(&(x, y)) {
-        return None;
-    }
-    egraph.nelson_oppen_ineq_literals.insert((x, y));
-
+// Build the trichotomy term `x = y \/ x > y \/ x < y`. Unlike the previous
+// version, this does NOT consult or update any dedup set: the propagator now
+// decides when to merge `x` and `y` in the egraph (via a
+// ProofForestEdge::Arithmetic edge) versus when to emit the trichotomy.
+pub fn nelson_oppen_trichotomy(x: u64, y: u64, egraph: &mut Egraph) -> Term {
     let bool_sort = egraph.context.bool_sort();
 
     let lt = QualifiedIdentifier::simple(egraph.context.allocate_symbol("<"));
@@ -103,7 +101,5 @@ pub fn nelson_oppen_clause_pair(x: u64, y: u64, egraph: &mut Egraph) -> Option<T
 
     let eq_term = egraph.context.eq(egraph.get_term(x), egraph.get_term(y));
 
-    let or = egraph.context.or(vec![lt_term, gt_term, eq_term]);
-
-    Some(or)
+    egraph.context.or(vec![lt_term, gt_term, eq_term])
 }

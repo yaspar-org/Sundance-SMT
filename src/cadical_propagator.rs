@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
-use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
-use crate::cnf::CNFConversion as _;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::{
-    get_child, get_parent, process_assignment, proof_forest_backtrack,
+    get_child, get_parent, process_assignment, proof_forest_backtrack, union,
 };
 use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
@@ -99,6 +97,23 @@ impl<'a> CustomExternalPropagator<'a> {
             (*self.solver).add_observed_var(abs_lit);
         }
     }
+
+    /// Drain `egraph.pending_trichotomies` and send the queued Tseitin clauses
+    /// to the SAT solver. The clauses were built in `leastcommonancestor_helper`
+    /// when a `ProofForestEdge::Arithmetic` edge was traversed for the first
+    /// time; this step just observes each literal, registers it with the proof
+    /// tracker, and pushes the clause onto `disequalities`.
+    fn drain_pending_trichotomies(&mut self) {
+        let pending: Vec<Vec<i32>> =
+            self.egraph.pending_trichotomies.drain(..).collect();
+        for clause in pending {
+            for lit in &clause {
+                self.add_observed_variable(*lit);
+                self.add_lit_to_proof_tracker(*lit);
+            }
+            self.disequalities.borrow_mut().push(clause);
+        }
+    }
 }
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
@@ -143,6 +158,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
             {
+                self.drain_pending_trichotomies();
                 for constraint in negated_model_or_datatype_constraints {
                     // todo: deleting this ordering thing -> just for debuggin
                     let mut constraint_ordered = constraint.clone();
@@ -471,35 +487,65 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
             }
             ArithResult::Sat(literals) => {
-                for set in literals.values() {
+                // Model-based Nelson-Oppen (Yices CAV'14): instead of eagerly
+                // emitting the trichotomy `x = y \/ x < y \/ x > y` for every
+                // pair the arithmetic theory says has the same model value,
+                // merge x and y in the egraph via a ProofForestEdge::Arithmetic
+                // edge. The trichotomy is only emitted lazily if such an edge
+                // ends up on a conflict path.
+                let mut conflict_from_arithmetic_merge: Option<Vec<Vec<i32>>> = None;
+                'outer: for set in literals.values() {
                     let mut t = set.iter();
                     let first = t.next().unwrap();
 
                     for term in t {
-                        let pair = if first < term {
-                            (first, term)
+                        let (x, y) = if first < term {
+                            (*first, *term)
                         } else {
-                            (term, first)
+                            (*term, *first)
                         };
 
-                        if let Some(term) = nelson_oppen_clause_pair(*pair.0, *pair.1, self.egraph)
-                        {
-                            debug_println!(25, 0, "adding in the nelson oppen term {}", term);
-                            let term_nnf = term.nnf(self.egraph);
-                            // println!("we have the term {:?}", term);
-                            self.egraph
-                                .insert_predecessor(&term_nnf, None, None, true, None);
-                            let term_cnf = term.cnf_tseitin(self.egraph);
-                            // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
-                            for clause in term_cnf {
-                                for lit in &clause.0 {
-                                    self.add_observed_variable(*lit);
-                                    self.add_lit_to_proof_tracker(*lit);
-                                }
-                                self.disequalities.borrow_mut().push(clause.0.clone());
-                            }
+                        // Skip pairs already merged in the egraph (this is hot:
+                        // cb_check_found_model is called on every candidate
+                        // model, and most Sat groups recur across models).
+                        // `union` would no-op internally, but constructing the
+                        // ProofForestEdge::Arithmetic allocates a HashMap and
+                        // HashSet per pair which dominates the inner loop.
+                        if self.egraph.find(x) == self.egraph.find(y) {
+                            continue;
+                        }
+
+                        let arith_edge = ProofForestEdge::Arithmetic {
+                            term: (x, y),
+                            size: 0,
+                            parent: 0,
+                            child: 0,
+                            disequalities: DeterministicHashMap::new(),
+                            level: self.decision_level,
+                            hash: self.egraph.predecessor_hash,
+                            children: DeterministicHashSet::new(),
+                        };
+                        if let Some(conflict) = union(
+                            x,
+                            y,
+                            self.egraph,
+                            arith_edge,
+                            self.decision_level,
+                            false,
+                            false,
+                        ) {
+                            conflict_from_arithmetic_merge = Some(conflict);
+                            break 'outer;
                         }
                     }
+                }
+
+                if let Some(conflict_clauses) = conflict_from_arithmetic_merge {
+                    self.drain_pending_trichotomies();
+                    for clause in conflict_clauses {
+                        self.disequalities.borrow_mut().push(clause);
+                    }
+                    return false;
                 }
 
                 // todo: have a helper function for this, because it gets included twice
