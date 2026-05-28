@@ -1,14 +1,14 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Sparse matrix implementation using mirrored row/column HashMaps.
+//! Sparse matrix implementation using mirrored row/column FxHashMaps.
 //!
 //! Each entry (i, j, v) is stored in both `rows[i]` and `cols[j]`, enabling
 //! O(1) access by either row or column. This is the pattern used by most SMT
 //! simplex implementations (Yices2, Z3, CVC5).
 
 use num_traits::Zero;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::error;
 use std::fmt;
 
@@ -31,8 +31,8 @@ pub type SparseResult<T> = Result<T, SparseError>;
 /// enabling O(1) access by either row or column during pivot operations.
 #[derive(Clone)]
 pub struct Matrix<V> {
-    rows: Vec<HashMap<usize, V>>, // rows[i]: col -> coefficient
-    cols: Vec<HashMap<usize, V>>, // cols[j]: row -> coefficient
+    rows: Vec<FxHashMap<usize, V>>, // rows[i]: col -> coefficient
+    cols: Vec<FxHashMap<usize, V>>, // cols[j]: row -> coefficient
     zero: V,
 }
 
@@ -59,8 +59,8 @@ impl<V: Zero + Clone + fmt::Debug> Matrix<V> {
             return Err(SparseError("nrows and ncols must be > 0".to_string()));
         }
         Ok(Self {
-            rows: vec![HashMap::new(); nrows],
-            cols: vec![HashMap::new(); ncols],
+            rows: vec![FxHashMap::default(); nrows],
+            cols: vec![FxHashMap::default(); ncols],
             zero: V::zero(),
         })
     }
@@ -161,21 +161,20 @@ impl<V: Zero + Clone + fmt::Debug> Matrix<V> {
 
         // Step 1: Snapshot the original pivot row (before modification)
         // Worst case O(M)
-        let pivot_row_snapshot: HashMap<usize, V> = self.rows[row].clone();
+        let pivot_row_snapshot = std::mem::take(&mut self.rows[row]);
 
         // Step 2: Update the pivot row in-place
         // Collect new values first, then write them
         // Worst case O(M)
-        let new_pivot_row: HashMap<usize, V> = pivot_row_snapshot
-            .iter()
-            .map(|(j, b)| {
-                if *j == col {
-                    (*j, inv_pivot.clone())
-                } else {
-                    (*j, -(b.clone() * inv_pivot.clone()))
-                }
-            })
-            .collect();
+        let mut new_pivot_row: FxHashMap<usize, V> =
+            FxHashMap::with_capacity_and_hasher(pivot_row_snapshot.len(), Default::default());
+        for (j, b) in pivot_row_snapshot.iter() {
+            if *j == col {
+                new_pivot_row.insert(*j, inv_pivot.clone());
+            } else {
+                new_pivot_row.insert(*j, -(b.clone() * inv_pivot.clone()));
+            }
+        }
 
         self.rows[row] = new_pivot_row;
         // Update cols to reflect new pivot row values (same set of columns, just new values)
@@ -194,23 +193,24 @@ impl<V: Zero + Clone + fmt::Debug> Matrix<V> {
 
         // Step 4: Update non-pivot rows
         for (i, c_val) in pivot_col_rows.iter() {
+            // Hoist c/a: same for every column j in this row
+            let c_over_a = c_val.clone() * inv_pivot.clone();
+
             // For each column j in the original pivot row snapshot:
             for (j, b_val) in pivot_row_snapshot.iter() {
                 if *j == col {
                     // Pivot column entry: c -> c/a
-                    let new_val = c_val.clone() / pivot_value.clone();
-                    if new_val.is_zero() {
+                    if c_over_a.is_zero() {
                         self.rows[*i].remove(j);
                         self.cols[*j].remove(i);
                     } else {
-                        self.rows[*i].insert(*j, new_val.clone());
-                        self.cols[*j].insert(*i, new_val);
+                        self.rows[*i].insert(*j, c_over_a.clone());
+                        self.cols[*j].insert(*i, c_over_a.clone());
                     }
                 } else {
                     // General case: d -> d - b*c/a
                     let d_val = self.rows[*i].get(j).cloned().unwrap_or_else(V::zero);
-                    let new_val =
-                        d_val - b_val.clone() * c_val.clone() * inv_pivot.clone();
+                    let new_val = d_val - b_val.clone() * c_over_a.clone();
                     if new_val.is_zero() {
                         self.rows[*i].remove(j);
                         self.cols[*j].remove(i);
