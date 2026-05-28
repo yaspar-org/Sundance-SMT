@@ -534,11 +534,7 @@ mod tests {
 
     #[test]
     fn test_pivot_0_0_diag_plus_row() {
-        let tuples = vec![
-            (0, 0, rbig!(2)),
-            (1, 1, rbig!(3)),
-            (0, 1, rbig!(4)),
-        ];
+        let tuples = vec![(0, 0, rbig!(2)), (1, 1, rbig!(3)), (0, 1, rbig!(4))];
         let mut m = Matrix::from_tuples(2, 2, tuples).expect("Failed to create matrix");
         m.pivot(0, 0).expect("first pivot failed");
         assert_eq!(m.get(0, 0), Some(&rbig!(1 / 2)));
