@@ -362,22 +362,40 @@ pub fn find_if_eq_diseq<'a>(
     // assert! (!fixed); // I think we should never have things be fixed basically
     let hash = if !fixed { egraph.predecessor_hash } else { 0 };
     match term.repr() {
-        // todo: support both kinds of testers when we update Yaspar info
-        App(f, t, _) if matches!(f.get_kind(), Some(IdentifierKind::Is(_))) && sign => {
-            assert_eq!(t.len(), 1);
-            // we have to do the following because if let guard is experimental, c.f. https://github.com/rust-lang/rust/issues/51114
+        // Match both tester syntaxes: (_ is Ctor) and (is-Ctor x)
+        App(f, t, _)
+            if (matches!(f.get_kind(), Some(IdentifierKind::Is(_)))
+                || (f.get_kind().is_none() && f.id_str().get().starts_with("is-")))
+                && t.len() == 1
+                && sign =>
+        {
+            // Extract the constructor name from whichever syntax was used
             let ctor_name = if let Some(IdentifierKind::Is(sym)) = f.get_kind() {
-                sym.clone()
+                // (_ is Ctor) — indexed identifier, ctor name is directly available
+                Some(sym.clone())
             } else {
-                panic!("we just tested it!");
+                // (is-Ctor x) — strip "is-" prefix and look up the constructor
+                let name = &f.id_str().get()[3..];
+                egraph
+                    .datatype_info
+                    .constructors
+                    .keys()
+                    .find(|k| *k.get() == *name)
+                    .cloned()
             };
-            let inner_term = t[0].clone();
-            Assertion::Tester {
-                ctor_name,
-                inner_term,
-                term: term.clone(),
+            if let Some(ctor_name) = ctor_name {
+                let inner_term = t[0].clone();
+                Assertion::Tester {
+                    ctor_name,
+                    inner_term,
+                    term: term.clone(),
+                }
+            } else {
+                // is-X where X is not a known constructor; treat as uninterpreted
+                Assertion::Other
             }
         }
+
         Eq(left, right) => {
             if sign {
                 debug_println!(1, 2, "Creating equality assertion");

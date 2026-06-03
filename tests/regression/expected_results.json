@@ -264,6 +264,8 @@
     "datatypes/backtracking_new_terms.smt2": "unsat",
     "datatypes/insert_pred_sel_apps.smt2": "unsat",
     "datatypes/insert_pred_sel_apps2.smt2": "unsat",
+    "datatypes/is-tester.smt2": "unsat",
+    "datatypes/is-tester-uf.smt2": "unsat",
     "arithmetic/atmosphere_reduced_reduced_reduced.smt2": "unsat",
     "arithmetic/atmosphere_reduced_reduced.smt2": "unsat",
     "arithmetic/atmosphere_reduced.smt2": "unsat",
