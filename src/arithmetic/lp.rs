@@ -8,7 +8,6 @@ use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
 #[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
 use crate::debug_println;
-use crate::egraphs::congruence_closure::leastcommonancestor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::unionfind::ProofTracker;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -424,7 +423,7 @@ pub fn extract_linear_expression(
 
                     let mut tracker = ProofTracker::new();
                     if let Some(negated_model) =
-                        leastcommonancestor(root_id, term_id, egraph, &mut tracker)
+                        egraph.leastcommonancestor(root_id, term_id, &mut tracker)
                     {
                         let model_terms: Vec<i32> = negated_model
                             .into_iter()
@@ -448,7 +447,7 @@ pub fn extract_linear_expression(
         _ => {
             let root_id = egraph.find(term_id);
             let mut tracker = ProofTracker::new();
-            if let Some(negated_model) = leastcommonancestor(root_id, term_id, egraph, &mut tracker)
+            if let Some(negated_model) = egraph.leastcommonancestor(root_id, term_id, &mut tracker)
             {
                 let model_terms: Vec<i32> = negated_model
                     .into_iter()

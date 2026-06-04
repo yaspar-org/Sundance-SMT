@@ -4,14 +4,16 @@
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
-use crate::egraphs::congruence_closure::union;
+use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent, process_assignment};
+use crate::egraphs::unionfind::ProofTracker;
+use crate::log::is_important;
 use crate::egraphs::datastructures::{
     Assertion, CanonicalForm, CanonicalOp, ConstructorType, DisequalTerm, Polarity::*, Predecessor,
     Quantifier, TermOption,
 };
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
+use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, fmt_termlist};
 use sat_interface::Formula;
 use std::collections::{HashMap, HashSet};
 use std::default::Default;
@@ -743,10 +745,9 @@ impl Egraph {
                         self.get_term(*pred_key),
                         equality
                     );
-                    union(
+                    self.cc_union(
                         term_num,
                         *pred_key,
-                        self,
                         equality,
                         self.decision_level,
                         false,
@@ -1393,6 +1394,909 @@ impl Egraph {
     pub fn check_for_recursive_datatypes(&self) -> Option<Str> {
         self.datatype_info
             .contains_recursive_datatype(&self.context)
+    }
+
+    /// Explain why u ≡ v by walking the proof forest to their least common ancestor.
+    /// Returns None if u and v are not in the same equivalence class.
+    pub(crate) fn leastcommonancestor(
+        &self,
+        u: u64,
+        v: u64,
+        tracker: &mut ProofTracker,
+    ) -> Option<Vec<(u64, u64)>> {
+        debug_println!(
+            11,
+            1,
+            "Finding least common ancestor for {} and {}",
+            self.get_term(u),
+            self.get_term(v)
+        );
+        self.leastcommonancestor_helper(u, v, tracker, 0)
+    }
+
+    fn leastcommonancestor_helper(
+        &self,
+        u: u64,
+        v: u64,
+        tracker: &mut ProofTracker,
+        indent: usize,
+    ) -> Option<Vec<(u64, u64)>> {
+        debug_println!(
+            20,
+            indent,
+            "checking the equality of {} and {}",
+            self.get_term(u),
+            self.get_term(v)
+        );
+        let mut visited = DeterministicHashSet::default();
+
+        let mut path_from_u = vec![];
+        let mut curr = u;
+
+        let max_recursion_depth = 100;
+        if indent > max_recursion_depth {
+            debug_println!(11, 0, "We have the proof forest :{}", self);
+            panic!("Should not have this many recusive calls to LCH");
+        }
+        loop {
+            let parent = self.proof_forest[curr as usize].clone();
+            visited.insert(curr);
+            if let ProofForestEdge::Root {
+                size: _,
+                child: _,
+                disequalities: _,
+                children: _,
+            } = parent
+            {
+                visited.insert(curr);
+                break;
+            }
+            curr = get_parent(&parent);
+            path_from_u.push(parent);
+        }
+
+        let mut path_from_v = vec![];
+        curr = v;
+        let mut parent: ProofForestEdge;
+        loop {
+            parent = self.proof_forest[curr as usize].clone();
+            if visited.contains(&curr) {
+                break;
+            }
+            if let ProofForestEdge::Root {
+                size: _,
+                child: _,
+                disequalities: _,
+                children: _,
+            } = parent
+            {
+                return None;
+            }
+            curr = get_parent(&parent);
+            path_from_v.push(parent);
+        }
+
+        let mut proof: Vec<ProofForestEdge> = Vec::new();
+        proof.extend(
+            path_from_u
+                .iter()
+                .take_while(|x| **x != parent)
+                .cloned()
+                .collect::<Vec<ProofForestEdge>>(),
+        );
+        proof.extend(path_from_v);
+
+        assert!(visited.contains(&curr));
+
+        let mut final_proof = vec![];
+        let mut proof_congruences = vec![];
+
+        debug_println!(11, indent + 1, "We get the unprocessed proof {:?}", proof);
+        debug_println!(16, indent + 1, "We have the proof:");
+        for proof_term in proof {
+            match proof_term {
+                ProofForestEdge::Root {
+                    size: _,
+                    child: _,
+                    disequalities: _,
+                    children: _,
+                } => {
+                    eprintln!("ERROR: Root should not be processed");
+                    std::process::exit(1);
+                }
+                ProofForestEdge::Congruence { pairs, .. } => {
+                    if is_important(20) {
+                        debug_println!(20, indent + 12, "Congruence ");
+                        for (t1, t2) in pairs.clone() {
+                            debug_println!(
+                                20,
+                                indent + 12,
+                                "{} [{}] ~ {} [{}] ",
+                                self.get_term(t1),
+                                t1,
+                                self.get_term(t2),
+                                t2
+                            );
+                        }
+                    }
+                    proof_congruences.push(pairs);
+                }
+                ProofForestEdge::Equality { term, .. } => {
+                    if let Some((t1, t2)) = term {
+                        debug_println!(
+                            20,
+                            indent + 12,
+                            "Equality {} [{}] = {} [{}]",
+                            self.get_term(t1),
+                            t1,
+                            self.get_term(t2),
+                            t2
+                        );
+                        if tracker.union(t1, t2) {
+                            final_proof.push((t1, t2));
+                        }
+                        debug_println!(
+                            11,
+                            1,
+                            "We have the current final proof is: {:?}",
+                            final_proof
+                        )
+                    }
+                }
+            }
+        }
+
+        for pairs in proof_congruences {
+            for pair in pairs {
+                if let Some(subproof) =
+                    self.leastcommonancestor_helper(pair.0, pair.1, tracker, indent + 1)
+                {
+                    final_proof.extend(subproof);
+                }
+            }
+        }
+        Some(final_proof)
+    }
+
+    /// Undo a single union operation during backtracking.
+    pub(crate) fn proof_forest_backtrack(
+        &mut self,
+        equality: ProofForestEdge,
+        y: u64,
+        y_parent: ProofForestEdge,
+    ) {
+        let child = &get_child(&equality);
+        let child_edge = self.proof_forest[*child as usize].clone();
+        let parent = &get_parent(&equality);
+        let parent_edge = self.proof_forest[*parent as usize].clone();
+
+        assert_eq!(self.find(*child), self.find(*parent));
+
+        debug_println!(
+            16,
+            0,
+            "Backtracking on {} with child {} and parent {} and y_term {}",
+            equality,
+            self.get_term(*child),
+            self.get_term(*parent),
+            self.get_term(y)
+        );
+
+        debug_println!(
+            6,
+            0,
+            "We are in proof_forest_backtrack trying to get term for {:?}",
+            child
+        );
+
+        debug_println!(
+            6,
+            0,
+            "We have child_edge {:?}, parent_edge {:?} and equality {:?}",
+            child_edge,
+            parent_edge,
+            equality
+        );
+        let (child, child_edge, _parent, _parent_edge) = if child_edge != equality {
+            debug_println!(6, 0, "we are reversing the edge");
+            debug_println!(10, 0, "{}", self);
+            assert_eq!(get_parent(&parent_edge), get_child(&equality));
+            debug_println!(6, 0, "after first assert");
+            assert_eq!(get_child(&parent_edge), get_parent(&equality));
+            (parent, parent_edge, child, child_edge)
+        } else {
+            (child, child_edge, parent, parent_edge)
+        };
+
+        debug_println!(
+            6,
+            0,
+            "We are setting the predecessors of the child {} to {:?}",
+            self.get_term(*child),
+            self.predecessors[*child as usize]
+        );
+
+        let childs_child = get_child(&child_edge);
+
+        let mut new_disequalities = DeterministicHashMap::new();
+        for (k, v) in child_edge.disequalities().iter() {
+            if valid_hash(v.hash, v.level, &self.predecessor_level) {
+                debug_println!(11, 0, "Keeping disequality {}: {} in {}", k, v, child);
+                new_disequalities.insert(*k, v.clone());
+            } else {
+                debug_println!(
+                    11,
+                    0,
+                    "Removing disequality {}: {} from {}",
+                    k,
+                    v,
+                    child_edge
+                );
+            }
+        }
+
+        let child_root = ProofForestEdge::Root {
+            size: 0,
+            child: childs_child,
+            disequalities: new_disequalities,
+            children: DeterministicHashSet::new(),
+        };
+
+        self.proof_forest[*child as usize] = child_root;
+
+        debug_println!(
+            16,
+            0,
+            "Making {} the root on a backtrack",
+            self.get_term(y)
+        );
+        self.make_root(y, y_parent);
+    }
+
+    /// Union two terms in the egraph, merging their equivalence classes
+    /// and adding edge x -> y. Good for recovering proof at the end,
+    /// but this could double/triple the max tree size at each iteration
+    ///
+    /// design decision: don't have eager updates for equivalence class and inverting tree
+    pub(crate) fn cc_union(
+        &mut self,
+        x: u64,
+        y: u64,
+        proof_parent: ProofForestEdge,
+        level: usize,
+        fixed: bool,
+        from_quantifier: bool,
+    ) -> Option<Vec<Vec<i32>>> {
+        let x_root = self.find(x);
+        let y_root = self.find(y);
+        debug_println!(6, 1, "{}", self);
+        debug_println!(6, 0, "before1");
+        debug_println!(
+            22,
+            1,
+            "Unioning vertices [{}] {}  and [{}] {}  (roots: {} [{}] and {} [{}]) at level {} with {}",
+            x,
+            self.get_term(x),
+            y,
+            self.get_term(y),
+            x_root,
+            self.get_term(x_root),
+            y_root,
+            self.get_term(y_root),
+            level,
+            proof_parent
+        );
+        debug_println!(11, 0, "{}", self);
+        assert_eq!(
+            self.get_term(x).get_sort(self),
+            self.get_term(y).get_sort(self),
+            "We are comparing terms {} and {}",
+            self.get_term(x),
+            self.get_term(y)
+        );
+
+        if x_root == y_root {
+            debug_println!(
+                16,
+                2,
+                "{} and {} are already in the same equivalence class",
+                self.get_term(x),
+                self.get_term(y)
+            );
+            return None;
+        }
+
+        // keep track of original proof_parent
+        let _proof_parent_original = proof_parent.clone();
+
+        // making x the parent of y ~> could also do this based on relative depth of x and y tree
+        let proof_parent: ProofForestEdge =
+            add_parent(proof_parent, x, y, level, self.predecessor_hash);
+
+        let y_root_parent = &self.proof_forest[y_root as usize];
+
+        if !fixed {
+            // not adding fixed levels to backtracking based on what Armin said
+            debug_println!(
+                16,
+                0,
+                "BACKTTRACK STACK: adding equalitity between {} and {} with y_root: {} at level {}",
+                self.get_term(x),
+                self.get_term(y),
+                self.get_term(y_root),
+                level
+            );
+            self.proof_forest_backtrack_stack.push((
+                level,
+                proof_parent.clone(),
+                y_root,
+                y_root_parent.clone(),
+            ));
+        }
+
+        debug_println!(
+            16,
+            2,
+            "Making {} the root of its equivalence class [previously was {}]",
+            self.get_term(y),
+            self.get_term(y_root)
+        );
+        self.make_root(y, proof_parent);
+
+        // need to add the new disequalities into x_root
+        // TODO: could also clean up some backtracking stuff here, probably want to factor this into its own function
+        let (x_root_disequalities_edge, y_root_disequalities_edge) = if x_root > y_root {
+            let split = self.proof_forest.split_at_mut(x_root as usize);
+            (&mut split.1[0], &split.0[y_root as usize])
+        } else {
+            let split = self.proof_forest.split_at_mut(y_root as usize);
+            (&mut split.0[x_root as usize], &split.1[0])
+        };
+
+        let y_root_disequalities = y_root_disequalities_edge.disequalities();
+        let x_root_disequalities = x_root_disequalities_edge.disequalities_mut();
+
+        // when we copy things over, make sure we only copy things over that are valid and that we are updating the hash/level -> this caused some very tricky bugs
+        // TODO: write helper functions to make copying over hased things easier
+        for (key, value) in y_root_disequalities {
+            // make sure we update the disequality level
+            if value.hash >= self.predecessor_level[value.level]
+                || value.hash == 0
+                || value.level == 0
+            {
+                // added value.level == 0 since I think all hashes should be valid at level 0
+                // TODO: borrowing issue so I can't use valid_hash function
+
+                // we can have that we introduce a new equality via eclass option after a quantifier instantiation
+                // this equality could be at level 0
+                // but then it's possible that there are disequalities that get copied over such that one of the disequalities are at a level higher than 0
+                let (diseq_level, diseq_hash) = if value.level > level {
+                    (value.level, value.hash)
+                } else {
+                    (level, self.predecessor_level[level])
+                };
+
+                let new_value = DisequalTerm {
+                    term: value.term,
+                    diseq_lit: value.diseq_lit,
+                    level: diseq_level,
+                    hash: diseq_hash,
+                    original_disequality: value.original_disequality,
+                };
+                // this assert is obviously not true as x_root_disequalities could contain key
+                // but then why is it not a problem that we are overwriting it
+                // assert!(!x_root_disequalities.contains_key(key));
+
+                if let Some(x_disequality) = x_root_disequalities.get(key)
+                    && (x_disequality.hash >= self.predecessor_level[x_disequality.level]
+                        || x_disequality.hash == 0)
+                {
+                    debug_println!(
+                        12,
+                        0,
+                        "Skipping disequality {} : {} to {} at level {}",
+                        key,
+                        new_value,
+                        x_root,
+                        level
+                    );
+                    continue;
+                }
+
+                debug_println!(
+                    12,
+                    0,
+                    "Adding disequality {} : {} to {} at level {}",
+                    key,
+                    new_value,
+                    x_root,
+                    level
+                );
+                x_root_disequalities.insert(*key, new_value);
+            }
+        }
+
+        // basically checking if the current equality that we just added violated any earlier disequalities and if it did, we learn a conflict clause
+        // TODO: now I am actually not sure if disequality checking is really necessary
+        // kind've a weird way to do it since we have already unioned, we are just checking if two things are unequal to themselves
+        debug_println!(
+            5,
+            0,
+            "A. Checking the equality {} = {} with disequalities {:?}",
+            self.get_term(x),
+            self.get_term(y),
+            self.proof_forest[x as usize].disequalities()
+        );
+        if let Some(disequality) = self.check_self_disequality(x_root).clone() {
+            debug_println!(
+                11,
+                0,
+                "B. Checking the equality {} = {} with disequality {} != {}",
+                self.get_term(x),
+                self.get_term(y),
+                self.get_term(disequality.original_disequality.0),
+                self.get_term(disequality.original_disequality.1)
+            );
+            let mut tracker = ProofTracker::new();
+            // tracker.initialize_tracker(egraph.num_vars as u64);
+            if let Some(negated_model) = self.leastcommonancestor(
+                disequality.original_disequality.0,
+                disequality.original_disequality.1,
+                &mut tracker,
+            ) {
+                let mut model_terms: Vec<i32> = negated_model
+                    .into_iter()
+                    .map(|x| -self.make_eq(x.0, x.1))
+                    .collect();
+                model_terms.push(-disequality.diseq_lit);
+                debug_println!(
+                    7,
+                    1,
+                    "Contradiction found [3]: {:?} [{:?}]",
+                    model_terms
+                        .iter()
+                        .map(|x| self.get_term_from_lit(*x))
+                        .collect::<Vec<_>>(),
+                    model_terms
+                );
+                return Some(vec![model_terms]); // Return negated model as the contradiction explanation (todo: ideally would want to have a way to specify this is a model to the thing we pass to, but this is not possible at least with our current setup)
+            } else {
+                debug_println!(16, 0, "{}", self);
+                panic!(
+                    "Should have found a equality between {} [root: {}] and {} [root: {}]",
+                    self.get_term(disequality.original_disequality.0),
+                    self.get_term(self.find(disequality.original_disequality.0)),
+                    self.get_term(disequality.original_disequality.1),
+                    self.get_term(self.find(disequality.original_disequality.1)),
+                );
+            }
+        }
+
+        self.union_predecessors(x_root, y_root, level, fixed, from_quantifier)
+    }
+
+    /// Given u and v (roots of u_original and v_original), check the predecessors of
+    /// each of these and union them if they have become equal
+    ///
+    /// TODO: I probably actually don't want this to delete all of the predecessors of u because it will screw up backtracking
+    /// you only have to do it for predecessor terms that are roots of a congruent class
+    /// once you merge two predecessor states, then you don't need to look at it until you backtrack
+    ///
+    /// TODO: need to implement a backtracking where I change the predecessor hash
+    pub(crate) fn union_predecessors(
+        &mut self,
+        u: u64,
+        v: u64,
+        level: usize,
+        fixed: bool,
+        from_quantifier: bool,
+    ) -> Option<Vec<Vec<i32>>> {
+        debug_println!(
+            11,
+            1,
+            "Unioning predecessors of {} [{}, Predecessors: {}] and {} [{}, Predecessors: {}]",
+            self.get_term(u),
+            u,
+            fmt_termlist(
+                self.predecessors[u as usize]
+                    .keys()
+                    .map(|x| self.get_term(*x))
+                    .collect::<Vec<_>>()
+            ),
+            self.get_term(v),
+            v,
+            fmt_termlist(
+                self.predecessors[v as usize]
+                    .keys()
+                    .map(|x| self.get_term(*x))
+                    .collect::<Vec<_>>()
+            )
+        );
+
+        debug_assert!(u != v);
+        debug_assert!(self.find(u) == u);
+
+        // Move u's and v's predecessor maps out of the egraph so we can iterate
+        // without cloning. Both slots are restored before any re-entrant call
+        // (add_predecessor / union_process_assignment) can observe them.
+        let mut predecessors_u = std::mem::take(&mut self.predecessors[u as usize]);
+        let predecessors_v = std::mem::take(&mut self.predecessors[v as usize]);
+
+        let mut canonical_forms_u: FastDeterministicHashMap<_, Vec<(Vec<u64>, u64)>> =
+            FastDeterministicHashMap::default();
+
+        // Stale entries are dropped in-place via retain before iterating.
+        predecessors_u.retain(|_, p| {
+            let keep = valid_hash(p.hash, p.level, &self.predecessor_level);
+            if !keep {
+                debug_println!(
+                    11,
+                    2,
+                    "CANONICAL_FORMS_U: Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
+                    self.get_term(p.predecessor),
+                    self.get_term(u),
+                    self.get_term(p.inner_term),
+                    p.hash,
+                    p.level,
+                    self.predecessor_level[p.level]
+                );
+            }
+            keep
+        });
+
+        for (_pred_u_key, predecessor_u) in predecessors_u.iter() {
+            debug_println!(
+                11,
+                2,
+                "1.We are in union_predecessors trying to get term for {}",
+                self.get_term(predecessor_u.predecessor)
+            );
+
+            // checking if the ite leads to a contradiction
+            // if let Some(negated_model) =
+            //     union_process_ite(&egraph.get_term(predecessor_u.predecessor), egraph, level, from_quantifier)
+            // {
+            //      debug_println!(
+            //         4,
+            //         3,
+            //         "M. Contradiction found in union_predecessors, we have the following negated_model: {:?}",
+            //         negated_model
+            //     );
+            //     return Some(negated_model);
+            // }
+
+            if let Some(CanonicalForm {
+                original_subterms,
+                op,
+                canonical_subterms,
+            }) = self.get_canonical_form(predecessor_u.predecessor, level)
+            {
+                let canonical_form = (op, canonical_subterms);
+                debug_println!(
+                    11,
+                    4,
+                    "We are adding in the canonical_form {:?}",
+                    canonical_form
+                );
+                if let Some(forms) = canonical_forms_u.get_mut(&canonical_form) {
+                    forms.push((original_subterms, predecessor_u.predecessor))
+                } else {
+                    canonical_forms_u.insert(
+                        canonical_form,
+                        vec![(original_subterms, predecessor_u.predecessor)],
+                    );
+                }
+            }
+        }
+
+        debug_println!(
+            11,
+            4,
+            "2.We have the canonical_forms_u {:?}",
+            canonical_forms_u
+        );
+
+        // Restore u's slot before calling add_predecessor below, which writes to it.
+        self.predecessors[u as usize] = predecessors_u;
+
+        // basically the issue was that in `union_predecessors` when you create a `canonical_term_u`,
+        // you fix it, but then you compare to a for loop iterating through all terms in v and iteratively
+        // computing the canonical_term_v, but this could change as you are iterating through the loop
+        // so we want to precompute the canonical terms of v.
+        //
+        // Precompute: store (key, predecessor_id, canonical_form) per entry.
+        // No Predecessor clone — just the scalar `predecessor` field needed downstream.
+        let mut predecessor_v_canonical_forms: Vec<(u64, u64, Option<CanonicalForm>)> =
+            Vec::with_capacity(predecessors_v.len());
+        for (pred_v_key, predecessor_v) in predecessors_v.iter() {
+            let canonical_form = self.get_canonical_form(predecessor_v.predecessor, level);
+            predecessor_v_canonical_forms.push((
+                *pred_v_key,
+                predecessor_v.predecessor,
+                canonical_form,
+            ));
+        }
+
+        // moving predecessors from v to u
+        for (pred_key, pred_val) in predecessors_v.iter() {
+            debug_println!(
+                11,
+                0,
+                "We are are adding predecessor {} (of  {}) to {} [level: {}, hash: {}]",
+                self.get_term(*pred_key),
+                self.get_term(pred_val.inner_term),
+                self.get_term(u),
+                level,
+                self.predecessor_hash
+            );
+            let new_pred = Predecessor {
+                level,
+                hash: self.predecessor_hash,
+                predecessor: *pred_key,
+                inner_term: pred_val.inner_term,
+            };
+            self.add_predecessor(u, *pred_key, new_pred);
+        }
+
+        // Restore v before the consuming loop — union_process_assignment can
+        // re-enter and read/write self.predecessors[v].
+        self.predecessors[v as usize] = predecessors_v;
+
+        for (pred_v_key, pred_predecessor, canonical_form_v) in predecessor_v_canonical_forms {
+            // Look up the predecessor's validity from the restored v slot.
+            // Extract only scalar fields — no Predecessor clone.
+            let (pred_hash, pred_level, pred_inner_term) =
+                match self.predecessors[v as usize].get(&pred_v_key) {
+                    Some(p) => (p.hash, p.level, p.inner_term),
+                    None => continue, // removed by a prior iteration
+                };
+            if !valid_hash(pred_hash, pred_level, &self.predecessor_level) {
+                debug_println!(
+                    11,
+                    5,
+                    "Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
+                    self.get_term(pred_predecessor),
+                    self.get_term(v),
+                    self.get_term(pred_inner_term),
+                    pred_hash,
+                    pred_level,
+                    self.predecessor_level[pred_level]
+                );
+                debug_println!(
+                    11,
+                    5,
+                    "The current level is {} and hash is {}",
+                    level,
+                    self.predecessor_hash
+                );
+                self.predecessors[v as usize].remove(&pred_v_key);
+                continue;
+            }
+            debug_println!(
+                11,
+                3,
+                "L. We are in union_predecessors trying to get term for {}",
+                self.get_term(pred_predecessor)
+            );
+
+            if let Some(CanonicalForm {
+                original_subterms,
+                op,
+                canonical_subterms,
+            }) = canonical_form_v
+            {
+                let canonical_form = (op, canonical_subterms);
+                debug_println!(
+                    11,
+                    6,
+                    "3. We are in union_predecessors for v and have canonical form {:?} for {}",
+                    canonical_form,
+                    self.get_term(pred_predecessor)
+                );
+                if let Some(u_forms) = canonical_forms_u.get(&canonical_form) {
+                    debug_println!(5, 0, "We have the following u_forms {:?}", u_forms);
+                    for (u_original_subterms, canonical_form_u) in u_forms {
+                        debug_println!(
+                            16,
+                            0,
+                            "We are actually merging the two predecessors {} and {}",
+                            self.get_term(*canonical_form_u),
+                            self.get_term(pred_predecessor)
+                        );
+                        if is_important(16) {
+                            debug_println!(16, 0, "We have u_original_subterms: ");
+                            for term in u_original_subterms {
+                                debug_println!(16, 4, "{}", self.get_term(*term));
+                            }
+                            debug_println!(16, 0, "We have original_subterms: ");
+                            for term in original_subterms.clone() {
+                                debug_println!(16, 4, "{}", self.get_term(term));
+                            }
+                        }
+
+                        let terms_pairwise = u_original_subterms
+                            .clone()
+                            .into_iter()
+                            .zip(original_subterms.clone())
+                            .collect::<Vec<(u64, u64)>>();
+                        let proof_parent = ProofForestEdge::Congruence {
+                            size: 0,
+                            pairs: terms_pairwise,
+                            parent: 0,
+                            child: 0,
+                            disequalities: DeterministicHashMap::new(),
+                            level,
+                            hash: self.predecessor_hash,
+                            children: DeterministicHashSet::new(),
+                        }; // TODO: I can't have a child of -1 anymore, but I think doing it like this is correct
+
+                        // TODO: this is a hackish way to add this if the equality occurs in the formula
+                        if let Some(negated_model) = self.union_process_assignment(
+                            *canonical_form_u,
+                            pred_predecessor,
+                            proof_parent,
+                            level,
+                            fixed,
+                            from_quantifier,
+                        ) {
+                            debug_println!(
+                                11,
+                                5,
+                                "[exiting union_pred] of {} and {} In union_predecessors, we have the following negated_model: {:?}",
+                                self.get_term(u),
+                                self.get_term(v),
+                                negated_model
+                            );
+                            return Some(negated_model);
+                        }
+                    }
+                }
+            }
+        }
+        debug_println!(
+            11,
+            0,
+            "[exiting union_pred] of {} and {} with None",
+            self.get_term(u),
+            self.get_term(v)
+        );
+        None
+    }
+
+    /// Helper function called by union_predecessors that represents a recursive call
+    /// to union
+    ///
+    /// TODO: would be cleaner to have union_predecessors just call union
+    pub(crate) fn union_process_assignment(
+        &mut self,
+        x: u64,
+        y: u64,
+        proof_parent: ProofForestEdge,
+        level: usize,
+        fixed: bool,
+        from_quantifier: bool,
+    ) -> Option<Vec<Vec<i32>>> {
+        debug_println!(6, 0, "before4");
+        let new_assignment = self.eq(self.get_term(x), self.get_term(y));
+        // if there is a new assignment, we need to check if the equality term exists, if it does we need to work on that
+        // otherwise we can just consider the union of these two terms
+        if let Some(new_assignment_lit) = self.cnf_cache.var_map.get(&new_assignment.uid()) {
+            // note we don't want reason to be the above thing because the explanation is still the same as teh explanation before
+            let reason = proof_parent;
+            debug_println!(
+                16,
+                0,
+                "We are in union_process_assignment trying to process assignment for x: {} [{}] and y: {} [{}] and fixed {}",
+                self.get_term(x),
+                x,
+                self.get_term(y),
+                y,
+                fixed
+            );
+            // TODO: Remove this call to process_assignment — replace with watch-based propagation
+            let negated_model_additional_constraints_opt = process_assignment(
+                *new_assignment_lit,
+                self,
+                level,
+                false,
+                from_quantifier,
+                Some(reason),
+            );
+            // assert!(additional_constraints_opt.is_none()); // this should be done becaue right now we only get new constraints for a datatype literal
+            if let Some(negated_model) = negated_model_additional_constraints_opt && false {
+                debug_println!(
+                    6,
+                    0,
+                    "We have the following negated_model: {:?}",
+                    negated_model
+                );
+                return Some(negated_model);
+            };
+        } else {
+            debug_println!(
+                16,
+                0,
+                "We are in union_process_assignment trying to union {} and {} with fixed {}",
+                self.get_term(x),
+                self.get_term(y),
+                fixed
+            );
+            if let Some(negated_model) =
+                self.cc_union(x, y, proof_parent, level, fixed, from_quantifier)
+            {
+                return Some(negated_model);
+            }
+        };
+        None
+    }
+
+    /// Make vertex the root of its proof-forest tree.
+    pub(crate) fn make_root(&mut self, vertex: u64, proof_parent: ProofForestEdge) {
+        debug_println!(
+            16,
+            0,
+            "Making {} the root with proof_parent {}",
+            self.get_term(vertex),
+            proof_parent
+        );
+        let old_parent = self.proof_forest[vertex as usize].clone();
+        let disequalities = match old_parent {
+            ProofForestEdge::Root { disequalities, .. } => disequalities,
+            ProofForestEdge::Congruence {
+                size: _,
+                pairs,
+                parent,
+                child,
+                disequalities,
+                level,
+                hash,
+                children,
+            } => {
+                assert_eq!(child, vertex);
+                self.make_root(
+                    parent,
+                    ProofForestEdge::Congruence {
+                        size: 0,
+                        pairs,
+                        parent: vertex,
+                        child: parent,
+                        disequalities: DeterministicHashMap::new(),
+                        level,
+                        hash,
+                        children,
+                    },
+                );
+                disequalities
+            }
+            ProofForestEdge::Equality {
+                term,
+                parent,
+                child,
+                disequalities,
+                level,
+                hash,
+                children,
+                ..
+            } => {
+                assert_eq!(child, vertex);
+                self.make_root(
+                    parent,
+                    ProofForestEdge::Equality {
+                        size: 0,
+                        term,
+                        parent: vertex,
+                        child: parent,
+                        disequalities: DeterministicHashMap::new(),
+                        level,
+                        hash,
+                        children,
+                    },
+                );
+                disequalities
+            }
+        };
+        let new_proof_parent = proof_parent.set_disequalities(disequalities);
+        self.proof_forest[vertex as usize] = new_proof_parent;
     }
 }
 

@@ -6,7 +6,7 @@ use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::{
-    get_child, get_parent, process_assignment, proof_forest_backtrack,
+    get_child, get_parent, process_assignment,
 };
 use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
@@ -317,7 +317,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let (_, backtrack_equality, y, y_root) =
                 self.egraph.proof_forest_backtrack_stack.pop().unwrap();
             debug_println!(16, 1, "Backtracking equality: {:?}", backtrack_equality);
-            proof_forest_backtrack(backtrack_equality, y, y_root, self.egraph)
+            self.egraph.proof_forest_backtrack(backtrack_equality, y, y_root)
         }
 
         debug_println!(
