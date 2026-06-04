@@ -4,7 +4,8 @@
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
-use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent, process_assignment};
+use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent};
+use crate::solver_state::process_assignment;
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
 use crate::egraphs::datastructures::{

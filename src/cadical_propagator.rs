@@ -5,9 +5,8 @@ use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_
 use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
-use crate::egraphs::congruence_closure::{
-    get_child, get_parent, process_assignment,
-};
+use crate::egraphs::congruence_closure::{get_child, get_parent};
+use crate::solver_state::process_assignment;
 use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
