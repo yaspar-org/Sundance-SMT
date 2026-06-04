@@ -1,0 +1,179 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Trait interface for egraph implementations.
+//!
+//! This trait decouples the solver from a specific egraph implementation,
+//! allowing different backends (e.g., the current Sundance egraph or the
+//! semi-persistent egraph) to be used interchangeably.
+
+use std::hash::Hash;
+
+/// A SAT literal: positive means the variable is true, negative means false.
+/// Zero means "no decision" when returned from decision methods.
+pub type Lit = i32;
+
+/// Conflict explanation: the equalities that were asserted (and their
+/// congruence consequences) that together violate a disequality.
+#[derive(Debug, Clone)]
+pub struct Conflict<T> {
+    /// Equalities forming the proof path that made the two disequal terms equal.
+    pub equalities: Vec<(T, T)>,
+    /// The disequality that was violated.
+    pub disequality: (T, T),
+}
+
+/// Result of a mutating egraph operation (assert_equal, assert_disequal, etc.).
+#[derive(Debug, Clone)]
+pub struct EgraphResult<T> {
+    /// A conflict, if the operation caused a disequality violation.
+    pub conflict: Option<Conflict<T>>,
+    /// SAT literals to propagate (from watched equalities that became true).
+    pub propagations: Vec<Lit>,
+}
+
+impl<T> EgraphResult<T> {
+    pub fn ok() -> Self {
+        Self {
+            conflict: None,
+            propagations: Vec::new(),
+        }
+    }
+
+    pub fn with_conflict(conflict: Conflict<T>) -> Self {
+        Self {
+            conflict: Some(conflict),
+            propagations: Vec::new(),
+        }
+    }
+}
+
+/// A single e-match result: a term and its children.
+#[derive(Debug, Clone)]
+pub struct MatchResult<T> {
+    pub term: T,
+    pub children: Vec<T>,
+}
+
+pub trait EgraphTrait {
+    /// Operator key for congruence: two terms are congruent iff they have
+    /// the same Op and pairwise-equal children.
+    type Op: Clone + Eq + Hash;
+
+    /// Term identifier. Opaque to the egraph, provided by the solver.
+    type TermId: Copy + Eq + Hash;
+
+    // --- Initialization ---
+
+    /// Tell the egraph which terms represent boolean true and false.
+    /// These must already be registered as constants.
+    fn set_bool_constants(&mut self, true_id: Self::TermId, false_id: Self::TermId);
+
+    // --- Registration ---
+
+    /// Register a term with its operator and children.
+    /// If `is_constant` is true, `children` must be empty and the term will
+    /// always be the root of its equivalence class. Merging two constants
+    /// produces a conflict.
+    fn register_term(
+        &mut self,
+        term: Self::TermId,
+        op: Self::Op,
+        children: &[Self::TermId],
+        is_constant: bool,
+    );
+
+    /// Register an equality `t1 = t2` with its corresponding SAT literal.
+    /// Sets up a watch: when `t1` and `t2` become equal, `lit` is propagated.
+    /// When they become provably disequal, `-lit` is propagated.
+    fn register_eq(&mut self, t1: Self::TermId, t2: Self::TermId, lit: Lit);
+
+    /// Register a boolean non-equality term with its SAT literal.
+    /// When the term becomes equal to `true_term`, `lit` is propagated.
+    /// When it becomes equal to `false_term`, `-lit` is propagated.
+    fn register_boolean_term(
+        &mut self,
+        term: Self::TermId,
+        op: Self::Op,
+        children: &[Self::TermId],
+        lit: Lit,
+    );
+
+    // --- Assertions ---
+
+    /// Assert `t1 = t2` at the given decision level.
+    /// Performs congruence closure. Returns a conflict if a disequality is violated.
+    fn assert_equal(
+        &mut self,
+        t1: Self::TermId,
+        t2: Self::TermId,
+        level: usize,
+    ) -> EgraphResult<Self::TermId>;
+
+    /// Assert `t1 ≠ t2` at the given decision level.
+    /// Returns a conflict if `t1` and `t2` are already in the same equivalence class.
+    fn assert_disequal(
+        &mut self,
+        t1: Self::TermId,
+        t2: Self::TermId,
+        level: usize,
+    ) -> EgraphResult<Self::TermId>;
+
+    /// Assert all terms in `terms` are pairwise distinct at the given decision level.
+    fn assert_distinct(
+        &mut self,
+        terms: &[Self::TermId],
+        level: usize,
+    ) -> EgraphResult<Self::TermId>;
+
+    // --- Queries ---
+
+    /// Find the canonical representative of a term's equivalence class.
+    fn find(&self, term: Self::TermId) -> Self::TermId;
+
+    /// Check if two terms are in the same equivalence class.
+    fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool;
+
+    // --- E-matching ---
+
+    /// Match a multi-trigger pattern.
+    ///
+    /// Each trigger is `(op, pattern)` where pattern slots are:
+    /// - `Some(t)` — must be in the same equivalence class as `t`
+    /// - `None` — wildcard (matches anything)
+    ///
+    /// Shared variables across trigger terms are expressed by using the same
+    /// `Some(t)` in multiple positions across different triggers.
+    ///
+    /// Returns a list of substitutions. Each substitution is a Vec of MatchResults,
+    /// one per trigger in the input, representing the concrete terms that matched.
+    fn match_triggers(
+        &self,
+        triggers: &[(Self::Op, Vec<Option<Self::TermId>>)],
+    ) -> Vec<Vec<MatchResult<Self::TermId>>>;
+
+    // --- Backtracking ---
+
+    /// Undo all operations performed at levels strictly greater than `level`.
+    fn backtrack_to(&mut self, level: usize);
+
+    // --- Decisions ---
+
+    /// SAT solver asks if the egraph wants to make a branching decision.
+    /// Returns 0 if no preference, otherwise a signed literal to assign.
+    fn make_decision(&self, assignments: &[i32]) -> i32;
+
+    /// SAT solver has chosen a variable (unsigned), asks the egraph for polarity.
+    /// Returns the signed literal (positive or negative).
+    fn make_decision_lit(&self, lit: Lit, assignments: &[i32]) -> Lit;
+
+    // --- Proofs ---
+
+    /// Explain why `t1 = t2`. Returns the list of asserted equalities that
+    /// form the proof. Returns None if `t1` and `t2` are not equal.
+    fn explain_equality(
+        &self,
+        t1: Self::TermId,
+        t2: Self::TermId,
+    ) -> Option<Vec<(Self::TermId, Self::TermId)>>;
+}
