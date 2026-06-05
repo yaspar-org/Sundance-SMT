@@ -8,10 +8,12 @@ use std::rc::Rc;
 
 use crate::cnf::CNFConversion;
 use crate::egraphs::datastructures::Polarity;
-use crate::egraphs::egraph::Egraph;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::skolem::skolemize;
+// TODO: These functions should take &mut SolverState and use solver_state.egraph for egraph ops.
+// For now they take &mut Egraph directly since the fields haven't been moved yet.
+use crate::egraphs::egraph::Egraph;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
 use crate::debug_println;
@@ -27,7 +29,7 @@ pub enum QuantifierInstance {
 }
 
 /// Returns a list of quantifier instantiation given the assignment and current state of the egraph
-///  
+///
 /// TODO: level is only used for printing, can get rid of it later
 /// (could use it for actiavte_bits, but right now we are activating everything at level 0)
 pub fn instantiate_quantifiers(
@@ -35,10 +37,10 @@ pub fn instantiate_quantifiers(
     proof_tracker: &Rc<RefCell<SMTProofTracker>>,
     assignments: &Vec<i32>,
     level: usize,
-    eager_skolem: bool,
-    ddsmt: bool,
-    lazy_dt: bool,
 ) -> Vec<QuantifierInstance> {
+    let eager_skolem = egraph.eager_skolem;
+    let ddsmt = egraph.ddsmt;
+    let lazy_dt = egraph.lazy_dt;
     let quantifiers = &egraph.quantifiers.clone();
     let mut instantiations = vec![];
     debug_println!(24, 0, "Starting a matching round");

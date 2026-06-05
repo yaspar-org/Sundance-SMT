@@ -6,9 +6,8 @@ use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::{get_child, get_parent};
-use crate::solver_state::process_assignment;
+use crate::solver_state::{SolverState, process_assignment};
 use crate::egraphs::datastructures::Predecessor;
-use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::log::is_important;
 use crate::proof::proof_tracer::SMTProofTracker;
@@ -39,7 +38,7 @@ fn keep_backtracking(
 /// Our implemetation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
-    pub egraph: &'a mut Egraph,
+    pub solver_state: &'a mut SolverState,
     pub disequalities: RefCell<Vec<Vec<i32>>>, // might be paying a bit of overhead for RefCell
     pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracker: Rc<RefCell<SMTProofTracker>>,
@@ -47,9 +46,6 @@ pub struct CustomExternalPropagator<'a> {
     pub solver: *mut CaDiCal,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
-    pub eager_skolem: bool,
-    pub ddsmt: bool,
-    pub lazy_dt: bool,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -69,18 +65,18 @@ impl<'a> CustomExternalPropagator<'a> {
             19,
             0,
             "Adding literal {lit} i.e. {} to proof tracker with uid {}",
-            self.egraph.get_term_from_lit(lit),
-            self.egraph.get_term_from_lit(lit).uid()
+            self.solver_state.egraph.get_term_from_lit(lit),
+            self.solver_state.egraph.get_term_from_lit(lit).uid()
         );
 
-        if let Some(id) = self.egraph.cnf_cache.var_map_reverse.get(&lit) {
-            let term = self.egraph.get_term(*id);
+        if let Some(id) = self.solver_state.egraph.cnf_cache.var_map_reverse.get(&lit) {
+            let term = self.solver_state.egraph.get_term(*id);
             self.proof_tracker
                 .borrow_mut()
                 .terms_list
                 .insert(lit, (*id, term, true));
-        } else if let Some(id) = self.egraph.cnf_cache.var_map_reverse.get(&-lit) {
-            let term = self.egraph.get_term(*id);
+        } else if let Some(id) = self.solver_state.egraph.cnf_cache.var_map_reverse.get(&-lit) {
+            let term = self.solver_state.egraph.get_term(*id);
             self.proof_tracker
                 .borrow_mut()
                 .terms_list
@@ -114,7 +110,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level,
             lits
         );
-        debug_println!(16, 0, "{}", self.egraph);
+        debug_println!(16, 0, "{}", self.solver_state.egraph);
         for lit in lits {
             debug_println!(
                 7,
@@ -122,7 +118,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 "Assigning the literal {:?} (level {}) which is {}",
                 lit,
                 self.decision_level,
-                self.egraph.get_term_from_lit(*lit)
+                self.solver_state.egraph.get_term_from_lit(*lit)
             );
 
             // adding the literal to the assignment
@@ -142,7 +138,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.add_lit_to_proof_tracker(*lit); // adding the literal to the proof_tracker
 
             let negated_model_or_datatype_constraints_opt =
-                process_assignment(*lit, self.egraph, self.decision_level, false, false, None, self.lazy_dt, self.ddsmt);
+                process_assignment(*lit, self.solver_state, self.decision_level, false, false, None);
 
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
@@ -159,7 +155,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     );
                     if is_important(12) {
                         for lit in constraint.clone() {
-                            debug_println!(12, 4, "{}", self.egraph.get_term_from_lit(lit));
+                            debug_println!(12, 4, "{}", self.solver_state.egraph.get_term_from_lit(lit));
                         }
                     }
                     let mut shrunk_constraint = vec![];
@@ -191,12 +187,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     for lit in shrunk_constraint.iter() {
                         self.add_lit_to_proof_tracker(*lit);
                         self.add_observed_variable(*lit);
-                        debug_println!(11, 1, "  {}", self.egraph.get_term_from_lit(*lit));
+                        debug_println!(11, 1, "  {}", self.solver_state.egraph.get_term_from_lit(*lit));
                     }
 
                     // Store the theory lemma with its proof steps
                     // TODO: I am not doing proof step stuff right now, but I need to add it back in
-                    // let proof_steps = self.egraph.get_proof_steps_for_lemma(&shrunk_constraint);
+                    // let proof_steps = self.solver_state.egraph.get_proof_steps_for_lemma(&shrunk_constraint);
 
                     debug_println!(
                         14 - 3,
@@ -236,27 +232,27 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level,
             self.decision_level + 1
         );
-        if self.decision_level + 2 >= self.egraph.predecessor_level.len() {
+        if self.decision_level + 2 >= self.solver_state.egraph.predecessor_level.len() {
             debug_println!(
                 2,
                 2,
                 "Resizing predecessor level array to {}",
-                2 * self.egraph.predecessor_level.len()
+                2 * self.solver_state.egraph.predecessor_level.len()
             );
-            self.egraph
+            self.solver_state.egraph
                 .predecessor_level
-                .resize(2 * self.egraph.predecessor_level.len(), 0);
+                .resize(2 * self.solver_state.egraph.predecessor_level.len(), 0);
         }
         self.decision_level += 1;
-        self.egraph.decision_level += 1;
+        self.solver_state.egraph.decision_level += 1;
         debug_println!(
             4,
             0,
             "Setting predecessor level for level {} to {}",
             self.decision_level,
-            self.egraph.predecessor_hash
+            self.solver_state.egraph.predecessor_hash
         );
-        self.egraph.predecessor_level[self.decision_level] = self.egraph.predecessor_hash;
+        self.solver_state.egraph.predecessor_level[self.decision_level] = self.solver_state.egraph.predecessor_hash;
     }
 
     fn notify_backtrack(&mut self, level: usize) {
@@ -269,7 +265,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             level
         );
 
-        self.egraph.predecessor_hash += 1;
+        self.solver_state.egraph.predecessor_hash += 1;
 
         // resetting the assignments to 0 for all levels greater than the current level
         for i in 1..self.assignments.len() {
@@ -280,7 +276,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         // TODO: not deactivating for rn, because important terms are getting deactivated
-        // deactivate_bits(level, self.egraph);
+        // deactivate_bits(level, self.solver_state.egraph);
 
         for i in level + 1..self.decision_level + 1 {
             debug_println!(
@@ -288,61 +284,61 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 1,
                 "We are updating level {} from {} to {}",
                 i,
-                self.egraph.predecessor_level[i],
-                self.egraph.predecessor_hash
+                self.solver_state.egraph.predecessor_level[i],
+                self.solver_state.egraph.predecessor_hash
             );
-            self.egraph.predecessor_level[i] = self.egraph.predecessor_hash;
+            self.solver_state.egraph.predecessor_level[i] = self.solver_state.egraph.predecessor_hash;
         }
 
         self.decision_level = level;
-        self.egraph.decision_level = level;
+        self.solver_state.egraph.decision_level = level;
 
         debug_println!(
             16,
             0,
             "Before backtracking we hav the stack: {:?}",
-            self.egraph
+            self.solver_state.egraph
                 .proof_forest_backtrack_stack
                 .iter()
                 .map(|(size, edge, _, _)| (
                     size,
                     format!(
                         "{} = {}",
-                        self.egraph.get_term(get_child(edge)),
-                        self.egraph.get_term(get_parent(edge))
+                        self.solver_state.egraph.get_term(get_child(edge)),
+                        self.solver_state.egraph.get_term(get_parent(edge))
                     )
                 ))
                 .collect::<Vec<_>>()
         );
         // TODO: right now we are assuming only fixed literals can be assigned at level 0
-        while keep_backtracking(&self.egraph.proof_forest_backtrack_stack, level) {
+        while keep_backtracking(&self.solver_state.egraph.proof_forest_backtrack_stack, level) {
             let (_, backtrack_equality, y, y_root) =
-                self.egraph.proof_forest_backtrack_stack.pop().unwrap();
+                self.solver_state.egraph.proof_forest_backtrack_stack.pop().unwrap();
             debug_println!(16, 1, "Backtracking equality: {:?}", backtrack_equality);
-            self.egraph.proof_forest_backtrack(backtrack_equality, y, y_root)
+            self.solver_state.egraph.proof_forest_backtrack(backtrack_equality, y, y_root)
         }
 
         debug_println!(
             16,
             0,
             "After backtracking we have the stack: {:?}",
-            self.egraph
+            self.solver_state.egraph
                 .proof_forest_backtrack_stack
                 .iter()
                 .map(|(size, edge, _, _)| (
                     size,
                     format!(
                         "{} = {}",
-                        self.egraph.get_term(get_child(edge)),
-                        self.egraph.get_term(get_parent(edge))
+                        self.solver_state.egraph.get_term(get_child(edge)),
+                        self.solver_state.egraph.get_term(get_parent(edge))
                     )
                 ))
                 .collect::<Vec<_>>()
         );
 
         // adding the new predecessors created by quantifiers to the predecessors list
-        for (term, parents) in &self.egraph.predecessors_created_by_quantifiers {
-            let current_ancestor = self.egraph.find(*term);
+        for (term, parents) in &self.solver_state.egraph.predecessors_created_by_quantifiers {
+            let current_ancestor = self.solver_state.egraph.find(*term);
             // if *term == current_ancestor {
             //     continue;
             // }
@@ -352,33 +348,33 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     16,
                     0,
                     "We are updating the predecessor of {} [ancestor of {}] to {} at level: {}; hash: {}",
-                    self.egraph.get_term(current_ancestor),
-                    self.egraph.get_term(*term),
-                    self.egraph.get_term(*parent),
+                    self.solver_state.egraph.get_term(current_ancestor),
+                    self.solver_state.egraph.get_term(*term),
+                    self.solver_state.egraph.get_term(*parent),
                     level,
-                    self.egraph.predecessor_hash
+                    self.solver_state.egraph.predecessor_hash
                 );
                 let predecessor = Predecessor {
                     level,
-                    hash: self.egraph.predecessor_hash,
+                    hash: self.solver_state.egraph.predecessor_hash,
                     predecessor: *parent,
                     inner_term: *term,
                 };
-                self.egraph.predecessors[current_ancestor as usize].insert(*parent, predecessor);
+                self.solver_state.egraph.predecessors[current_ancestor as usize].insert(*parent, predecessor);
 
                 debug_println!(
                     11,
                     0,
                     "We have the predecessors of {}",
-                    self.egraph.get_term(current_ancestor)
+                    self.solver_state.egraph.get_term(current_ancestor)
                 );
                 if is_important(11) {
-                    for pred in self.egraph.predecessors[current_ancestor as usize].clone() {
+                    for pred in self.solver_state.egraph.predecessors[current_ancestor as usize].clone() {
                         debug_println!(
                             11,
                             4,
                             "{} with level {} and hash {}",
-                            self.egraph.get_term(pred.1.predecessor),
+                            self.solver_state.egraph.get_term(pred.1.predecessor),
                             pred.1.level,
                             pred.1.hash
                         )
@@ -389,35 +385,35 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // once we get to level 0, we don't need to keep track of this anymore since we have reached the bottom case
         if level == 0 {
-            self.egraph.predecessors_created_by_quantifiers = DeterministicHashMap::new();
+            self.solver_state.egraph.predecessors_created_by_quantifiers = DeterministicHashMap::new();
         }
 
         // redoing the union_to_eclass stuff
-        let union_to_eclass_info = self.egraph.union_to_eclass.clone();
+        let union_to_eclass_info = self.solver_state.egraph.union_to_eclass.clone();
         for (term, func, subterms) in union_to_eclass_info {
             debug_println!(
                 16,
                 0,
                 "Reunioning term {} with function {} and subterms {:?}",
-                self.egraph.get_term(term),
+                self.solver_state.egraph.get_term(term),
                 func,
                 subterms
                     .iter()
-                    .map(|x| self.egraph.get_term(*x))
+                    .map(|x| self.solver_state.egraph.get_term(*x))
                     .collect::<Vec<_>>()
             );
-            self.egraph.find_and_union_to_eclass(term, func, subterms);
+            self.solver_state.egraph.find_and_union_to_eclass(term, func, subterms);
         }
 
         // once we get to level 0, we don't need to keep track of this anymore since we have reached the bottom case
         if level == 0 {
-            self.egraph.union_to_eclass = DeterministicHashSet::new();
-            self.egraph.proof_forest_backtrack_stack = vec![];
+            self.solver_state.egraph.union_to_eclass = DeterministicHashSet::new();
+            self.solver_state.egraph.proof_forest_backtrack_stack = vec![];
         }
 
         debug_println!(16, 0, "Ending backtracking at level {}", level);
 
-        debug_println!(11, 0, "{}", self.egraph);
+        debug_println!(11, 0, "{}", self.solver_state.egraph);
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
@@ -428,12 +424,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             model,
             model
                 .iter()
-                .map(|x| self.egraph.get_term_from_lit(*x))
+                .map(|x| self.solver_state.egraph.get_term_from_lit(*x))
                 .collect::<Vec<_>>(),
         );
 
         // for lit in model{
-        //      debug_println!(11, 4, "{}", self.egraph.get_term_from_lit(*lit))
+        //      debug_println!(11, 4, "{}", self.solver_state.egraph.get_term_from_lit(*lit))
         // }
 
         if !self.disequalities.borrow_mut().is_empty() {
@@ -446,24 +442,24 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         for term in model {
-            let (u64_val, polarity) = self.egraph.get_u64_from_lit_with_polarity(*term);
+            let (u64_val, polarity) = self.solver_state.egraph.get_u64_from_lit_with_polarity(*term);
             debug_println!(
                 24,
                 4,
                 "{} [lit: {}] [u64: {} with polarity {}]",
-                self.egraph.get_term_from_lit(*term),
+                self.solver_state.egraph.get_term_from_lit(*term),
                 term,
                 u64_val,
                 polarity
             );
         }
-        debug_println!(24, 0, "{}", self.egraph);
+        debug_println!(24, 0, "{}", self.solver_state.egraph);
 
         // Check arithmetic consistency before instantiating quantifiers
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
-        match check_integer_constraints_satisfiable(&self.arithmetic, model, self.egraph) {
+        match check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state) {
             ArithResult::Unsat(arithmetic_literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
                 {
@@ -491,14 +487,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             (term, first)
                         };
 
-                        if let Some(term) = nelson_oppen_clause_pair(*pair.0, *pair.1, self.egraph)
+                        if let Some(term) = nelson_oppen_clause_pair(*pair.0, *pair.1, &mut self.solver_state)
                         {
                             debug_println!(25, 0, "adding in the nelson oppen term {}", term);
-                            let term_nnf = term.nnf(self.egraph);
+                            let term_nnf = term.nnf(&mut self.solver_state.egraph);
                             // println!("we have the term {:?}", term);
-                            self.egraph
+                            self.solver_state.egraph
                                 .insert_predecessor(&term_nnf, None, None, true, None);
-                            let term_cnf = term.cnf_tseitin(self.egraph);
+                            let term_cnf = term.cnf_tseitin(&mut self.solver_state.egraph);
                             // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
                             for clause in term_cnf {
                                 for lit in &clause.0 {
@@ -513,16 +509,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
                 // todo: have a helper function for this, because it gets included twice
                 // for literal in literals {
-                //     // if self.egraph.nelson_oppen_literals.contains(&literal) {
+                //     // if self.solver_state.egraph.nelson_oppen_literals.contains(&literal) {
                 //     //     continue;
                 //     // }
-                //     // self.egraph.nelson_oppen_literals.insert(literal);
+                //     // self.solver_state.egraph.nelson_oppen_literals.insert(literal);
 
-                //     if let Some(term) = nelson_oppen_clause_ineq(literal, &mut self.egraph) {
-                //         let term_nnf = term.sundance_nnf(&mut *self.egraph.cnfenv.context);
+                //     if let Some(term) = nelson_oppen_clause_ineq(literal, &mut self.solver_state.egraph) {
+                //         let term_nnf = term.sundance_nnf(&mut *self.solver_state.egraph.cnfenv.context);
                 //         // println!("we have the term {:?}", term);
-                //         self.egraph.insert_predecessor(&term_nnf, None, None, false, None);
-                //         let term_cnf = term.cnf_tseitin(&mut *self.egraph.cnfenv.context);
+                //         self.solver_state.egraph.insert_predecessor(&term_nnf, None, None, false, None);
+                //         let term_cnf = term.cnf_tseitin(&mut *self.solver_state.egraph.cnfenv.context);
                 //         // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
                 //         for clause in term_cnf {
                 //             for lit in &clause.0 {
@@ -539,16 +535,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // do the Nelson-Oppen disequality check
         // for literal in model {
-        //     if self.egraph.nelson_oppen_literals.contains(literal) {
+        //     if self.solver_state.egraph.nelson_oppen_literals.contains(literal) {
         //         continue;
         //     }
-        //     self.egraph.nelson_oppen_literals.insert(*literal);
+        //     self.solver_state.egraph.nelson_oppen_literals.insert(*literal);
 
-        //     if let Some(term) = nelson_oppen_clause(*literal, &mut self.egraph) {
-        //         let term_nnf = term.sundance_nnf(&mut self.egraph.cnfenv);
+        //     if let Some(term) = nelson_oppen_clause(*literal, &mut self.solver_state.egraph) {
+        //         let term_nnf = term.sundance_nnf(&mut self.solver_state.egraph.cnfenv);
         //         // println!("we have the term {:?}", term);
-        //         self.egraph.insert_predecessor(&term_nnf, None, None, false, None);
-        //         let term_cnf = term.sundance_cnf_tseitin(&mut self.egraph.cnfenv);
+        //         self.solver_state.egraph.insert_predecessor(&term_nnf, None, None, false, None);
+        //         let term_cnf = term.sundance_cnf_tseitin(&mut self.solver_state.egraph.cnfenv);
         //         // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
         //         for clause in term_cnf {
         //             for lit in &clause.0 {
@@ -566,13 +562,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         debug_println!(11, 0, "Starting quantifier instantiations");
         let quantifier_instantiations = instantiate_quantifiers(
-            self.egraph,
+            &mut self.solver_state.egraph,
             &self.proof_tracker,
             &self.assignments,
             self.decision_level,
-            self.eager_skolem,
-            self.ddsmt,
-            self.lazy_dt,
         );
         debug_println!(
             11,
@@ -582,7 +575,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
 
         if quantifier_instantiations.is_empty() {
-            debug_println!(10, 0, "{}", self.egraph);
+            debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.disequalities.borrow().is_empty());
 
             return true;
@@ -683,7 +676,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         if literal != 0 {
             self.add_lit_to_proof_tracker(literal);
         }
-        if let Some(term) = self.egraph.get_term_from_lit_safe(literal) {
+        if let Some(term) = self.solver_state.egraph.get_term_from_lit_safe(literal) {
             debug_println!(
                 11,
                 0,
@@ -695,7 +688,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             debug_println!(11, 0, "END OF CLAUSE");
             assert!(literal == 0);
         }
-        debug_println!(4, 0, "{}", self.egraph);
+        debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal
     }
 }

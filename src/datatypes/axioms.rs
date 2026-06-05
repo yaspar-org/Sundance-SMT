@@ -14,6 +14,7 @@ use crate::debug_println;
 use crate::egraphs::datastructures::ConstructorType;
 use crate::egraphs::egraph::Egraph;
 use crate::preprocess::check_for_function_bool;
+use crate::solver_state::SolverState;
 
 /// For a term of datatype sort, we want to learn the following axioms:
 /// 1. isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
@@ -26,13 +27,13 @@ use crate::preprocess::check_for_function_bool;
 pub fn find_datatype_axioms(
     term: &Term, // must be a datatype term
     sort: &Sort, // the sort of the given term
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     from_quantifier: bool, // this is necessary because of the calls to insert_predecessor where we need to know whether the axiom is from a quantifier or not
     lazy_dt: bool,
     ddsmt: bool,
 ) -> Vec<Vec<i32>> {
     let mut vector = vec![];
-    let dt_dec = if let Some(ctors) = egraph
+    let dt_dec = if let Some(ctors) = solver_state
         .datatype_info
         .datatypes
         .get(sort.sort_name())
@@ -44,37 +45,37 @@ pub fn find_datatype_axioms(
         return vector;
     };
     let dt_dec = dt_dec
-        .monomorphize(sort, egraph)
+        .monomorphize(sort, solver_state)
         .expect("type invariant violation: datatype fails to monomorphize");
 
     // Step 1. Store the constructor in term_constructors
     let num = term.uid();
-    if egraph.datatype_axioms_applied.contains(&num) {
+    if solver_state.datatype_axioms_applied.contains(&num) {
         return vector;
     }
-    egraph.datatype_axioms_applied.insert(num);
+    solver_state.datatype_axioms_applied.insert(num);
 
-    if !egraph.term_constructors.contains_key(&num) {
-        add_to_term_constructors(egraph, term);
+    if !solver_state.term_constructors.contains_key(&num) {
+        add_to_term_constructors(solver_state, term);
     }
 
     // Step 2. Learn the clause isC1(t) \/ ... \/ isCm(t)
-    let tester_apps = learn_exactly_one_tester_clause(egraph, term, &dt_dec, from_quantifier);
+    let tester_apps = learn_exactly_one_tester_clause(solver_state, term, &dt_dec, from_quantifier);
     vector.extend(tester_apps);
 
     // Step 2.5. Learn the constraint (is-f t) => t = f(f^0(t) ... f^m(t))
     // as long as we are not doing lazy datatypes
     if !lazy_dt {
-        let ctor_selector_clauses = learn_ctors_selector_clauses(egraph, term, sort, &dt_dec, ddsmt, lazy_dt);
+        let ctor_selector_clauses = learn_ctors_selector_clauses(solver_state, term, sort, &dt_dec, ddsmt, lazy_dt);
         vector.extend(ctor_selector_clauses);
     }
 
     // Step 3. Learn the constraint  /\_i=1^k f_i(f(t1, ... tk)) = t_i
     if let App(f, terms, _) = term.repr()
-        && egraph.datatype_info.constructors.contains_key(f.id_str())
+        && solver_state.datatype_info.constructors.contains_key(f.id_str())
     {
         let selector_ctor_clauses =
-            learn_selector_ctor_clause(egraph, term, f.id_str(), terms, &dt_dec, from_quantifier);
+            learn_selector_ctor_clause(solver_state, term, f.id_str(), terms, &dt_dec, from_quantifier);
         vector.extend(selector_ctor_clauses);
     }
     vector
@@ -84,27 +85,27 @@ pub fn find_datatype_axioms(
 /// Note that the axiom `~isCi(t) \/ ~isCj(t)` is added lazily based on the assignment in term_constructors
 /// if the term is of the form C(t1, ..., tm) where C is a constructor, we add it as a Constructor with the tester term (_ is C) t
 /// otherwise, we add it as Uninitialized and we will update it later if we learn that
-fn add_to_term_constructors(egraph: &mut Egraph, term: &Term) {
+fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
     let num = term.uid();
     // todo: missing Global case?
     if let App(f, _, _) = term.repr()
-        && egraph.datatype_info.constructors.contains_key(f.id_str())
+        && solver_state.datatype_info.constructors.contains_key(f.id_str())
     {
-        let bool_sort = egraph.bool_sort();
-        let is_symbol = egraph.allocate_symbol("is");
+        let bool_sort = solver_state.bool_sort();
+        let is_symbol = solver_state.allocate_symbol("is");
 
         let tester_identifier = Identifier {
             symbol: is_symbol.clone(),
             indices: vec![Index::Symbol(f.id_str().clone())],
         };
         // insert (_ is X)
-        let tester_term = egraph.app(
+        let tester_term = solver_state.app(
             tester_identifier.into(),
             vec![term.clone()],
             Some(bool_sort.clone()),
         );
         // todo: we are not handling is-X here
-        egraph.term_constructors.insert(
+        solver_state.term_constructors.insert(
             num,
             ConstructorType::Constructor {
                 name: f.id_str().clone(),
@@ -114,7 +115,7 @@ fn add_to_term_constructors(egraph: &mut Egraph, term: &Term) {
             },
         );
     } else {
-        egraph
+        solver_state
             .term_constructors
             .insert(num, ConstructorType::Uninitialized);
     }
@@ -123,14 +124,14 @@ fn add_to_term_constructors(egraph: &mut Egraph, term: &Term) {
 /// For a term of datatype sort, learn the clause isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
 /// if the term is of the form C(t1, ..., tm) where C is a constructor, we also add the clause (isC1(t) \/ ... \/ isCm(t)) /\ isC(t) where C is the constructor of the term
 fn learn_exactly_one_tester_clause(
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     term: &Term,
     dt_dec: &DatatypeDec,
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     // Collect all constructors for this datatype sort
-    let is_symbol = egraph.allocate_symbol("is");
-    let bool_sort = egraph.bool_sort();
+    let is_symbol = solver_state.allocate_symbol("is");
+    let bool_sort = solver_state.bool_sort();
     let mut vector = vec![];
 
     let mut tester_apps = vec![];
@@ -146,7 +147,7 @@ fn learn_exactly_one_tester_clause(
         };
 
         // todo: also need (is-ConstructorName term)
-        let tester_app = egraph.app(
+        let tester_app = solver_state.app(
             tester_identifier.into(),
             vec![term.clone()],
             Some(bool_sort.clone()),
@@ -156,9 +157,9 @@ fn learn_exactly_one_tester_clause(
         match term.repr() {
             App(f, _, _) | Global(f, _) if *f.id_str() == *ctor_name => {
                 debug_println!(12, 0, "TESTER Constructor CASE");
-                let tester_app_nnf = tester_app.nnf(egraph);
-                egraph.insert_predecessor(&tester_app_nnf, None, None, from_quantifier, None);
-                let tester_app_cnf = tester_app_nnf.cnf_tseitin(egraph).into_iter().map(|x| x.0);
+                let tester_app_nnf = tester_app.nnf(solver_state);
+                solver_state.insert_predecessor(&tester_app_nnf, None, None, from_quantifier, None);
+                let tester_app_cnf = tester_app_nnf.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
                 debug_println!(25, 10, "(assert {})", tester_app);
                 vector.extend(tester_app_cnf);
             }
@@ -171,12 +172,12 @@ fn learn_exactly_one_tester_clause(
     let tester_or = if tester_apps.len() == 1 {
         tester_apps.pop().unwrap()
     } else {
-        egraph.or(tester_apps)
+        solver_state.or(tester_apps)
     };
     debug_println!(12, 0, "TESTER OR CASE");
     debug_println!(25, 10, "(assert {})", tester_or);
-    egraph.insert_predecessor(&tester_or, None, None, from_quantifier, None);
-    let tester_cnf = tester_or.cnf_tseitin(egraph).into_iter().map(|x| x.0);
+    solver_state.egraph.insert_predecessor(&tester_or, None, None, from_quantifier, None);
+    let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
     vector
 }
@@ -186,7 +187,7 @@ fn learn_exactly_one_tester_clause(
 /// Precondition:
 /// - dt_dec should be monomorphized; c.f. [yaspar_ir::ast::Monomorphization]
 fn learn_ctors_selector_clauses(
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     term: &Term,
     sort: &Sort,
     dt_dec: &DatatypeDec,
@@ -207,7 +208,7 @@ fn learn_ctors_selector_clauses(
 /// Precondition:
 /// - ctor should be monomorphized; c.f. [yaspar_ir::ast::Monomorphization]
 pub fn learn_ctor_selector_clauses(
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     term: &Term,
     ctor: &ConstructorDec,
     sort: &Sort,
@@ -215,15 +216,15 @@ pub fn learn_ctor_selector_clauses(
     ddsmt: bool,
     lazy_dt: bool,
 ) -> Vec<Vec<i32>> {
-    let is_symbol = egraph.allocate_symbol("is");
-    let bool_sort = egraph.bool_sort();
+    let is_symbol = solver_state.allocate_symbol("is");
+    let bool_sort = solver_state.bool_sort();
 
     let ctor_name = &ctor.ctor;
     let tester_identifier = Identifier {
         symbol: is_symbol.clone(),
         indices: vec![Index::Symbol(ctor_name.clone())],
     };
-    let tester_app = egraph.app(
+    let tester_app = solver_state.app(
         tester_identifier.into(),
         vec![term.clone()],
         Some(bool_sort.clone()),
@@ -231,7 +232,7 @@ pub fn learn_ctor_selector_clauses(
 
     let mut selector_apps = vec![];
     for sel in &ctor.args {
-        let sel_app = egraph.context.app(
+        let sel_app = solver_state.context.app(
             QualifiedIdentifier::simple(sel.0.clone()),
             vec![term.clone()],
             // this line requires monomorphization, otherwise it's wrong!
@@ -243,27 +244,27 @@ pub fn learn_ctor_selector_clauses(
     // have the simple_sorted id for the global case and the simple id for the app case
     let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
     let ctor_app = if selector_apps.is_empty() {
-        egraph.global(ctor_id, Some(sort.clone()))
+        solver_state.global(ctor_id, Some(sort.clone()))
     } else {
-        egraph.app(ctor_id, selector_apps, Some(sort.clone()))
+        solver_state.app(ctor_id, selector_apps, Some(sort.clone()))
     };
-    let eq = egraph.eq(term.clone(), ctor_app);
+    let eq = solver_state.eq(term.clone(), ctor_app);
 
-    let eq_nnf = eq.nnf(egraph);
-    egraph.insert_predecessor(&eq_nnf, None, None, true, None);
+    let eq_nnf = eq.nnf(solver_state);
+    solver_state.insert_predecessor(&eq_nnf, None, None, true, None);
 
     // note that additioanl constraints are needed for `datatypes/ctor_sel_term_additional_dt_constraints3.smt2`
-    let mut vector = check_for_function_bool(&eq_nnf, egraph, false, ddsmt, lazy_dt);
-    let eq_cnf = eq_nnf.cnf_tseitin(egraph);
+    let mut vector = check_for_function_bool(&eq_nnf, solver_state, false, ddsmt, lazy_dt);
+    let eq_cnf = eq_nnf.cnf_tseitin(solver_state);
     assert_eq!(eq_cnf.0.len(), 1);
     let eq_clause = eq_cnf.0[0].0.clone();
     assert_eq!(eq_clause.len(), 1);
 
-    let imp = egraph.implies(vec![tester_app], eq);
+    let imp = solver_state.implies(vec![tester_app], eq);
     debug_println!(25, 10, "(assert {})", imp);
-    let imp_nnf = imp.nnf(egraph);
-    egraph.insert_predecessor(&imp_nnf, None, None, from_quantifier, None);
-    let imp_cnf = imp.cnf_tseitin(egraph);
+    let imp_nnf = imp.nnf(solver_state);
+    solver_state.insert_predecessor(&imp_nnf, None, None, from_quantifier, None);
+    let imp_cnf = imp.cnf_tseitin(solver_state);
     let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
     vector.extend(clauses);
     vector
@@ -273,7 +274,7 @@ pub fn learn_ctor_selector_clauses(
 /// for term = f(t1, ..., tk) where f is a constructor with selectors f_1, ..., f_k and subterms t1, ..., tk.
 /// Note that we also need to include the datatype axioms for the selectors if they are of datatype sort, so we call find_datatype_axioms on each selector application as well
 fn learn_selector_ctor_clause(
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     term: &Term,
     f: &Str,
     subterms: &[Term],
@@ -310,17 +311,17 @@ fn learn_selector_ctor_clause(
 /// Learn the clause ~isCi(t) \/ ~isCj(t) for each pair of distinct constructors Ci and Cj of the datatype based on the assignment in term_constructors
 /// This is called lazily during the congruence_closure algorithm
 pub fn learn_or_not_term_tester_term(
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     term: Term,
     tester_term: Term,
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
-    let not_tester_term = egraph.not(tester_term.clone());
-    let not_term = egraph.not(term);
-    let or_not_tester_not_term = egraph.or(vec![not_tester_term, not_term]);
-    egraph.insert_predecessor(&or_not_tester_not_term, None, None, from_quantifier, None);
+    let not_tester_term = solver_state.not(tester_term.clone());
+    let not_term = solver_state.not(term);
+    let or_not_tester_not_term = solver_state.or(vec![not_tester_term, not_term]);
+    solver_state.insert_predecessor(&or_not_tester_not_term, None, None, from_quantifier, None);
     let tester_cnf = or_not_tester_not_term
-        .cnf_tseitin(egraph)
+        .cnf_tseitin(solver_state)
         .into_iter()
         .map(|x| x.0)
         .collect();

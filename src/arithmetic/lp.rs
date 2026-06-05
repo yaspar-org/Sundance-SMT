@@ -10,6 +10,7 @@ use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
 use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::unionfind::ProofTracker;
+use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use clap::ValueEnum;
 use dashu::Integer;
@@ -87,12 +88,12 @@ pub fn check_integer_constraints_satisfiable(
     arith_solver: &ArithSolver,
     terms: &[i32],
     // TODO: lialp: check that taking egraph mutable is okay
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
 ) -> ArithResult {
     match arith_solver {
-        ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, egraph),
+        ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, solver_state),
         #[cfg(feature = "z3-solver")]
-        ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, egraph),
+        ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, solver_state),
         ArithSolver::None => ArithResult::None,
     }
 }
@@ -144,13 +145,13 @@ impl LinearConstraint {
 /// This is a simplified version that handles basic arithmetic constraints
 pub fn extract_linear_constraints(
     terms: &[i32],
-    egraph: &mut crate::egraphs::egraph::Egraph,
+    solver_state: &mut SolverState,
 ) -> (Vec<LinearConstraint>, Vec<i32>) {
     let mut constraints = Vec::new();
     let mut arithmetic_literals = vec![];
 
     for &lit in terms {
-        let (term_id, polarity) = egraph.get_u64_from_lit_with_polarity(lit);
+        let (term_id, polarity) = solver_state.get_u64_from_lit_with_polarity(lit);
         if let Some(constraint) = extract_constraint_from_term(term_id, polarity, egraph) {
             debug_println!(21, 4, "We get the constraint {:?}", constraint);
             constraints.push(constraint);
@@ -317,15 +318,15 @@ fn extract_constraint_from_term(
 /// TODO: simplify this, we might not need DeterministicHashMap representation for z3
 pub fn extract_linear_expression(
     term_id: u64,
-    egraph: &mut crate::egraphs::egraph::Egraph,
+    solver_state: &mut SolverState,
 ) -> (DeterministicHashMap<Coefficient, Integer>, Vec<i32>) {
     debug_println!(
         21,
         8,
         "[ARITH CHECK] Extracting linear expression for term {:?}",
-        egraph.get_term(term_id)
+        solver_state.get_term(term_id)
     );
-    let term = egraph.get_term(term_id);
+    let term = solver_state.get_term(term_id);
     let mut expr = DeterministicHashMap::new();
     expr.insert(Coefficient::Constant, IBig::from(0));
     let mut additional_constraints = vec![];

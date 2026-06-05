@@ -211,49 +211,24 @@ impl fmt::Display for Egraph {
 
 /// The egraph datastructure that keeps track of terms, equalities and parents
 pub struct Egraph {
-    pub context: Context,
-    /// map from u64 to Terms (default: all terms are None, two passes go from Uninitialized to Some, todo (amar): clean this up)
+    /// map from u64 to Terms
     pub terms_list: Vec<TermOption>,
     /// map from vertices (u64) -> ProofForestEdge
-    pub proof_forest: Vec<ProofForestEdge>, // u64 -> ProofForestEdge [t <- ]
+    pub proof_forest: Vec<ProofForestEdge>,
     /// keeps track of a stack of "edges" to backtrack on
     pub proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u64, ProofForestEdge)>,
-    /// this is a map from terms (u64) -> (term in the same egraph, predecesssor of term in same egraph)
-    pub predecessors: Vec<FastDeterministicHashMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
+    /// this is a map from terms (u64) -> (term in the same egraph, predecessor of term in same egraph)
+    pub predecessors: Vec<FastDeterministicHashMap<u64, Predecessor>>,
     /// number to keep track of the current hash
     pub predecessor_hash: u64,
     /// mapping from levels -> corresponding hash
-    pub predecessor_level: Vec<u64>, // u64 -> hash (u64)
-    /// shortcut to prevent recomputing assertions from literals
-    pub assertions: Vec<Assertion>,
-    /// this is a list of quantifiers
-    pub quantifiers: Vec<Quantifier>,
+    pub predecessor_level: Vec<u64>,
     /// map from functions (String) -> terms of this function
-    pub function_maps: DeterministicHashMap<String, Vec<(u64, Vec<u64>)>>, // maps a function name to a list of terms that are of that function
+    pub function_maps: DeterministicHashMap<String, Vec<(u64, Vec<u64>)>>,
     /// uid for true
     pub true_term: u64,
     /// uid for false
     pub false_term: u64,
-    /// a list of quantifier instantiations indexed by the uid of the original quantifier (todo: why do we store a mapping from variable names to terms)
-    pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<String, Term>>>,
-    /// this is a list of skolemized terms
-    pub added_skolemizations: DeterministicHashSet<u64>,
-    /// keeps track of terms created by quantifier instantiation and their predecessors
-    pub predecessors_created_by_quantifiers: DeterministicHashMap<u64, DeterministicHashSet<u64>>,
-    /// keeps track of info about datatypes
-    pub datatype_info: DatatypeInfo,
-    /// keeps track of all constructors (from dt preprocessing pass)
-    pub term_constructors: DeterministicHashMap<u64, ConstructorType>, // maps all terms to the correct constructor (using Hashmap because I don't anticipate a lot of datatype terms relative to total # of terms)
-    /// if a quantifier instantiates (f t) and t = s, then we want to add  (f.uid(), "f", [t.uid()])
-    pub union_to_eclass: DeterministicHashSet<(u64, String, Vec<u64>)>, // todo: use identifier instead of String
-    /// remember pairs of terms for which we have learnt  x = y \/ x > y \/ x < y
-    pub nelson_oppen_ineq_literals: HashSet<(u64, u64)>,
-    /// remember terms for which we have learnt datatype axioms
-    pub datatype_axioms_applied: HashSet<u64>,
-    /// keeping track of arithmetic terms for theory combination (todo: might be easier just to keep track of arithmetic roots, but thats way more complicated)
-    pub arithmetic_terms: Vec<u64>,
-    /// store CNF cache
-    pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
     pub decision_level: usize,
 }
@@ -262,80 +237,38 @@ impl Egraph {
     pub fn new(mut context: Context) -> Self {
         let tru = context.get_true();
         let fal = context.get_false();
-        let datatype_info = DatatypeInfo::from_context(&context);
 
         Egraph {
-            context,
             terms_list: vec![TermOption::None],
             proof_forest: vec![ProofForestEdge::Root {
                 size: 1000,
                 child: 0,
                 disequalities: DeterministicHashMap::new(),
                 children: DeterministicHashSet::new(),
-            }], // think about whether using a vector or hashmap is better here
-            // note: this is an option because if you are a subterm of a quantifier, you are not in the proof forest. TODO: maybe there is a better way to think about this
+            }],
             proof_forest_backtrack_stack: Vec::new(),
             predecessors: vec![FastDeterministicHashMap::default()],
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
-            assertions: vec![],
-            quantifiers: vec![],
             function_maps: DeterministicHashMap::default(),
             true_term: tru.uid(),
             false_term: fal.uid(),
-            added_instantiations: HashMap::default(),
-            added_skolemizations: DeterministicHashSet::default(),
-            predecessors_created_by_quantifiers: DeterministicHashMap::new(),
-            datatype_info,
-            term_constructors: DeterministicHashMap::new(),
-            union_to_eclass: DeterministicHashSet::new(),
-            nelson_oppen_ineq_literals: HashSet::new(),
-            datatype_axioms_applied: HashSet::new(),
-            arithmetic_terms: vec![],
-            cnf_cache: Default::default(),
             decision_level: 0,
         }
     }
 
-    fn cnf_env(&mut self) -> CNFEnv<'_> {
-        CNFEnv {
-            context: &mut self.context,
-            cache: &mut self.cnf_cache,
-        }
-    }
+    // fn cnf_env(&mut self) -> CNFEnv<'_> {
+    //     CNFEnv {
+    //         context: &mut self.context,
+    //         cache: &mut self.cnf_cache,
+    //     }
+    // }
 
     /// Returns the u64 corresponding to a given lit with the correct polarity
-    pub fn get_u64_from_lit_with_polarity(&self, lit: i32) -> (u64, bool) {
-        if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
-            (*num, true)
-        } else if let Some(num) = self.cnf_cache.var_map_reverse.get(&-lit) {
-            (*num, false)
-        } else {
-            panic!(
-                "Term {} not found in terms_list {:?}\n We also have proof_forest {:?}",
-                lit, self.terms_list, self.proof_forest
-            );
-        }
-    }
-
-    pub fn get_lit_from_u64(&self, num: u64) -> i32 {
-        debug_println!(
-            6,
-            0,
-            "We are in get_lit_from_u64 with num {} and var_map {:?}",
-            num,
-            self.cnf_cache.var_map
-        );
-        debug_println!(5, 0, "We have the term {}", self.get_term(num));
-        *self.cnf_cache.var_map.get(&num).unwrap()
-    }
-
-    pub fn get_lit_from_u64_safe(&self, num: u64) -> Option<i32> {
-        self.cnf_cache.var_map.get(&num).cloned()
-    }
+    // TODO: get_u64_from_lit_with_polarity, get_lit_from_u64, get_lit_from_u64_safe,
+    // get_term_from_lit, get_term_from_lit_safe, get_lit_from_term moved to SolverState
 
     pub fn get_term(&self, num: u64) -> Term {
-        debug_println!(6, 0, "here3 with {}", num);
         self.terms_list[num as usize].clone().unwrap()
     }
 
@@ -352,56 +285,6 @@ impl Egraph {
         } else {
             self.terms_list[num as usize].clone()
         }
-    }
-
-    pub fn get_term_from_lit(&mut self, lit: i32) -> Term {
-        debug_println!(
-            5,
-            0,
-            "We are in get_term_from_lit with lit {} and var_map_reverse {:?}",
-            lit,
-            self.cnf_cache.var_map_reverse
-        );
-        if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
-            debug_println!(6, 0, "before5");
-            self.get_term(*num)
-        } else {
-            let num = self.cnf_cache.var_map_reverse.get(&-lit).unwrap();
-            debug_println!(6, 0, "before6");
-            self.context.not(self.get_term(*num))
-        }
-    }
-
-    pub fn get_term_from_lit_safe(&mut self, lit: i32) -> Option<Term> {
-        debug_println!(
-            7,
-            0,
-            "We are in get_term_from_lit with lit {} and var_map_reverse {:?}",
-            lit,
-            self.cnf_cache.var_map_reverse
-        );
-        if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
-            debug_println!(6, 0, "before7");
-            Some(self.get_term(*num))
-        } else if let Some(num) = self.cnf_cache.var_map_reverse.get(&-lit) {
-            debug_println!(6, 0, "before8");
-            Some(self.context.not(self.get_term(*num)))
-        } else {
-            None
-        }
-    }
-
-    pub fn get_lit_from_term(&self, term: &Term) -> i32 {
-        let num = term.uid();
-        debug_println!(
-            11,
-            0,
-            "We are in get_lit_from_term with term {} and num {}",
-            term,
-            num
-        );
-        debug_println!(11, 0, "We have the var_map {:?}", self.cnf_cache.var_map);
-        *self.cnf_cache.var_map.get(&num).unwrap()
     }
 
     /// Adds basic information about term to egraph
@@ -1221,53 +1104,7 @@ impl Egraph {
     }
 
     /// Set the terms corresponding to x and y equal in egraph
-    pub fn make_eq(&mut self, x: u64, y: u64) -> i32 {
-        debug_println!(5, 0, "We are in make_eq with x {} and y {}", x, y);
-
-        if (x == self.false_term && y == self.true_term)
-            || (x == self.true_term && y == self.false_term)
-        {
-            debug_println!(
-                5,
-                0,
-                "We are in make_eq with x [{}] false and y [{}] true or x [{}] true and y [{}] false",
-                self.get_term(x),
-                self.get_term(y),
-                self.get_term(x),
-                self.get_term(y)
-            );
-            self.get_lit_from_u64(self.false_term)
-        } else if (x == self.true_term && y == self.true_term)
-            || (x == self.false_term && y == self.false_term)
-        {
-            debug_println!(
-                5,
-                0,
-                "We are in make_eq with x [{}] true and y [{}] true or x [{}] false and y [{}] false",
-                self.get_term(x),
-                self.get_term(y),
-                self.get_term(x),
-                self.get_term(y)
-            );
-            self.get_lit_from_u64(self.true_term)
-        } else if x == self.true_term {
-            debug_println!(5, 0, "We are in make_eq with x true and y {}", y);
-            self.get_lit_from_u64(y)
-        } else if y == self.true_term {
-            debug_println!(5, 0, "We are in make_eq with y true and x {}", x);
-            self.get_lit_from_u64(x)
-        } else if x == self.false_term {
-            debug_println!(5, 0, "We are in make_eq with x false and y {}", y);
-            -self.get_lit_from_u64(y)
-        } else if y == self.false_term {
-            debug_println!(5, 0, "We are in make_eq with y false and x {}", x);
-            -self.get_lit_from_u64(x)
-        } else {
-            debug_println!(6, 0, "before10");
-            let eq_term_class = self.context.eq(self.get_term(x), self.get_term(y));
-            self.get_lit_from_term(&eq_term_class)
-        }
-    }
+    // TODO: make_eq moved to SolverState (uses cnf_cache, context)
 
     /// Get the canonical form for some term
     /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  
@@ -1382,10 +1219,7 @@ impl Egraph {
         }
     }
 
-    pub fn check_for_recursive_datatypes(&self) -> Option<Str> {
-        self.datatype_info
-            .contains_recursive_datatype(&self.context)
-    }
+    // TODO: check_for_recursive_datatypes moved to SolverState
 
     /// Explain why u ≡ v by walking the proof forest to their least common ancestor.
     /// Returns None if u and v are not in the same equivalence class.
@@ -2294,25 +2128,9 @@ impl Egraph {
     }
 }
 
-impl HasArena for Egraph {
-    #[inline]
-    fn arena(&mut self) -> &mut Arena {
-        self.context.arena()
-    }
-}
+// HasArena for Egraph removed — use HasArena for SolverState instead (in solver_state.rs)
 
-impl<T> CNFConversion<Egraph> for T
-where
-    T: for<'a> CNFConversion<CNFEnv<'a>>,
-{
-    fn cnf_tseitin(&self, env: &mut Egraph) -> Formula {
-        self.cnf_tseitin(&mut env.cnf_env())
-    }
-
-    fn nnf(&self, env: &mut Egraph) -> Self {
-        self.nnf(&mut env.cnf_env())
-    }
-}
+// CNFConversion<Egraph> removed — use CNFConversion<SolverState> instead (in solver_state.rs)
 
 /// Checks if the hash is still valid at the given level
 pub fn valid_hash(hash: u64, level: usize, predecessor_level: &[u64]) -> bool {

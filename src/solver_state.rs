@@ -9,12 +9,15 @@
 //! `solver_state.egraph`.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 
+use cadical_sys::bridge::ffi::Solver;
+use sat_interface::Formula;
 use yaspar_ir::ast::alg::CheckIdentifier;
-use yaspar_ir::ast::{Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Term};
+use yaspar_ir::ast::{Arena, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Term};
 use yaspar_ir::ast::ATerm::*;
 
-use crate::cnf::CNFCache;
+use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
@@ -32,6 +35,7 @@ use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 /// For now, the `Context` (term allocator) is accessed via `self.egraph.context`.
 /// It will be moved here in a later step.
 pub struct SolverState {
+    pub context: Context,
     /// The core egraph (union-find, congruence closure, predecessors, backtracking).
     pub egraph: Egraph,
 
@@ -92,6 +96,7 @@ impl SolverState {
         let egraph = Egraph::new(context);
 
         SolverState {
+            context,
             terms_list: vec![TermOption::None],
             assertions: vec![],
             quantifiers: vec![],
@@ -111,42 +116,82 @@ impl SolverState {
             egraph,
         }
     }
+
+    pub fn cnf_env(&mut self) -> CNFEnv<'_> {
+        CNFEnv {
+            context: &mut self.context,
+            cache: &mut self.cnf_cache,
+        }
+    }
 }
+
+impl HasArena for SolverState {
+    fn arena(&mut self) -> &mut Arena {
+        self.context.arena()
+    }
+}
+
+impl<T> CNFConversion<SolverState> for T
+where
+    T: for<'a> CNFConversion<CNFEnv<'a>>,
+{
+    fn cnf_tseitin(&self, env: &mut SolverState) -> Formula {
+        self.cnf_tseitin(&mut env.cnf_env())
+    }
+
+    fn nnf(&self, env: &mut SolverState) -> Self {
+        self.nnf(&mut env.cnf_env())
+    }
+}
+
+// impl Deref for SolverState {
+//     type Target = Egraph;
+
+//     fn deref(&self) -> &Egraph {
+//         &self.egraph
+//     }
+// }
+
+// impl DerefMut for SolverState {
+//     fn deref_mut(&mut self) -> &mut Egraph {
+//         &mut self.egraph
+//     }
+// }
 
 /// Process a SAT literal assignment through the egraph.
 /// This is the solver-level entry point that classifies the literal and
 /// dispatches to the appropriate egraph operation (union, disequality, etc.).
 pub fn process_assignment(
     lit: i32,
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     level: usize,
     fixed: bool,
     from_quantifier: bool,
     reason: Option<ProofForestEdge>,
-    lazy_dt: bool,
-    ddsmt: bool,
 ) -> Option<Vec<Vec<i32>>> {
+    let lazy_dt = solver_state.lazy_dt;
+    let ddsmt = solver_state.ddsmt;
     debug_println!(2, 0, "Processing literal {:} at level {}", lit, level);
     let sign = lit > 0;
 
-    let term = egraph.get_term_from_lit(lit.abs());
+    let term = solver_state.egraph.get_term_from_lit(lit.abs());
     debug_println!(24, 1, "Term: {}", term);
-    let assertion = find_if_eq_diseq(&term, sign, egraph, level, fixed);
+    let assertion = find_if_eq_diseq(&term, sign, solver_state, level, fixed);
 
     let mut tracker = ProofTracker::new();
 
-    if let Some(t) = egraph.cnf_cache.var_map_reverse.get(&lit) {
+    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&lit) {
         let res = if let Some(r) = reason.clone() {
             r
         } else {
             ProofForestEdge::Equality {
                 size: 0,
-                term: Some((*t, egraph.true_term)),
+                term: Some((*t, solver_state.true_term)),
                 parent: 0,
                 child: 0,
                 disequalities: DeterministicHashMap::new(),
                 level,
-                hash: egraph.predecessor_hash,
+                hash: solver_state.predecessor_hash,
                 children: DeterministicHashSet::new(),
             }
         };
@@ -156,11 +201,11 @@ pub fn process_assignment(
             "We are in process_assignment, unioning with true for lit {} and t {} and true_term {}",
             lit,
             t,
-            egraph.true_term
+            solver_state.true_term
         );
-        if let Some(negated_model) = egraph.cc_union(
+        if let Some(negated_model) = solver_state.cc_union(
             *t,
-            egraph.true_term,
+            solver_state.true_term,
             res,
             level,
             fixed,
@@ -170,18 +215,18 @@ pub fn process_assignment(
         };
     }
 
-    if let Some(t) = egraph.cnf_cache.var_map_reverse.get(&-lit) {
+    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&-lit) {
         let res = if let Some(r) = reason.clone() {
             r
         } else {
             ProofForestEdge::Equality {
                 size: 0,
-                term: Some((*t, egraph.false_term)),
+                term: Some((*t, solver_state.false_term)),
                 parent: 0,
                 child: 0,
                 disequalities: DeterministicHashMap::new(),
                 level,
-                hash: egraph.predecessor_hash,
+                hash: solver_state.predecessor_hash,
                 children: DeterministicHashSet::new(),
             }
         };
@@ -191,11 +236,11 @@ pub fn process_assignment(
             "We are in process_assignment, unioning with false for lit {} and t {} and false_term {}",
             lit,
             t,
-            egraph.false_term
+            solver_state.false_term
         );
-        if let Some(negated_model) = egraph.cc_union(
+        if let Some(negated_model) = solver_state.cc_union(
             *t,
-            egraph.false_term,
+            solver_state.false_term,
             res,
             level,
             fixed,
@@ -212,16 +257,16 @@ pub fn process_assignment(
             inner_term,
             term,
         } => {
-            let dt_sort = inner_term.get_sort(egraph);
-            let _term_lit = egraph.get_lit_from_term(&term);
+            let dt_sort = inner_term.get_sort(solver_state);
+            let _term_lit = solver_state.get_lit_from_term(&term);
             debug_println!(19, 0, "trying to get for the term {}", inner_term);
-            match egraph.term_constructors.get(&inner_term.uid()).unwrap() {
+            match solver_state.term_constructors.get(&inner_term.uid()).unwrap() {
                 Constructor {
                     name,
                     tester_term,
                     hash,
                     level,
-                } if valid_hash(*hash, *level, &egraph.predecessor_level) => {
+                } if valid_hash(*hash, *level, &solver_state.predecessor_level) => {
                     debug_println!(
                         11,
                         2,
@@ -235,7 +280,7 @@ pub fn process_assignment(
                     } else {
                         debug_println!(11, 2, "name != ctor_name");
                         let tester_cnf = learn_or_not_term_tester_term(
-                            egraph,
+                            solver_state,
                             tester_term.clone(),
                             term.clone(),
                             true,
@@ -244,21 +289,21 @@ pub fn process_assignment(
                     }
                 }
                 _ => {
-                    egraph.term_constructors.insert(
+                    solver_state.term_constructors.insert(
                         inner_term.uid(),
                         Constructor {
                             name: ctor_name.clone(),
                             tester_term: term.clone(),
                             level,
-                            hash: egraph.predecessor_hash,
+                            hash: solver_state.predecessor_hash,
                         },
                     );
 
                     if lazy_dt {
-                        let dt_name = egraph.datatype_info.constructors.get(&ctor_name).unwrap();
-                        let dt_dec = egraph.datatype_info.datatypes.get(dt_name).unwrap();
+                        let dt_name = solver_state.datatype_info.constructors.get(&ctor_name).unwrap();
+                        let dt_dec = solver_state.datatype_info.datatypes.get(dt_name).unwrap();
                         let dt_dec = dt_dec
-                            .monomorphize(&dt_sort, egraph.context.arena())
+                            .monomorphize(&dt_sort, solver_state.context.arena())
                             .expect("type invariant violation: datatype fails to monomorphize");
 
                         let ctor = dt_dec
@@ -269,7 +314,7 @@ pub fn process_assignment(
                             .clone();
 
                         let ctor_selector_clauses: Vec<Vec<i32>> =
-                            learn_ctor_selector_clauses(egraph, &inner_term, &ctor, &dt_sort, true, ddsmt, lazy_dt);
+                            learn_ctor_selector_clauses(solver_state, &inner_term, &ctor, &dt_sort, true, ddsmt, lazy_dt);
                         Some(ctor_selector_clauses)
                     } else {
                         None
@@ -282,8 +327,8 @@ pub fn process_assignment(
                 16,
                 0,
                 "Merging: {} = {}",
-                egraph.get_term(t1),
-                egraph.get_term(t2)
+                solver_state.egraph.get_term(t1),
+                solver_state.egraph.get_term(t2)
             );
 
             let reason = if let Some(r) = reason.clone() {
@@ -296,11 +341,11 @@ pub fn process_assignment(
                     child: 0,
                     disequalities: DeterministicHashMap::new(),
                     level,
-                    hash: egraph.predecessor_hash,
+                    hash: solver_state.predecessor_hash,
                     children: DeterministicHashSet::new(),
                 }
             };
-            egraph.cc_union(t1, t2, reason, level, fixed, from_quantifier)
+            solver_state.cc_union(t1, t2, reason, level, fixed, from_quantifier)
         }
         Assertion::Disequality {
             t1,
@@ -312,34 +357,34 @@ pub fn process_assignment(
                 16,
                 0,
                 "Adding disequality {} ≠ {} to stack at level {:?} and hash {}",
-                egraph.get_term(t1),
-                egraph.get_term(t2),
+                solver_state.egraph.get_term(t1),
+                solver_state.egraph.get_term(t2),
                 level,
                 hash
             );
-            debug_println!(10, 0, "{}", egraph);
+            debug_println!(10, 0, "{}", solver_state);
 
             if let Some(negated_model) =
-                egraph.leastcommonancestor(t1, t2, &mut ProofTracker::new())
+                solver_state.leastcommonancestor(t1, t2, &mut ProofTracker::new())
             {
                 let mut model_terms: Vec<i32> = negated_model
                     .into_iter()
-                    .map(|x| -egraph.make_eq(x.0, x.1))
+                    .map(|x| -solver_state.make_eq(x.0, x.1))
                     .collect();
-                model_terms.push(egraph.make_eq(t1, t2));
+                model_terms.push(solver_state.make_eq(t1, t2));
                 debug_println!(
                     16,
                     1,
                     "Contradiction found [1]: {:?} [{:?}]",
                     model_terms
                         .iter()
-                        .map(|x| egraph.get_term_from_lit(*x))
+                        .map(|x| solver_state.egraph.get_term_from_lit(*x))
                         .collect::<Vec<_>>(),
                     model_terms
                 );
                 return Some(vec![model_terms]);
             }
-            egraph.add_disequality(t1, t2, lit, level, hash);
+            solver_state.add_disequality(t1, t2, lit, level, hash);
             None
         }
         Assertion::Distinct { terms, level, hash } => {
@@ -350,17 +395,17 @@ pub fn process_assignment(
                         12,
                         0,
                         "Asserting {} and {} are not equal at level {} with hash {}",
-                        egraph.get_term(t1),
-                        egraph.get_term(t2),
+                        solver_state.egraph.get_term(t1),
+                        solver_state.egraph.get_term(t2),
                         level,
                         hash
                     );
                     if let Some(negated_model) =
-                        egraph.leastcommonancestor(t1, t2, &mut ProofTracker::new())
+                        solver_state.leastcommonancestor(t1, t2, &mut ProofTracker::new())
                     {
                         let mut model_terms: Vec<i32> = negated_model
                             .into_iter()
-                            .map(|x| -egraph.make_eq(x.0, x.1))
+                            .map(|x| -solver_state.make_eq(x.0, x.1))
                             .collect();
                         model_terms.push(-lit);
                         debug_println!(
@@ -369,15 +414,15 @@ pub fn process_assignment(
                             "Contradiction found [1]: {:?} [{:?}]",
                             model_terms
                                 .iter()
-                                .map(|x| egraph.get_term_from_lit(*x))
+                                .map(|x| solver_state.egraph.get_term_from_lit(*x))
                                 .collect::<Vec<_>>(),
                             model_terms
                         );
                         debug_println!(16, 0, "returning negated model {:?}", model_terms);
                         return Some(vec![model_terms]);
                     }
-                    egraph.add_disequality(t1, t2, lit, level, hash);
-                    debug_println!(11, 0, "{}", egraph);
+                    solver_state.add_disequality(t1, t2, lit, level, hash);
+                    debug_println!(11, 0, "{}", solver_state);
                 }
             }
             None
@@ -389,16 +434,16 @@ pub fn process_assignment(
         4,
         0,
         "We are in process_assignment, checking for contradiction with true_term {} and false_term {}",
-        egraph.true_term,
-        egraph.false_term
+        solver_state.true_term,
+        solver_state.false_term
     );
-    debug_println!(10, 0, "Checking if true = false {}", egraph);
+    debug_println!(10, 0, "Checking if true = false {}", solver_state);
     if let Some(negated_model) =
-        egraph.leastcommonancestor(egraph.true_term, egraph.false_term, &mut tracker)
+        solver_state.leastcommonancestor(solver_state.true_term, solver_state.false_term, &mut tracker)
     {
         let negated_model_terms: Vec<i32> = negated_model
             .into_iter()
-            .map(|x| -egraph.make_eq(x.0, x.1))
+            .map(|x| -solver_state.make_eq(x.0, x.1))
             .collect();
         debug_println!(
             24,
@@ -406,16 +451,16 @@ pub fn process_assignment(
             "Contradiction found [2] (setting true = false): {:?} [{:?}]",
             negated_model_terms
                 .iter()
-                .map(|x| egraph.get_term_from_lit(*x))
+                .map(|x| solver_state.egraph.get_term_from_lit(*x))
                 .collect::<Vec<_>>(),
             negated_model_terms
         );
         if is_important(7) {
             for lit in negated_model_terms.clone() {
-                debug_println!(7, 4, "{}", egraph.get_term_from_lit(lit));
+                debug_println!(7, 4, "{}", solver_state.egraph.get_term_from_lit(lit));
             }
         }
-        debug_println!(7, 0, "{}", egraph);
+        debug_println!(7, 0, "{}", solver_state);
 
         return if let Some(mut constraints) = additional_constraints {
             constraints.push(negated_model_terms);
@@ -438,11 +483,11 @@ pub fn process_assignment(
 pub fn find_if_eq_diseq<'a>(
     term: &'a Term,
     sign: bool,
-    egraph: &'a Egraph,
+    solver_state: &'a SolverState,
     level: usize,
     fixed: bool,
 ) -> Assertion {
-    let hash = if !fixed { egraph.predecessor_hash } else { 0 };
+    let hash = if !fixed { solver_state.predecessor_hash } else { 0 };
     match term.repr() {
         App(f, t, _)
             if (matches!(f.get_kind(), Some(IdentifierKind::Is(_)))
@@ -454,7 +499,7 @@ pub fn find_if_eq_diseq<'a>(
                 Some(sym.clone())
             } else {
                 let name = &f.id_str().get()[3..];
-                egraph
+                solver_state
                     .datatype_info
                     .constructors
                     .keys()

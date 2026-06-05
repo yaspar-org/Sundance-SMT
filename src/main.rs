@@ -7,8 +7,8 @@ use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
-use sundance_smt::egraphs::egraph::Egraph;
 use sundance_smt::preprocess::check_for_function_bool;
+use sundance_smt::solver_state::SolverState;
 use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
@@ -72,7 +72,7 @@ fn main() -> Result<(), String> {
     assertions.push(true_term.clone());
     assertions.push(not_false_term);
 
-    let mut egraph = Egraph::new(context);
+    let mut egraph = SolverState::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
 
     egraph.insert_predecessor(&false_term, None, None, false, None);
     egraph.insert_predecessor(&true_term, None, None, false, None);

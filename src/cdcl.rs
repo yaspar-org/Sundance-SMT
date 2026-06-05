@@ -5,8 +5,8 @@
 use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::CustomExternalPropagator;
 use crate::debug_println;
-use crate::egraphs::egraph::Egraph;
 use crate::proof::proof_tracer::SMTProofTracker;
+use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, Status, Terminator};
@@ -32,17 +32,14 @@ impl Terminator for DeadlineTerminator {
 /// todo: reduce the number of arguments
 #[allow(clippy::too_many_arguments)]
 pub fn cdcl_decision_procedure(
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     clauses: Vec<Vec<i32>>,
     boolean_dt_constraints: Vec<Vec<i32>>,
     proof_file: Option<PathBuf>,
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
-    timeout: u64,
-    eager_skolem: bool,
-    ddsmt: bool,
-    lazy_dt: bool,
+    timeout: u64
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
 
@@ -66,7 +63,7 @@ pub fn cdcl_decision_procedure(
 
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
-        egraph,
+        solver_state,
         disequalities: RefCell::new(vec![]),
         fixed_literals: DeterministicHashSet::default(),
         proof_tracker: Rc::clone(&proof_tracker), // Clone the Rc reference
@@ -74,9 +71,6 @@ pub fn cdcl_decision_procedure(
         solver: &mut solver as *mut CaDiCal,
         arithmetic,
         stats: SolverStats::new(),
-        eager_skolem,
-        ddsmt,
-        lazy_dt,
     };
 
     solver.connect_external_propagator(&mut propagator);
