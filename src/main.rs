@@ -72,7 +72,7 @@ fn main() -> Result<(), String> {
     assertions.push(true_term.clone());
     assertions.push(not_false_term);
 
-    let mut egraph = Egraph::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
+    let mut egraph = Egraph::new(context);
 
     egraph.insert_predecessor(&false_term, None, None, false, None);
     egraph.insert_predecessor(&true_term, None, None, false, None);
@@ -147,7 +147,7 @@ fn main() -> Result<(), String> {
     // somewhat inefficient especially since we have to clone nnf_term, but I couldn't come up with a
     // better way to do this
     for nnf_term in nnf_terms {
-        let additional_constraints = check_for_function_bool(&nnf_term, &mut egraph, false);
+        let additional_constraints = check_for_function_bool(&nnf_term, &mut egraph, false, args.ddsmt, args.lazy_dt);
         boolean_dt_constraints.extend(additional_constraints);
     }
 
@@ -188,6 +188,9 @@ fn main() -> Result<(), String> {
         symbol_table,
         args.arithmetic,
         args.timeout,
+        args.eager_skolem,
+        args.ddsmt,
+        args.lazy_dt,
     );
 
     match return_value {

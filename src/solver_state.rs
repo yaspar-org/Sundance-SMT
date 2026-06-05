@@ -89,7 +89,7 @@ impl SolverState {
     /// creates the inner Egraph using the existing constructor.
     pub fn new(context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
         let datatype_info = DatatypeInfo::from_context(&context);
-        let egraph = Egraph::new(context, lazy_dt, ddsmt, eager_skolem);
+        let egraph = Egraph::new(context);
 
         SolverState {
             terms_list: vec![TermOption::None],
@@ -123,6 +123,8 @@ pub fn process_assignment(
     fixed: bool,
     from_quantifier: bool,
     reason: Option<ProofForestEdge>,
+    lazy_dt: bool,
+    ddsmt: bool,
 ) -> Option<Vec<Vec<i32>>> {
     debug_println!(2, 0, "Processing literal {:} at level {}", lit, level);
     let sign = lit > 0;
@@ -252,7 +254,7 @@ pub fn process_assignment(
                         },
                     );
 
-                    if egraph.lazy_dt {
+                    if lazy_dt {
                         let dt_name = egraph.datatype_info.constructors.get(&ctor_name).unwrap();
                         let dt_dec = egraph.datatype_info.datatypes.get(dt_name).unwrap();
                         let dt_dec = dt_dec
@@ -267,7 +269,7 @@ pub fn process_assignment(
                             .clone();
 
                         let ctor_selector_clauses: Vec<Vec<i32>> =
-                            learn_ctor_selector_clauses(egraph, &inner_term, &ctor, &dt_sort, true);
+                            learn_ctor_selector_clauses(egraph, &inner_term, &ctor, &dt_sort, true, ddsmt, lazy_dt);
                         Some(ctor_selector_clauses)
                     } else {
                         None

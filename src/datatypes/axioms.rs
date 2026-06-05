@@ -28,6 +28,8 @@ pub fn find_datatype_axioms(
     sort: &Sort, // the sort of the given term
     egraph: &mut Egraph,
     from_quantifier: bool, // this is necessary because of the calls to insert_predecessor where we need to know whether the axiom is from a quantifier or not
+    lazy_dt: bool,
+    ddsmt: bool,
 ) -> Vec<Vec<i32>> {
     let mut vector = vec![];
     let dt_dec = if let Some(ctors) = egraph
@@ -62,8 +64,8 @@ pub fn find_datatype_axioms(
 
     // Step 2.5. Learn the constraint (is-f t) => t = f(f^0(t) ... f^m(t))
     // as long as we are not doing lazy datatypes
-    if !egraph.lazy_dt {
-        let ctor_selector_clauses = learn_ctors_selector_clauses(egraph, term, sort, &dt_dec);
+    if !lazy_dt {
+        let ctor_selector_clauses = learn_ctors_selector_clauses(egraph, term, sort, &dt_dec, ddsmt, lazy_dt);
         vector.extend(ctor_selector_clauses);
     }
 
@@ -188,11 +190,13 @@ fn learn_ctors_selector_clauses(
     term: &Term,
     sort: &Sort,
     dt_dec: &DatatypeDec,
+    ddsmt: bool,
+    lazy_dt: bool,
 ) -> Vec<Vec<i32>> {
     let mut vector = vec![];
 
     for ctor in &dt_dec.constructors {
-        let ctor_selector_clauses = learn_ctor_selector_clauses(egraph, term, ctor, sort, false);
+        let ctor_selector_clauses = learn_ctor_selector_clauses(egraph, term, ctor, sort, false, ddsmt, lazy_dt);
         vector.extend(ctor_selector_clauses);
     }
     vector
@@ -208,6 +212,8 @@ pub fn learn_ctor_selector_clauses(
     ctor: &ConstructorDec,
     sort: &Sort,
     from_quantifier: bool,
+    ddsmt: bool,
+    lazy_dt: bool,
 ) -> Vec<Vec<i32>> {
     let is_symbol = egraph.allocate_symbol("is");
     let bool_sort = egraph.bool_sort();
@@ -247,7 +253,7 @@ pub fn learn_ctor_selector_clauses(
     egraph.insert_predecessor(&eq_nnf, None, None, true, None);
 
     // note that additioanl constraints are needed for `datatypes/ctor_sel_term_additional_dt_constraints3.smt2`
-    let mut vector = check_for_function_bool(&eq_nnf, egraph, false);
+    let mut vector = check_for_function_bool(&eq_nnf, egraph, false, ddsmt, lazy_dt);
     let eq_cnf = eq_nnf.cnf_tseitin(egraph);
     assert_eq!(eq_cnf.0.len(), 1);
     let eq_clause = eq_cnf.0[0].0.clone();

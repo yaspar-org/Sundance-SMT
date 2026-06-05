@@ -47,6 +47,9 @@ pub struct CustomExternalPropagator<'a> {
     pub solver: *mut CaDiCal,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
+    pub eager_skolem: bool,
+    pub ddsmt: bool,
+    pub lazy_dt: bool,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -139,7 +142,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.add_lit_to_proof_tracker(*lit); // adding the literal to the proof_tracker
 
             let negated_model_or_datatype_constraints_opt =
-                process_assignment(*lit, self.egraph, self.decision_level, false, false, None);
+                process_assignment(*lit, self.egraph, self.decision_level, false, false, None, self.lazy_dt, self.ddsmt);
 
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
@@ -567,6 +570,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             &self.proof_tracker,
             &self.assignments,
             self.decision_level,
+            self.eager_skolem,
+            self.ddsmt,
+            self.lazy_dt,
         );
         debug_println!(
             11,

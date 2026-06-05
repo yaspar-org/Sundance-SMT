@@ -5,7 +5,6 @@ use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent};
-use crate::solver_state::process_assignment;
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
 use crate::egraphs::datastructures::{
@@ -251,14 +250,8 @@ pub struct Egraph {
     pub nelson_oppen_ineq_literals: HashSet<(u64, u64)>,
     /// remember terms for which we have learnt datatype axioms
     pub datatype_axioms_applied: HashSet<u64>,
-    /// user flag for whether to instantiate some datatype axioms lazily
-    pub lazy_dt: bool,
     /// keeping track of arithmetic terms for theory combination (todo: might be easier just to keep track of arithmetic roots, but thats way more complicated)
     pub arithmetic_terms: Vec<u64>,
-    /// user flag for whether certain optimizations for ddsmt are turned on (WARNING: this is buggy and should not be used for real queries)
-    pub ddsmt: bool,
-    /// user flag for whether we should skolemize eagerly
-    pub eager_skolem: bool,
     /// store CNF cache
     pub cnf_cache: CNFCache,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
@@ -266,7 +259,7 @@ pub struct Egraph {
 }
 
 impl Egraph {
-    pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
+    pub fn new(mut context: Context) -> Self {
         let tru = context.get_true();
         let fal = context.get_false();
         let datatype_info = DatatypeInfo::from_context(&context);
@@ -298,10 +291,7 @@ impl Egraph {
             union_to_eclass: DeterministicHashSet::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
             datatype_axioms_applied: HashSet::new(),
-            lazy_dt,
             arithmetic_terms: vec![],
-            ddsmt,
-            eager_skolem,
             cnf_cache: Default::default(),
             decision_level: 0,
         }
@@ -2168,67 +2158,70 @@ impl Egraph {
     /// to union
     ///
     /// TODO: would be cleaner to have union_predecessors just call union
+    // TODO: Replace with watch-based propagation. When congruence discovers f(x)=f(y)
+    // and Eq(f(x),f(y)) exists as a literal, we should merge that equality term with true
+    // and propagate the corresponding SAT literal.
     pub(crate) fn union_process_assignment(
         &mut self,
-        x: u64,
-        y: u64,
-        proof_parent: ProofForestEdge,
-        level: usize,
-        fixed: bool,
-        from_quantifier: bool,
+        _x: u64,
+        _y: u64,
+        _proof_parent: ProofForestEdge,
+        _level: usize,
+        _fixed: bool,
+        _from_quantifier: bool,
     ) -> Option<Vec<Vec<i32>>> {
-        debug_println!(6, 0, "before4");
-        let new_assignment = self.eq(self.get_term(x), self.get_term(y));
-        // if there is a new assignment, we need to check if the equality term exists, if it does we need to work on that
-        // otherwise we can just consider the union of these two terms
-        if let Some(new_assignment_lit) = self.cnf_cache.var_map.get(&new_assignment.uid()) {
-            // note we don't want reason to be the above thing because the explanation is still the same as teh explanation before
-            let reason = proof_parent;
-            debug_println!(
-                16,
-                0,
-                "We are in union_process_assignment trying to process assignment for x: {} [{}] and y: {} [{}] and fixed {}",
-                self.get_term(x),
-                x,
-                self.get_term(y),
-                y,
-                fixed
-            );
-            // TODO: Remove this call to process_assignment — replace with watch-based propagation
-            let negated_model_additional_constraints_opt = process_assignment(
-                *new_assignment_lit,
-                self,
-                level,
-                false,
-                from_quantifier,
-                Some(reason),
-            );
-            // assert!(additional_constraints_opt.is_none()); // this should be done becaue right now we only get new constraints for a datatype literal
-            if let Some(negated_model) = negated_model_additional_constraints_opt && false {
-                debug_println!(
-                    6,
-                    0,
-                    "We have the following negated_model: {:?}",
-                    negated_model
-                );
-                return Some(negated_model);
-            };
-        } else {
-            debug_println!(
-                16,
-                0,
-                "We are in union_process_assignment trying to union {} and {} with fixed {}",
-                self.get_term(x),
-                self.get_term(y),
-                fixed
-            );
-            if let Some(negated_model) =
-                self.cc_union(x, y, proof_parent, level, fixed, from_quantifier)
-            {
-                return Some(negated_model);
-            }
-        };
         None
+        // debug_println!(6, 0, "before4");
+        // let new_assignment = self.eq(self.get_term(x), self.get_term(y));
+        // // if there is a new assignment, we need to check if the equality term exists, if it does we need to work on that
+        // // otherwise we can just consider the union of these two terms
+        // if let Some(new_assignment_lit) = self.cnf_cache.var_map.get(&new_assignment.uid()) {
+        //     // note we don't want reason to be the above thing because the explanation is still the same as teh explanation before
+        //     let reason = proof_parent;
+        //     debug_println!(
+        //         16,
+        //         0,
+        //         "We are in union_process_assignment trying to process assignment for x: {} [{}] and y: {} [{}] and fixed {}",
+        //         self.get_term(x),
+        //         x,
+        //         self.get_term(y),
+        //         y,
+        //         fixed
+        //     );
+        //     // TODO: Remove this call to process_assignment — replace with watch-based propagation
+        //     let negated_model_additional_constraints_opt = process_assignment(
+        //         *new_assignment_lit,
+        //         self,
+        //         level,
+        //         false,
+        //         from_quantifier,
+        //         Some(reason),
+        //     );
+        //     if let Some(negated_model) = negated_model_additional_constraints_opt {
+        //         debug_println!(
+        //             6,
+        //             0,
+        //             "We have the following negated_model: {:?}",
+        //             negated_model
+        //         );
+        //         return Some(negated_model);
+        //     };
+        // } else {
+        //     debug_println!(
+        //         16,
+        //         0,
+        //         "We are in union_process_assignment trying to union {} and {} with fixed {}",
+        //         self.get_term(x),
+        //         self.get_term(y),
+        //         fixed
+        //     );
+        //     if let Some(negated_model) =
+        //         self.cc_union(x, y, proof_parent, level, fixed, from_quantifier)
+        //     {
+        //         return Some(negated_model);
+        //     }
+        // };
+        // None
     }
 
     /// Make vertex the root of its proof-forest tree.

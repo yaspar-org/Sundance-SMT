@@ -40,6 +40,9 @@ pub fn cdcl_decision_procedure(
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
     timeout: u64,
+    eager_skolem: bool,
+    ddsmt: bool,
+    lazy_dt: bool,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
 
@@ -71,6 +74,9 @@ pub fn cdcl_decision_procedure(
         solver: &mut solver as *mut CaDiCal,
         arithmetic,
         stats: SolverStats::new(),
+        eager_skolem,
+        ddsmt,
+        lazy_dt,
     };
 
     solver.connect_external_propagator(&mut propagator);

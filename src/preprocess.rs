@@ -21,6 +21,8 @@ pub fn check_for_function_bool(
     term: &Term,
     egraph: &mut Egraph,
     from_quantifier: bool,
+    ddsmt: bool,
+    lazy_dt: bool,
 ) -> Vec<Vec<i32>> {
     debug_println!(
         16,
@@ -90,7 +92,7 @@ pub fn check_for_function_bool(
 
     // if a term has a datatype type, then create tester applications for each constructor
     if egraph.datatype_info.is_datatype(sort.sort_name()) {
-        vector.extend(find_datatype_axioms(term, &sort, egraph, from_quantifier))
+        vector.extend(find_datatype_axioms(term, &sort, egraph, from_quantifier, lazy_dt, ddsmt))
     }
 
     match term.repr() {
@@ -98,41 +100,41 @@ pub fn check_for_function_bool(
             vector.extend(
                 items
                     .iter()
-                    .flat_map(|t| check_for_function_bool(t, egraph, from_quantifier)),
+                    .flat_map(|t| check_for_function_bool(t, egraph, from_quantifier, ddsmt, lazy_dt)),
             );
         }
         Eq(a, b) => {
-            vector.extend(check_for_function_bool(a, egraph, from_quantifier));
-            vector.extend(check_for_function_bool(b, egraph, from_quantifier));
+            vector.extend(check_for_function_bool(a, egraph, from_quantifier, ddsmt, lazy_dt));
+            vector.extend(check_for_function_bool(b, egraph, from_quantifier, ddsmt, lazy_dt));
         }
         Not(t) | Annotated(t, _) => {
-            vector.extend(check_for_function_bool(t, egraph, from_quantifier));
+            vector.extend(check_for_function_bool(t, egraph, from_quantifier, ddsmt, lazy_dt));
         }
         Implies(items, p) => {
-            vector.extend(check_for_function_bool(p, egraph, from_quantifier));
+            vector.extend(check_for_function_bool(p, egraph, from_quantifier, ddsmt, lazy_dt));
             vector.extend(
                 items
                     .iter()
-                    .flat_map(|t| check_for_function_bool(t, egraph, from_quantifier)),
+                    .flat_map(|t| check_for_function_bool(t, egraph, from_quantifier, ddsmt, lazy_dt)),
             );
         }
         Ite(b, x, y) => {
-            vector.extend(check_for_function_bool(b, egraph, from_quantifier));
-            vector.extend(check_for_function_bool(x, egraph, from_quantifier));
-            vector.extend(check_for_function_bool(y, egraph, from_quantifier));
+            vector.extend(check_for_function_bool(b, egraph, from_quantifier, ddsmt, lazy_dt));
+            vector.extend(check_for_function_bool(x, egraph, from_quantifier, ddsmt, lazy_dt));
+            vector.extend(check_for_function_bool(y, egraph, from_quantifier, ddsmt, lazy_dt));
         }
         Matching(t, pattern_arms) => {
-            vector.extend(check_for_function_bool(t, egraph, from_quantifier));
+            vector.extend(check_for_function_bool(t, egraph, from_quantifier, ddsmt, lazy_dt));
             vector.extend(pattern_arms.iter().flat_map(|pattern| {
-                check_for_function_bool(&pattern.body, egraph, from_quantifier)
+                check_for_function_bool(&pattern.body, egraph, from_quantifier, ddsmt, lazy_dt)
             }));
         }
         Forall(var_bindings, t) | Exists(var_bindings, t) => {
             // if we have a forall statement equivalent to false, it must be false (just an optimization to help with ddsmt)
-            if egraph.ddsmt {
+            if ddsmt {
                 let var_binding_strings = var_bindings.iter().map(|x| x.0.get()).collect();
                 let nnf_t = t.nnf(egraph); // kind've wasteful but necessary to get ddsmt to play nicely (todo: could eventually remove this)
-                if !check_if_var_occurs_in_term(&nnf_t, &var_binding_strings, egraph) {
+                if !check_if_var_occurs_in_term(&nnf_t, &var_binding_strings, egraph, ddsmt) {
                     let equality = egraph.eq(term.clone(), t.clone());
                     let nnf_term = equality.nnf(egraph);
                     egraph.insert_predecessor(&nnf_term, None, None, from_quantifier, None);
@@ -140,7 +142,7 @@ pub fn check_for_function_bool(
                         .cnf_tseitin(egraph)
                         .into_iter()
                         .map(|x| x.into_iter().collect::<Vec<_>>());
-                    let sub_formula = check_for_function_bool(&nnf_t, egraph, from_quantifier);
+                    let sub_formula = check_for_function_bool(&nnf_t, egraph, from_quantifier, ddsmt, lazy_dt);
                     debug_println!(
                         19,
                         0,
@@ -170,6 +172,8 @@ pub fn check_for_function_bool(
                                     &var_binding_strings,
                                     egraph,
                                     from_quantifier,
+                                    ddsmt,
+                                    lazy_dt,
                                 );
                                 debug_println!(
                                     19,
@@ -197,11 +201,13 @@ fn get_pattern_dt_constraints(
     vars: &DeterministicHashSet<&String>,
     egraph: &mut Egraph,
     from_quantifier: bool,
+    ddsmt: bool,
+    lazy_dt: bool,
 ) -> Vec<Vec<i32>> {
     let mut vector = vec![];
 
     // if the pattern does not occur in the term, we can treat it like a datatype
-    if !check_if_var_occurs_in_term(pattern, vars, egraph) {
+    if !check_if_var_occurs_in_term(pattern, vars, egraph, ddsmt) {
         let sort = pattern.get_sort(egraph);
         if egraph.datatype_info.is_datatype(sort.sort_name()) {
             vector.extend(find_datatype_axioms(
@@ -209,6 +215,8 @@ fn get_pattern_dt_constraints(
                 &sort,
                 egraph,
                 from_quantifier,
+                lazy_dt,
+                ddsmt,
             ))
         }
     }
@@ -221,22 +229,28 @@ fn get_pattern_dt_constraints(
                     vars,
                     egraph,
                     from_quantifier,
+                    ddsmt,
+                    lazy_dt,
                 ))
             }
         }
         Ite(b, t1, t2) => {
-            vector.extend(get_pattern_dt_constraints(b, vars, egraph, from_quantifier));
+            vector.extend(get_pattern_dt_constraints(b, vars, egraph, from_quantifier, ddsmt, lazy_dt));
             vector.extend(get_pattern_dt_constraints(
                 t1,
                 vars,
                 egraph,
                 from_quantifier,
+                ddsmt,
+                lazy_dt,
             ));
             vector.extend(get_pattern_dt_constraints(
                 t2,
                 vars,
                 egraph,
                 from_quantifier,
+                ddsmt,
+                lazy_dt,
             ))
         }
         // no subcases to consider
@@ -254,6 +268,7 @@ fn check_if_var_occurs_in_term(
     term: &Term,
     var_bindings: &DeterministicHashSet<&String>,
     egraph: &mut Egraph,
+    ddsmt: bool,
 ) -> bool {
     debug_println!(
         19,
@@ -269,7 +284,7 @@ fn check_if_var_occurs_in_term(
         // for And and Or, if they contain a false or true respectively, not that we don't have to consider it
         // this is a ddsmt optimization (dont produce sound proofs for this)
         And(items) => {
-            if egraph.ddsmt {
+            if ddsmt {
                 for item in items {
                     if item == &egraph.get_false() {
                         return false;
@@ -278,10 +293,10 @@ fn check_if_var_occurs_in_term(
             }
             items
                 .iter()
-                .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
+                .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph, ddsmt))
         }
         Or(items) => {
-            if egraph.ddsmt {
+            if ddsmt {
                 for item in items {
                     if item == &egraph.get_true() {
                         return false;
@@ -290,27 +305,27 @@ fn check_if_var_occurs_in_term(
             }
             items
                 .iter()
-                .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph))
+                .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph, ddsmt))
         }
         Xor(items) => items
             .iter()
-            .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph)),
+            .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph, ddsmt)),
         App(_, items, _) | Distinct(items) => items
             .iter()
-            .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph)),
-        Annotated(t, _) | Not(t) => check_if_var_occurs_in_term(t, var_bindings, egraph),
+            .any(|t| check_if_var_occurs_in_term(t, var_bindings, egraph, ddsmt)),
+        Annotated(t, _) | Not(t) => check_if_var_occurs_in_term(t, var_bindings, egraph, ddsmt),
         Eq(t1, t2) => {
-            check_if_var_occurs_in_term(t1, var_bindings, egraph)
-                || check_if_var_occurs_in_term(t2, var_bindings, egraph)
+            check_if_var_occurs_in_term(t1, var_bindings, egraph, ddsmt)
+                || check_if_var_occurs_in_term(t2, var_bindings, egraph, ddsmt)
         }
         Implies(items, t) => items.iter().fold(
-            check_if_var_occurs_in_term(t, var_bindings, egraph),
-            |acc, t| acc || check_if_var_occurs_in_term(t, var_bindings, egraph),
+            check_if_var_occurs_in_term(t, var_bindings, egraph, ddsmt),
+            |acc, t| acc || check_if_var_occurs_in_term(t, var_bindings, egraph, ddsmt),
         ),
         Ite(t1, t2, t3) => {
-            check_if_var_occurs_in_term(t1, var_bindings, egraph)
-                || check_if_var_occurs_in_term(t2, var_bindings, egraph)
-                || check_if_var_occurs_in_term(t3, var_bindings, egraph)
+            check_if_var_occurs_in_term(t1, var_bindings, egraph, ddsmt)
+                || check_if_var_occurs_in_term(t2, var_bindings, egraph, ddsmt)
+                || check_if_var_occurs_in_term(t3, var_bindings, egraph, ddsmt)
         }
         Exists(var_bindings_innner, t) | Forall(var_bindings_innner, t) => {
             // Create a new set excluding the bound variables
@@ -318,7 +333,7 @@ fn check_if_var_occurs_in_term(
             for var_binding in var_bindings_innner {
                 filtered_vars.remove(var_binding.0.get());
             }
-            check_if_var_occurs_in_term(t, &filtered_vars, egraph)
+            check_if_var_occurs_in_term(t, &filtered_vars, egraph, ddsmt)
         }
         Let(..) | Matching(..) => todo!(),
     }

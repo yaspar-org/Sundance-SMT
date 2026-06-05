@@ -35,6 +35,9 @@ pub fn instantiate_quantifiers(
     proof_tracker: &Rc<RefCell<SMTProofTracker>>,
     assignments: &Vec<i32>,
     level: usize,
+    eager_skolem: bool,
+    ddsmt: bool,
+    lazy_dt: bool,
 ) -> Vec<QuantifierInstance> {
     let quantifiers = &egraph.quantifiers.clone();
     let mut instantiations = vec![];
@@ -77,7 +80,7 @@ pub fn instantiate_quantifiers(
 
         // if the quantifier in a negative polarity or we doin g ddsmt optimizations, and we haven't skolemized it yet, then we skolemize it
         // todo: replace egraph.added_skolemizations. with the skolemized flag in the quantifier
-        if (quantifier_polarity || egraph.eager_skolem)
+        if (quantifier_polarity || eager_skolem)
             && !egraph.added_skolemizations.contains(&quantifier.id)
         {
             debug_println!(
@@ -110,7 +113,7 @@ pub fn instantiate_quantifiers(
             // let (skolemized_quantifier, _) = skolemize(&skolemized_quantifier, egraph.context, &mut egraph.skolem_counter);
             let skolemized_quantifier = skolemized_quantifier.nnf(egraph);
             let additional_constraints =
-                check_for_function_bool(&skolemized_quantifier, egraph, true);
+                check_for_function_bool(&skolemized_quantifier, egraph, true, ddsmt, lazy_dt);
             debug_println!(19, 0, "we are skolemizing {}", term);
             debug_println!(26, 0, "(assert {})", skolemized_quantifier);
             debug_println!(
@@ -347,7 +350,7 @@ pub fn instantiate_quantifiers(
                 // the bug comes from the additional constraints
                 // basically the additional constraints are valid lits -> converted to valid u64, but may not be in the actual term mapping
                 // it should be added in insert_predecessor which calls get_or_insert which adds into terms_list
-                let additional_constraints = check_for_function_bool(&nnf_term, egraph, true);
+                let additional_constraints = check_for_function_bool(&nnf_term, egraph, true, ddsmt, lazy_dt);
                 clauses.extend(additional_constraints);
 
                 // could activate bits here (the level should not be 0)
