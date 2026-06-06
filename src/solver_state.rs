@@ -19,7 +19,7 @@ use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_te
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::datastructures::{
-    Assertion, ConstructorType, ConstructorType::*, Quantifier, TermOption,
+    Assertion, ConstructorType, ConstructorType::*, DisequalTerm, Quantifier, TermOption,
 };
 use crate::egraphs::egraph::{Egraph, valid_hash};
 use crate::egraphs::proofforest::ProofForestEdge;
@@ -204,6 +204,27 @@ impl SolverState {
     pub fn check_for_recursive_datatypes(&self) -> Option<Str> {
         self.datatype_info
             .contains_recursive_datatype(&self.context)
+    }
+
+    /// Solver-level wrapper around egraph.insert_predecessor.
+    /// Handles solver-specific bookkeeping (arithmetic term tracking, quantifier registration)
+    /// then delegates to the egraph for the core operation.
+    pub fn insert_predecessor(
+        &mut self,
+        term: &Term,
+        parent: Option<u64>,
+        guard: Option<u64>,
+        from_quantifier: bool,
+        disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
+    ) {
+        // TODO: arithmetic term tracking
+        // if term.get_sort(&mut self.context).to_string() == "Int" {
+        //     self.arithmetic_terms.push(term.uid())
+        // }
+
+        // TODO: quantifier registration should happen here after egraph registration
+
+        self.egraph.insert_predecessor(term, parent, guard, from_quantifier, disequalities);
     }
 }
 

@@ -406,52 +406,9 @@ impl Egraph {
 
         // TODO: inserting the term if it is a quantifier
         // TODO: there is a weird issue where quantifiers dont get added normally
-        if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
-            if let Some(g) = guard {
-                debug_println!(
-                    6,
-                    0,
-                    "We are adding the guard {} for quantifier {}",
-                    self.get_term(g),
-                    term
-                );
-            }
-            if let Annotated(inner_term, attrs) = middle_term.repr() {
-                // assert! (attrs.len() == 1); // TODO: we don't support triggers with > 1 multipattern yet
-                let mut triggers = vec![];
-                let mut trigger_ids = vec![];
-
-                for attr in attrs.iter() {
-                    if let Attribute::Pattern(s_exprs) = attr {
-                        // assert!(s_exprs.len()==1, "{} has a multi-pattern", term);
-                        trigger_ids.push(s_exprs.iter().map(|p| p.uid()).collect());
-                        triggers.push(s_exprs);
-                    }
-                }
-
-                // requires that every variable occurs in every pattern
-                let variables: Vec<String> = sorted_vars.iter().map(|x| x.0.to_string()).collect();
-                check_quantifier_validity(&triggers, &variables, term);
-
-                let polarity = if let Forall(..) = term.repr() {
-                    Universal
-                } else {
-                    Existential
-                };
-
-                self.quantifiers.push(Quantifier {
-                    triggers: trigger_ids,
-                    variables,
-                    body: inner_term.uid(),
-                    id: term.uid(),
-                    guard,
-                    polarity,
-                    skolemized: false,
-                });
-            } else {
-                panic!("We have a quantifier {} without an annotation", term)
-            }
-        }
+        // TODO: quantifier registration moved to SolverState::insert_predecessor
+        // The quantifier parsing (triggers, variables, polarity) should happen at
+        // the solver level after egraph term registration.
         false
     }
 
@@ -685,9 +642,10 @@ impl Egraph {
             return;
         }
 
-        if term.get_sort(&mut self.context).to_string() == "Int" {
-            self.arithmetic_terms.push(term.uid())
-        }
+        // TODO: arithmetic term tracking moved to SolverState::insert_predecessor
+        // if term.get_sort(&mut self.context).to_string() == "Int" {
+        //     self.arithmetic_terms.push(term.uid())
+        // }
 
         // Recursively insert predecessors for all subterms
         let (func, subterms) = get_subterms(term);

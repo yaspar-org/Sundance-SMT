@@ -562,7 +562,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         debug_println!(11, 0, "Starting quantifier instantiations");
         let quantifier_instantiations = instantiate_quantifiers(
-            &mut self.solver_state.egraph,
+            self.solver_state,
             &self.proof_tracker,
             &self.assignments,
             self.decision_level,
