@@ -492,7 +492,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             debug_println!(25, 0, "adding in the nelson oppen term {}", term);
                             let term_nnf = term.nnf(self.solver_state);
                             // println!("we have the term {:?}", term);
-                            self.solver_state.egraph
+                            self.solver_state
                                 .insert_predecessor(&term_nnf, None, None, true, None);
                             let term_cnf = term.cnf_tseitin(self.solver_state);
                             // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);

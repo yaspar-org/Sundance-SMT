@@ -72,14 +72,14 @@ fn main() -> Result<(), String> {
     assertions.push(true_term.clone());
     assertions.push(not_false_term);
 
-    let mut egraph = SolverState::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
+    let mut solver_state = SolverState::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
 
-    egraph.insert_predecessor(&false_term, None, None, false, None);
-    egraph.insert_predecessor(&true_term, None, None, false, None);
+    solver_state.insert_predecessor(&false_term, None, None, false, None);
+    solver_state.insert_predecessor(&true_term, None, None, false, None);
 
     // checking if we have any inductive datatypes -> if we do panic!
     // gets the info about our datatypes
-    if let Some(dt) = egraph.check_for_recursive_datatypes() {
+    if let Some(dt) = solver_state.check_for_recursive_datatypes() {
         return Err(format!(
             "Sundance does not support recursive datatype {dt}!"
         ));
@@ -188,9 +188,6 @@ fn main() -> Result<(), String> {
         symbol_table,
         args.arithmetic,
         args.timeout,
-        args.eager_skolem,
-        args.ddsmt,
-        args.lazy_dt,
     );
 
     match return_value {

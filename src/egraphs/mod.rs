@@ -7,4 +7,4 @@ pub mod egraph;
 pub(crate) mod proofforest;
 pub mod traits;
 pub mod unionfind;
-mod utils;
+pub(crate) mod utils;

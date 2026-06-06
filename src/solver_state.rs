@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use sat_interface::Formula;
 use yaspar_ir::ast::alg::CheckIdentifier;
-use yaspar_ir::ast::{Arena, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, ObjectAllocatorExt, Repr, Str, Term, TermAllocator};
+use yaspar_ir::ast::{Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, ObjectAllocatorExt, Repr, Str, Term, TermAllocator};
 use yaspar_ir::ast::ATerm::*;
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -19,7 +19,7 @@ use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_te
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::datastructures::{
-    Assertion, ConstructorType, ConstructorType::*, DisequalTerm, Quantifier, TermOption,
+    Assertion, ConstructorType, ConstructorType::*, DisequalTerm, Polarity, Quantifier, TermOption,
 };
 use crate::egraphs::egraph::{Egraph, valid_hash};
 use crate::egraphs::proofforest::ProofForestEdge;
@@ -206,9 +206,10 @@ impl SolverState {
             .contains_recursive_datatype(&self.context)
     }
 
-    /// Solver-level wrapper around egraph.insert_predecessor.
-    /// Handles solver-specific bookkeeping (arithmetic term tracking, quantifier registration)
-    /// then delegates to the egraph for the core operation.
+    /// Solver-level recursive term registration.
+    /// Walks the term tree, does solver-specific bookkeeping at each node
+    /// (arithmetic tracking, quantifier registration), then registers each
+    /// term in the egraph via register_term.
     pub fn insert_predecessor(
         &mut self,
         term: &Term,
@@ -217,14 +218,74 @@ impl SolverState {
         from_quantifier: bool,
         disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
     ) {
-        // TODO: arithmetic term tracking
-        // if term.get_sort(&mut self.context).to_string() == "Int" {
-        //     self.arithmetic_terms.push(term.uid())
-        // }
+        use crate::egraphs::utils::get_subterms;
 
-        // TODO: quantifier registration should happen here after egraph registration
+        let num = term.uid();
 
-        self.egraph.insert_predecessor(term, parent, guard, from_quantifier, disequalities);
+        // Arithmetic term tracking
+        if term.get_sort(self.context.arena()).to_string() == "Int" {
+            if !self.arithmetic_terms.contains(&num) {
+                self.arithmetic_terms.push(num);
+            }
+        }
+
+        // Register this term in the egraph (non-recursive, single term)
+        let previously_inserted = self.egraph.register_term(term, parent, from_quantifier, disequalities);
+        if previously_inserted {
+            return;
+        }
+
+        // Quantifier registration: if this term is a forall/exists, parse and register it
+        if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
+            if let Annotated(inner_term, attrs) = middle_term.repr() {
+                let mut trigger_ids = vec![];
+
+                for attr in attrs.iter() {
+                    if let Attribute::Pattern(s_exprs) = attr {
+                        trigger_ids.push(s_exprs.iter().map(|p| p.uid()).collect());
+                    }
+                }
+
+                let variables: Vec<String> = sorted_vars.iter().map(|x| x.0.to_string()).collect();
+
+                let polarity = if let Forall(..) = term.repr() {
+                    Polarity::Universal
+                } else {
+                    Polarity::Existential
+                };
+
+                self.quantifiers.push(Quantifier {
+                    triggers: trigger_ids,
+                    variables,
+                    body: inner_term.uid(),
+                    id: term.uid(),
+                    guard,
+                    polarity,
+                    skolemized: false,
+                });
+            }
+
+            // For quantifier terms, add subterms to terms_list only (not as predecessors)
+            let (_, subterms) = get_subterms(term);
+            for subterm in &subterms {
+                self.egraph.add_to_terms_list(subterm);
+            }
+            return;
+        }
+
+        // Recursively insert subterms
+        let (func, subterms) = get_subterms(term);
+        for subterm in &subterms {
+            self.insert_predecessor(subterm, Some(num), None, from_quantifier, None);
+        }
+
+        // If from quantifier instantiation, try to find and merge with existing congruent terms
+        if from_quantifier && !subterms.is_empty() {
+            let subterms_cloned: Vec<u64> = subterms.iter().map(|x| x.uid()).collect();
+            self.egraph.find_and_union_to_eclass(num, func.to_string(), subterms_cloned.clone());
+            self.egraph.union_to_eclass
+                .insert((num, func.to_string(), subterms_cloned));
+        }
     }
 }
 

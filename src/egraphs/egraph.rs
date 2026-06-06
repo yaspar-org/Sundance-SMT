@@ -6,16 +6,16 @@ use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent};
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
 use crate::egraphs::datastructures::{
-    CanonicalForm, CanonicalOp, DisequalTerm, Polarity::*, Predecessor,
-    Quantifier, TermOption,
+    CanonicalForm, CanonicalOp, DisequalTerm, Predecessor,
+    TermOption,
 };
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, fmt_termlist};
 use std::default::Default;
 use std::fmt;
-use yaspar_ir::ast::{ATerm, ATerm::*, FetchSort};
-use yaspar_ir::ast::{Attribute, Repr, Term};
+use yaspar_ir::ast::{ATerm, ATerm::*};
+use yaspar_ir::ast::{Repr, Term};
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -269,328 +269,38 @@ impl Egraph {
         }
     }
 
-    /// Adds basic information about term to egraph
-    fn get_or_insert(
-        &mut self,
-        term: &Term,
-        guard: Option<u64>,
-        disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
-    ) -> bool {
-        // returns a vector of literals which do not occur in the propositional skeleton
-        debug_println!(
-            11,
-            0,
-            "We are in get_or_insert with term {} adn term id {}",
-            term,
-            term.uid()
-        );
-        let num = term.uid();
-
-        // resize terms_list
-        while self.terms_list.len() <= num as usize {
-            self.terms_list
-                .resize(self.terms_list.len() * 2, TermOption::None);
-            self.proof_forest.resize(
-                self.proof_forest.len() * 2,
-                ProofForestEdge::Root {
-                    size: 1000,
-                    child: 0,
-                    disequalities: DeterministicHashMap::new(),
-                    children: DeterministicHashSet::new(),
-                },
-            );
-            self.predecessors.resize(
-                self.predecessors.len() * 2,
-                FastDeterministicHashMap::default(),
-            );
-        }
-
-        // if this has already been inserted, then we don't need to do anything
-        // TODO: need to add this for non-pattern based stuff
-        if let TermOption::Some(i) = &self.terms_list[num as usize] {
-            debug_println!(
-                22,
-                0,
-                "We are in get_or_insert with term {} and num {} and the term is already in the terms list {}",
-                term,
-                num,
-                i
-            );
-            return true;
-        }
-
-        // otherwise, we can add the term
-        debug_println!(22, 0, "Adding {} into with num {} terms list", term, num);
-        self.terms_list[num as usize] = TermOption::Some(term.clone());
-
-        // if the term is an ITE where the boolean is true or false, then we need to merge immediately
-        // todo: I don't know if this is actually necessary (also these )
-        // if let Ite(b, _, _) = term.repr() {
-        //     if b.uid() == self.true_term {
-        //          debug_println!(
-        //             5,
-        //             0,
-        //             "We are in ITE get_or_insert with term {} and num {} and b true",
-        //             term,
-        //             num
-        //         );
-        //         let proof_parent = ProofForestEdge::Equality {
-        //             size: 0,
-        //             term: None,
-        //             parent: 0,
-        //             child: 0,
-        //             disequalities: DeterministicHashMap::new(),
-        //             level: 0,
-        //             hash: 0,
-        //             children: DeterministicHashSet::new()
-        //         }; // the parent is None, since this is justified by b = True
-        //         union(num, self.true_term, self, proof_parent, 0, true, false);
-        //     } else if b.uid() == self.false_term {
-        //          debug_println!(
-        //             5,
-        //             0,
-        //             "We are in ITE get_or_insert with term {} and num {} and b false",
-        //             term,
-        //             num
-        //         );
-        //         let proof_parent = ProofForestEdge::Equality {
-        //             size: 0,
-        //             term: None,
-        //             parent: 0,
-        //             child: 0,
-        //             disequalities: DeterministicHashMap::new(),
-        //             level: 0,
-        //             hash: 0,
-        //             children: DeterministicHashSet::new()
-        //         }; // the parent is None, since this is justified by b = False
-        //         union(num, self.false_term, self, proof_parent, 0, true, false);
-        //     }
-        // };
-
-        let new_disequalities = disequalities.unwrap_or_default();
-
-        self.proof_forest[num as usize] = ProofForestEdge::Root {
-            size: 1,
-            disequalities: new_disequalities,
-            child: 0,
-            children: DeterministicHashSet::new(),
-        };
-        // }
-
-        // inserting the term into the list of functions
-        if let App(func, subterms, ..) = term.repr() {
-            debug_println!(
-                22,
-                0,
-                "We are adding the function {} with subterms {:?}",
-                func,
-                subterms
-            );
-            let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
-            self.function_maps
-                .entry(func.to_string())
-                .or_default()
-                .push((num, subterms_u64));
-        };
-
-        // inserting the ite term into the list of functions
-        if let Ite(b, t1, t2) = term.repr() {
-            let subterms = vec![b, t1, t2];
-            debug_println!(5, 0, "We are adding the ite subterms {:?}", subterms);
-            let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
-            self.function_maps
-                .entry("ite".to_string())
-                .or_default()
-                .push((num, subterms_u64));
-        };
-
-        // TODO: inserting the term if it is a quantifier
-        // TODO: there is a weird issue where quantifiers dont get added normally
-        // TODO: quantifier registration moved to SolverState::insert_predecessor
-        // The quantifier parsing (triggers, variables, polarity) should happen at
-        // the solver level after egraph term registration.
-        false
-    }
-
-    /// For forall terms, adds the subterms to the terms_list but not to any of the other data structures
-    fn add_to_terms_list(&mut self, term: &Term) {
-        let num = term.uid();
-
-        // resize terms_list
-        while self.terms_list.len() <= num as usize {
-            self.terms_list
-                .resize(self.terms_list.len() * 2, TermOption::None);
-            self.proof_forest.resize(
-                self.proof_forest.len() * 2,
-                ProofForestEdge::Root {
-                    size: 1000,
-                    child: 0,
-                    disequalities: DeterministicHashMap::new(),
-                    children: DeterministicHashSet::new(),
-                },
-            );
-            self.predecessors.resize(
-                self.predecessors.len() * 2,
-                FastDeterministicHashMap::default(),
-            );
-        }
-
-        // if this has already been inserted, then we don't need to do anything
-        match self.terms_list[num as usize] {
-            TermOption::Some(_) => return,
-            TermOption::Uninitialized(_) => return,
-            _ => {}
-        }
-
-        // otherwise, we can add the term as uninitialized. Thus, if the quantifier gets instantiated, we will add it to the terms list
-        self.terms_list[num as usize] = TermOption::Uninitialized(term.clone());
-
-        // adding in the subterms
-        let (_, subterms) = get_subterms(term);
-        for subterm in &subterms {
-            self.add_to_terms_list(subterm);
-        }
-    }
-
-    /// This function takes in a term_num, func, subterms
-    /// term_num corresponds to the term with
-    /// func applied to subterms
-    /// if any of the predecessors of first element in subterms are equivalent (i.e. has the same function
-    /// and all of its subterms are equal to the subterms of term_num), then
-    /// we union term_num with that predecessors
-    /// Used when a term is learned at level > 0 because of quantifier instantiation or datatype axiom
-    pub fn find_and_union_to_eclass(&mut self, term_num: u64, func: String, subterms: Vec<u64>) {
-        let subterm_num = subterms[0];
-        let subterm_root = self.find(subterm_num);
-        debug_println!(
-            16,
-            0,
-            "TRYING ECLASS: with term_num {}, term {}, function {}, subterm {}, subterm_root {}",
-            term_num,
-            self.get_term(term_num),
-            func,
-            self.get_term(subterm_num),
-            self.get_term(subterm_root)
-        );
-
-        let subterm_root_predecessor = &self.predecessors[subterm_root as usize].clone(); // need to clone here because I mutably borrow later
-
-        debug_println!(
-            16,
-            0,
-            "We have the predecessors of the subterm root {} with term {} as",
-            subterm_root,
-            self.get_term(subterm_root),
-        );
-        for pred_key in subterm_root_predecessor.keys() {
-            debug_println!(16, 4, "{}", self.get_term(*pred_key),);
-        }
-
-        // enumerate through all of the predecessors of the root of the first subterm, and see if any of them are equivalent to term_num, and if so, union them
-        for (pred_key, pred) in subterm_root_predecessor {
-            debug_println!(6, 0, "before9");
-            // if the predecessor is not valid, then we can remove it from the predecessors list (this can happen because of backtracking) and continue
-            if !valid_hash(pred.hash, pred.level, &self.predecessor_level) {
-                self.predecessors[subterm_root as usize].remove(pred_key);
-                debug_println!(
-                    16,
-                    1,
-                    "We removed predecessor {} with inner term {} because of invalid hash {} at level {}",
-                    self.get_term(*pred_key),
-                    self.get_term(pred.inner_term),
-                    pred.hash,
-                    pred.level
-                );
-                continue;
-            }
-            debug_println!(
-                16,
-                0,
-                "We have subterm_root_predecessor {} with inner_term {}",
-                self.get_term(*pred_key),
-                self.get_term(pred.inner_term)
-            );
-            let pred_term = self.get_term(*pred_key);
-            let (pred_func, pred_subterms) = get_subterms(&pred_term);
-            // we can see if the predecessors has the same function name and the same number of subterms
-            // if it does we can check if all of the subterms are equal.
-            if func == pred_func && pred_subterms.len() == subterms.len() {
-                let mut equal = true;
-                let mut congruence_pairs = vec![];
-                // check if all of the subterms are equal. If they are, then we can union term_num with the predecessor
-                for (pred_subterm, subterm) in pred_subterms.iter().zip(subterms.iter()) {
-                    let (pred_subterm_uid, subterm_uid) = (pred_subterm.uid(), *subterm);
-                    let (subterm_equal, subterm_level, subterm_hash) =
-                        self.check_equal(pred_subterm_uid, subterm_uid);
-                    debug_println!(
-                        16,
-                        4,
-                        "We are checking the equality of {} and {}, we get equal {} at level {} and hash {}",
-                        self.get_term(pred_subterm_uid),
-                        self.get_term(subterm_uid),
-                        subterm_equal,
-                        subterm_level,
-                        subterm_hash
-                    );
-                    if !subterm_equal {
-                        equal = false;
-                        break;
-                    }
-
-                    congruence_pairs.push((pred_subterm_uid, subterm_uid));
-                }
-                if equal {
-                    let equality = ProofForestEdge::Congruence {
-                        pairs: congruence_pairs.clone(),
-                        size: 0,
-                        parent: term_num,
-                        child: *pred_key,
-                        disequalities: DeterministicHashMap::new(),
-                        level: self.decision_level,
-                        hash: self.predecessor_hash,
-                        children: DeterministicHashSet::new(),
-                    };
-                    debug_println!(
-                        16,
-                        0,
-                        "In eclass: We are unioning {} and {} with equality {:?}",
-                        self.get_term(term_num),
-                        self.get_term(*pred_key),
-                        equality
-                    );
-                    self.cc_union(
-                        term_num,
-                        *pred_key,
-                        equality,
-                        self.decision_level,
-                        false,
-                        true,
-                    );
-                }
-            }
-        }
-    }
-
-    // Inserts the predecessor into egraph (for instance f(x) for x)
-    // TODO: I handle the => subcase (to add guards) and the forall subcase (to avoid adding predecessors) separately, so that I don't need to
-    pub fn insert_predecessor(
+    /// Register a single term in the egraph (non-recursive).
+    /// Sets up terms_list, proof_forest, predecessors, function_maps for this term.
+    /// Returns true if the term was already registered.
+    pub fn register_term(
         &mut self,
         term: &Term,
         parent: Option<u64>,
-        guard: Option<u64>,
         from_quantifier: bool,
         disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
-    ) {
-        debug_println!(
-            22,
-            0,
-            "We are in insert_predecessor with {} [{}] and from_quantifier {}",
-            term,
-            term.uid(),
-            from_quantifier
-        );
+    ) -> bool {
         let num = term.uid();
 
+        // Resize storage if needed
+        while self.terms_list.len() <= num as usize {
+            self.terms_list
+                .resize(self.terms_list.len() * 2, TermOption::None);
+            self.proof_forest.resize(
+                self.proof_forest.len() * 2,
+                ProofForestEdge::Root {
+                    size: 1000,
+                    child: 0,
+                    disequalities: DeterministicHashMap::new(),
+                    children: DeterministicHashSet::new(),
+                },
+            );
+            self.predecessors.resize(
+                self.predecessors.len() * 2,
+                FastDeterministicHashMap::default(),
+            );
+        }
+
+        // Add predecessor entry if parent is given
         if let Some(parent_num) = parent {
             let predecessor = Predecessor {
                 level: 0,
@@ -598,17 +308,11 @@ impl Egraph {
                 predecessor: parent_num,
                 inner_term: num,
             };
-
-            // this will not insert if something already exists. it should not matter for correctness, but should be slighlty more efficient
             self.predecessors[num as usize]
                 .entry(parent_num)
                 .or_insert(predecessor);
 
             if from_quantifier {
-                // todo: if a quantifier adds (f t), we need to add (f t) as predecessor for root(t) (todo: need the right backtracking heuristic)
-                // todo: also think about whether adding it as a predecessor for root(t) is enough or need to add it as a predecessor multiple places
-                // i.e. look at how we do backtracking
-                // todo: see if I need subterm_equal here
                 let (root, level, hash) = self.find_with_level(num, 0, 0);
                 let root_predecessor = Predecessor {
                     level,
@@ -633,128 +337,133 @@ impl Egraph {
                     .entry(parent_num)
                     .or_insert(root_predecessor);
             }
+        }
+
+        // Check if already inserted
+        if let TermOption::Some(_) = &self.terms_list[num as usize] {
+            return true;
+        }
+
+        // Add the term
+        self.terms_list[num as usize] = TermOption::Some(term.clone());
+
+        let new_disequalities = disequalities.unwrap_or_default();
+        self.proof_forest[num as usize] = ProofForestEdge::Root {
+            size: 1,
+            disequalities: new_disequalities,
+            child: 0,
+            children: DeterministicHashSet::new(),
         };
 
-        let previously_inserted = self.get_or_insert(term, guard, disequalities);
-        // todo: if previously inserted, then maybe exit here?
-        // todo is this valid??
-        if previously_inserted {
-            return;
+        // Add to function_maps for App terms
+        if let App(func, subterms, ..) = term.repr() {
+            let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
+            self.function_maps
+                .entry(func.to_string())
+                .or_default()
+                .push((num, subterms_u64));
         }
 
-        // TODO: arithmetic term tracking moved to SolverState::insert_predecessor
-        // if term.get_sort(&mut self.context).to_string() == "Int" {
-        //     self.arithmetic_terms.push(term.uid())
-        // }
-
-        // Recursively insert predecessors for all subterms
-        let (func, subterms) = get_subterms(term);
-
-        // for forall  and Exists terms, we need to add the subterms to the terms_list but not to any of the other data structures
-        if let Exists(_, _) | Forall(_, _) = term.repr() {
-            for subterm in subterms {
-                debug_println!(
-                    22,
-                    0,
-                    "We are adding the subterm of a forall/exists term {} to the terms list",
-                    subterm
-                );
-                self.add_to_terms_list(subterm);
-            }
-            // println!("returning");
-            return;
-        } else {
-            debug_println!(22, 0, "not a forall/exists term {}", term);
+        // Add to function_maps for Ite terms
+        if let Ite(b, t1, t2) = term.repr() {
+            let subterms_u64 = vec![b.uid(), t1.uid(), t2.uid()];
+            self.function_maps
+                .entry("ite".to_string())
+                .or_default()
+                .push((num, subterms_u64));
         }
 
-        // // if a Datatype, we store its constructor
-        // // todo: using context here but thats not correct
-        // let sort = term.get_sort(self.cnfenv.context); // todo: not sure why this even finds anything hmm
-        // let s = sort.to_string();
+        false
+    }
 
-        // if self.datatype_info.sorts.contains_key(&s) && !self.term_constructors.contains_key(&num) {
-        //     if let App(f, _, _) = term.repr() && self.datatype_info.constructors.contains_key(f.id_str().as_str()) {
-        //         // println!("happens1 for term {}", term);
-        //         let ctor_symbol =  self.cnfenv.context.allocate_string(f.to_string());// egraph.cnfenv.context.get_symbol_str(&ctor_name)
-        //         let is_symbol = self.cnfenv.context.allocate_str("is"); // todo: maybe this should have allocate_symbol instead??
-        //         let tester_identifier = Identifier {
-        //             symbol: is_symbol,
-        //             indices: vec![Index::Symbol(ctor_symbol)],
-        //         };
-        //         let tester_qid : QualifiedIdentifier = yaspar_ir::ast::alg::QualifiedIdentifier(tester_identifier, None); // todo: not sure if I actually need a type here
-        //         // Create the tester application: ((_ is ConstructorName) term)
-        //         let bool_sort = self.cnfenv.context.bool_sort();
-        //         let tester_term = self.cnfenv.context.app(tester_qid, vec![term.clone()], Some(bool_sort));
-        //         self.term_constructors.insert(num, ConstructorType::Constructor { name: f.to_string(), tester_term, hash: 0, level: 0 });
-        //     } else {
-        //         // println!("happens2 for term {}", term);
-        //         self.term_constructors.insert(num, ConstructorType::Uninitialized);
-        //     }
-        // } else {
-        //     // println!("doesnt happen for term {} with sort {}", term, sort);
-        //     // println!("We have the sorts {:?}", self.datatype_info.sorts.keys());
-        // }
+    /// Add a term to terms_list as Uninitialized (for quantifier body subterms).
+    /// Recursively adds subterms. Does not set up predecessors or function_maps.
+    pub fn add_to_terms_list(&mut self, term: &Term) {
+        let num = term.uid();
 
-        // kindve hacky way to handle the cause with (=> A (forall (x) B)). We want to keep A as a guard for the quantifier, so that if we instantiate, the quantifier A becomes "active"
-        // also because of nnf, we are adding this
-        // todo: delete this and make sure it doesn't negatively affect anything
-        // if let Or(terms) = term.repr()
-        //     && terms.len() == 2
-        //     && let Not(t1) = terms[0].repr()
-        // {
-        //     let t2 = &terms[1];
-        //      debug_println!(
-        //         6,
-        //         0,
-        //         "We actually have an implies with t1 {} and t2 {}",
-        //         t1,
-        //         t2
-        //     );
-        //     self.insert_predecessor(&terms[0], Some(num), None, from_quantifier, None);
-        //     self.insert_predecessor(t2, Some(num), Some(t1.uid()), from_quantifier, None);
-        //     return;
-        // }
-
-        // if something is distinct, we add it as disequalities
-        // if let Distinct(terms) = term.repr() {
-        //     for term in terms {
-        //         let h = DeterministicHashMap::new();
-        //         for t in terms {
-        //             if t != term {
-        //                 let disequal_term =
-        //                     DisequalTerm { term: (), level: 0, diseq_lit: (), hash: 0, original_disequality: () };
-        //                 h.insert(t.uid(), disequal_term);
-        //             }
-        //             self.insert_predecessor(term, Some(num), None, from_quantifier, Some(h));
-        //         }
-        //     }
-        // }
-
-        // if we don't hit on either of the two previous cases
-
-        for subterm in &subterms {
-            debug_println!(
-                22,
-                4,
-                "We are adding the subterm {} of {} to the terms list (and other things)",
-                subterm,
-                term
+        while self.terms_list.len() <= num as usize {
+            self.terms_list
+                .resize(self.terms_list.len() * 2, TermOption::None);
+            self.proof_forest.resize(
+                self.proof_forest.len() * 2,
+                ProofForestEdge::Root {
+                    size: 1000,
+                    child: 0,
+                    disequalities: DeterministicHashMap::new(),
+                    children: DeterministicHashSet::new(),
+                },
             );
-            self.insert_predecessor(subterm, Some(num), None, from_quantifier, None);
+            self.predecessors.resize(
+                self.predecessors.len() * 2,
+                FastDeterministicHashMap::default(),
+            );
         }
 
-        // if a quantifier instantiates (f t) and t = s, then we want to add (f t) =  (f s)
-        if from_quantifier && !subterms.is_empty() && !previously_inserted {
-            let subterms_cloned: Vec<u64> = subterms.iter().map(|x| x.uid()).collect();
-            self.find_and_union_to_eclass(num, func.to_string(), subterms_cloned.clone());
-            self.union_to_eclass
-                .insert((num, func.to_string(), subterms_cloned));
+        match self.terms_list[num as usize] {
+            TermOption::Some(_) => return,
+            TermOption::Uninitialized(_) => return,
+            _ => {}
+        }
+
+        self.terms_list[num as usize] = TermOption::Uninitialized(term.clone());
+
+        let (_, subterms) = get_subterms(term);
+        for subterm in &subterms {
+            self.add_to_terms_list(subterm);
         }
     }
 
-    // FIND operation for union-find
-    // lazy find, keep finding the representative until you get to something that is a representative of itself
-    // design decision: I do not implement path compression. I could, but would make recovering proof much harder
+    /// If any predecessors of the first subterm are congruent to term_num
+    /// (same function, all subterms equal), union them.
+    pub fn find_and_union_to_eclass(&mut self, term_num: u64, func: String, subterms: Vec<u64>) {
+        let subterm_num = subterms[0];
+        let subterm_root = self.find(subterm_num);
+
+        let subterm_root_predecessor = &self.predecessors[subterm_root as usize].clone();
+
+        for (pred_key, pred) in subterm_root_predecessor {
+            if !valid_hash(pred.hash, pred.level, &self.predecessor_level) {
+                self.predecessors[subterm_root as usize].remove(pred_key);
+                continue;
+            }
+            let pred_term = self.get_term(*pred_key);
+            let (pred_func, pred_subterms) = get_subterms(&pred_term);
+            if func == pred_func && pred_subterms.len() == subterms.len() {
+                let mut equal = true;
+                let mut congruence_pairs = vec![];
+                for (pred_subterm, subterm) in pred_subterms.iter().zip(subterms.iter()) {
+                    let (pred_subterm_uid, subterm_uid) = (pred_subterm.uid(), *subterm);
+                    let (subterm_equal, _, _) = self.check_equal(pred_subterm_uid, subterm_uid);
+                    if !subterm_equal {
+                        equal = false;
+                        break;
+                    }
+                    congruence_pairs.push((pred_subterm_uid, subterm_uid));
+                }
+                if equal {
+                    let equality = ProofForestEdge::Congruence {
+                        pairs: congruence_pairs,
+                        size: 0,
+                        parent: term_num,
+                        child: *pred_key,
+                        disequalities: DeterministicHashMap::new(),
+                        level: self.decision_level,
+                        hash: self.predecessor_hash,
+                        children: DeterministicHashSet::new(),
+                    };
+                    self.cc_union(
+                        term_num,
+                        *pred_key,
+                        equality,
+                        self.decision_level,
+                        false,
+                        true,
+                    );
+                }
+            }
+        }
+    }
+
     pub fn find(&self, x: u64) -> u64 {
         let p = &self.proof_forest[x as usize];
         match p {

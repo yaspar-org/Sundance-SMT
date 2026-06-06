@@ -175,7 +175,7 @@ fn learn_exactly_one_tester_clause(
     };
     debug_println!(12, 0, "TESTER OR CASE");
     debug_println!(25, 10, "(assert {})", tester_or);
-    solver_state.egraph.insert_predecessor(&tester_or, None, None, from_quantifier, None);
+    solver_state.insert_predecessor(&tester_or, None, None, from_quantifier, None);
     let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
     vector
