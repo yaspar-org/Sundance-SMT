@@ -12,7 +12,6 @@ use yaspar_ir::ast::{ObjectAllocatorExt, Repr, StrAllocator, Term};
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
 use crate::egraphs::datastructures::ConstructorType;
-use crate::egraphs::egraph::Egraph;
 use crate::preprocess::check_for_function_bool;
 use crate::solver_state::SolverState;
 
@@ -197,7 +196,7 @@ fn learn_ctors_selector_clauses(
     let mut vector = vec![];
 
     for ctor in &dt_dec.constructors {
-        let ctor_selector_clauses = learn_ctor_selector_clauses(egraph, term, ctor, sort, false, ddsmt, lazy_dt);
+        let ctor_selector_clauses = learn_ctor_selector_clauses(solver_state, term, ctor, sort, false, ddsmt, lazy_dt);
         vector.extend(ctor_selector_clauses);
     }
     vector
@@ -291,17 +290,17 @@ fn learn_selector_ctor_clause(
     assert_eq!(subterms.len(), ctor.args.len());
 
     for (sel_term, sel) in subterms.iter().zip(ctor.args.iter()) {
-        let so = sel_term.get_sort(egraph);
-        let sel_app = &egraph.app(
+        let so = sel_term.get_sort(solver_state);
+        let sel_app = &solver_state.app(
             QualifiedIdentifier::simple(sel.0.clone()),
             vec![term.clone()],
             Some(so),
         );
-        let sel_eq = egraph.eq(sel_app.clone(), sel_term.clone());
+        let sel_eq = solver_state.eq(sel_app.clone(), sel_term.clone());
         debug_println!(25, 10, "(assert {})", sel_eq);
-        let sel_eq_nnf = sel_eq.nnf(egraph);
-        egraph.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier, None);
-        let sel_eq_cnf = sel_eq.cnf_tseitin(egraph);
+        let sel_eq_nnf = sel_eq.nnf(solver_state);
+        solver_state.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier, None);
+        let sel_eq_cnf = sel_eq.cnf_tseitin(solver_state);
         let clauses = sel_eq_cnf.into_iter().map(|c| c.0);
         vector.extend(clauses)
     }

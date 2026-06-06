@@ -13,13 +13,13 @@ use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::skolem::skolemize;
 // TODO: These functions should take &mut SolverState and use solver_state.egraph for egraph ops.
 // For now they take &mut Egraph directly since the fields haven't been moved yet.
-use crate::egraphs::egraph::Egraph;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use crate::solver_state::SolverState;
+use crate::utils::DeterministicHashMap;
 
 use crate::debug_println;
 use crate::log::is_important;
 use yaspar_ir::ast::{
-    ATerm, FetchSort, HasArena, LetElim, Repr, Substitute, Substitution, Term, TermAllocator,
+    LetElim, Substitute, Substitution, Term, TermAllocator,
 };
 
 #[derive(Debug, Clone)]
@@ -33,15 +33,15 @@ pub enum QuantifierInstance {
 /// TODO: level is only used for printing, can get rid of it later
 /// (could use it for actiavte_bits, but right now we are activating everything at level 0)
 pub fn instantiate_quantifiers(
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     proof_tracker: &Rc<RefCell<SMTProofTracker>>,
     assignments: &Vec<i32>,
     level: usize,
 ) -> Vec<QuantifierInstance> {
-    let eager_skolem = egraph.eager_skolem;
-    let ddsmt = egraph.ddsmt;
-    let lazy_dt = egraph.lazy_dt;
-    let quantifiers = &egraph.quantifiers.clone();
+    let eager_skolem = solver_state.eager_skolem;
+    let ddsmt = solver_state.ddsmt;
+    let lazy_dt = solver_state.lazy_dt;
+    let quantifiers = &solver_state.quantifiers.clone();
     let mut instantiations = vec![];
     debug_println!(24, 0, "Starting a matching round");
     for quantifier in quantifiers {
@@ -49,10 +49,10 @@ pub fn instantiate_quantifiers(
             19,
             0,
             "We have the quantifier {}",
-            egraph.get_term(quantifier.id)
+            solver_state.get_term(quantifier.id)
         );
         // check if the quantifier is assigned
-        let quantifier_literal = egraph.get_lit_from_u64(quantifier.id);
+        let quantifier_literal = solver_state.get_lit_from_u64(quantifier.id);
         assert!(quantifier_literal != 0); // todo: note I think this should actually always be positive but not sure
         let quantifier_assignment = assignments[quantifier_literal.unsigned_abs() as usize];
 
@@ -66,7 +66,7 @@ pub fn instantiate_quantifiers(
                 6,
                 0,
                 "We are skipping the quantifier {} with quantifier_literal {} and quantifier_assignment {} | assignments {:?}",
-                egraph.get_term(quantifier.id),
+                solver_state.get_term(quantifier.id),
                 quantifier_literal,
                 quantifier_assignment,
                 assignments
@@ -81,54 +81,54 @@ pub fn instantiate_quantifiers(
             ^ (quantifier.polarity == Polarity::Existential);
 
         // if the quantifier in a negative polarity or we doin g ddsmt optimizations, and we haven't skolemized it yet, then we skolemize it
-        // todo: replace egraph.added_skolemizations. with the skolemized flag in the quantifier
+        // todo: replace solver_state.added_skolemizations. with the skolemized flag in the quantifier
         if (quantifier_polarity || eager_skolem)
-            && !egraph.added_skolemizations.contains(&quantifier.id)
+            && !solver_state.added_skolemizations.contains(&quantifier.id)
         {
             debug_println!(
                 6,
                 0,
                 "We are skolemizing the quantifier {} with quantifier_literal {} and quantifier_assignment {} | assignments {:?}",
-                egraph.get_term(quantifier.id),
+                solver_state.get_term(quantifier.id),
                 quantifier_literal,
                 quantifier_assignment,
                 assignments
             );
 
-            let term = egraph.get_term(quantifier.id);
+            let term = solver_state.get_term(quantifier.id);
             // let negated_term =
-            //     if let Universal = quantifier.polarity {egraph.context.not(term)} else {term};
+            //     if let Universal = quantifier.polarity {solver_state.context.not(term)} else {term};
 
             let polarity = quantifier.polarity != Polarity::Universal;
 
             // todo: replace this with the skolemized flag in the quantifier
-            if egraph.added_skolemizations.contains(&quantifier.id) {
+            if solver_state.added_skolemizations.contains(&quantifier.id) {
                 continue;
             }
 
             let (skolemized_quantifier, skolem_vars) =
-                skolemize(&term, &mut egraph.context, polarity);
+                skolemize(&term, &mut solver_state.context, polarity);
 
-            egraph.added_skolemizations.insert(quantifier.id);
+            solver_state.added_skolemizations.insert(quantifier.id);
 
-            let skolemized_quantifier: Term = skolemized_quantifier.let_elim(&mut egraph.context);
-            // let (skolemized_quantifier, _) = skolemize(&skolemized_quantifier, egraph.context, &mut egraph.skolem_counter);
-            let skolemized_quantifier = skolemized_quantifier.nnf(egraph);
+            let skolemized_quantifier: Term = skolemized_quantifier.let_elim(&mut solver_state.context);
+            // let (skolemized_quantifier, _) = skolemize(&skolemized_quantifier, solver_state.context, &mut solver_state.skolem_counter);
+            let skolemized_quantifier = skolemized_quantifier.nnf(solver_state);
             let additional_constraints =
-                check_for_function_bool(&skolemized_quantifier, egraph, true, ddsmt, lazy_dt);
+                check_for_function_bool(&skolemized_quantifier, solver_state, true, ddsmt, lazy_dt);
             debug_println!(19, 0, "we are skolemizing {}", term);
             debug_println!(26, 0, "(assert {})", skolemized_quantifier);
             debug_println!(
                 24,
                 8,
                 "from quantifier {} [{}]",
-                egraph.get_term(quantifier.id),
+                solver_state.get_term(quantifier.id),
                 quantifier.id
             );
 
             // note that from_quantifier is true here
-            egraph.insert_predecessor(&skolemized_quantifier, None, None, true, None);
-            let clauses = skolemized_quantifier.cnf_tseitin(egraph);
+            solver_state.insert_predecessor(&skolemized_quantifier, None, None, true, None);
+            let clauses = skolemized_quantifier.cnf_tseitin(solver_state);
 
             // learning (not \forall P(x)) => P(c)
             // equivalent to \forall P(x) \/ P(c)
@@ -139,7 +139,7 @@ pub fn instantiate_quantifiers(
                 -quantifier_literal
             };
 
-            let skolemized_term_literal = egraph.get_lit_from_term(&skolemized_quantifier);
+            let skolemized_term_literal = solver_state.get_lit_from_term(&skolemized_quantifier);
 
             let quantifier_implies_skolemization_clause =
                 vec![quantifier_literal, skolemized_term_literal];
@@ -184,7 +184,7 @@ pub fn instantiate_quantifiers(
             19,
             0,
             "instantiating the quantifier {}",
-            egraph.get_term(quantifier.id)
+            solver_state.get_term(quantifier.id)
         );
         let triggers = &quantifier.triggers;
         // note we consider patterns in a multipattern conjunctively and multipatterns in a trigger disjunctively
@@ -198,18 +198,18 @@ pub fn instantiate_quantifiers(
                 19,
                 0,
                 "About to match quantifier body {} with trigger {:?}",
-                egraph.get_term(body),
+                solver_state.get_term(body),
                 trigger_term_pairs
             );
             debug_println!(12, 0, "after9");
-            let list_assignments = match_term(&mut assignments, trigger_term_pairs, egraph);
+            let list_assignments = solver_state.egraph.match_term(&mut assignments, trigger_term_pairs);
 
             if list_assignments.is_empty() {
                 debug_println!(
                     24,
                     0,
                     "No substitutions for {}",
-                    egraph.get_term(quantifier.id)
+                    solver_state.get_term(quantifier.id)
                 );
             }
 
@@ -223,13 +223,13 @@ pub fn instantiate_quantifiers(
                 // maybe I eventually want to do something in the match_term function
                 // we are doing a lot of redundant work. It would be nice to have something
                 // like semi-naive evaluation for datalog
-                if let Some(set) = egraph.added_instantiations.get(&quantifier.id)
+                if let Some(set) = solver_state.added_instantiations.get(&quantifier.id)
                     && set.contains(subs)
                 {
-                    // println!("Skipping the instantiation {} for {}", t, egraph.get_term(quantifier.id));
+                    // println!("Skipping the instantiation {} for {}", t, solver_state.get_term(quantifier.id));
                     continue;
                 }
-                egraph
+                solver_state
                     .added_instantiations
                     .entry(quantifier.id)
                     .or_default()
@@ -243,12 +243,12 @@ pub fn instantiate_quantifiers(
                     }
                 }
                 debug_println!(6, 0, "before12");
-                let term = egraph.get_term(body);
+                let term = solver_state.get_term(body);
                 let substitution = Substitution::new(
                     subs.iter().map(|(s, t)| (s, t.clone())),
-                    &mut egraph.context,
+                    &mut solver_state.context,
                 );
-                let substituted_term = term.subst(&substitution, &mut egraph.context);
+                let substituted_term = term.subst(&substitution, &mut solver_state.context);
                 substitutions.push((substituted_term, activation_depth, subs));
             }
 
@@ -257,23 +257,22 @@ pub fn instantiate_quantifiers(
                     6,
                     0,
                     "We are skipping the quantifier {} because it has no substitutions",
-                    egraph.get_term(quantifier.id)
+                    solver_state.get_term(quantifier.id)
                 );
                 continue;
             }
 
             debug_println!(6, 0, "Starting to look at substitutions");
-            debug_println!(6, 0, "{}", egraph);
             for (t, &activation_depth, _) in substitutions {
                 // skipping instantiations that have already been added
                 // TODO: need to come up with a more efficient way to do this
-                // TODO: have egraph.added_instantiations as a string right now, really want to go back to u32
+                // TODO: have solver_state.added_instantiations as a string right now, really want to go back to u32
 
                 // if this came from a negated existential, we have to negate the term
 
                 // println!("original_t: {}", t);
                 let t = if quantifier.polarity == Polarity::Existential {
-                    egraph.context.not(t)
+                    solver_state.context.not(t)
                 } else {
                     t
                 };
@@ -283,32 +282,32 @@ pub fn instantiate_quantifiers(
                     0,
                     "We are adding the instantiation {} for quantifier {} at level {}",
                     t.clone(),
-                    egraph.get_term(quantifier.id),
+                    solver_state.get_term(quantifier.id),
                     level
                 );
 
                 debug_println!(4, 0, "We have the term {} with id {}", t, t.uid());
 
                 // eliminating lets
-                let let_elim_term = t.let_elim(&mut egraph.context);
+                let let_elim_term = t.let_elim(&mut solver_state.context);
 
                 debug_println!(
                     8,
                     0,
                     "{} is an instantiation of {} at depth {}",
                     let_elim_term,
-                    egraph.get_term(quantifier.id),
+                    solver_state.get_term(quantifier.id),
                     activation_depth
                 );
 
-                let nnf_term = let_elim_term.nnf(egraph);
+                let nnf_term = let_elim_term.nnf(solver_state);
 
                 debug_println!(26, 4, "(assert {})", nnf_term.clone());
                 debug_println!(
                     24,
                     8,
                     "from quantifier {} [{}]",
-                    egraph.get_term(quantifier.id),
+                    solver_state.get_term(quantifier.id),
                     quantifier.id
                 );
 
@@ -324,9 +323,9 @@ pub fn instantiate_quantifiers(
                 // this might lead to weirdness when you have equality of booleans not being represented in egraph
                 // but it should be fine. This is necessary becasue we need to look up lits
                 // todo: also might be less efficient as well because we are losing structure from original formula in the egraph
-                egraph.insert_predecessor(&nnf_term, None, None, true, None);
+                solver_state.insert_predecessor(&nnf_term, None, None, true, None);
 
-                let cnf_term = nnf_term.cnf_tseitin(egraph);
+                let cnf_term = nnf_term.cnf_tseitin(solver_state);
                 debug_println!(7, 0, "We have the cnf term {:?}", cnf_term);
 
                 let mut clauses: Vec<_> = cnf_term
@@ -335,7 +334,7 @@ pub fn instantiate_quantifiers(
                     .map(|x| x.into_iter().collect::<Vec<_>>())
                     .collect();
 
-                let quantifier_literal = egraph.get_lit_from_u64(quantifier.id);
+                let quantifier_literal = solver_state.get_lit_from_u64(quantifier.id);
 
                 let quantifier_literal = if quantifier.polarity == Polarity::Universal {
                     -quantifier_literal
@@ -352,7 +351,7 @@ pub fn instantiate_quantifiers(
                 // the bug comes from the additional constraints
                 // basically the additional constraints are valid lits -> converted to valid u64, but may not be in the actual term mapping
                 // it should be added in insert_predecessor which calls get_or_insert which adds into terms_list
-                let additional_constraints = check_for_function_bool(&nnf_term, egraph, true, ddsmt, lazy_dt);
+                let additional_constraints = check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
                 clauses.extend(additional_constraints);
 
                 // could activate bits here (the level should not be 0)
@@ -368,249 +367,4 @@ pub fn instantiate_quantifiers(
     instantiations
 }
 
-/// The simplify algorithm for matching patterns, iteratively
-/// building a list of assignments for the free variables in the pattern
-/// see <https://mmoskal.github.io/smt/e-matching.pdf>
-///
-/// todo: @Amar the following comment is out of date
-/// Returning assignments as DeterministicHashMap<u64, u64> and DeterministicHashMap<string, u64>,
-/// since then it is easier to substitute things when you have a nested forall case
-///
-/// TODO: I might need to think about writing this tail recursively eventually
-pub fn match_term<'a>(
-    assignment: &'a mut DeterministicHashMap<String, Term>,
-    trigger_term_pairs: Vec<(u64, Option<u64>)>,
-    egraph: &'a mut Egraph,
-) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
-    if trigger_term_pairs.is_empty() {
-        debug_println!(
-            6,
-            0,
-            "We have reached the bottom case with assignment {:?}",
-            assignment
-        );
-        return vec![(assignment.clone(), 0)];
-    }
-    let (trigger, term) = trigger_term_pairs[0];
-    debug_println!(6, 0, "before13");
-    let trigger_term = &egraph.get_term(trigger);
-    if is_important(6) {
-        if let Some(t) = term {
-            debug_println!(
-                6,
-                0,
-                "We are matching trigger {} with term {} and assignment {:?}",
-                trigger_term,
-                egraph.get_term(t),
-                assignment
-            );
-        } else {
-            debug_println!(
-                6,
-                0,
-                "We are matching trigger {} with term None and assignment {:?}",
-                trigger_term,
-                assignment
-            );
-        }
-    }
-    match trigger_term.repr() {
-        ATerm::Global(_, _) => {
-            debug_println!(
-                6,
-                0,
-                "We are matching global term {} with trigger {} to the term {}",
-                trigger_term,
-                egraph.get_term(trigger),
-                egraph.get_term(term.unwrap())
-            );
-            if term.is_none() || egraph.find(trigger) == egraph.find(term.unwrap()) {
-                match_term(assignment, trigger_term_pairs[1..].to_vec(), egraph)
-            } else {
-                vec![]
-            }
-        }
-        ATerm::Constant(..) => {
-            debug_println!(
-                6,
-                0,
-                "We are matching constant term {} with term {} and assignment {:?}",
-                trigger_term,
-                egraph.get_term(term.unwrap()),
-                assignment
-            );
-            if term.is_none() || egraph.find(trigger) == egraph.find(term.unwrap()) {
-                match_term(assignment, trigger_term_pairs[1..].to_vec(), egraph)
-            } else {
-                vec![]
-            }
-        }
-        ATerm::Local(local) => {
-            debug_println!(
-                6,
-                0,
-                "We are matching local term {} with term {} and assignment {:?}",
-                trigger_term,
-                egraph.get_term(term.unwrap()),
-                assignment
-            );
-            match assignment.get(&local.symbol.to_string()) {
-                Option::None => {
-                    debug_println!(6, 0, "We are inserting the local term into the assignment");
-                    debug_println!(6, 0, "before14");
-                    assert!(
-                        *local.sort.as_ref().unwrap()
-                            == egraph
-                                .get_term(term.unwrap())
-                                .get_sort(egraph.context.arena())
-                    ); // checking that things are typechecked
-                    assignment.insert(local.symbol.to_string(), egraph.get_term(term.unwrap()));
-
-                    // we cannot just return match_term(*, *, *) because we need to consider the activation depth of the current term
-                    // TODO: maybe there is a better way to do this, where we only check the activation depth at the highest level
-                    let new_assignments =
-                        match_term(assignment, trigger_term_pairs[1..].to_vec(), egraph);
-                    // let current_activation_depth =
-                    //     egraph.terms_active[term.unwrap() as usize].unwrap_or_default();
-                    // if current_activation_depth >= egraph.max_activation_depth {
-                    //      debug_println!(
-                    //         6,
-                    //         0,
-                    //         "We are skipping the term (as a substitution) {} because it is too deep",
-                    //         egraph.get_term(term.unwrap())
-                    //     );
-                    //     return vec![];
-                    // }
-
-                    new_assignments
-                        .iter()
-                        .map(|(a, d)| (a.clone(), usize::max(*d, 0))) // note can get rid of this 0 it represents activation depth which we are not using
-                        .collect::<Vec<_>>()
-                }
-                Some(v) if egraph.find(v.uid()) == egraph.find(term.unwrap()) => {
-                    debug_println!(6, 0, "The local term matches the assignment");
-                    match_term(assignment, trigger_term_pairs[1..].to_vec(), egraph)
-                }
-                Some(assignment_term) => {
-                    debug_println!(
-                        6,
-                        0,
-                        "The local term does not match the assignment term {}",
-                        assignment_term
-                    );
-                    debug_println!(6, 0, "{}", egraph);
-                    vec![]
-                }
-            }
-        }
-        ATerm::App(func, args, _) => {
-            debug_println!(6, 0, "We are matching app term {} with args:", trigger_term);
-            debug_println!(6, 0, "before15");
-            let func_name = func.id_str();
-            let args_ref = args.iter().collect::<Vec<_>>();
-            find_assignments_on_term(
-                term,
-                func_name,
-                args_ref,
-                trigger_term_pairs,
-                assignment,
-                egraph,
-            )
-        }
-        ATerm::Ite(b, t1, t2) => find_assignments_on_term(
-            term,
-            &"ite".to_string(),
-            vec![b, t1, t2],
-            trigger_term_pairs,
-            assignment,
-            egraph,
-        ),
-        _ => panic!(
-            "Trigger term {} is not an App, ITE or variable",
-            trigger_term
-        ),
-    }
-}
-
-// given a term and a func_name, returns a list of assignments
-fn find_assignments_on_term(
-    term: Option<u64>,
-    func_name: &String,
-    args: Vec<&Term>,
-    trigger_term_pairs: Vec<(u64, Option<u64>)>,
-    assignment: &mut DeterministicHashMap<String, Term>,
-    egraph: &mut Egraph,
-) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
-    let _ = args
-        .iter()
-        .map(|a| debug_println!(6, 0, "{}", egraph.get_term(a.uid())))
-        .collect::<Vec<_>>();
-    let mut list_assignments = Vec::new();
-
-    // let func_name = &func.id_str().to_string();
-    let function_terms = egraph.function_maps.get(func_name);
-    // if there are no terms of this function, then we cannot do a specific instantiation
-    if function_terms.is_none() {
-        debug_println!(5, 0, "Function term not found: {}", func_name);
-        return vec![];
-    }
-
-    let function_terms = function_terms.unwrap().clone();
-    // checks that we don't consider the same set of subterms twice
-    let mut considered_function_terms = DeterministicHashSet::default();
-
-    // note that we need to get the root of the term here,
-    // because the input to the function is not necessarily a root
-    let term_root = term.map(|t| egraph.find(t));
-    debug_println!(16, 0, "For the function {} we have the terms:", func_name);
-    for (i, subterms) in function_terms {
-        debug_println!(16, 4, "{}", egraph.get_term(i));
-        // TODO: the number of terms could potentially grow
-        // TODO: this could actually be made more efficient, by maybe considering an egraph with only active terms
-
-        assert!(subterms.len() == args.len());
-
-        let i_root = egraph.find(i);
-        if term_root.is_none() || term_root.unwrap() == i_root {
-            // comparing term to i_root, since term should already be a root based on definition of new_pairs
-            // basically checking if we repeat the same subterms
-            let subterms_canonical = subterms.iter().map(|s| egraph.find(*s)).collect::<Vec<_>>();
-
-            if considered_function_terms.contains(&subterms_canonical) {
-                debug_println!(
-                    6,
-                    0,
-                    "We are skipping the term {} because it is already considered",
-                    egraph.get_term(i)
-                );
-                continue;
-            }
-            considered_function_terms.insert(subterms_canonical);
-
-            // originally Some(*find(s)), but thats buggy take ~f(t) and (t = B(true)) as an example (skips the instantiation we want because it is a root)
-            // for some x in a pattern, we were substituting in root(t) when we match x |-> t, but this is bad.
-            // Fixed by substituting t instead of root(t)
-            let mut new_pairs = args
-                .iter()
-                .zip(subterms.iter())
-                .map(|(a, s)| (a.uid(), Some(*s)))
-                .collect::<Vec<_>>();
-            new_pairs.extend(trigger_term_pairs[1..].to_vec());
-            debug_println!(6, 0, "We have the new pairs {:?}", new_pairs);
-            // note we need to clone the assignment here because each subcase should have its own assignment, TODO: is there a more efficient way to do this? I think not
-            let new_assignments = match_term(&mut assignment.clone(), new_pairs, egraph);
-            debug_println!(6, 0, "We have the new assignments {:?}", new_assignments);
-
-            list_assignments.extend(
-                new_assignments.iter().map(|(a, _)| (a.clone(), 0)), // todo the 0 here comes from activation depth, we can get rid of it
-            );
-        }
-    }
-    debug_println!(
-        6,
-        0,
-        "We have the list of assignments {:?}",
-        list_assignments
-    );
-    list_assignments
-}
+// match_term and find_assignments_on_term moved to Egraph methods in solver_state.rs

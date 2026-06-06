@@ -48,7 +48,7 @@ pub fn check_for_function_bool(
             term
         );
         if !solver_state.cnf_cache.var_map.contains_key(&term.uid()) {
-            let nnf_term = term.nnf(&mut solver_state.context);
+            let nnf_term = term.nnf(solver_state);
             let cnf_formula = term.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
 
             solver_state.insert_predecessor(&nnf_term, None, None, from_quantifier, None); // todo: I think its right to have a from_quantifier here
@@ -341,17 +341,17 @@ fn check_if_var_occurs_in_term(
 
 fn process_ite(term: &Term, solver_state: &mut SolverState, from_quantifier: bool) -> Option<Formula> {
     if let Ite(b, t1, t2) = term.repr() {
-        let eq1 = solver_state.solver_state.eq(term.clone(), t1.clone());
-        let imp1 = solver_state.solver_state.implies(vec![b.clone()], eq1);
+        let eq1 = solver_state.eq(term.clone(), t1.clone());
+        let imp1 = solver_state.implies(vec![b.clone()], eq1);
 
-        let eq2 = solver_state.solver_state.eq(term.clone(), t2.clone());
-        let not_b = solver_state.solver_state.not(b.clone());
-        let imp2 = solver_state.solver_state.implies(vec![not_b], eq2);
+        let eq2 = solver_state.eq(term.clone(), t2.clone());
+        let not_b = solver_state.not(b.clone());
+        let imp2 = solver_state.implies(vec![not_b], eq2);
 
-        let ite_axioms = solver_state.solver_state.and(vec![imp1, imp2]);
-        let ite_axioms_nnf = ite_axioms.nnf(&mut solver_state.solver_state);
-        solver_state.solver_state.insert_predecessor(&ite_axioms_nnf, None, None, from_quantifier, None);
-        Some(ite_axioms_nnf.cnf_tseitin(&mut solver_state.solver_state))
+        let ite_axioms = solver_state.and(vec![imp1, imp2]);
+        let ite_axioms_nnf = ite_axioms.nnf(solver_state);
+        solver_state.insert_predecessor(&ite_axioms_nnf, None, None, from_quantifier, None);
+        Some(ite_axioms_nnf.cnf_tseitin(solver_state))
     } else {
         None
     }

@@ -14,7 +14,6 @@ use crate::arithmetic::lp::{
     extract_linear_expression,
 };
 use crate::debug_println;
-use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};

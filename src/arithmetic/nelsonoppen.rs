@@ -1,7 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::egraphs::egraph::Egraph;
 use crate::solver_state::SolverState;
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::FetchSort;
@@ -10,7 +9,7 @@ use yaspar_ir::ast::{
 };
 
 pub fn nelson_oppen_clause(literal: i32, solver_state: &mut SolverState) -> Option<Term> {
-    let term = solver_state.egraph.get_term_from_lit(-literal);
+    let term = solver_state.get_term_from_lit(-literal);
     match term.repr() {
         Eq(x, y) => {
             if x.get_sort(&mut solver_state.context).to_string() == "Int"

@@ -1,25 +1,21 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
-use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent};
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
 use crate::egraphs::datastructures::{
-    Assertion, CanonicalForm, CanonicalOp, ConstructorType, DisequalTerm, Polarity::*, Predecessor,
+    CanonicalForm, CanonicalOp, DisequalTerm, Polarity::*, Predecessor,
     Quantifier, TermOption,
 };
 use crate::egraphs::proofforest::*;
 use crate::egraphs::utils::get_subterms;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, fmt_termlist};
-use sat_interface::Formula;
-use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::fmt;
-use yaspar_ir::ast::{ATerm::*, Arena, Context, FetchSort, HasArena, ObjectAllocatorExt, Str};
-use yaspar_ir::ast::{Attribute, Repr, Term, TermAllocator};
+use yaspar_ir::ast::{ATerm, ATerm::*, FetchSort};
+use yaspar_ir::ast::{Attribute, Repr, Term};
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -28,8 +24,6 @@ impl fmt::Display for Egraph {
         // Basic statistics
         writeln!(f, "Proof forest entries: {}", self.proof_forest.len())?;
         writeln!(f, "Predecessor relationships: {}", self.predecessors.len())?;
-        writeln!(f, "Assertions: {}", self.assertions.len())?;
-        writeln!(f, "Quantifiers: {}", self.quantifiers.len())?;
         writeln!(f, "Function maps: {}", self.function_maps.len())?;
 
         // Proof forest structure
@@ -188,22 +182,6 @@ impl fmt::Display for Egraph {
             }
         }
 
-        // Assertions
-        if !self.assertions.is_empty() {
-            writeln!(f, "\n=== Assertions ===")?;
-            for assertion in &self.assertions {
-                writeln!(f, "  {:?}", assertion)?;
-            }
-        }
-
-        // Quantifiers
-        if !self.quantifiers.is_empty() {
-            writeln!(f, "\n=== Quantifiers ===")?;
-            for quantifier in &self.quantifiers {
-                writeln!(f, "  {:?}", quantifier)?;
-            }
-        }
-
         writeln!(f, "=== End Egraph Summary ===")?;
         Ok(())
     }
@@ -231,12 +209,14 @@ pub struct Egraph {
     pub false_term: u64,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
     pub decision_level: usize,
+    /// keeps track of terms created by quantifier instantiation and their predecessors
+    pub predecessors_created_by_quantifiers: DeterministicHashMap<u64, DeterministicHashSet<u64>>,
+    /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()])
+    pub union_to_eclass: DeterministicHashSet<(u64, String, Vec<u64>)>,
 }
 
 impl Egraph {
-    pub fn new(mut context: Context) -> Self {
-        let tru = context.get_true();
-        let fal = context.get_false();
+    pub fn new(tru: Term, fal: Term) -> Self {
 
         Egraph {
             terms_list: vec![TermOption::None],
@@ -254,6 +234,8 @@ impl Egraph {
             true_term: tru.uid(),
             false_term: fal.uid(),
             decision_level: 0,
+            predecessors_created_by_quantifiers: DeterministicHashMap::new(),
+            union_to_eclass: DeterministicHashSet::new(),
         }
     }
 
@@ -1512,13 +1494,13 @@ impl Egraph {
             proof_parent
         );
         debug_println!(11, 0, "{}", self);
-        assert_eq!(
-            self.get_term(x).get_sort(self),
-            self.get_term(y).get_sort(self),
-            "We are comparing terms {} and {}",
-            self.get_term(x),
-            self.get_term(y)
-        );
+        // assert_eq!(
+        //     self.get_term(x).get_sort(self),
+        //     self.get_term(y).get_sort(self),
+        //     "We are comparing terms {} and {}",
+        //     self.get_term(x),
+        //     self.get_term(y)
+        // );
 
         if x_root == y_root {
             debug_println!(
@@ -1674,16 +1656,16 @@ impl Egraph {
                     .map(|x| -self.make_eq(x.0, x.1))
                     .collect();
                 model_terms.push(-disequality.diseq_lit);
-                debug_println!(
-                    7,
-                    1,
-                    "Contradiction found [3]: {:?} [{:?}]",
-                    model_terms
-                        .iter()
-                        .map(|x| self.get_term_from_lit(*x))
-                        .collect::<Vec<_>>(),
-                    model_terms
-                );
+                // debug_println!(
+                //     7,
+                //     1,
+                //     "Contradiction found [3]: {:?} [{:?}]",
+                //     model_terms
+                //         .iter()
+                //         .map(|x| self.get_term_from_lit(*x))
+                //         .collect::<Vec<_>>(),
+                //     model_terms
+                // );
                 return Some(vec![model_terms]); // Return negated model as the contradiction explanation (todo: ideally would want to have a way to specify this is a model to the thing we pass to, but this is not possible at least with our current setup)
             } else {
                 debug_println!(16, 0, "{}", self);
@@ -2125,6 +2107,126 @@ impl Egraph {
         };
         let new_proof_parent = proof_parent.set_disequalities(disequalities);
         self.proof_forest[vertex as usize] = new_proof_parent;
+    }
+
+    /// E-matching: given a partial assignment and trigger-term pairs, find all
+    /// satisfying substitutions. This is the core e-matching algorithm.
+    pub fn match_term<'a>(
+        &'a mut self,
+        assignment: &'a mut DeterministicHashMap<String, Term>,
+        trigger_term_pairs: Vec<(u64, Option<u64>)>,
+    ) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
+        if trigger_term_pairs.is_empty() {
+            return vec![(assignment.clone(), 0)];
+        }
+        let (trigger, term) = trigger_term_pairs[0];
+        let trigger_term = &self.get_term(trigger);
+        match trigger_term.repr() {
+            ATerm::Global(_, _) => {
+                if term.is_none() || self.find(trigger) == self.find(term.unwrap()) {
+                    self.match_term(assignment, trigger_term_pairs[1..].to_vec())
+                } else {
+                    vec![]
+                }
+            }
+            ATerm::Constant(..) => {
+                if term.is_none() || self.find(trigger) == self.find(term.unwrap()) {
+                    self.match_term(assignment, trigger_term_pairs[1..].to_vec())
+                } else {
+                    vec![]
+                }
+            }
+            ATerm::Local(local) => {
+                match assignment.get(&local.symbol.to_string()) {
+                    Option::None => {
+                        // TODO: sort checking removed (needs Context)
+                        assignment.insert(local.symbol.to_string(), self.get_term(term.unwrap()));
+                        let new_assignments =
+                            self.match_term(assignment, trigger_term_pairs[1..].to_vec());
+                        new_assignments
+                            .iter()
+                            .map(|(a, d)| (a.clone(), usize::max(*d, 0)))
+                            .collect::<Vec<_>>()
+                    }
+                    Some(v) if self.find(v.uid()) == self.find(term.unwrap()) => {
+                        self.match_term(assignment, trigger_term_pairs[1..].to_vec())
+                    }
+                    Some(_) => {
+                        vec![]
+                    }
+                }
+            }
+            ATerm::App(func, args, _) => {
+                let func_name = func.id_str();
+                let args_ref = args.iter().collect::<Vec<_>>();
+                self.find_assignments_on_term(
+                    term,
+                    func_name,
+                    args_ref,
+                    trigger_term_pairs,
+                    assignment,
+                )
+            }
+            ATerm::Ite(b, t1, t2) => self.find_assignments_on_term(
+                term,
+                &"ite".to_string(),
+                vec![b, t1, t2],
+                trigger_term_pairs,
+                assignment,
+            ),
+            _ => panic!(
+                "Trigger term {} is not an App, ITE or variable",
+                trigger_term
+            ),
+        }
+    }
+
+    /// Given a function name and arguments, find all matching applications in the egraph.
+    fn find_assignments_on_term(
+        &mut self,
+        term: Option<u64>,
+        func_name: &String,
+        args: Vec<&Term>,
+        trigger_term_pairs: Vec<(u64, Option<u64>)>,
+        assignment: &mut DeterministicHashMap<String, Term>,
+    ) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
+        let mut list_assignments = Vec::new();
+
+        let function_terms = self.function_maps.get(func_name);
+        if function_terms.is_none() {
+            return vec![];
+        }
+
+        let function_terms = function_terms.unwrap().clone();
+        let mut considered_function_terms = DeterministicHashSet::default();
+
+        let term_root = term.map(|t| self.find(t));
+        for (i, subterms) in function_terms {
+            assert!(subterms.len() == args.len());
+
+            let i_root = self.find(i);
+            if term_root.is_none() || term_root.unwrap() == i_root {
+                let subterms_canonical = subterms.iter().map(|s| self.find(*s)).collect::<Vec<_>>();
+
+                if considered_function_terms.contains(&subterms_canonical) {
+                    continue;
+                }
+                considered_function_terms.insert(subterms_canonical);
+
+                let mut new_pairs = args
+                    .iter()
+                    .zip(subterms.iter())
+                    .map(|(a, s)| (a.uid(), Some(*s)))
+                    .collect::<Vec<_>>();
+                new_pairs.extend(trigger_term_pairs[1..].to_vec());
+                let new_assignments = self.match_term(&mut assignment.clone(), new_pairs);
+
+                list_assignments.extend(
+                    new_assignments.iter().map(|(a, _)| (a.clone(), 0)),
+                );
+            }
+        }
+        list_assignments
     }
 }
 
