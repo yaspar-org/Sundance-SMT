@@ -268,13 +268,18 @@ impl Egraph {
     /// Register a single term in the egraph (non-recursive).
     /// Sets up terms_list, proof_forest, predecessors, function_maps for this term.
     /// Returns true if the term was already registered.
-    pub fn register_term(
-        &mut self,
-        term: &Term,
-        parent: Option<u64>,
-        from_quantifier: bool,
-    ) -> bool {
+    /// Register a term and all its subterms recursively.
+    /// Sets up terms_list, proof_forest, function_maps, and predecessor edges.
+    /// For quantifier bodies, subterms are added as Uninitialized (no predecessors).
+    /// If decision_level > 0, also tracks predecessors_created_by_quantifiers
+    /// and calls find_and_union_to_eclass.
+    pub fn register_term(&mut self, term: &Term) {
+        self.register_term_inner(term, None);
+    }
+
+    fn register_term_inner(&mut self, term: &Term, parent: Option<u64>) {
         let num = term.uid();
+        let from_quantifier = self.decision_level > 0;
 
         // Resize storage if needed
         while self.terms_list.len() <= num as usize {
@@ -334,9 +339,9 @@ impl Egraph {
             }
         }
 
-        // Check if already inserted
+        // Check if already inserted — early return
         if let TermOption::Some(_) = &self.terms_list[num as usize] {
-            return true;
+            return;
         }
 
         // Add the term
@@ -349,8 +354,11 @@ impl Egraph {
             children: DeterministicHashSet::new(),
         };
 
-        // Add to function_maps for App terms
-        if let App(func, subterms, ..) = term.repr() {
+        // Get operator and subterms (handles App, Ite, etc.)
+        let (func, subterms) = get_subterms(term);
+
+        // Add to function_maps if it has an operator
+        if !func.is_empty() {
             let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
             self.function_maps
                 .entry(func.to_string())
@@ -358,16 +366,26 @@ impl Egraph {
                 .push((num, subterms_u64));
         }
 
-        // Add to function_maps for Ite terms
-        if let Ite(b, t1, t2) = term.repr() {
-            let subterms_u64 = vec![b.uid(), t1.uid(), t2.uid()];
-            self.function_maps
-                .entry("ite".to_string())
-                .or_default()
-                .push((num, subterms_u64));
+        // For quantifier terms, add subterms as Uninitialized only
+        if let Exists(_, _) | Forall(_, _) = term.repr() {
+            for subterm in &subterms {
+                self.add_to_terms_list(subterm);
+            }
+            return;
         }
 
-        false
+        // Recursively register subterms with predecessor edges
+        for subterm in &subterms {
+            self.register_term_inner(subterm, Some(num));
+        }
+
+        // If from quantifier instantiation, find and merge with existing congruent terms
+        if from_quantifier && !subterms.is_empty() {
+            let subterms_cloned: Vec<u64> = subterms.iter().map(|x| x.uid()).collect();
+            self.find_and_union_to_eclass(num, func.to_string(), subterms_cloned.clone());
+            self.union_to_eclass
+                .insert((num, func.to_string(), subterms_cloned));
+        }
     }
 
     /// Add a term to terms_list as Uninitialized (for quantifier body subterms).

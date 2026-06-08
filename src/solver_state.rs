@@ -206,17 +206,29 @@ impl SolverState {
             .contains_recursive_datatype(&self.context)
     }
 
-    /// Solver-level recursive term registration.
-    /// Walks the term tree, does solver-specific bookkeeping at each node
-    /// (arithmetic tracking, quantifier registration), then registers each
-    /// term in the egraph via register_term.
+    /// Solver-level term registration.
+    /// Walks the term tree for solver-specific bookkeeping (arithmetic tracking,
+    /// quantifier registration), then delegates to egraph.register_term which
+    /// recursively registers all subterms with predecessor edges.
     pub fn insert_predecessor(
         &mut self,
         term: &Term,
-        parent: Option<u64>,
+        _parent: Option<u64>,
         guard: Option<u64>,
         from_quantifier: bool,
     ) {
+        use crate::egraphs::utils::get_subterms;
+
+        // Walk the term tree for solver-level bookkeeping
+        self.solver_walk_term(term, guard);
+
+        // Register the term (and all subterms recursively) in the egraph
+        self.egraph.register_term(term);
+    }
+
+    /// Walk the term tree for solver-level bookkeeping only.
+    /// Tracks arithmetic terms and registers quantifiers.
+    fn solver_walk_term(&mut self, term: &Term, guard: Option<u64>) {
         use crate::egraphs::utils::get_subterms;
 
         let num = term.uid();
@@ -228,13 +240,7 @@ impl SolverState {
             }
         }
 
-        // Register this term in the egraph (non-recursive, single term)
-        let previously_inserted = self.egraph.register_term(term, parent, from_quantifier);
-        if previously_inserted {
-            return;
-        }
-
-        // Quantifier registration: if this term is a forall/exists, parse and register it
+        // Quantifier registration
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
             if let Annotated(inner_term, attrs) = middle_term.repr() {
                 let mut trigger_ids = vec![];
@@ -263,27 +269,14 @@ impl SolverState {
                     skolemized: false,
                 });
             }
-
-            // For quantifier terms, add subterms to terms_list only (not as predecessors)
-            let (_, subterms) = get_subterms(term);
-            for subterm in &subterms {
-                self.egraph.add_to_terms_list(subterm);
-            }
+            // Don't recurse into quantifier bodies for solver bookkeeping
             return;
         }
 
-        // Recursively insert subterms
-        let (func, subterms) = get_subterms(term);
+        // Recurse into subterms
+        let (_, subterms) = get_subterms(term);
         for subterm in &subterms {
-            self.insert_predecessor(subterm, Some(num), None, from_quantifier);
-        }
-
-        // If from quantifier instantiation, try to find and merge with existing congruent terms
-        if from_quantifier && !subterms.is_empty() {
-            let subterms_cloned: Vec<u64> = subterms.iter().map(|x| x.uid()).collect();
-            self.egraph.find_and_union_to_eclass(num, func.to_string(), subterms_cloned.clone());
-            self.egraph.union_to_eclass
-                .insert((num, func.to_string(), subterms_cloned));
+            self.solver_walk_term(subterm, None);
         }
     }
 }
