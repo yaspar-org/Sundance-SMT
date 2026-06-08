@@ -1029,6 +1029,53 @@ impl Egraph {
         Some(final_proof)
     }
 
+    /// Assert t1 = t2 at the current decision level.
+    /// Performs congruence closure. Returns a conflict if a disequality is violated.
+    pub fn assert_equal(&mut self, t1: u64, t2: u64, level: usize) -> EgraphResult<u64> {
+        let fixed = level == 0;
+        let from_quantifier = level > 0;
+        let proof_parent = ProofForestEdge::Equality {
+            size: 0,
+            term: Some((t1, t2)),
+            parent: 0,
+            child: 0,
+            disequalities: DeterministicHashMap::new(),
+            level,
+            hash: self.predecessor_hash,
+            children: DeterministicHashSet::new(),
+        };
+        self.cc_union(t1, t2, proof_parent, level, fixed, from_quantifier)
+    }
+
+    /// Assert t1 ≠ t2 at the current decision level.
+    /// Returns a conflict if t1 and t2 are already in the same equivalence class.
+    pub fn assert_disequal(&mut self, t1: u64, t2: u64, diseq_lit: i32, level: usize) -> EgraphResult<u64> {
+        let mut tracker = ProofTracker::new();
+        if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
+            return EgraphResult::with_conflict(Conflict {
+                equalities,
+                disequality: (t1, t2),
+                diseq_lit,
+            });
+        }
+        let hash = self.predecessor_hash;
+        self.add_disequality(t1, t2, diseq_lit, level, hash);
+        EgraphResult::ok()
+    }
+
+    /// Assert all terms are pairwise distinct at the current decision level.
+    pub fn assert_distinct(&mut self, terms: &[u64], diseq_lit: i32, level: usize) -> EgraphResult<u64> {
+        for i in 0..terms.len() {
+            for j in i + 1..terms.len() {
+                let result = self.assert_disequal(terms[i], terms[j], diseq_lit, level);
+                if result.conflict.is_some() {
+                    return result;
+                }
+            }
+        }
+        EgraphResult::ok()
+    }
+
     /// Undo all egraph operations at levels strictly greater than `level`.
     pub fn backtrack_to(&mut self, level: usize) {
         self.predecessor_hash += 1;
