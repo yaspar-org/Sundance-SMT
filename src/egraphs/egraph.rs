@@ -214,10 +214,6 @@ pub struct Egraph {
     pub predecessors_created_by_quantifiers: DeterministicHashMap<u64, DeterministicHashSet<u64>>,
     /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()])
     pub union_to_eclass: DeterministicHashSet<(u64, String, Vec<u64>)>,
-    /// Watched equalities: (min(t1,t2), max(t1,t2)) → lit to propagate when t1 ≡ t2
-    pub eq_watches: DeterministicHashMap<(u64, u64), i32>,
-    /// Watched boolean terms: term → lit to propagate when term ≡ true (negate for false)
-    pub bool_watches: DeterministicHashMap<u64, i32>,
 }
 
 impl Egraph {
@@ -241,56 +237,10 @@ impl Egraph {
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
             union_to_eclass: DeterministicHashSet::new(),
-            eq_watches: DeterministicHashMap::new(),
-            bool_watches: DeterministicHashMap::new(),
         }
     }
 
     /// Register an equality watch: when t1 ≡ t2, propagate lit.
-    /// Key is sorted so (min, max) for canonical lookup.
-    pub fn register_eq(&mut self, t1: u64, t2: u64, lit: i32) {
-        let key = if t1 < t2 { (t1, t2) } else { (t2, t1) };
-        self.eq_watches.insert(key, lit);
-    }
-
-    /// Register a boolean term watch: when term ≡ true, propagate lit; when ≡ false, propagate -lit.
-    pub fn register_boolean_term(&mut self, term: u64, lit: i32) {
-        self.bool_watches.insert(term, lit);
-    }
-
-    /// Egraph-level make_eq: look up the SAT literal for an equality between x and y.
-    /// Uses eq_watches and bool_watches (registered by the solver during preprocessing).
-    pub fn make_eq(&self, x: u64, y: u64) -> i32 {
-        if (x == self.false_term && y == self.true_term)
-            || (x == self.true_term && y == self.false_term)
-        {
-            // true = false → look up literal for false
-            *self.bool_watches.get(&self.false_term).unwrap_or(&0)
-        } else if (x == self.true_term && y == self.true_term)
-            || (x == self.false_term && y == self.false_term)
-        {
-            // true = true → look up literal for true
-            *self.bool_watches.get(&self.true_term).unwrap_or(&0)
-        } else if x == self.true_term {
-            *self.bool_watches.get(&y).unwrap_or(&0)
-        } else if y == self.true_term {
-            *self.bool_watches.get(&x).unwrap_or(&0)
-        } else if x == self.false_term {
-            -(*self.bool_watches.get(&y).unwrap_or(&0))
-        } else if y == self.false_term {
-            -(*self.bool_watches.get(&x).unwrap_or(&0))
-        } else {
-            let key = if x < y { (x, y) } else { (y, x) };
-            *self.eq_watches.get(&key).unwrap_or(&0)
-        }
-    }
-
-    // fn cnf_env(&mut self) -> CNFEnv<'_> {
-    //     CNFEnv {
-    //         context: &mut self.context,
-    //         cache: &mut self.cnf_cache,
-    //     }
-    // }
 
     /// Returns the u64 corresponding to a given lit with the correct polarity
     // TODO: get_u64_from_lit_with_polarity, get_lit_from_u64, get_lit_from_u64_safe,
@@ -1639,7 +1589,7 @@ impl Egraph {
                             children: DeterministicHashSet::new(),
                         }; // TODO: I can't have a child of -1 anymore, but I think doing it like this is correct
 
-                        let sub_result = self.union_process_assignment(
+                        let sub_result = self.cc_union(
                             *canonical_form_u,
                             pred_predecessor,
                             proof_parent,
@@ -1650,7 +1600,6 @@ impl Egraph {
                         if sub_result.conflict.is_some() {
                             return sub_result;
                         }
-                        result.propagations.extend(sub_result.propagations);
                     }
                 }
             }
@@ -1665,31 +1614,6 @@ impl Egraph {
         result
     }
 
-    /// Called by union_predecessors when two congruent predecessors are discovered.
-    /// Checks eq_watches for propagation, then unions the two terms.
-    pub(crate) fn union_process_assignment(
-        &mut self,
-        x: u64,
-        y: u64,
-        proof_parent: ProofForestEdge,
-        level: usize,
-        fixed: bool,
-        from_quantifier: bool,
-    ) -> EgraphResult<u64> {
-        // Check if (x, y) has a registered equality watch — if so, propagate it
-        let key = if x < y { (x, y) } else { (y, x) };
-        let propagation = self.eq_watches.get(&key).copied();
-
-        // Union the two terms
-        let mut result = self.cc_union(x, y, proof_parent, level, fixed, from_quantifier);
-
-        // Add propagation if the equality is watched
-        if let Some(lit) = propagation {
-            result.propagations.push(lit);
-        }
-
-        result
-    }
 
     /// Make vertex the root of its proof-forest tree.
     pub(crate) fn make_root(&mut self, vertex: u64, proof_parent: ProofForestEdge) {
