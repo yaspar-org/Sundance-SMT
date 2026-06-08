@@ -85,38 +85,38 @@ fn main() -> Result<(), String> {
         ));
     }
 
-    let global_names = egraph.context.all_defined_symbols();
+    let global_names = solver_state.context.all_defined_symbols();
     let mut nnf_terms = vec![];
     for assert in assertions {
         debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
 
         // inline the let bindings
         let expanded_term = assert
-            .let_elim(&mut egraph.context)
-            .gsubst(global_names.clone(), &mut egraph.context);
+            .let_elim(&mut solver_state.context)
+            .gsubst(global_names.clone(), &mut solver_state.context);
         debug_println!(10, 0, "Expanded form: {}", expanded_term);
 
         let skolemized_term = expanded_term;
 
-        let nnf_term = skolemized_term.nnf(&mut egraph);
+        let nnf_term = skolemized_term.nnf(&mut solver_state);
         debug_println!(
             12,
             0,
             "NNF form: {} with hash {}",
             nnf_term,
-            egraph.predecessor_hash
+            solver_state.egraph.predecessor_hash
         );
 
         nnf_terms.push(nnf_term.clone());
 
-        egraph.insert_predecessor(&nnf_term, None, None, false, None);
+        solver_state.insert_predecessor(&nnf_term, None, None, false, None);
 
         debug_println!(4, 0, "We have the nnf term {}", nnf_term);
 
         // Convert to CNF (Conjunctive Normal Form) using Sundance implementation
         // using tseitin transformation because if we have (and true b), we
         // want (and true b) <-> true \land b, not just the forwards direction
-        let cnf_formula = nnf_term.cnf_tseitin(&mut egraph);
+        let cnf_formula = nnf_term.cnf_tseitin(&mut solver_state);
 
         debug_println!(4, 0, "We have the cnf formula {}", cnf_formula);
 
@@ -131,23 +131,23 @@ fn main() -> Result<(), String> {
     }
 
     // save the sorts and symbol table for the proof file
-    let sorts = egraph.context.expose_sorts().clone();
-    let symbol_table = egraph.context.expose_symbol_table().clone();
+    let sorts = solver_state.context.expose_sorts().clone();
+    let symbol_table = solver_state.context.expose_symbol_table().clone();
 
     debug_println!(
         6,
         0,
         "before BOOL: We have the var_map {:?}",
-        egraph.cnf_cache.var_map
+        solver_state.cnf_cache.var_map
     );
 
     let mut boolean_dt_constraints = vec![];
 
-    // have to do this as a separate loop because `check_for_function_bool` uses egraph.context
+    // have to do this as a separate loop because `check_for_function_bool` uses solver_state.context
     // somewhat inefficient especially since we have to clone nnf_term, but I couldn't come up with a
     // better way to do this
     for nnf_term in nnf_terms {
-        let additional_constraints = check_for_function_bool(&nnf_term, &mut egraph, false, args.ddsmt, args.lazy_dt);
+        let additional_constraints = check_for_function_bool(&nnf_term, &mut solver_state, false, args.ddsmt, args.lazy_dt);
         boolean_dt_constraints.extend(additional_constraints);
     }
 
@@ -172,15 +172,15 @@ fn main() -> Result<(), String> {
             .iter()
             .map(|x| x
                 .iter()
-                .map(|y| egraph.get_term_from_lit(*y))
+                .map(|y| solver_state.get_term_from_lit(*y))
                 .collect::<Vec<_>>())
             .collect::<Vec<_>>()
     );
 
-    let quantifiers = !egraph.quantifiers.is_empty();
+    let quantifiers = !solver_state.quantifiers.is_empty();
 
     let (return_value, stats) = cdcl_decision_procedure(
-        &mut egraph,
+        &mut solver_state,
         prop_skeleton,
         boolean_dt_constraints,
         args.proof,
