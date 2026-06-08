@@ -113,18 +113,22 @@ pub trait EgraphTrait {
     ) -> EgraphResult<Self::TermId>;
 
     /// Assert `t1 ≠ t2` at the given decision level.
+    /// `lit` is the SAT literal that caused this disequality (for conflict reporting).
     /// Returns a conflict if `t1` and `t2` are already in the same equivalence class.
     fn assert_disequal(
         &mut self,
         t1: Self::TermId,
         t2: Self::TermId,
+        lit: Lit,
         level: usize,
     ) -> EgraphResult<Self::TermId>;
 
     /// Assert all terms in `terms` are pairwise distinct at the given decision level.
+    /// `lit` is the SAT literal for the distinct assertion.
     fn assert_distinct(
         &mut self,
         terms: &[Self::TermId],
+        lit: Lit,
         level: usize,
     ) -> EgraphResult<Self::TermId>;
 

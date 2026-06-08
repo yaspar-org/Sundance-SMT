@@ -1999,3 +1999,107 @@ fn check_quantifier_validity_helper(
         }
     }
 }
+
+use crate::egraphs::traits::{EgraphTrait, MatchResult};
+
+impl EgraphTrait for Egraph {
+    type Op = String;
+    type TermId = u64;
+
+    fn set_bool_constants(&mut self, true_id: Self::TermId, false_id: Self::TermId) {
+        self.true_term = true_id;
+        self.false_term = false_id;
+    }
+
+    fn register_term(
+        &mut self,
+        _term: Self::TermId,
+        _op: Self::Op,
+        _children: &[Self::TermId],
+        _is_constant: bool,
+    ) {
+        // TODO: trait-compatible register_term (takes IDs, not &Term)
+        // For now, registration happens via the &Term-based register_term method
+        // called from SolverState::insert_predecessor.
+    }
+
+    fn register_eq(&mut self, _t1: Self::TermId, _t2: Self::TermId, _lit: Lit) {
+        // TODO: watch-based equality propagation (future optimization)
+    }
+
+    fn register_boolean_term(
+        &mut self,
+        _term: Self::TermId,
+        _op: Self::Op,
+        _children: &[Self::TermId],
+        _lit: Lit,
+    ) {
+        // TODO: watch-based boolean propagation (future optimization)
+    }
+
+    fn assert_equal(
+        &mut self,
+        t1: Self::TermId,
+        t2: Self::TermId,
+        level: usize,
+    ) -> EgraphResult<Self::TermId> {
+        self.assert_equal(t1, t2, level)
+    }
+
+    fn assert_disequal(
+        &mut self,
+        t1: Self::TermId,
+        t2: Self::TermId,
+        lit: Lit,
+        level: usize,
+    ) -> EgraphResult<Self::TermId> {
+        self.assert_disequal(t1, t2, lit, level)
+    }
+
+    fn assert_distinct(
+        &mut self,
+        terms: &[Self::TermId],
+        lit: Lit,
+        level: usize,
+    ) -> EgraphResult<Self::TermId> {
+        self.assert_distinct(terms, lit, level)
+    }
+
+    fn find(&self, term: Self::TermId) -> Self::TermId {
+        self.find(term)
+    }
+
+    fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool {
+        self.find(t1) == self.find(t2)
+    }
+
+    fn match_triggers(
+        &self,
+        _triggers: &[(Self::Op, Vec<Option<Self::TermId>>)],
+    ) -> Vec<Vec<MatchResult<Self::TermId>>> {
+        // TODO: implement trait-compatible match_triggers
+        // For now, e-matching is done via the match_term method called from quantifier.rs
+        vec![]
+    }
+
+    fn backtrack_to(&mut self, level: usize) {
+        self.backtrack_to(level)
+    }
+
+    fn make_decision(&self, _assignments: &[i32]) -> i32 {
+        0
+    }
+
+    fn make_decision_lit(&self, lit: Lit, _assignments: &[i32]) -> Lit {
+        lit
+    }
+
+    fn explain_equality(
+        &self,
+        t1: Self::TermId,
+        t2: Self::TermId,
+    ) -> Option<Vec<(Self::TermId, Self::TermId)>> {
+        let mut tracker = ProofTracker::new();
+        self.leastcommonancestor(t1, t2, &mut tracker)
+    }
+}
