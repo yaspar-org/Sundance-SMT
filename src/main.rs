@@ -74,8 +74,8 @@ fn main() -> Result<(), String> {
 
     let mut solver_state = SolverState::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
 
-    solver_state.insert_predecessor(&false_term, None, None, false, None);
-    solver_state.insert_predecessor(&true_term, None, None, false, None);
+    solver_state.insert_predecessor(&false_term, None, None, false);
+    solver_state.insert_predecessor(&true_term, None, None, false);
 
     // checking if we have any inductive datatypes -> if we do panic!
     // gets the info about our datatypes
@@ -109,7 +109,7 @@ fn main() -> Result<(), String> {
 
         nnf_terms.push(nnf_term.clone());
 
-        solver_state.insert_predecessor(&nnf_term, None, None, false, None);
+        solver_state.insert_predecessor(&nnf_term, None, None, false);
 
         debug_println!(4, 0, "We have the nnf term {}", nnf_term);
 

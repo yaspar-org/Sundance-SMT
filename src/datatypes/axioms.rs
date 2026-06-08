@@ -157,7 +157,7 @@ fn learn_exactly_one_tester_clause(
             App(f, _, _) | Global(f, _) if *f.id_str() == *ctor_name => {
                 debug_println!(12, 0, "TESTER Constructor CASE");
                 let tester_app_nnf = tester_app.nnf(solver_state);
-                solver_state.insert_predecessor(&tester_app_nnf, None, None, from_quantifier, None);
+                solver_state.insert_predecessor(&tester_app_nnf, None, None, from_quantifier);
                 let tester_app_cnf = tester_app_nnf.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
                 debug_println!(25, 10, "(assert {})", tester_app);
                 vector.extend(tester_app_cnf);
@@ -175,7 +175,7 @@ fn learn_exactly_one_tester_clause(
     };
     debug_println!(12, 0, "TESTER OR CASE");
     debug_println!(25, 10, "(assert {})", tester_or);
-    solver_state.insert_predecessor(&tester_or, None, None, from_quantifier, None);
+    solver_state.insert_predecessor(&tester_or, None, None, from_quantifier);
     let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
     vector
@@ -250,7 +250,7 @@ pub fn learn_ctor_selector_clauses(
     let eq = solver_state.eq(term.clone(), ctor_app);
 
     let eq_nnf = eq.nnf(solver_state);
-    solver_state.insert_predecessor(&eq_nnf, None, None, true, None);
+    solver_state.insert_predecessor(&eq_nnf, None, None, true);
 
     // note that additioanl constraints are needed for `datatypes/ctor_sel_term_additional_dt_constraints3.smt2`
     let mut vector = check_for_function_bool(&eq_nnf, solver_state, false, ddsmt, lazy_dt);
@@ -262,7 +262,7 @@ pub fn learn_ctor_selector_clauses(
     let imp = solver_state.implies(vec![tester_app], eq);
     debug_println!(25, 10, "(assert {})", imp);
     let imp_nnf = imp.nnf(solver_state);
-    solver_state.insert_predecessor(&imp_nnf, None, None, from_quantifier, None);
+    solver_state.insert_predecessor(&imp_nnf, None, None, from_quantifier);
     let imp_cnf = imp.cnf_tseitin(solver_state);
     let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
     vector.extend(clauses);
@@ -299,7 +299,7 @@ fn learn_selector_ctor_clause(
         let sel_eq = solver_state.eq(sel_app.clone(), sel_term.clone());
         debug_println!(25, 10, "(assert {})", sel_eq);
         let sel_eq_nnf = sel_eq.nnf(solver_state);
-        solver_state.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier, None);
+        solver_state.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier);
         let sel_eq_cnf = sel_eq.cnf_tseitin(solver_state);
         let clauses = sel_eq_cnf.into_iter().map(|c| c.0);
         vector.extend(clauses)
@@ -318,7 +318,7 @@ pub fn learn_or_not_term_tester_term(
     let not_tester_term = solver_state.not(tester_term.clone());
     let not_term = solver_state.not(term);
     let or_not_tester_not_term = solver_state.or(vec![not_tester_term, not_term]);
-    solver_state.insert_predecessor(&or_not_tester_not_term, None, None, from_quantifier, None);
+    solver_state.insert_predecessor(&or_not_tester_not_term, None, None, from_quantifier);
     let tester_cnf = or_not_tester_not_term
         .cnf_tseitin(solver_state)
         .into_iter()

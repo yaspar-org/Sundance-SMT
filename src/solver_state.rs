@@ -216,7 +216,6 @@ impl SolverState {
         parent: Option<u64>,
         guard: Option<u64>,
         from_quantifier: bool,
-        disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
     ) {
         use crate::egraphs::utils::get_subterms;
 
@@ -230,7 +229,7 @@ impl SolverState {
         }
 
         // Register this term in the egraph (non-recursive, single term)
-        let previously_inserted = self.egraph.register_term(term, parent, from_quantifier, disequalities);
+        let previously_inserted = self.egraph.register_term(term, parent, from_quantifier);
         if previously_inserted {
             return;
         }
@@ -276,7 +275,7 @@ impl SolverState {
         // Recursively insert subterms
         let (func, subterms) = get_subterms(term);
         for subterm in &subterms {
-            self.insert_predecessor(subterm, Some(num), None, from_quantifier, None);
+            self.insert_predecessor(subterm, Some(num), None, from_quantifier);
         }
 
         // If from quantifier instantiation, try to find and merge with existing congruent terms

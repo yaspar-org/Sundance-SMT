@@ -273,7 +273,6 @@ impl Egraph {
         term: &Term,
         parent: Option<u64>,
         from_quantifier: bool,
-        disequalities: Option<DeterministicHashMap<u64, DisequalTerm>>,
     ) -> bool {
         let num = term.uid();
 
@@ -343,10 +342,9 @@ impl Egraph {
         // Add the term
         self.terms_list[num as usize] = TermOption::Some(term.clone());
 
-        let new_disequalities = disequalities.unwrap_or_default();
         self.proof_forest[num as usize] = ProofForestEdge::Root {
             size: 1,
-            disequalities: new_disequalities,
+            disequalities: DeterministicHashMap::new(),
             child: 0,
             children: DeterministicHashSet::new(),
         };

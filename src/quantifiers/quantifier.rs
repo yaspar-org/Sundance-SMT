@@ -127,7 +127,7 @@ pub fn instantiate_quantifiers(
             );
 
             // note that from_quantifier is true here
-            solver_state.insert_predecessor(&skolemized_quantifier, None, None, true, None);
+            solver_state.insert_predecessor(&skolemized_quantifier, None, None, true);
             let clauses = skolemized_quantifier.cnf_tseitin(solver_state);
 
             // learning (not \forall P(x)) => P(c)
@@ -323,7 +323,7 @@ pub fn instantiate_quantifiers(
                 // this might lead to weirdness when you have equality of booleans not being represented in egraph
                 // but it should be fine. This is necessary becasue we need to look up lits
                 // todo: also might be less efficient as well because we are losing structure from original formula in the egraph
-                solver_state.insert_predecessor(&nnf_term, None, None, true, None);
+                solver_state.insert_predecessor(&nnf_term, None, None, true);
 
                 let cnf_term = nnf_term.cnf_tseitin(solver_state);
                 debug_println!(7, 0, "We have the cnf term {:?}", cnf_term);

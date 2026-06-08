@@ -51,7 +51,7 @@ pub fn check_for_function_bool(
             let nnf_term = term.nnf(solver_state);
             let cnf_formula = term.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
 
-            solver_state.insert_predecessor(&nnf_term, None, None, from_quantifier, None); // todo: I think its right to have a from_quantifier here
+            solver_state.insert_predecessor(&nnf_term, None, None, from_quantifier); // todo: I think its right to have a from_quantifier here
 
             vector.extend(cnf_formula);
             debug_println!(
@@ -137,7 +137,7 @@ pub fn check_for_function_bool(
                 if !check_if_var_occurs_in_term(&nnf_t, &var_binding_strings, solver_state, ddsmt) {
                     let equality = solver_state.eq(term.clone(), t.clone());
                     let nnf_term = equality.nnf(solver_state);
-                    solver_state.insert_predecessor(&nnf_term, None, None, from_quantifier, None);
+                    solver_state.insert_predecessor(&nnf_term, None, None, from_quantifier);
                     let cnf_formula = nnf_term
                         .cnf_tseitin(solver_state)
                         .into_iter()
@@ -350,7 +350,7 @@ fn process_ite(term: &Term, solver_state: &mut SolverState, from_quantifier: boo
 
         let ite_axioms = solver_state.and(vec![imp1, imp2]);
         let ite_axioms_nnf = ite_axioms.nnf(solver_state);
-        solver_state.insert_predecessor(&ite_axioms_nnf, None, None, from_quantifier, None);
+        solver_state.insert_predecessor(&ite_axioms_nnf, None, None, from_quantifier);
         Some(ite_axioms_nnf.cnf_tseitin(solver_state))
     } else {
         None
