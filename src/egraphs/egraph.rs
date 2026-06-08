@@ -2074,12 +2074,14 @@ impl EgraphTrait for Egraph {
     }
 
     fn match_triggers(
-        &self,
-        _triggers: &[(Self::Op, Vec<Option<Self::TermId>>)],
-    ) -> Vec<Vec<MatchResult<Self::TermId>>> {
-        // TODO: implement trait-compatible match_triggers
-        // For now, e-matching is done via the match_term method called from quantifier.rs
-        vec![]
+        &mut self,
+        trigger_term_pairs: Vec<(Self::TermId, Option<Self::TermId>)>,
+    ) -> Vec<DeterministicHashMap<String, Term>> {
+        let mut assignment = DeterministicHashMap::default();
+        self.match_term(&mut assignment, trigger_term_pairs)
+            .into_iter()
+            .map(|(subst, _depth)| subst)
+            .collect()
     }
 
     fn backtrack_to(&mut self, level: usize) {

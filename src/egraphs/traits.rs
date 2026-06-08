@@ -144,19 +144,15 @@ pub trait EgraphTrait {
 
     /// Match a multi-trigger pattern.
     ///
-    /// Each trigger is `(op, pattern)` where pattern slots are:
-    /// - `Some(t)` — must be in the same equivalence class as `t`
-    /// - `None` — wildcard (matches anything)
+    /// `trigger_term_pairs` is a list of (pattern_term_uid, optional_ground_term_uid).
+    /// - `Some(t)` means the pattern must match in the same equivalence class as `t`
+    /// - `None` means the pattern can match any term of the right function
     ///
-    /// Shared variables across trigger terms are expressed by using the same
-    /// `Some(t)` in multiple positions across different triggers.
-    ///
-    /// Returns a list of substitutions. Each substitution is a Vec of MatchResults,
-    /// one per trigger in the input, representing the concrete terms that matched.
+    /// Returns a list of substitution maps (variable name → matched term).
     fn match_triggers(
-        &self,
-        triggers: &[(Self::Op, Vec<Option<Self::TermId>>)],
-    ) -> Vec<Vec<MatchResult<Self::TermId>>>;
+        &mut self,
+        trigger_term_pairs: Vec<(Self::TermId, Option<Self::TermId>)>,
+    ) -> Vec<crate::utils::DeterministicHashMap<String, yaspar_ir::ast::Term>>;
 
     // --- Backtracking ---
 
