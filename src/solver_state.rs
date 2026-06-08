@@ -367,16 +367,22 @@ pub fn process_assignment(
             t,
             solver_state.egraph.true_term
         );
-        if let Some(negated_model) = solver_state.egraph.cc_union(
+        let union_result = solver_state.egraph.cc_union(
             *t,
             solver_state.egraph.true_term,
             res,
             level,
             fixed,
             from_quantifier,
-        ) {
-            return Some(negated_model);
-        };
+        );
+        if let Some(conflict) = union_result.conflict {
+            let mut model_terms: Vec<i32> = conflict.equalities
+                .iter()
+                .map(|(a, b)| -solver_state.make_eq(*a, *b))
+                .collect();
+            model_terms.push(solver_state.make_eq(conflict.disequality.0, conflict.disequality.1));
+            return Some(vec![model_terms]);
+        }
     }
 
     if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&-lit) {
@@ -402,15 +408,21 @@ pub fn process_assignment(
             t,
             solver_state.egraph.false_term
         );
-        if let Some(negated_model) = solver_state.egraph.cc_union(
+        let union_result = solver_state.egraph.cc_union(
             *t,
             solver_state.egraph.false_term,
             res,
             level,
             fixed,
             from_quantifier,
-        ) {
-            return Some(negated_model);
+        );
+        if let Some(conflict) = union_result.conflict {
+            let mut model_terms: Vec<i32> = conflict.equalities
+                .iter()
+                .map(|(a, b)| -solver_state.make_eq(*a, *b))
+                .collect();
+            model_terms.push(solver_state.make_eq(conflict.disequality.0, conflict.disequality.1));
+            return Some(vec![model_terms]);
         };
     }
 
@@ -509,7 +521,17 @@ pub fn process_assignment(
                     children: DeterministicHashSet::new(),
                 }
             };
-            solver_state.egraph.cc_union(t1, t2, reason, level, fixed, from_quantifier)
+            let union_result = solver_state.egraph.cc_union(t1, t2, reason, level, fixed, from_quantifier);
+            if let Some(conflict) = union_result.conflict {
+                let mut model_terms: Vec<i32> = conflict.equalities
+                    .iter()
+                    .map(|(a, b)| -solver_state.make_eq(*a, *b))
+                    .collect();
+                model_terms.push(solver_state.make_eq(conflict.disequality.0, conflict.disequality.1));
+                Some(vec![model_terms])
+            } else {
+                None
+            }
         }
         Assertion::Disequality {
             t1,
