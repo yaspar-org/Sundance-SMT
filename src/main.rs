@@ -77,6 +77,7 @@ fn main() -> Result<(), String> {
     solver_state.insert_predecessor(&false_term, None, None, false);
     solver_state.insert_predecessor(&true_term, None, None, false);
 
+
     // checking if we have any inductive datatypes -> if we do panic!
     // gets the info about our datatypes
     if let Some(dt) = solver_state.check_for_recursive_datatypes() {

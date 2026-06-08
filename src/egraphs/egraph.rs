@@ -267,19 +267,14 @@ impl Egraph {
 
     /// Register a single term in the egraph (non-recursive).
     /// Sets up terms_list, proof_forest, predecessors, function_maps for this term.
+    /// Register a single term (non-recursive). Children must already be registered.
+    /// Sets up terms_list, proof_forest, function_maps, and adds this term as a
+    /// predecessor of each of its children.
+    /// If `dynamic` is true, calls find_and_union_to_eclass to merge with any
+    /// existing congruent term (needed for quantifier instantiation and datatype axioms).
     /// Returns true if the term was already registered.
-    /// Register a term and all its subterms recursively.
-    /// Sets up terms_list, proof_forest, function_maps, and predecessor edges.
-    /// For quantifier bodies, subterms are added as Uninitialized (no predecessors).
-    /// If decision_level > 0, also tracks predecessors_created_by_quantifiers
-    /// and calls find_and_union_to_eclass.
-    pub fn register_term(&mut self, term: &Term) {
-        self.register_term_inner(term, None);
-    }
-
-    fn register_term_inner(&mut self, term: &Term, parent: Option<u64>) {
+    pub fn register_term(&mut self, term: &Term, dynamic: bool) -> bool {
         let num = term.uid();
-        let from_quantifier = self.decision_level > 0;
 
         // Resize storage if needed
         while self.terms_list.len() <= num as usize {
@@ -300,48 +295,9 @@ impl Egraph {
             );
         }
 
-        // Add predecessor entry if parent is given
-        if let Some(parent_num) = parent {
-            let predecessor = Predecessor {
-                level: 0,
-                hash: 0,
-                predecessor: parent_num,
-                inner_term: num,
-            };
-            self.predecessors[num as usize]
-                .entry(parent_num)
-                .or_insert(predecessor);
-
-            if from_quantifier {
-                let (root, level, hash) = self.find_with_level(num, 0, 0);
-                let root_predecessor = Predecessor {
-                    level,
-                    hash,
-                    predecessor: parent_num,
-                    inner_term: num,
-                };
-
-                match self.predecessors_created_by_quantifiers.get_mut(&num) {
-                    Some(parents) => {
-                        parents.insert(parent_num);
-                    }
-                    None => {
-                        let mut parents = DeterministicHashSet::new();
-                        parents.insert(parent_num);
-                        self.predecessors_created_by_quantifiers
-                            .insert(num, parents);
-                    }
-                };
-
-                self.predecessors[root as usize]
-                    .entry(parent_num)
-                    .or_insert(root_predecessor);
-            }
-        }
-
-        // Check if already inserted — early return
+        // Check if already inserted
         if let TermOption::Some(_) = &self.terms_list[num as usize] {
-            return;
+            return true;
         }
 
         // Add the term
@@ -354,7 +310,7 @@ impl Egraph {
             children: DeterministicHashSet::new(),
         };
 
-        // Get operator and subterms (handles App, Ite, etc.)
+        // Get operator and subterms
         let (func, subterms) = get_subterms(term);
 
         // Add to function_maps if it has an operator
@@ -366,26 +322,55 @@ impl Egraph {
                 .push((num, subterms_u64));
         }
 
-        // For quantifier terms, add subterms as Uninitialized only
-        if let Exists(_, _) | Forall(_, _) = term.repr() {
-            for subterm in &subterms {
-                self.add_to_terms_list(subterm);
-            }
-            return;
-        }
-
-        // Recursively register subterms with predecessor edges
+        // Add this term as a predecessor of each child
         for subterm in &subterms {
-            self.register_term_inner(subterm, Some(num));
+            let child_uid = subterm.uid();
+            let predecessor = Predecessor {
+                level: 0,
+                hash: 0,
+                predecessor: num,
+                inner_term: child_uid,
+            };
+            self.predecessors[child_uid as usize]
+                .entry(num)
+                .or_insert(predecessor);
+
+            if dynamic {
+                let (root, level, hash) = self.find_with_level(child_uid, 0, 0);
+                let root_predecessor = Predecessor {
+                    level,
+                    hash,
+                    predecessor: num,
+                    inner_term: child_uid,
+                };
+
+                match self.predecessors_created_by_quantifiers.get_mut(&child_uid) {
+                    Some(parents) => {
+                        parents.insert(num);
+                    }
+                    None => {
+                        let mut parents = DeterministicHashSet::new();
+                        parents.insert(num);
+                        self.predecessors_created_by_quantifiers
+                            .insert(child_uid, parents);
+                    }
+                };
+
+                self.predecessors[root as usize]
+                    .entry(num)
+                    .or_insert(root_predecessor);
+            }
         }
 
-        // If from quantifier instantiation, find and merge with existing congruent terms
-        if from_quantifier && !subterms.is_empty() {
+        // If dynamic, find and merge with existing congruent terms
+        if dynamic && !subterms.is_empty() {
             let subterms_cloned: Vec<u64> = subterms.iter().map(|x| x.uid()).collect();
             self.find_and_union_to_eclass(num, func.to_string(), subterms_cloned.clone());
             self.union_to_eclass
                 .insert((num, func.to_string(), subterms_cloned));
         }
+
+        false
     }
 
     /// Add a term to terms_list as Uninitialized (for quantifier body subterms).
@@ -1332,6 +1317,7 @@ impl Egraph {
                 return EgraphResult::with_conflict(Conflict {
                     equalities,
                     disequality: disequality.original_disequality,
+                    diseq_lit: disequality.diseq_lit,
                 });
             } else {
                 debug_println!(16, 0, "{}", self);

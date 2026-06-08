@@ -337,7 +337,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
 
         // adding the new predecessors created by quantifiers to the predecessors list
-        for (term, parents) in &self.solver_state.predecessors_created_by_quantifiers {
+        for (term, parents) in &self.solver_state.egraph.predecessors_created_by_quantifiers {
             let current_ancestor = self.solver_state.egraph.find(*term);
             // if *term == current_ancestor {
             //     continue;
@@ -385,7 +385,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // once we get to level 0, we don't need to keep track of this anymore since we have reached the bottom case
         if level == 0 {
-            self.solver_state.predecessors_created_by_quantifiers = DeterministicHashMap::new();
+            self.solver_state.egraph.predecessors_created_by_quantifiers = DeterministicHashMap::new();
         }
 
         // redoing the union_to_eclass stuff

@@ -36,9 +36,6 @@ pub struct SolverState {
     /// The core egraph (union-find, congruence closure, predecessors, backtracking).
     pub egraph: Egraph,
 
-    /// Maps u64 term UIDs to Term objects.
-    pub terms_list: Vec<TermOption>,
-
     /// Cached assertions (equality, disequality, distinct, tester).
     pub assertions: Vec<Assertion>,
 
@@ -51,17 +48,11 @@ pub struct SolverState {
     /// Tracks skolemized quantifiers.
     pub added_skolemizations: DeterministicHashSet<u64>,
 
-    /// Terms created by quantifier instantiation and their predecessors.
-    pub predecessors_created_by_quantifiers: DeterministicHashMap<u64, DeterministicHashSet<u64>>,
-
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
 
     /// Maps terms to their constructor type (for datatype theory).
     pub term_constructors: DeterministicHashMap<u64, ConstructorType>,
-
-    /// Tracks (term, func, subterms) triples for e-class union after quantifier instantiation.
-    pub union_to_eclass: DeterministicHashSet<(u64, String, Vec<u64>)>,
 
     /// Pairs of terms for which we have learnt x = y \/ x > y \/ x < y.
     pub nelson_oppen_ineq_literals: HashSet<(u64, u64)>,
@@ -97,15 +88,12 @@ impl SolverState {
 
         SolverState {
             context,
-            terms_list: vec![TermOption::None],
             assertions: vec![],
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
             added_skolemizations: DeterministicHashSet::default(),
-            predecessors_created_by_quantifiers: DeterministicHashMap::new(),
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
-            union_to_eclass: DeterministicHashSet::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
             datatype_axioms_applied: HashSet::new(),
             arithmetic_terms: vec![],
@@ -206,10 +194,9 @@ impl SolverState {
             .contains_recursive_datatype(&self.context)
     }
 
-    /// Solver-level term registration.
-    /// Walks the term tree for solver-specific bookkeeping (arithmetic tracking,
-    /// quantifier registration), then delegates to egraph.register_term which
-    /// recursively registers all subterms with predecessor edges.
+    /// Solver-level recursive term registration (bottom-up).
+    /// Recurses into subterms first, then registers this term.
+    /// This guarantees children exist before parents in the egraph.
     pub fn insert_predecessor(
         &mut self,
         term: &Term,
@@ -219,11 +206,32 @@ impl SolverState {
     ) {
         use crate::egraphs::utils::get_subterms;
 
-        // Walk the term tree for solver-level bookkeeping
-        self.solver_walk_term(term, guard);
+        // For quantifier terms, add subterms as Uninitialized only (no predecessors)
+        if let Exists(_, _) | Forall(_, _) = term.repr() {
+            let (_, subterms) = get_subterms(term);
+            for subterm in &subterms {
+                self.egraph.add_to_terms_list(subterm);
+            }
+            // Register the quantifier term itself
+            self.egraph.register_term(term, from_quantifier);
+            // Solver bookkeeping (quantifier registration)
+            self.solver_walk_term(term, guard);
+            return;
+        }
 
-        // Register the term (and all subterms recursively) in the egraph
-        self.egraph.register_term(term);
+        // Recurse into subterms first (bottom-up: children before parents)
+        let (_, subterms) = get_subterms(term);
+        for subterm in &subterms {
+            self.insert_predecessor(subterm, None, None, from_quantifier);
+        }
+
+        // Register this term in the egraph (children already exist)
+        let already_registered = self.egraph.register_term(term, from_quantifier);
+
+        // Solver-level bookkeeping only for newly registered terms
+        if !already_registered {
+            self.solver_walk_term(term, guard);
+        }
     }
 
     /// Walk the term tree for solver-level bookkeeping only.
@@ -372,7 +380,7 @@ pub fn process_assignment(
                 .iter()
                 .map(|(a, b)| -solver_state.make_eq(*a, *b))
                 .collect();
-            model_terms.push(solver_state.make_eq(conflict.disequality.0, conflict.disequality.1));
+            model_terms.push(-conflict.diseq_lit);
             return Some(vec![model_terms]);
         }
     }
@@ -413,7 +421,7 @@ pub fn process_assignment(
                 .iter()
                 .map(|(a, b)| -solver_state.make_eq(*a, *b))
                 .collect();
-            model_terms.push(solver_state.make_eq(conflict.disequality.0, conflict.disequality.1));
+            model_terms.push(-conflict.diseq_lit);
             return Some(vec![model_terms]);
         };
     }
@@ -519,7 +527,7 @@ pub fn process_assignment(
                     .iter()
                     .map(|(a, b)| -solver_state.make_eq(*a, *b))
                     .collect();
-                model_terms.push(solver_state.make_eq(conflict.disequality.0, conflict.disequality.1));
+                model_terms.push(-conflict.diseq_lit);
                 Some(vec![model_terms])
             } else {
                 None
