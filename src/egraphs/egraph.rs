@@ -1029,6 +1029,55 @@ impl Egraph {
         Some(final_proof)
     }
 
+    /// Undo all egraph operations at levels strictly greater than `level`.
+    pub fn backtrack_to(&mut self, level: usize) {
+        self.predecessor_hash += 1;
+
+        for i in level + 1..self.decision_level + 1 {
+            self.predecessor_level[i] = self.predecessor_hash;
+        }
+
+        self.decision_level = level;
+
+        // Pop proof forest backtrack stack
+        while !self.proof_forest_backtrack_stack.is_empty() {
+            let last_level = self.proof_forest_backtrack_stack.last().unwrap().0;
+            if last_level <= level {
+                break;
+            }
+            let (_, backtrack_equality, y, y_root) =
+                self.proof_forest_backtrack_stack.pop().unwrap();
+            self.proof_forest_backtrack(backtrack_equality, y, y_root);
+        }
+
+        // Re-add predecessors created by quantifiers at their new roots
+        for (term, parents) in &self.predecessors_created_by_quantifiers.clone() {
+            let current_ancestor = self.find(*term);
+            for parent in parents {
+                let predecessor = Predecessor {
+                    level,
+                    hash: self.predecessor_hash,
+                    predecessor: *parent,
+                    inner_term: *term,
+                };
+                self.predecessors[current_ancestor as usize].insert(*parent, predecessor);
+            }
+        }
+
+        // Re-do union_to_eclass
+        let union_to_eclass_info = self.union_to_eclass.clone();
+        for (term, func, subterms) in union_to_eclass_info {
+            self.find_and_union_to_eclass(term, func, subterms);
+        }
+
+        // Clear at level 0
+        if level == 0 {
+            self.predecessors_created_by_quantifiers = DeterministicHashMap::new();
+            self.union_to_eclass = DeterministicHashSet::new();
+            self.proof_forest_backtrack_stack = vec![];
+        }
+    }
+
     /// Undo a single union operation during backtracking.
     pub(crate) fn proof_forest_backtrack(
         &mut self,

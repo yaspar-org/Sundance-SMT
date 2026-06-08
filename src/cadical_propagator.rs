@@ -265,154 +265,19 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             level
         );
 
-        self.solver_state.egraph.predecessor_hash += 1;
-
-        // resetting the assignments to 0 for all levels greater than the current level
+        // Reset solver-level assignments
         for i in 1..self.assignments.len() {
             if self.assignments[i].abs() > (level + 1) as i32 {
-                debug_println!(7, 0, "We are backtracking on assignment {}", i);
                 self.assignments[i] = 0;
             }
         }
 
-        // TODO: not deactivating for rn, because important terms are getting deactivated
-        // deactivate_bits(level, self.solver_state.egraph);
-
-        for i in level + 1..self.decision_level + 1 {
-            debug_println!(
-                4,
-                1,
-                "We are updating level {} from {} to {}",
-                i,
-                self.solver_state.egraph.predecessor_level[i],
-                self.solver_state.egraph.predecessor_hash
-            );
-            self.solver_state.egraph.predecessor_level[i] = self.solver_state.egraph.predecessor_hash;
-        }
-
         self.decision_level = level;
-        self.solver_state.egraph.decision_level = level;
 
-        debug_println!(
-            16,
-            0,
-            "Before backtracking we hav the stack: {:?}",
-            self.solver_state.egraph
-                .proof_forest_backtrack_stack
-                .iter()
-                .map(|(size, edge, _, _)| (
-                    size,
-                    format!(
-                        "{} = {}",
-                        self.solver_state.egraph.get_term(get_child(edge)),
-                        self.solver_state.egraph.get_term(get_parent(edge))
-                    )
-                ))
-                .collect::<Vec<_>>()
-        );
-        // TODO: right now we are assuming only fixed literals can be assigned at level 0
-        while keep_backtracking(&self.solver_state.egraph.proof_forest_backtrack_stack, level) {
-            let (_, backtrack_equality, y, y_root) =
-                self.solver_state.egraph.proof_forest_backtrack_stack.pop().unwrap();
-            debug_println!(16, 1, "Backtracking equality: {:?}", backtrack_equality);
-            self.solver_state.egraph.proof_forest_backtrack(backtrack_equality, y, y_root)
-        }
-
-        debug_println!(
-            16,
-            0,
-            "After backtracking we have the stack: {:?}",
-            self.solver_state.egraph
-                .proof_forest_backtrack_stack
-                .iter()
-                .map(|(size, edge, _, _)| (
-                    size,
-                    format!(
-                        "{} = {}",
-                        self.solver_state.egraph.get_term(get_child(edge)),
-                        self.solver_state.egraph.get_term(get_parent(edge))
-                    )
-                ))
-                .collect::<Vec<_>>()
-        );
-
-        // adding the new predecessors created by quantifiers to the predecessors list
-        for (term, parents) in &self.solver_state.egraph.predecessors_created_by_quantifiers {
-            let current_ancestor = self.solver_state.egraph.find(*term);
-            // if *term == current_ancestor {
-            //     continue;
-            // }
-
-            for parent in parents {
-                debug_println!(
-                    16,
-                    0,
-                    "We are updating the predecessor of {} [ancestor of {}] to {} at level: {}; hash: {}",
-                    self.solver_state.egraph.get_term(current_ancestor),
-                    self.solver_state.egraph.get_term(*term),
-                    self.solver_state.egraph.get_term(*parent),
-                    level,
-                    self.solver_state.egraph.predecessor_hash
-                );
-                let predecessor = Predecessor {
-                    level,
-                    hash: self.solver_state.egraph.predecessor_hash,
-                    predecessor: *parent,
-                    inner_term: *term,
-                };
-                self.solver_state.egraph.predecessors[current_ancestor as usize].insert(*parent, predecessor);
-
-                debug_println!(
-                    11,
-                    0,
-                    "We have the predecessors of {}",
-                    self.solver_state.egraph.get_term(current_ancestor)
-                );
-                if is_important(11) {
-                    for pred in self.solver_state.egraph.predecessors[current_ancestor as usize].clone() {
-                        debug_println!(
-                            11,
-                            4,
-                            "{} with level {} and hash {}",
-                            self.solver_state.egraph.get_term(pred.1.predecessor),
-                            pred.1.level,
-                            pred.1.hash
-                        )
-                    }
-                }
-            }
-        }
-
-        // once we get to level 0, we don't need to keep track of this anymore since we have reached the bottom case
-        if level == 0 {
-            self.solver_state.egraph.predecessors_created_by_quantifiers = DeterministicHashMap::new();
-        }
-
-        // redoing the union_to_eclass stuff
-        let union_to_eclass_info = self.solver_state.egraph.union_to_eclass.clone();
-        for (term, func, subterms) in union_to_eclass_info {
-            debug_println!(
-                16,
-                0,
-                "Reunioning term {} with function {} and subterms {:?}",
-                self.solver_state.egraph.get_term(term),
-                func,
-                subterms
-                    .iter()
-                    .map(|x| self.solver_state.egraph.get_term(*x))
-                    .collect::<Vec<_>>()
-            );
-            self.solver_state.egraph.find_and_union_to_eclass(term, func, subterms);
-        }
-
-        // once we get to level 0, we don't need to keep track of this anymore since we have reached the bottom case
-        if level == 0 {
-            self.solver_state.egraph.union_to_eclass = DeterministicHashSet::new();
-            self.solver_state.egraph.proof_forest_backtrack_stack = vec![];
-        }
+        // Delegate to egraph for all egraph-internal backtracking
+        self.solver_state.egraph.backtrack_to(level);
 
         debug_println!(16, 0, "Ending backtracking at level {}", level);
-
         debug_println!(11, 0, "{}", self.solver_state.egraph);
     }
 
