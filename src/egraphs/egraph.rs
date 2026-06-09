@@ -259,21 +259,6 @@ impl Egraph {
         }
     }
 
-    pub fn get_term_ref(&self, num: u64) -> &Term {
-        match &self.terms_list[num as usize] {
-            TermOption::Some(term) | TermOption::Uninitialized(term) => term,
-            TermOption::None => panic!("called `get_term_ref` on a None value"),
-        }
-    }
-
-    pub fn get_term_safe(&self, num: u64) -> TermOption {
-        if self.terms_list.len() <= num as usize {
-            TermOption::None
-        } else {
-            self.terms_list[num as usize].clone()
-        }
-    }
-
     /// Register a single term in the egraph (non-recursive).
     /// Sets up terms_list, proof_forest, predecessors, function_maps for this term.
     /// Register a single term (non-recursive). Children must already be registered.
@@ -380,14 +365,11 @@ impl Egraph {
     }
 
     /// Extract the Op from a Term and its function name string.
-    /// Add a term to terms_list as Uninitialized (for quantifier body subterms).
-    /// Recursively adds subterms. Does not set up predecessors or function_maps.
-    pub fn add_to_terms_list(&mut self, term: &Term) {
-        let num = term.uid();
-
-        while self.terms_list.len() <= num as usize {
-            self.terms_list
-                .resize(self.terms_list.len() * 2, TermOption::None);
+    /// Ensure storage is allocated for the given term ID without fully registering it.
+    /// Used for quantifier body subterms that are opaque to the egraph.
+    pub fn ensure_capacity(&mut self, id: u64) {
+        while self.terms.len() <= id as usize {
+            self.terms.resize(self.terms.len() * 2, None);
             self.proof_forest.resize(
                 self.proof_forest.len() * 2,
                 ProofForestEdge::Root {
@@ -401,19 +383,6 @@ impl Egraph {
                 self.predecessors.len() * 2,
                 FastDeterministicHashMap::default(),
             );
-        }
-
-        match self.terms_list[num as usize] {
-            TermOption::Some(_) => return,
-            TermOption::Uninitialized(_) => return,
-            _ => {}
-        }
-
-        self.terms_list[num as usize] = TermOption::Uninitialized(term.clone());
-
-        let (_, subterms) = get_subterms(term);
-        for subterm in &subterms {
-            self.add_to_terms_list(subterm);
         }
     }
 
@@ -1772,44 +1741,36 @@ impl Egraph {
 
     /// E-matching: given a partial assignment and trigger-term pairs, find all
     /// satisfying substitutions. This is the core e-matching algorithm.
-    pub fn match_term<'a>(
-        &'a mut self,
-        assignment: &'a mut DeterministicHashMap<String, Term>,
+    /// E-matching: given a partial assignment and trigger-term pairs, find all
+    /// satisfying substitutions. Returns variable name → matched term ID.
+    pub fn match_term(
+        &mut self,
+        assignment: &mut DeterministicHashMap<String, u64>,
         trigger_term_pairs: Vec<(u64, Option<u64>)>,
-    ) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
+    ) -> Vec<DeterministicHashMap<String, u64>> {
         if trigger_term_pairs.is_empty() {
-            return vec![(assignment.clone(), 0)];
+            return vec![assignment.clone()];
         }
         let (trigger, term) = trigger_term_pairs[0];
-        let trigger_term = &self.display_term(trigger);
-        match trigger_term.repr() {
-            ATerm::Global(_, _) => {
+        let trigger_entry = self.terms[trigger as usize].as_ref().unwrap().clone();
+
+        match &trigger_entry.op {
+            Op::Constant(_) => {
                 if term.is_none() || self.find(trigger) == self.find(term.unwrap()) {
                     self.match_term(assignment, trigger_term_pairs[1..].to_vec())
                 } else {
                     vec![]
                 }
             }
-            ATerm::Constant(..) => {
-                if term.is_none() || self.find(trigger) == self.find(term.unwrap()) {
-                    self.match_term(assignment, trigger_term_pairs[1..].to_vec())
-                } else {
-                    vec![]
-                }
-            }
-            ATerm::Local(local) => {
-                match assignment.get(&local.symbol.to_string()) {
-                    Option::None => {
-                        // TODO: sort checking removed (needs Context)
-                        assignment.insert(local.symbol.to_string(), self.display_term(term.unwrap()));
+            Op::Local(name) => {
+                match assignment.get(name) {
+                    None => {
+                        assignment.insert(name.clone(), term.unwrap());
                         let new_assignments =
                             self.match_term(assignment, trigger_term_pairs[1..].to_vec());
                         new_assignments
-                            .iter()
-                            .map(|(a, d)| (a.clone(), usize::max(*d, 0)))
-                            .collect::<Vec<_>>()
                     }
-                    Some(v) if self.find(v.uid()) == self.find(term.unwrap()) => {
+                    Some(v) if self.find(*v) == self.find(term.unwrap()) => {
                         self.match_term(assignment, trigger_term_pairs[1..].to_vec())
                     }
                     Some(_) => {
@@ -1817,40 +1778,34 @@ impl Egraph {
                     }
                 }
             }
-            ATerm::App(func, args, _) => {
-                let func_name = func.id_str();
-                let args_ref = args.iter().collect::<Vec<_>>();
+            op if !trigger_entry.children.is_empty() => {
+                let func_name = op.to_function_map_key();
+                let children: Vec<u64> = trigger_entry.children.as_slice().to_vec();
                 self.find_assignments_on_term(
                     term,
-                    func_name,
-                    args_ref,
+                    &func_name,
+                    children,
                     trigger_term_pairs,
                     assignment,
                 )
             }
-            ATerm::Ite(b, t1, t2) => self.find_assignments_on_term(
-                term,
-                &"ite".to_string(),
-                vec![b, t1, t2],
-                trigger_term_pairs,
-                assignment,
-            ),
             _ => panic!(
-                "Trigger term {} is not an App, ITE or variable",
-                trigger_term
+                "Trigger term {} is not an App or variable",
+                self.display_term(trigger)
             ),
         }
     }
 
     /// Given a function name and arguments, find all matching applications in the egraph.
+    /// Given a function name and trigger children (as IDs), find all matching applications.
     fn find_assignments_on_term(
         &mut self,
         term: Option<u64>,
-        func_name: &String,
-        args: Vec<&Term>,
+        func_name: &str,
+        trigger_children: Vec<u64>,
         trigger_term_pairs: Vec<(u64, Option<u64>)>,
-        assignment: &mut DeterministicHashMap<String, Term>,
-    ) -> Vec<(DeterministicHashMap<String, Term>, usize)> {
+        assignment: &mut DeterministicHashMap<String, u64>,
+    ) -> Vec<DeterministicHashMap<String, u64>> {
         let mut list_assignments = Vec::new();
 
         let function_terms = self.function_maps.get(func_name);
@@ -1863,7 +1818,7 @@ impl Egraph {
 
         let term_root = term.map(|t| self.find(t));
         for (i, subterms) in function_terms {
-            assert!(subterms.len() == args.len());
+            assert!(subterms.len() == trigger_children.len());
 
             let i_root = self.find(i);
             if term_root.is_none() || term_root.unwrap() == i_root {
@@ -1874,17 +1829,15 @@ impl Egraph {
                 }
                 considered_function_terms.insert(subterms_canonical);
 
-                let mut new_pairs = args
+                let mut new_pairs: Vec<(u64, Option<u64>)> = trigger_children
                     .iter()
                     .zip(subterms.iter())
-                    .map(|(a, s)| (a.uid(), Some(*s)))
-                    .collect::<Vec<_>>();
+                    .map(|(a, s)| (*a, Some(*s)))
+                    .collect();
                 new_pairs.extend(trigger_term_pairs[1..].to_vec());
                 let new_assignments = self.match_term(&mut assignment.clone(), new_pairs);
 
-                list_assignments.extend(
-                    new_assignments.iter().map(|(a, _)| (a.clone(), 0)),
-                );
+                list_assignments.extend(new_assignments);
             }
         }
         list_assignments
@@ -2064,12 +2017,9 @@ impl EgraphTrait for Egraph {
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(Self::TermId, Option<Self::TermId>)>,
-    ) -> Vec<DeterministicHashMap<String, Term>> {
+    ) -> Vec<DeterministicHashMap<String, u64>> {
         let mut assignment = DeterministicHashMap::default();
         self.match_term(&mut assignment, trigger_term_pairs)
-            .into_iter()
-            .map(|(subst, _depth)| subst)
-            .collect()
     }
 
     fn backtrack_to(&mut self, level: usize) {

@@ -145,11 +145,11 @@ pub trait EgraphTrait {
     /// - `Some(t)` means the pattern must match in the same equivalence class as `t`
     /// - `None` means the pattern can match any term of the right function
     ///
-    /// Returns a list of substitution maps (variable name → matched term).
+    /// Returns a list of substitution maps (variable name → matched term ID).
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(Self::TermId, Option<Self::TermId>)>,
-    ) -> Vec<crate::utils::DeterministicHashMap<String, yaspar_ir::ast::Term>>;
+    ) -> Vec<crate::utils::DeterministicHashMap<String, Self::TermId>>;
 
     // --- Backtracking ---
 
