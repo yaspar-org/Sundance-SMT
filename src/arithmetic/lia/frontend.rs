@@ -33,7 +33,7 @@ use crate::arithmetic::lia::variables::VarType;
 use crate::debug_println;
 
 /// Error type for conversion issues from [Term] to [Rel]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct FrontendError(pub String);
 
 impl Display for FrontendError {
@@ -979,5 +979,21 @@ mod tests {
             .expect("Failed to run simplex algorithm")
             .decision;
         assert!(matches!(result, SolverDecision::FEASIBLE(_)));
+    }
+
+    #[test]
+    fn test_div_zero_by_c() {
+        let smt_input = r#"
+(declare-fun C () Int)
+(assert (= C 1))
+(assert (= 1 (div 0 C)))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default());
+        assert!(
+            result.is_err_and(
+                |e| e == FrontendError("non-linear division is not supported".to_string())
+            )
+        );
     }
 }
