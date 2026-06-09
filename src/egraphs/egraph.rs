@@ -32,7 +32,7 @@ impl fmt::Display for Egraph {
         if !self.proof_forest.is_empty() {
             writeln!(f, "\n=== Proof Forest ===")?;
             for (term_id, edge) in self.proof_forest.iter().enumerate() {
-                if self.terms_list[term_id].is_none() {
+                if self.terms[term_id].is_none() {
                     continue;
                 }
 
@@ -60,9 +60,9 @@ impl fmt::Display for Egraph {
                         writeln!(
                             f,
                             "  {} -> root [Root (size: {}, child: {:?}, disequalities: {:?}, children: {:?}])",
-                            self.get_term(term_id as u64),
+                            self.display_term(term_id as u64),
                             size,
-                            self.get_term_safe(*child),
+                            self.display_term(*child),
                             disequalities,
                             children
                         )?;
@@ -80,13 +80,13 @@ impl fmt::Display for Egraph {
                         writeln!(
                             f,
                             "  {} -> {} [Equality {} = {} (size: {}, parent: {}, child: {}, disequalities: {:?}, level: {}, hash: {}, children: {:?})]",
-                            self.get_term(term_id as u64),
-                            self.get_term(*parent),
-                            self.get_term(*t1),
-                            self.get_term(*t2),
+                            self.display_term(term_id as u64),
+                            self.display_term(*parent),
+                            self.display_term(*t1),
+                            self.display_term(*t2),
                             size,
-                            self.get_term(*parent),
-                            self.get_term(*child),
+                            self.display_term(*parent),
+                            self.display_term(*child),
                             disequalities,
                             level,
                             hash,
@@ -106,11 +106,11 @@ impl fmt::Display for Egraph {
                         writeln!(
                             f,
                             "  {} -> {} [Equality None (size: {}, parent: {}, child: {}, disequalities: {:?}, level: {}, hash: {}, children: {:?})]",
-                            self.get_term(term_id as u64),
-                            self.get_term(*parent),
+                            self.display_term(term_id as u64),
+                            self.display_term(*parent),
                             size,
-                            self.get_term(*parent),
-                            self.get_term(*child),
+                            self.display_term(*parent),
+                            self.display_term(*child),
                             disequalities,
                             level,
                             hash,
@@ -130,15 +130,15 @@ impl fmt::Display for Egraph {
                         writeln!(
                             f,
                             "  {} -> {} [Congruence {:?} (size: {}, parent: {}, child: {}, disequalities: {:?}, level: {}, hash: {}, children: {:?})]",
-                            self.get_term(term_id as u64),
-                            self.get_term(*parent),
+                            self.display_term(term_id as u64),
+                            self.display_term(*parent),
                             pairs
                                 .iter()
-                                .map(|(t1, t2)| (self.get_term(*t1), self.get_term(*t2)))
+                                .map(|(t1, t2)| (self.display_term(*t1), self.display_term(*t2)))
                                 .collect::<Vec<_>>(),
                             size,
-                            self.get_term(*parent),
-                            self.get_term(*child),
+                            self.display_term(*parent),
+                            self.display_term(*child),
                             disequalities,
                             level,
                             hash,
@@ -156,14 +156,14 @@ impl fmt::Display for Egraph {
                 writeln!(
                     f,
                     "  {}: {} predecessors",
-                    self.terms_list[term],
+                    self.display_term(term as u64),
                     preds.len()
                 )?;
                 for pred in preds.values() {
                     writeln!(
                         f,
                         "    -> {} (level: {}, hash: {})",
-                        self.terms_list[pred.predecessor as usize], pred.level, pred.hash
+                        self.display_term(pred.predecessor), pred.level, pred.hash
                     )?; // TODO: it is bad form to use self.false_term as the fallback here
                 }
             }
@@ -175,9 +175,9 @@ impl fmt::Display for Egraph {
             for (func_name, applications) in self.function_maps.iter() {
                 writeln!(f, "  {}: {} applications", func_name, applications.len())?;
                 for (term_id, subterms) in applications {
-                    write!(f, "    {} (", self.get_term(*term_id))?;
+                    write!(f, "    {} (", self.display_term(*term_id))?;
                     for subterm in subterms {
-                        write!(f, " {}, ", self.get_term(*subterm))?;
+                        write!(f, " {}, ", self.display_term(*subterm))?;
                     }
                     writeln!(f, ")")?;
                 }
@@ -244,11 +244,19 @@ impl Egraph {
     /// Register an equality watch: when t1 ≡ t2, propagate lit.
 
     /// Returns the u64 corresponding to a given lit with the correct polarity
-    // TODO: get_u64_from_lit_with_polarity, get_lit_from_u64, get_lit_from_u64_safe,
-    // get_term_from_lit, get_term_from_lit_safe, get_lit_from_term moved to SolverState
-
-    pub fn get_term(&self, num: u64) -> Term {
-        self.terms_list[num as usize].clone().unwrap()
+    /// Display a term recursively using the internal representation.
+    pub fn display_term(&self, id: u64) -> String {
+        let entry = self.terms[id as usize].as_ref()
+            .unwrap_or_else(|| panic!("display_term: no term entry for id {}", id));
+        if entry.children.is_empty() {
+            entry.op.to_function_map_key()
+        } else {
+            let children_str: Vec<String> = entry.children.as_slice()
+                .iter()
+                .map(|c| self.display_term(*c))
+                .collect();
+            format!("({} {})", entry.op.to_function_map_key(), children_str.join(" "))
+        }
     }
 
     pub fn get_term_ref(&self, num: u64) -> &Term {
@@ -422,13 +430,14 @@ impl Egraph {
                 self.predecessors[subterm_root as usize].remove(pred_key);
                 continue;
             }
-            let pred_term = self.get_term(*pred_key);
-            let (pred_func, pred_subterms) = get_subterms(&pred_term);
-            if func == pred_func && pred_subterms.len() == subterms.len() {
+            let pred_entry = self.terms[*pred_key as usize].as_ref().unwrap();
+            let pred_func = pred_entry.op.to_function_map_key();
+            let pred_children = pred_entry.children.as_slice();
+            if func == pred_func && pred_children.len() == subterms.len() {
                 let mut equal = true;
                 let mut congruence_pairs = vec![];
-                for (pred_subterm, subterm) in pred_subterms.iter().zip(subterms.iter()) {
-                    let (pred_subterm_uid, subterm_uid) = (pred_subterm.uid(), *subterm);
+                for (pred_subterm_uid, subterm) in pred_children.iter().zip(subterms.iter()) {
+                    let (pred_subterm_uid, subterm_uid) = (*pred_subterm_uid, *subterm);
                     let (subterm_equal, _, _) = self.check_equal(pred_subterm_uid, subterm_uid);
                     if !subterm_equal {
                         equal = false;
@@ -666,8 +675,8 @@ impl Egraph {
             12,
             0,
             "Adding a disequality between {} and {} at level {} and hash {}",
-            self.get_term(t1),
-            self.get_term(t2),
+            self.display_term(t1),
+            self.display_term(t2),
             level,
             hash
         );
@@ -694,7 +703,7 @@ impl Egraph {
             19,
             1,
             "We are in check_self_disequality with t {}",
-            self.get_term(t)
+            self.display_term(t)
         );
         let t_disequalities = &self.proof_forest[t as usize].disequalities();
         debug_println!(19, 2, "We have t_disequalities {:?}", t_disequalities);
@@ -709,7 +718,7 @@ impl Egraph {
                     19,
                     0,
                     "We are skipping disequality with {}, disequality: {:?} because it is not at the same level does not have key {}",
-                    self.get_term(disequality.term),
+                    self.display_term(disequality.term),
                     disequality,
                     self.predecessor_level[disequality.level]
                 );
@@ -721,25 +730,25 @@ impl Egraph {
                 19,
                 3,
                 "We are in check_self_disequality with {} [{}] and root {} [{}] and original term {}",
-                self.get_term(t),
+                self.display_term(t),
                 t,
-                self.get_term(root),
+                self.display_term(root),
                 root,
-                self.get_term(disequality.term)
+                self.display_term(disequality.term)
             );
             if root == t {
                 debug_println!(
                     19,
                     4,
                     "We have found a key {} [{}], disequality {:?} with root: {}, t: {}, disequality.term {} and original_disequality {} != {}",
-                    self.get_term(*key),
+                    self.display_term(*key),
                     key,
                     disequality,
-                    self.get_term(root),
-                    self.get_term(t),
-                    self.get_term(disequality.term),
-                    self.get_term(disequality.original_disequality.0),
-                    self.get_term(disequality.original_disequality.1)
+                    self.display_term(root),
+                    self.display_term(t),
+                    self.display_term(disequality.term),
+                    self.display_term(disequality.original_disequality.0),
+                    self.display_term(disequality.original_disequality.1)
                 );
                 // assert! ((smaller_term == self.find(disequality.original_disequality.0) && larger_term == self.find(disequality.original_disequality.1)) || (smaller_term == self.find(disequality.original_disequality.1) && larger_term == self.find(disequality.original_disequality.0)));
                 return Some(disequality.clone());
@@ -755,37 +764,17 @@ impl Egraph {
     /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  
     /// TODO: I don't support canonical forms for non-app, non-eq terms, non-ite terms, but will have to do that eventually
     pub fn get_canonical_form(&self, term_num: u64, _level: usize) -> Option<CanonicalForm> {
-        debug_println!(
-            5,
-            0,
-            "We are in get_canonical_form with term_num {} and term {}",
-            term_num,
-            self.get_term_ref(term_num)
-        );
-        debug_println!(6, 0, "before11");
+        let entry = match &self.terms[term_num as usize] {
+            Some(e) => e,
+            None => return None,
+        };
 
-        // Extract subterm uids and the operation identifier without cloning the Term.
-        // The inner block holds a borrow of self.terms_list via get_term_ref;
-        // it ends before we need &self for self.find(...).
-        //
-        // CanonicalOp replaces the old String-based identifier so that HashMap keys
-        // compare/hash as u64 (via hash-consed uids) instead of allocating and
-        // hashing String bytes per call.
-        let (original_subterms, op) = {
-            let term = self.get_term_ref(term_num);
-            match term.repr() {
-                App(func, subterms, ..) => {
-                    let uids: Vec<u64> = subterms.iter().map(|t| t.uid()).collect();
-                    // Clone the full QualifiedIdentifier so we preserve both
-                    // the symbol AND any sort/index annotations — without them
-                    // polymorphic constructor instances collide in the
-                    // canonical-form HashMap.
-                    (uids, CanonicalOp::App(func.clone()))
-                }
-                Eq(left, right) => (vec![left.uid(), right.uid()], CanonicalOp::Eq),
-                Ite(b, t1, t2) => (vec![b.uid(), t1.uid(), t2.uid()], CanonicalOp::Ite),
-                _ => return None,
-            }
+        let original_subterms = entry.children.as_slice().to_vec();
+        let op = match &entry.op {
+            Op::App(s) => CanonicalOp::App(yaspar_ir::ast::QualifiedIdentifier::simple(s.clone())),
+            Op::Eq => CanonicalOp::Eq,
+            Op::Ite => CanonicalOp::Ite,
+            _ => return None,
         };
 
         let canonical_subterms: Vec<u64> =
@@ -806,8 +795,8 @@ impl Egraph {
             5,
             0,
             "We are in add_predecessor with term {} and new_pred_key {} and new_pred {:?}",
-            self.get_term(term),
-            self.get_term(new_pred_key),
+            self.display_term(term),
+            self.display_term(new_pred_key),
             new_pred
         );
 
@@ -825,8 +814,8 @@ impl Egraph {
                     11,
                     0,
                     "For term {}, we are adding the predecessor {} [level {}, hash {}]",
-                    self.get_term(term),
-                    self.get_term(new_pred_key),
+                    self.display_term(term),
+                    self.display_term(new_pred_key),
                     new_pred_level,
                     new_pred_hash
                 );
@@ -850,11 +839,11 @@ impl Egraph {
                         11,
                         0,
                         "For term {}, we are replacing the predecessor {} [level {}, hash {}] with predecessor {} [level {}, hash {}]",
-                        self.get_term(term),
-                        self.get_term(orig_predecessor),
+                        self.display_term(term),
+                        self.display_term(orig_predecessor),
                         orig_level,
                         orig_hash,
-                        self.get_term(new_pred_key),
+                        self.display_term(new_pred_key),
                         new_pred_level,
                         new_pred_hash
                     );
@@ -878,8 +867,8 @@ impl Egraph {
             11,
             1,
             "Finding least common ancestor for {} and {}",
-            self.get_term(u),
-            self.get_term(v)
+            self.display_term(u),
+            self.display_term(v)
         );
         self.leastcommonancestor_helper(u, v, tracker, 0)
     }
@@ -895,8 +884,8 @@ impl Egraph {
             20,
             indent,
             "checking the equality of {} and {}",
-            self.get_term(u),
-            self.get_term(v)
+            self.display_term(u),
+            self.display_term(v)
         );
         let mut visited = DeterministicHashSet::default();
 
@@ -982,9 +971,9 @@ impl Egraph {
                                 20,
                                 indent + 12,
                                 "{} [{}] ~ {} [{}] ",
-                                self.get_term(t1),
+                                self.display_term(t1),
                                 t1,
-                                self.get_term(t2),
+                                self.display_term(t2),
                                 t2
                             );
                         }
@@ -997,9 +986,9 @@ impl Egraph {
                             20,
                             indent + 12,
                             "Equality {} [{}] = {} [{}]",
-                            self.get_term(t1),
+                            self.display_term(t1),
                             t1,
-                            self.get_term(t2),
+                            self.display_term(t2),
                             t2
                         );
                         if tracker.union(t1, t2) {
@@ -1143,9 +1132,9 @@ impl Egraph {
             0,
             "Backtracking on {} with child {} and parent {} and y_term {}",
             equality,
-            self.get_term(*child),
-            self.get_term(*parent),
-            self.get_term(y)
+            self.display_term(*child),
+            self.display_term(*parent),
+            self.display_term(y)
         );
 
         debug_println!(
@@ -1178,7 +1167,7 @@ impl Egraph {
             6,
             0,
             "We are setting the predecessors of the child {} to {:?}",
-            self.get_term(*child),
+            self.display_term(*child),
             self.predecessors[*child as usize]
         );
 
@@ -1214,7 +1203,7 @@ impl Egraph {
             16,
             0,
             "Making {} the root on a backtrack",
-            self.get_term(y)
+            self.display_term(y)
         );
         self.make_root(y, y_parent);
     }
@@ -1242,23 +1231,23 @@ impl Egraph {
             1,
             "Unioning vertices [{}] {}  and [{}] {}  (roots: {} [{}] and {} [{}]) at level {} with {}",
             x,
-            self.get_term(x),
+            self.display_term(x),
             y,
-            self.get_term(y),
+            self.display_term(y),
             x_root,
-            self.get_term(x_root),
+            self.display_term(x_root),
             y_root,
-            self.get_term(y_root),
+            self.display_term(y_root),
             level,
             proof_parent
         );
         debug_println!(11, 0, "{}", self);
         // assert_eq!(
-        //     self.get_term(x).get_sort(self),
-        //     self.get_term(y).get_sort(self),
+        //     self.display_term(x).get_sort(self),
+        //     self.display_term(y).get_sort(self),
         //     "We are comparing terms {} and {}",
-        //     self.get_term(x),
-        //     self.get_term(y)
+        //     self.display_term(x),
+        //     self.display_term(y)
         // );
 
         if x_root == y_root {
@@ -1266,8 +1255,8 @@ impl Egraph {
                 16,
                 2,
                 "{} and {} are already in the same equivalence class",
-                self.get_term(x),
-                self.get_term(y)
+                self.display_term(x),
+                self.display_term(y)
             );
             return EgraphResult::ok();
         }
@@ -1287,9 +1276,9 @@ impl Egraph {
                 16,
                 0,
                 "BACKTTRACK STACK: adding equalitity between {} and {} with y_root: {} at level {}",
-                self.get_term(x),
-                self.get_term(y),
-                self.get_term(y_root),
+                self.display_term(x),
+                self.display_term(y),
+                self.display_term(y_root),
                 level
             );
             self.proof_forest_backtrack_stack.push((
@@ -1304,8 +1293,8 @@ impl Egraph {
             16,
             2,
             "Making {} the root of its equivalence class [previously was {}]",
-            self.get_term(y),
-            self.get_term(y_root)
+            self.display_term(y),
+            self.display_term(y_root)
         );
         self.make_root(y, proof_parent);
 
@@ -1389,8 +1378,8 @@ impl Egraph {
             5,
             0,
             "A. Checking the equality {} = {} with disequalities {:?}",
-            self.get_term(x),
-            self.get_term(y),
+            self.display_term(x),
+            self.display_term(y),
             self.proof_forest[x as usize].disequalities()
         );
         if let Some(disequality) = self.check_self_disequality(x_root).clone() {
@@ -1398,10 +1387,10 @@ impl Egraph {
                 11,
                 0,
                 "B. Checking the equality {} = {} with disequality {} != {}",
-                self.get_term(x),
-                self.get_term(y),
-                self.get_term(disequality.original_disequality.0),
-                self.get_term(disequality.original_disequality.1)
+                self.display_term(x),
+                self.display_term(y),
+                self.display_term(disequality.original_disequality.0),
+                self.display_term(disequality.original_disequality.1)
             );
             let mut tracker = ProofTracker::new();
             if let Some(equalities) = self.leastcommonancestor(
@@ -1418,10 +1407,10 @@ impl Egraph {
                 debug_println!(16, 0, "{}", self);
                 panic!(
                     "Should have found a equality between {} [root: {}] and {} [root: {}]",
-                    self.get_term(disequality.original_disequality.0),
-                    self.get_term(self.find(disequality.original_disequality.0)),
-                    self.get_term(disequality.original_disequality.1),
-                    self.get_term(self.find(disequality.original_disequality.1)),
+                    self.display_term(disequality.original_disequality.0),
+                    self.display_term(self.find(disequality.original_disequality.0)),
+                    self.display_term(disequality.original_disequality.1),
+                    self.display_term(self.find(disequality.original_disequality.1)),
                 );
             }
         }
@@ -1449,20 +1438,20 @@ impl Egraph {
             11,
             1,
             "Unioning predecessors of {} [{}, Predecessors: {}] and {} [{}, Predecessors: {}]",
-            self.get_term(u),
+            self.display_term(u),
             u,
             fmt_termlist(
                 self.predecessors[u as usize]
                     .keys()
-                    .map(|x| self.get_term(*x))
+                    .map(|x| self.display_term(*x))
                     .collect::<Vec<_>>()
             ),
-            self.get_term(v),
+            self.display_term(v),
             v,
             fmt_termlist(
                 self.predecessors[v as usize]
                     .keys()
-                    .map(|x| self.get_term(*x))
+                    .map(|x| self.display_term(*x))
                     .collect::<Vec<_>>()
             )
         );
@@ -1489,9 +1478,9 @@ impl Egraph {
                     11,
                     2,
                     "CANONICAL_FORMS_U: Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
-                    self.get_term(p.predecessor),
-                    self.get_term(u),
-                    self.get_term(p.inner_term),
+                    self.display_term(p.predecessor),
+                    self.display_term(u),
+                    self.display_term(p.inner_term),
                     p.hash,
                     p.level,
                     self.predecessor_level[p.level]
@@ -1505,7 +1494,7 @@ impl Egraph {
                 11,
                 2,
                 "1.We are in union_predecessors trying to get term for {}",
-                self.get_term(predecessor_u.predecessor)
+                self.display_term(predecessor_u.predecessor)
             );
 
             // checking if the ite leads to a contradiction
@@ -1579,9 +1568,9 @@ impl Egraph {
                 11,
                 0,
                 "We are are adding predecessor {} (of  {}) to {} [level: {}, hash: {}]",
-                self.get_term(*pred_key),
-                self.get_term(pred_val.inner_term),
-                self.get_term(u),
+                self.display_term(*pred_key),
+                self.display_term(pred_val.inner_term),
+                self.display_term(u),
                 level,
                 self.predecessor_hash
             );
@@ -1611,9 +1600,9 @@ impl Egraph {
                     11,
                     5,
                     "Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
-                    self.get_term(pred_predecessor),
-                    self.get_term(v),
-                    self.get_term(pred_inner_term),
+                    self.display_term(pred_predecessor),
+                    self.display_term(v),
+                    self.display_term(pred_inner_term),
                     pred_hash,
                     pred_level,
                     self.predecessor_level[pred_level]
@@ -1632,7 +1621,7 @@ impl Egraph {
                 11,
                 3,
                 "L. We are in union_predecessors trying to get term for {}",
-                self.get_term(pred_predecessor)
+                self.display_term(pred_predecessor)
             );
 
             if let Some(CanonicalForm {
@@ -1647,7 +1636,7 @@ impl Egraph {
                     6,
                     "3. We are in union_predecessors for v and have canonical form {:?} for {}",
                     canonical_form,
-                    self.get_term(pred_predecessor)
+                    self.display_term(pred_predecessor)
                 );
                 if let Some(u_forms) = canonical_forms_u.get(&canonical_form) {
                     debug_println!(5, 0, "We have the following u_forms {:?}", u_forms);
@@ -1656,17 +1645,17 @@ impl Egraph {
                             16,
                             0,
                             "We are actually merging the two predecessors {} and {}",
-                            self.get_term(*canonical_form_u),
-                            self.get_term(pred_predecessor)
+                            self.display_term(*canonical_form_u),
+                            self.display_term(pred_predecessor)
                         );
                         if is_important(16) {
                             debug_println!(16, 0, "We have u_original_subterms: ");
                             for term in u_original_subterms {
-                                debug_println!(16, 4, "{}", self.get_term(*term));
+                                debug_println!(16, 4, "{}", self.display_term(*term));
                             }
                             debug_println!(16, 0, "We have original_subterms: ");
                             for term in original_subterms.clone() {
-                                debug_println!(16, 4, "{}", self.get_term(term));
+                                debug_println!(16, 4, "{}", self.display_term(term));
                             }
                         }
 
@@ -1705,8 +1694,8 @@ impl Egraph {
             11,
             0,
             "[exiting union_pred] of {} and {} with None",
-            self.get_term(u),
-            self.get_term(v)
+            self.display_term(u),
+            self.display_term(v)
         );
         result
     }
@@ -1718,7 +1707,7 @@ impl Egraph {
             16,
             0,
             "Making {} the root with proof_parent {}",
-            self.get_term(vertex),
+            self.display_term(vertex),
             proof_parent
         );
         let old_parent = self.proof_forest[vertex as usize].clone();
@@ -1792,7 +1781,7 @@ impl Egraph {
             return vec![(assignment.clone(), 0)];
         }
         let (trigger, term) = trigger_term_pairs[0];
-        let trigger_term = &self.get_term(trigger);
+        let trigger_term = &self.display_term(trigger);
         match trigger_term.repr() {
             ATerm::Global(_, _) => {
                 if term.is_none() || self.find(trigger) == self.find(term.unwrap()) {
@@ -1812,7 +1801,7 @@ impl Egraph {
                 match assignment.get(&local.symbol.to_string()) {
                     Option::None => {
                         // TODO: sort checking removed (needs Context)
-                        assignment.insert(local.symbol.to_string(), self.get_term(term.unwrap()));
+                        assignment.insert(local.symbol.to_string(), self.display_term(term.unwrap()));
                         let new_assignments =
                             self.match_term(assignment, trigger_term_pairs[1..].to_vec());
                         new_assignments
