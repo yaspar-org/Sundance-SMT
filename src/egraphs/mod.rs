@@ -5,6 +5,7 @@ pub mod congruence_closure;
 pub(crate) mod datastructures;
 pub mod egraph;
 pub(crate) mod proofforest;
+pub mod repr;
 pub mod traits;
 pub mod unionfind;
 pub(crate) mod utils;
