@@ -3,6 +3,7 @@
 
 use crate::debug_println;
 use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent};
+use crate::egraphs::repr::{Children, Op, TermEntry};
 use crate::egraphs::traits::{EgraphResult, Conflict, Lit};
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
@@ -16,7 +17,7 @@ use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministic
 use std::default::Default;
 use std::fmt;
 use yaspar_ir::ast::{ATerm, ATerm::*};
-use yaspar_ir::ast::{Repr, Term};
+use yaspar_ir::ast::{Repr, Str, Term};
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -190,8 +191,8 @@ impl fmt::Display for Egraph {
 
 /// The egraph datastructure that keeps track of terms, equalities and parents
 pub struct Egraph {
-    /// map from u64 to Terms
-    pub terms_list: Vec<TermOption>,
+    /// Internal term representation: (op, children) per term ID
+    pub terms: Vec<Option<TermEntry>>,
     /// map from vertices (u64) -> ProofForestEdge
     pub proof_forest: Vec<ProofForestEdge>,
     /// keeps track of a stack of "edges" to backtrack on
@@ -220,7 +221,7 @@ impl Egraph {
     pub fn new(tru: Term, fal: Term) -> Self {
 
         Egraph {
-            terms_list: vec![TermOption::None],
+            terms: vec![None],
             proof_forest: vec![ProofForestEdge::Root {
                 size: 1000,
                 child: 0,
@@ -273,13 +274,12 @@ impl Egraph {
     /// If `dynamic` is true, calls find_and_union_to_eclass to merge with any
     /// existing congruent term (needed for quantifier instantiation and datatype axioms).
     /// Returns true if the term was already registered.
-    pub fn register_term(&mut self, term: &Term, dynamic: bool) -> bool {
-        let num = term.uid();
-
+    /// Register a single term (non-recursive). Children must already be registered.
+    /// Takes raw IDs — no dependency on Term representation.
+    pub fn register_term(&mut self, id: u64, op: Op, children: &[u64], dynamic: bool) -> bool {
         // Resize storage if needed
-        while self.terms_list.len() <= num as usize {
-            self.terms_list
-                .resize(self.terms_list.len() * 2, TermOption::None);
+        while self.terms.len() <= id as usize {
+            self.terms.resize(self.terms.len() * 2, None);
             self.proof_forest.resize(
                 self.proof_forest.len() * 2,
                 ProofForestEdge::Root {
@@ -296,43 +296,42 @@ impl Egraph {
         }
 
         // Check if already inserted
-        if let TermOption::Some(_) = &self.terms_list[num as usize] {
+        if self.terms[id as usize].is_some() {
             return true;
         }
 
-        // Add the term
-        self.terms_list[num as usize] = TermOption::Some(term.clone());
+        // Store internal representation
+        self.terms[id as usize] = Some(TermEntry {
+            op: op.clone(),
+            children: Children::from_slice(children),
+        });
 
-        self.proof_forest[num as usize] = ProofForestEdge::Root {
+        self.proof_forest[id as usize] = ProofForestEdge::Root {
             size: 1,
             disequalities: DeterministicHashMap::new(),
             child: 0,
             children: DeterministicHashSet::new(),
         };
 
-        // Get operator and subterms
-        let (func, subterms) = get_subterms(term);
-
-        // Add to function_maps if it has an operator
-        if !func.is_empty() {
-            let subterms_u64 = subterms.iter().map(|t| t.uid()).collect::<Vec<_>>();
+        // Add to function_maps using the op's string key
+        let func_key = op.to_function_map_key();
+        if !func_key.is_empty() {
             self.function_maps
-                .entry(func.to_string())
+                .entry(func_key.clone())
                 .or_default()
-                .push((num, subterms_u64));
+                .push((id, children.to_vec()));
         }
 
         // Add this term as a predecessor of each child
-        for subterm in &subterms {
-            let child_uid = subterm.uid();
+        for &child_uid in children {
             let predecessor = Predecessor {
                 level: 0,
                 hash: 0,
-                predecessor: num,
+                predecessor: id,
                 inner_term: child_uid,
             };
             self.predecessors[child_uid as usize]
-                .entry(num)
+                .entry(id)
                 .or_insert(predecessor);
 
             if dynamic {
@@ -340,39 +339,39 @@ impl Egraph {
                 let root_predecessor = Predecessor {
                     level,
                     hash,
-                    predecessor: num,
+                    predecessor: id,
                     inner_term: child_uid,
                 };
 
                 match self.predecessors_created_by_quantifiers.get_mut(&child_uid) {
                     Some(parents) => {
-                        parents.insert(num);
+                        parents.insert(id);
                     }
                     None => {
                         let mut parents = DeterministicHashSet::new();
-                        parents.insert(num);
+                        parents.insert(id);
                         self.predecessors_created_by_quantifiers
                             .insert(child_uid, parents);
                     }
                 };
 
                 self.predecessors[root as usize]
-                    .entry(num)
+                    .entry(id)
                     .or_insert(root_predecessor);
             }
         }
 
         // If dynamic, find and merge with existing congruent terms
-        if dynamic && !subterms.is_empty() {
-            let subterms_cloned: Vec<u64> = subterms.iter().map(|x| x.uid()).collect();
-            self.find_and_union_to_eclass(num, func.to_string(), subterms_cloned.clone());
+        if dynamic && !children.is_empty() {
+            self.find_and_union_to_eclass(id, func_key.clone(), children.to_vec());
             self.union_to_eclass
-                .insert((num, func.to_string(), subterms_cloned));
+                .insert((id, func_key, children.to_vec()));
         }
 
         false
     }
 
+    /// Extract the Op from a Term and its function name string.
     /// Add a term to terms_list as Uninitialized (for quantifier body subterms).
     /// Recursively adds subterms. Does not set up predecessors or function_maps.
     pub fn add_to_terms_list(&mut self, term: &Term) {

@@ -26,6 +26,28 @@ pub enum Op {
     Implies,
     /// Distinct
     Distinct,
+    /// Pattern variable (only used in e-matching, never registered)
+    Local(String),
+    /// Global constant (variable name)
+    Constant(Str),
+}
+
+impl Op {
+    /// Convert to the string key used in function_maps.
+    pub fn to_function_map_key(&self) -> String {
+        match self {
+            Op::App(s) => s.get().to_string(),
+            Op::Eq => "=".to_string(),
+            Op::Ite => "ite".to_string(),
+            Op::Not => "not".to_string(),
+            Op::And => "and".to_string(),
+            Op::Or => "or".to_string(),
+            Op::Implies => "=>".to_string(),
+            Op::Distinct => "distinct".to_string(),
+            Op::Local(_) => String::new(),
+            Op::Constant(s) => s.get().to_string(),
+        }
+    }
 }
 
 /// Children of a term, stored inline for common arities to avoid heap allocation.

@@ -74,16 +74,14 @@ pub trait EgraphTrait {
     // --- Registration ---
 
     /// Register a term with its operator and children.
-    /// If `is_constant` is true, `children` must be empty and the term will
-    /// always be the root of its equivalence class. Merging two constants
-    /// produces a conflict.
+    /// The egraph assigns and returns the TermId.
+    /// If `dynamic` is true, finds and merges with existing congruent terms.
     fn register_term(
         &mut self,
-        term: Self::TermId,
         op: Self::Op,
         children: &[Self::TermId],
-        is_constant: bool,
-    );
+        dynamic: bool,
+    ) -> Self::TermId;
 
     /// Register an equality `t1 = t2` with its corresponding SAT literal.
     /// Sets up a watch: when `t1` and `t2` become equal, `lit` is propagated.
@@ -95,11 +93,10 @@ pub trait EgraphTrait {
     /// When it becomes equal to `false_term`, `-lit` is propagated.
     fn register_boolean_term(
         &mut self,
-        term: Self::TermId,
         op: Self::Op,
         children: &[Self::TermId],
         lit: Lit,
-    );
+    ) -> Self::TermId;
 
     // --- Assertions ---
 
