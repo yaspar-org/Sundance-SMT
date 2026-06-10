@@ -90,18 +90,18 @@ pub fn nelson_oppen_clause_pair(x: u64, y: u64, solver_state: &mut SolverState) 
     let lt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol("<"));
     let lt_term = solver_state.context.app(
         lt,
-        vec![solver_state.egraph.get_term(x), solver_state.egraph.get_term(y)],
+        vec![solver_state.get_term(x), solver_state.get_term(y)],
         Some(bool_sort.clone()),
     );
 
     let gt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol(">"));
     let gt_term = solver_state.context.app(
         gt,
-        vec![solver_state.egraph.get_term(x), solver_state.egraph.get_term(y)],
+        vec![solver_state.get_term(x), solver_state.get_term(y)],
         Some(bool_sort),
     );
 
-    let eq_term = solver_state.context.eq(solver_state.egraph.get_term(x), solver_state.egraph.get_term(y));
+    let eq_term = solver_state.context.eq(solver_state.get_term(x), solver_state.get_term(y));
 
     let or = solver_state.context.or(vec![lt_term, gt_term, eq_term]);
 

@@ -29,7 +29,7 @@ pub enum Op {
     /// Pattern variable (only used in e-matching, never registered)
     Local(String),
     /// Global constant (variable name)
-    Constant(Str),
+    Constant(String),
 }
 
 impl Op {
@@ -45,7 +45,7 @@ impl Op {
             Op::Implies => "=>".to_string(),
             Op::Distinct => "distinct".to_string(),
             Op::Local(_) => String::new(),
-            Op::Constant(s) => s.get().to_string(),
+            Op::Constant(s) => s.clone(),
         }
     }
 }
@@ -113,4 +113,16 @@ impl Children {
 pub struct TermEntry {
     pub op: Op,
     pub children: Children,
+}
+
+/// A slot in the egraph's term vector.
+#[derive(Debug, Clone)]
+pub enum TermSlot {
+    /// Not allocated
+    Empty,
+    /// A fully registered term with op and children
+    Term(TermEntry),
+    /// An opaque term — participates in union-find and congruence propagation
+    /// upward, but has no internal structure visible to the egraph.
+    Opaque,
 }

@@ -5,16 +5,14 @@ use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_
 use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
-use crate::egraphs::congruence_closure::{get_child, get_parent};
 use crate::solver_state::{SolverState, process_assignment};
-use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::log::is_important;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::stats::SolverStats;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -70,13 +68,13 @@ impl<'a> CustomExternalPropagator<'a> {
         );
 
         if let Some(id) = self.solver_state.cnf_cache.var_map_reverse.get(&lit) {
-            let term = self.solver_state.egraph.get_term(*id);
+            let term = self.solver_state.get_term(*id);
             self.proof_tracker
                 .borrow_mut()
                 .terms_list
                 .insert(lit, (*id, term, true));
         } else if let Some(id) = self.solver_state.cnf_cache.var_map_reverse.get(&-lit) {
-            let term = self.solver_state.egraph.get_term(*id);
+            let term = self.solver_state.get_term(*id);
             self.proof_tracker
                 .borrow_mut()
                 .terms_list

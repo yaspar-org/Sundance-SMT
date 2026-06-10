@@ -17,7 +17,6 @@ use crate::solver_state::SolverState;
 use crate::utils::DeterministicHashMap;
 
 use crate::debug_println;
-use crate::log::is_important;
 use yaspar_ir::ast::{
     LetElim, Substitute, Substitution, Term, TermAllocator,
 };
@@ -215,18 +214,16 @@ pub fn instantiate_quantifiers(
 
             debug_println!(7, 0, "We have the following list of assignments:");
             let mut substitutions = vec![];
-            for (subs, activation_depth) in list_assignments.iter() {
-                // todo: maybe need to come up with a more efficient representation than adding in subs
-                // but I don't want to add in the substituted term for two reasons: (1) I want to avoid
-                // calling substitute when I don't need to and (2) if a term contains a quantifier, two
-                // equivalent terms will actually be unequal
-                // maybe I eventually want to do something in the match_term function
-                // we are doing a lot of redundant work. It would be nice to have something
-                // like semi-naive evaluation for datalog
+            for subs_ids in list_assignments.iter() {
+                // Convert ID map to Term map for substitution
+                let subs: DeterministicHashMap<String, Term> = subs_ids
+                    .iter()
+                    .map(|(k, v)| (k.clone(), solver_state.get_term(*v)))
+                    .collect();
+
                 if let Some(set) = solver_state.added_instantiations.get(&quantifier.id)
-                    && set.contains(subs)
+                    && set.contains(&subs)
                 {
-                    // println!("Skipping the instantiation {} for {}", t, solver_state.get_term(quantifier.id));
                     continue;
                 }
                 solver_state
@@ -235,13 +232,6 @@ pub fn instantiate_quantifiers(
                     .or_default()
                     .insert(subs.clone());
 
-                if is_important(22) {
-                    debug_println!(22, 0, "The body is {}", body);
-                    debug_println!(22, 0, "The assignment is");
-                    for sub in subs {
-                        debug_println!(22, 4, "{} |-> {}", sub.0, sub.1)
-                    }
-                }
                 debug_println!(6, 0, "before12");
                 let term = solver_state.get_term(body);
                 let substitution = Substitution::new(
@@ -249,7 +239,7 @@ pub fn instantiate_quantifiers(
                     &mut solver_state.context,
                 );
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
-                substitutions.push((substituted_term, activation_depth, subs));
+                substitutions.push((substituted_term, subs));
             }
 
             if substitutions.is_empty() {
@@ -263,7 +253,7 @@ pub fn instantiate_quantifiers(
             }
 
             debug_println!(6, 0, "Starting to look at substitutions");
-            for (t, &activation_depth, _) in substitutions {
+            for (t, _) in substitutions {
                 // skipping instantiations that have already been added
                 // TODO: need to come up with a more efficient way to do this
                 // TODO: have solver_state.added_instantiations as a string right now, really want to go back to u32
@@ -294,10 +284,9 @@ pub fn instantiate_quantifiers(
                 debug_println!(
                     8,
                     0,
-                    "{} is an instantiation of {} at depth {}",
+                    "{} is an instantiation of {}",
                     let_elim_term,
-                    solver_state.get_term(quantifier.id),
-                    activation_depth
+                    solver_state.get_term(quantifier.id)
                 );
 
                 let nnf_term = let_elim_term.nnf(solver_state);

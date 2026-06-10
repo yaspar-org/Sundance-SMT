@@ -3,21 +3,19 @@
 
 use crate::debug_println;
 use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent};
-use crate::egraphs::repr::{Children, Op, TermEntry};
+use crate::egraphs::repr::{Children, Op, TermEntry, TermSlot};
 use crate::egraphs::traits::{EgraphResult, Conflict, Lit};
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
 use crate::egraphs::datastructures::{
     CanonicalForm, CanonicalOp, DisequalTerm, Predecessor,
-    TermOption,
 };
 use crate::egraphs::proofforest::*;
-use crate::egraphs::utils::get_subterms;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, fmt_termlist};
+use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
 use std::default::Default;
 use std::fmt;
-use yaspar_ir::ast::{ATerm, ATerm::*};
-use yaspar_ir::ast::{Repr, Str, Term};
+use yaspar_ir::ast::ATerm::*;
+use yaspar_ir::ast::{Repr, Term};
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -32,7 +30,7 @@ impl fmt::Display for Egraph {
         if !self.proof_forest.is_empty() {
             writeln!(f, "\n=== Proof Forest ===")?;
             for (term_id, edge) in self.proof_forest.iter().enumerate() {
-                if self.terms[term_id].is_none() {
+                if matches!(self.terms[term_id], TermSlot::Empty) {
                     continue;
                 }
 
@@ -191,8 +189,12 @@ impl fmt::Display for Egraph {
 
 /// The egraph datastructure that keeps track of terms, equalities and parents
 pub struct Egraph {
-    /// Internal term representation: (op, children) per term ID
-    pub terms: Vec<Option<TermEntry>>,
+    /// Next ID to assign
+    next_id: u64,
+    /// Internal term representation per term ID
+    pub terms: Vec<TermSlot>,
+    /// Pattern terms (for e-matching only, separate from ground terms)
+    pub patterns: DeterministicHashMap<u64, TermEntry>,
     /// map from vertices (u64) -> ProofForestEdge
     pub proof_forest: Vec<ProofForestEdge>,
     /// keeps track of a stack of "edges" to backtrack on
@@ -221,7 +223,9 @@ impl Egraph {
     pub fn new(tru: Term, fal: Term) -> Self {
 
         Egraph {
-            terms: vec![None],
+            next_id: 0,
+            terms: vec![TermSlot::Empty],
+            patterns: DeterministicHashMap::new(),
             proof_forest: vec![ProofForestEdge::Root {
                 size: 1000,
                 child: 0,
@@ -246,16 +250,23 @@ impl Egraph {
     /// Returns the u64 corresponding to a given lit with the correct polarity
     /// Display a term recursively using the internal representation.
     pub fn display_term(&self, id: u64) -> String {
-        let entry = self.terms[id as usize].as_ref()
-            .unwrap_or_else(|| panic!("display_term: no term entry for id {}", id));
-        if entry.children.is_empty() {
-            entry.op.to_function_map_key()
-        } else {
-            let children_str: Vec<String> = entry.children.as_slice()
-                .iter()
-                .map(|c| self.display_term(*c))
-                .collect();
-            format!("({} {})", entry.op.to_function_map_key(), children_str.join(" "))
+        if id as usize >= self.terms.len() {
+            return format!("?{}", id);
+        }
+        match &self.terms[id as usize] {
+            TermSlot::Empty => format!("?{}", id),
+            TermSlot::Opaque => format!("[opaque:{}]", id),
+            TermSlot::Term(entry) => {
+                if entry.children.is_empty() {
+                    entry.op.to_function_map_key()
+                } else {
+                    let children_str: Vec<String> = entry.children.as_slice()
+                        .iter()
+                        .map(|c| self.display_term(*c))
+                        .collect();
+                    format!("({} {})", entry.op.to_function_map_key(), children_str.join(" "))
+                }
+            }
         }
     }
 
@@ -269,10 +280,10 @@ impl Egraph {
     /// Returns true if the term was already registered.
     /// Register a single term (non-recursive). Children must already be registered.
     /// Takes raw IDs — no dependency on Term representation.
-    pub fn register_term(&mut self, id: u64, op: Op, children: &[u64], dynamic: bool) -> bool {
+    pub fn register_term_with_id(&mut self, id: u64, op: Op, children: &[u64], dynamic: bool) -> bool {
         // Resize storage if needed
         while self.terms.len() <= id as usize {
-            self.terms.resize(self.terms.len() * 2, None);
+            self.terms.resize(self.terms.len() * 2, TermSlot::Empty);
             self.proof_forest.resize(
                 self.proof_forest.len() * 2,
                 ProofForestEdge::Root {
@@ -289,12 +300,12 @@ impl Egraph {
         }
 
         // Check if already inserted
-        if self.terms[id as usize].is_some() {
+        if !matches!(self.terms[id as usize], TermSlot::Empty) {
             return true;
         }
 
         // Store internal representation
-        self.terms[id as usize] = Some(TermEntry {
+        self.terms[id as usize] = TermSlot::Term(TermEntry {
             op: op.clone(),
             children: Children::from_slice(children),
         });
@@ -369,7 +380,7 @@ impl Egraph {
     /// Used for quantifier body subterms that are opaque to the egraph.
     pub fn ensure_capacity(&mut self, id: u64) {
         while self.terms.len() <= id as usize {
-            self.terms.resize(self.terms.len() * 2, None);
+            self.terms.resize(self.terms.len() * 2, TermSlot::Empty);
             self.proof_forest.resize(
                 self.proof_forest.len() * 2,
                 ProofForestEdge::Root {
@@ -386,6 +397,34 @@ impl Egraph {
         }
     }
 
+    /// Store a pattern term's structure (for match_term to inspect) without
+    /// adding to function_maps, proof_forest, or predecessors. Pattern terms
+    /// are only used for e-matching, never as ground terms.
+    /// Stored in a separate map so they don't interfere with ground term registration.
+    pub fn register_pattern_entry(&mut self, id: u64, op: Op, children: &[u64]) {
+        self.patterns.insert(id, TermEntry {
+            op,
+            children: Children::from_slice(children),
+        });
+    }
+
+    /// Register an opaque term — allocates a full slot with a proof_forest Root
+    /// but no op/children/function_maps/predecessors. Used for quantifier terms
+    /// that participate in union-find (merged with true/false) but not congruence.
+    pub fn register_opaque_term(&mut self, id: u64) {
+        self.ensure_capacity(id);
+        if !matches!(self.terms[id as usize], TermSlot::Empty) {
+            return;
+        }
+        self.terms[id as usize] = TermSlot::Opaque;
+        self.proof_forest[id as usize] = ProofForestEdge::Root {
+            size: 1,
+            disequalities: DeterministicHashMap::new(),
+            child: 0,
+            children: DeterministicHashSet::new(),
+        };
+    }
+
     /// If any predecessors of the first subterm are congruent to term_num
     /// (same function, all subterms equal), union them.
     pub fn find_and_union_to_eclass(&mut self, term_num: u64, func: String, subterms: Vec<u64>) {
@@ -399,7 +438,7 @@ impl Egraph {
                 self.predecessors[subterm_root as usize].remove(pred_key);
                 continue;
             }
-            let pred_entry = self.terms[*pred_key as usize].as_ref().unwrap();
+            let pred_entry = match &self.terms[*pred_key as usize] { TermSlot::Term(e) => e, _ => continue };
             let pred_func = pred_entry.op.to_function_map_key();
             let pred_children = pred_entry.children.as_slice();
             if func == pred_func && pred_children.len() == subterms.len() {
@@ -734,8 +773,8 @@ impl Egraph {
     /// TODO: I don't support canonical forms for non-app, non-eq terms, non-ite terms, but will have to do that eventually
     pub fn get_canonical_form(&self, term_num: u64, _level: usize) -> Option<CanonicalForm> {
         let entry = match &self.terms[term_num as usize] {
-            Some(e) => e,
-            None => return None,
+            TermSlot::Term(e) => e,
+            _ => return None,
         };
 
         let original_subterms = entry.children.as_slice().to_vec();
@@ -1409,7 +1448,7 @@ impl Egraph {
             "Unioning predecessors of {} [{}, Predecessors: {}] and {} [{}, Predecessors: {}]",
             self.display_term(u),
             u,
-            fmt_termlist(
+            format!("{:?}",
                 self.predecessors[u as usize]
                     .keys()
                     .map(|x| self.display_term(*x))
@@ -1417,7 +1456,7 @@ impl Egraph {
             ),
             self.display_term(v),
             v,
-            fmt_termlist(
+            format!("{:?}",
                 self.predecessors[v as usize]
                     .keys()
                     .map(|x| self.display_term(*x))
@@ -1428,7 +1467,7 @@ impl Egraph {
         debug_assert!(u != v);
         debug_assert!(self.find(u) == u);
 
-        let mut result = EgraphResult::ok();
+        let result = EgraphResult::ok();
 
         // Move u's and v's predecessor maps out of the egraph so we can iterate
         // without cloning. Both slots are restored before any re-entrant call
@@ -1752,7 +1791,9 @@ impl Egraph {
             return vec![assignment.clone()];
         }
         let (trigger, term) = trigger_term_pairs[0];
-        let trigger_entry = self.terms[trigger as usize].as_ref().unwrap().clone();
+        let trigger_entry = self.patterns.get(&trigger)
+            .unwrap_or_else(|| panic!("match_term: trigger {} is not a registered pattern", trigger))
+            .clone();
 
         match &trigger_entry.op {
             Op::Constant(_) => {
@@ -1944,7 +1985,7 @@ fn check_quantifier_validity_helper(
 use crate::egraphs::traits::{EgraphTrait, MatchResult};
 
 impl EgraphTrait for Egraph {
-    type Op = String;
+    type Op = Op;
     type TermId = u64;
 
     fn set_bool_constants(&mut self, true_id: Self::TermId, false_id: Self::TermId) {
@@ -1954,14 +1995,14 @@ impl EgraphTrait for Egraph {
 
     fn register_term(
         &mut self,
-        _term: Self::TermId,
-        _op: Self::Op,
-        _children: &[Self::TermId],
-        _is_constant: bool,
-    ) {
-        // TODO: trait-compatible register_term (takes IDs, not &Term)
-        // For now, registration happens via the &Term-based register_term method
-        // called from SolverState::insert_predecessor.
+        op: Self::Op,
+        children: &[Self::TermId],
+        dynamic: bool,
+    ) -> Self::TermId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.register_term_with_id(id, op, children, dynamic);
+        id
     }
 
     fn register_eq(&mut self, _t1: Self::TermId, _t2: Self::TermId, _lit: Lit) {
@@ -1970,12 +2011,11 @@ impl EgraphTrait for Egraph {
 
     fn register_boolean_term(
         &mut self,
-        _term: Self::TermId,
-        _op: Self::Op,
-        _children: &[Self::TermId],
+        op: Self::Op,
+        children: &[Self::TermId],
         _lit: Lit,
-    ) {
-        // TODO: watch-based boolean propagation (future optimization)
+    ) -> Self::TermId {
+        self.register_term(op, children, false)
     }
 
     fn assert_equal(

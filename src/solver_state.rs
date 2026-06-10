@@ -36,6 +36,9 @@ pub struct SolverState {
     /// The core egraph (union-find, congruence closure, predecessors, backtracking).
     pub egraph: Egraph,
 
+    /// Map from term UID to yaspar Term objects (solver-level, not in egraph)
+    pub terms_list: Vec<TermOption>,
+
     /// Cached assertions (equality, disequality, distinct, tester).
     pub assertions: Vec<Assertion>,
 
@@ -88,6 +91,7 @@ impl SolverState {
 
         SolverState {
             context,
+            terms_list: vec![TermOption::None],
             assertions: vec![],
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
@@ -132,18 +136,18 @@ impl SolverState {
 
     pub fn get_term_from_lit(&mut self, lit: i32) -> Term {
         if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
-            self.egraph.get_term(*num)
+            self.get_term(*num)
         } else {
             let num = self.cnf_cache.var_map_reverse.get(&-lit).unwrap();
-            self.context.not(self.egraph.get_term(*num))
+            self.context.not(self.get_term(*num))
         }
     }
 
     pub fn get_term_from_lit_safe(&mut self, lit: i32) -> Option<Term> {
         if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
-            Some(self.egraph.get_term(*num))
+            Some(self.get_term(*num))
         } else if let Some(num) = self.cnf_cache.var_map_reverse.get(&-lit) {
-            Some(self.context.not(self.egraph.get_term(*num)))
+            Some(self.context.not(self.get_term(*num)))
         } else {
             None
         }
@@ -172,26 +176,52 @@ impl SolverState {
         } else if y == self.egraph.false_term {
             -self.get_lit_from_u64(x)
         } else {
-            let eq_term_class = self.context.eq(self.egraph.get_term(x), self.egraph.get_term(y));
+            let eq_term_class = self.context.eq(self.get_term(x), self.get_term(y));
             self.get_lit_from_term(&eq_term_class)
         }
     }
 
     pub fn get_term(&self, num: u64) -> Term {
-        self.egraph.get_term(num)
+        self.terms_list[num as usize].clone().unwrap()
     }
 
     pub fn get_term_ref(&self, num: u64) -> &Term {
-        self.egraph.get_term_ref(num)
+        match &self.terms_list[num as usize] {
+            TermOption::Some(term) | TermOption::Uninitialized(term) => term,
+            TermOption::None => panic!("get_term_ref: no term for id {}", num),
+        }
     }
 
     pub fn get_term_safe(&self, num: u64) -> TermOption {
-        self.egraph.get_term_safe(num)
+        if self.terms_list.len() <= num as usize {
+            TermOption::None
+        } else {
+            self.terms_list[num as usize].clone()
+        }
     }
 
     pub fn check_for_recursive_datatypes(&self) -> Option<Str> {
         self.datatype_info
             .contains_recursive_datatype(&self.context)
+    }
+
+    /// Extract Op from a yaspar Term.
+    fn extract_op(term: &Term) -> crate::egraphs::repr::Op {
+        use crate::egraphs::repr::Op;
+        match term.repr() {
+            Eq(_, _) => Op::Eq,
+            Ite(_, _, _) => Op::Ite,
+            Not(_) => Op::Not,
+            And(_) => Op::And,
+            Or(_) => Op::Or,
+            Implies(_, _) => Op::Implies,
+            Distinct(_) => Op::Distinct,
+            App(f, _, _) => Op::App(f.id_str().clone()),
+            Global(qid, _) => Op::Constant(qid.id_str().get().to_string()),
+            Constant(c, _) => Op::Constant(format!("{:?}", c)),
+            Local(local) => Op::Local(local.symbol.to_string()),
+            _ => panic!("extract_op: unsupported term type {:?}", term.repr()),
+        }
     }
 
     /// Solver-level recursive term registration (bottom-up).
@@ -206,15 +236,23 @@ impl SolverState {
     ) {
         use crate::egraphs::utils::get_subterms;
 
-        // For quantifier terms, add subterms as Uninitialized only (no predecessors)
-        if let Exists(_, _) | Forall(_, _) = term.repr() {
-            let (_, subterms) = get_subterms(term);
-            for subterm in &subterms {
-                self.egraph.add_to_terms_list(subterm);
+        let num = term.uid();
+
+        // For quantifier terms, register pattern subterms (for match_term) but no congruence
+        if let Exists(_, t) | Forall(_, t) = term.repr() {
+            // let (_, subterms) = get_subterms(term);
+            // for subterm in &subterms {
+            //     self.register_pattern_term(subterm);
+            // }
+            // Add term to solver's terms_list
+
+            while self.terms_list.len() <= num as usize {
+                self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
             }
-            // Register the quantifier term itself
-            self.egraph.register_term(term, from_quantifier);
-            // Solver bookkeeping (quantifier registration)
+            self.terms_list[num as usize] = TermOption::Some(term.clone());
+            // Register as opaque in egraph (proof_forest entry, no congruence)
+            self.egraph.register_opaque_term(num);
+            // Solver bookkeeping
             self.solver_walk_term(term, guard);
             return;
         }
@@ -225,13 +263,44 @@ impl SolverState {
             self.insert_predecessor(subterm, None, None, from_quantifier);
         }
 
-        // Register this term in the egraph (children already exist)
-        let already_registered = self.egraph.register_term(term, from_quantifier);
+        // Add term to solver's terms_list
+        while self.terms_list.len() <= num as usize {
+            self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
+        }
+        if let TermOption::Some(_) = &self.terms_list[num as usize] {
+            // Already registered at solver level — still register in egraph (idempotent)
+            let op = Self::extract_op(term);
+            let children: Vec<u64> = subterms.iter().map(|s| s.uid()).collect();
+            self.egraph.register_term_with_id(num, op, &children, from_quantifier);
+            return;
+        }
+        self.terms_list[num as usize] = TermOption::Some(term.clone());
+
+        // Register this term in the egraph
+        let op = Self::extract_op(term);
+        let children: Vec<u64> = subterms.iter().map(|s| s.uid()).collect();
+        let already_registered = self.egraph.register_term_with_id(num, op, &children, from_quantifier);
 
         // Solver-level bookkeeping only for newly registered terms
         if !already_registered {
             self.solver_walk_term(term, guard);
         }
+    }
+
+    /// Register a pattern term recursively in the egraph (for match_term to inspect).
+    /// Only stores TermEntry — does NOT add to function_maps/predecessors/proof_forest.
+    fn register_pattern_term(&mut self, term: &Term) {
+        use crate::egraphs::utils::get_subterms;
+        let num = term.uid();
+        // Recurse into subterms first
+        let (_, subterms) = get_subterms(term);
+        for subterm in &subterms {
+            self.register_pattern_term(subterm);
+        }
+        // Store pattern structure only (no function_maps, no congruence)
+        let op = Self::extract_op(term);
+        let children: Vec<u64> = subterms.iter().map(|s| s.uid()).collect();
+        self.egraph.register_pattern_entry(num, op, &children);
     }
 
     /// Walk the term tree for solver-level bookkeeping only.
@@ -251,11 +320,23 @@ impl SolverState {
         // Quantifier registration
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
             if let Annotated(inner_term, attrs) = middle_term.repr() {
+                // Store quantifier body in terms_list (needed for substitution during instantiation)
+                let body_uid = inner_term.uid();
+                while self.terms_list.len() <= body_uid as usize {
+                    self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
+                }
+                if self.terms_list[body_uid as usize].is_none() {
+                    self.terms_list[body_uid as usize] = TermOption::Uninitialized(inner_term.clone());
+                }
+
                 let mut trigger_ids = vec![];
 
                 for attr in attrs.iter() {
                     if let Attribute::Pattern(s_exprs) = attr {
                         trigger_ids.push(s_exprs.iter().map(|p| p.uid()).collect());
+                        for pattern in s_exprs {
+                            self.register_pattern_term(pattern);
+                        }
                     }
                 }
 
@@ -503,8 +584,8 @@ pub fn process_assignment(
                 16,
                 0,
                 "Merging: {} = {}",
-                solver_state.egraph.get_term(t1),
-                solver_state.egraph.get_term(t2)
+                solver_state.get_term(t1),
+                solver_state.get_term(t2)
             );
 
             let reason = if let Some(r) = reason.clone() {
@@ -543,8 +624,8 @@ pub fn process_assignment(
                 16,
                 0,
                 "Adding disequality {} ≠ {} to stack at level {:?} and hash {}",
-                solver_state.egraph.get_term(t1),
-                solver_state.egraph.get_term(t2),
+                solver_state.get_term(t1),
+                solver_state.get_term(t2),
                 level,
                 hash
             );
@@ -581,8 +662,8 @@ pub fn process_assignment(
                         12,
                         0,
                         "Asserting {} and {} are not equal at level {} with hash {}",
-                        solver_state.egraph.get_term(t1),
-                        solver_state.egraph.get_term(t2),
+                        solver_state.get_term(t1),
+                        solver_state.get_term(t2),
                         level,
                         hash
                     );
