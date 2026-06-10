@@ -4,7 +4,7 @@
 use crate::debug_println;
 use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent};
 use crate::egraphs::repr::{Children, Op, TermEntry, TermSlot};
-use crate::egraphs::traits::{EgraphResult, Conflict, Lit};
+use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
 use crate::egraphs::datastructures::{
@@ -14,8 +14,6 @@ use crate::egraphs::proofforest::*;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
 use std::default::Default;
 use std::fmt;
-use yaspar_ir::ast::ATerm::*;
-use yaspar_ir::ast::{Repr, Term};
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -220,7 +218,7 @@ pub struct Egraph {
 }
 
 impl Egraph {
-    pub fn new(tru: Term, fal: Term) -> Self {
+    pub fn new(true_term: u64, false_term: u64) -> Self {
 
         Egraph {
             next_id: 0,
@@ -237,8 +235,8 @@ impl Egraph {
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
             function_maps: DeterministicHashMap::default(),
-            true_term: tru.uid(),
-            false_term: fal.uid(),
+            true_term,
+            false_term,
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
             union_to_eclass: DeterministicHashSet::new(),
@@ -1900,89 +1898,6 @@ pub fn valid_hash(hash: u64, level: usize, predecessor_level: &[u64]) -> bool {
     );
     hash >= predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
 }
-
-// check that every variable occurs in each multipattern
-// see: https://isabelle.in.tum.de/library/HOL/HOL/SMT.html
-// Some SMT solvers support patterns as a quantifier instantiation
-// heuristics. Patterns may either be positive terms (tagged by "pat")
-// triggering quantifier instantiations -- when the solver finds a
-// term matching a positive pattern, it instantiates the corresponding
-// quantifier accordingly -- or negative terms (tagged by "nopat")
-// inhibiting quantifier instantiations. A list of patterns
-// of the same kind is called a multipattern, and all patterns in a
-// multipattern are considered conjunctively for quantifier instantiation.
-// A list of multipatterns is called a trigger, and their multipatterns
-// act disjunctively during quantifier instantiation. Each multipattern
-// should mention at least all quantified variables of the preceding
-// quantifier block.
-fn check_quantifier_validity(triggers: &Vec<&Vec<Term>>, vars: &Vec<String>, term: &Term) {
-    for multipattern in triggers {
-        let mut contains_var = DeterministicHashMap::new();
-        for var in vars {
-            contains_var.insert(var.clone(), false);
-        }
-        for pattern in *multipattern {
-            check_quantifier_validity_helper(pattern, &mut contains_var);
-        }
-        // println!("We have contains_var: {:?}", contains_var);
-        for key in contains_var.keys() {
-            if !contains_var[key] {
-                panic!(
-                    "We have variable {} that does not occur in multipattern {:?} for term {}",
-                    key, multipattern, term
-                );
-            }
-        }
-    }
-}
-
-fn check_quantifier_validity_helper(
-    term: &Term,
-    contains_var: &mut DeterministicHashMap<String, bool>,
-) {
-    // println!("Checking validity with term {} and contains_var {:?}", term, contains_var);
-    match term.repr() {
-        Constant(..) | Global(..) => (),
-        Local(local) => {
-            let local_id = local.symbol.to_string();
-            // println!("We have the local_id {}", local_id);
-            if let std::collections::btree_map::Entry::Occupied(mut e) =
-                contains_var.entry(local_id)
-            {
-                // println!("We are updating the local_id");
-                let _ = Some(e.insert(true));
-            }
-        }
-        App(_, items, _) | And(items) | Or(items) | Xor(items) | Distinct(items) => {
-            items
-                .iter()
-                .for_each(|item| check_quantifier_validity_helper(item, contains_var));
-        }
-        Eq(t1, t2) => {
-            check_quantifier_validity_helper(t1, contains_var);
-            check_quantifier_validity_helper(t2, contains_var);
-        }
-        Not(t) => {
-            check_quantifier_validity_helper(t, contains_var);
-        }
-        Implies(items, t) => {
-            check_quantifier_validity_helper(t, contains_var);
-            items
-                .iter()
-                .for_each(|item| check_quantifier_validity_helper(item, contains_var));
-        }
-        Ite(b, t1, t2) => {
-            check_quantifier_validity_helper(b, contains_var);
-            check_quantifier_validity_helper(t1, contains_var);
-            check_quantifier_validity_helper(t2, contains_var);
-        }
-        Let(..) | Exists(..) | Forall(..) | Matching(..) | Annotated(..) => {
-            panic!("we do not support patterns with {}", term);
-        }
-    }
-}
-
-use crate::egraphs::traits::{EgraphTrait, MatchResult};
 
 impl EgraphTrait for Egraph {
     type Op = Op;

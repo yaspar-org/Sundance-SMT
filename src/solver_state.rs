@@ -85,7 +85,7 @@ impl SolverState {
     pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
         let tru = context.get_true();
         let fal = context.get_false();
-        let egraph = Egraph::new(tru, fal);
+        let egraph = Egraph::new(tru.uid(), fal.uid());
         let datatype_info = DatatypeInfo::from_context(&context);
 
 
