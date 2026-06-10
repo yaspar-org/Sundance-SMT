@@ -216,7 +216,16 @@ impl SolverState {
             Or(_) => Op::Or,
             Implies(_, _) => Op::Implies,
             Distinct(_) => Op::Distinct,
-            App(f, _, _) => Op::App(f.id_str().clone()),
+            App(f, _, _) => {
+                let func_indices = &f.0.indices;
+                if func_indices.is_empty() {
+                    Op::App(f.id_str().clone())
+                } else {
+                    // Indexed function (like (_ is Ctor)) — include indices in key
+                    let key = format!("({} {})", f.id_str().get(), func_indices[0]);
+                    Op::Constant(key)
+                }
+            }
             Global(qid, _) => Op::Constant(qid.id_str().get().to_string()),
             Constant(c, _) => Op::Constant(format!("{:?}", c)),
             Local(local) => Op::Local(local.symbol.to_string()),
