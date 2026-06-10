@@ -779,7 +779,7 @@ impl Egraph {
 
         let original_subterms = entry.children.as_slice().to_vec();
         let op = match &entry.op {
-            Op::App(s) => CanonicalOp::App(yaspar_ir::ast::QualifiedIdentifier::simple(s.clone())),
+            Op::App(s) => CanonicalOp::App(s.to_string()),
             Op::Eq => CanonicalOp::Eq,
             Op::Ite => CanonicalOp::Ite,
             _ => return None,

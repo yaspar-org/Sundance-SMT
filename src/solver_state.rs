@@ -219,11 +219,11 @@ impl SolverState {
             App(f, _, _) => {
                 let func_indices = &f.0.indices;
                 if func_indices.is_empty() {
-                    Op::App(f.id_str().clone())
+                    Op::App(f.id_str().get().to_string())
                 } else {
                     // Indexed function (like (_ is Ctor)) — include indices in key
                     let key = format!("({} {})", f.id_str().get(), func_indices[0]);
-                    Op::Constant(key)
+                    Op::App(key)
                 }
             }
             Global(qid, _) => Op::Constant(qid.id_str().get().to_string()),

@@ -4,14 +4,12 @@
 //! Internal term representation for the Sundance egraph.
 //! These types are specific to our egraph implementation, not part of the generic trait.
 
-use yaspar_ir::ast::Str;
-
 /// Operator type for congruence closure.
 /// Two terms are congruent iff they have the same Op and pairwise-equal children.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Op {
     /// Uninterpreted function application
-    App(Str),
+    App(String),
     /// Equality (=)
     Eq,
     /// If-then-else
@@ -36,7 +34,7 @@ impl Op {
     /// Convert to the string key used in function_maps.
     pub fn to_function_map_key(&self) -> String {
         match self {
-            Op::App(s) => s.get().to_string(),
+            Op::App(s) => s.clone(),
             Op::Eq => "=".to_string(),
             Op::Ite => "ite".to_string(),
             Op::Not => "not".to_string(),

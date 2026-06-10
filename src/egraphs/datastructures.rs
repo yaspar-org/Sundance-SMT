@@ -36,7 +36,7 @@ impl fmt::Display for DisequalTerm {
 /// hash-consed and hash/compare by uid.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CanonicalOp {
-    App(QualifiedIdentifier),
+    App(String),
     Eq,
     Ite,
 }
