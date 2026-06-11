@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::cnf::CNFConversion;
-use crate::egraphs::datastructures::Polarity;
+use crate::solver_types::Polarity;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::skolem::skolemize;

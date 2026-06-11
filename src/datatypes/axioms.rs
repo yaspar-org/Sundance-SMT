@@ -11,7 +11,7 @@ use yaspar_ir::ast::{ObjectAllocatorExt, Repr, StrAllocator, Term};
 
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
-use crate::egraphs::datastructures::ConstructorType;
+use crate::solver_types::ConstructorType;
 use crate::preprocess::check_for_function_bool;
 use crate::solver_state::SolverState;
 

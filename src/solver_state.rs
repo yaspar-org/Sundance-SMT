@@ -18,8 +18,9 @@ use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
-use crate::egraphs::datastructures::{
-    Assertion, ConstructorType, ConstructorType::*, DisequalTerm, Polarity, Quantifier, TermOption,
+use crate::egraphs::datastructures::DisequalTerm;
+use crate::solver_types::{
+    Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
 use crate::egraphs::egraph::{Egraph, valid_hash};
 use crate::egraphs::proofforest::ProofForestEdge;
