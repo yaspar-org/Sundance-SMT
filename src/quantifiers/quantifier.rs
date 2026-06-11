@@ -218,7 +218,7 @@ pub fn instantiate_quantifiers(
                 // Convert ID map to Term map for substitution
                 let subs: DeterministicHashMap<String, Term> = subs_ids
                     .iter()
-                    .map(|(k, v)| (k.clone(), solver_state.get_term(*v)))
+                    .map(|(k, v)| (k.clone(), solver_state.get_term(solver_state.to_solver_uid(*v))))
                     .collect();
 
                 if let Some(set) = solver_state.added_instantiations.get(&quantifier.id)

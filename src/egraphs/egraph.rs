@@ -218,7 +218,7 @@ pub struct Egraph {
 }
 
 impl Egraph {
-    pub fn new(true_term: u64, false_term: u64) -> Self {
+    pub fn new() -> Self {
 
         Egraph {
             next_id: 0,
@@ -235,8 +235,8 @@ impl Egraph {
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
             function_maps: DeterministicHashMap::default(),
-            true_term,
-            false_term,
+            true_term: 0,
+            false_term: 0,
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
             union_to_eclass: DeterministicHashSet::new(),
@@ -278,7 +278,7 @@ impl Egraph {
     /// Returns true if the term was already registered.
     /// Register a single term (non-recursive). Children must already be registered.
     /// Takes raw IDs — no dependency on Term representation.
-    pub fn register_term_with_id(&mut self, id: u64, op: Op, children: &[u64], dynamic: bool) -> bool {
+    pub fn register_term_internal(&mut self, id: u64, op: Op, children: &[u64], dynamic: bool) -> bool {
         // Resize storage if needed
         while self.terms.len() <= id as usize {
             self.terms.resize(self.terms.len() * 2, TermSlot::Empty);
@@ -409,11 +409,10 @@ impl Egraph {
     /// Register an opaque term — allocates a full slot with a proof_forest Root
     /// but no op/children/function_maps/predecessors. Used for quantifier terms
     /// that participate in union-find (merged with true/false) but not congruence.
-    pub fn register_opaque_term(&mut self, id: u64) {
+    pub fn register_opaque_term(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
         self.ensure_capacity(id);
-        if !matches!(self.terms[id as usize], TermSlot::Empty) {
-            return;
-        }
         self.terms[id as usize] = TermSlot::Opaque;
         self.proof_forest[id as usize] = ProofForestEdge::Root {
             size: 1,
@@ -421,6 +420,7 @@ impl Egraph {
             child: 0,
             children: DeterministicHashSet::new(),
         };
+        id
     }
 
     /// If any predecessors of the first subterm are congruent to term_num
@@ -476,7 +476,7 @@ impl Egraph {
     }
 
     pub fn find(&self, x: u64) -> u64 {
-        let p = &self.proof_forest[x as usize];
+        let p: &ProofForestEdge = &self.proof_forest[x as usize];
         match p {
             ProofForestEdge::Root { .. } => x,
             ProofForestEdge::Congruence { parent: p, .. }
@@ -1903,9 +1903,34 @@ impl EgraphTrait for Egraph {
     type Op = Op;
     type TermId = u64;
 
-    fn set_bool_constants(&mut self, true_id: Self::TermId, false_id: Self::TermId) {
-        self.true_term = true_id;
-        self.false_term = false_id;
+    fn register_true(&mut self) -> Self::TermId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.ensure_capacity(id);
+        self.terms[id as usize] = TermSlot::Opaque;
+        self.proof_forest[id as usize] = ProofForestEdge::Root {
+            size: 1,
+            disequalities: DeterministicHashMap::new(),
+            child: 0,
+            children: DeterministicHashSet::new(),
+        };
+        self.true_term = id;
+        id
+    }
+
+    fn register_false(&mut self) -> Self::TermId {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.ensure_capacity(id);
+        self.terms[id as usize] = TermSlot::Opaque;
+        self.proof_forest[id as usize] = ProofForestEdge::Root {
+            size: 1,
+            disequalities: DeterministicHashMap::new(),
+            child: 0,
+            children: DeterministicHashSet::new(),
+        };
+        self.false_term = id;
+        id
     }
 
     fn register_term(
@@ -1916,7 +1941,7 @@ impl EgraphTrait for Egraph {
     ) -> Self::TermId {
         let id = self.next_id;
         self.next_id += 1;
-        self.register_term_with_id(id, op, children, dynamic);
+        self.register_term_internal(id, op, children, dynamic);
         id
     }
 

@@ -67,9 +67,11 @@ pub trait EgraphTrait {
 
     // --- Initialization ---
 
-    /// Tell the egraph which terms represent boolean true and false.
-    /// These must already be registered as constants.
-    fn set_bool_constants(&mut self, true_id: Self::TermId, false_id: Self::TermId);
+    /// Register the boolean true constant and return its ID.
+    fn register_true(&mut self) -> Self::TermId;
+
+    /// Register the boolean false constant and return its ID.
+    fn register_false(&mut self) -> Self::TermId;
 
     // --- Registration ---
 

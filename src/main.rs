@@ -74,8 +74,7 @@ fn main() -> Result<(), String> {
 
     let mut solver_state = SolverState::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
 
-    solver_state.insert_predecessor(&false_term, None, None, false);
-    solver_state.insert_predecessor(&true_term, None, None, false);
+    solver_state.register_bool_constants(&true_term, &false_term);
 
 
     // checking if we have any inductive datatypes -> if we do panic!

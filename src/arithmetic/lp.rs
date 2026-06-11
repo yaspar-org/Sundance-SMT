@@ -419,11 +419,11 @@ pub fn extract_linear_expression(
                     }
                 }
                 _ => {
-                    let root_id = solver_state.egraph.find(term_id);
+                    let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
 
                     let mut tracker = ProofTracker::new();
                     if let Some(negated_model) =
-                        solver_state.egraph.leastcommonancestor(root_id, term_id, &mut tracker)
+                        solver_state.egraph.leastcommonancestor(root_id, solver_state.to_egraph_id(term_id), &mut tracker)
                     {
                         let model_terms: Vec<i32> = negated_model
                             .into_iter()
@@ -445,9 +445,9 @@ pub fn extract_linear_expression(
             }
         }
         _ => {
-            let root_id = solver_state.egraph.find(term_id);
+            let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
             let mut tracker = ProofTracker::new();
-            if let Some(negated_model) = solver_state.egraph.leastcommonancestor(root_id, term_id, &mut tracker)
+            if let Some(negated_model) = solver_state.egraph.leastcommonancestor(root_id, solver_state.to_egraph_id(term_id), &mut tracker)
             {
                 let model_terms: Vec<i32> = negated_model
                     .into_iter()

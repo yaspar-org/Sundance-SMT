@@ -36,6 +36,9 @@ pub struct SolverState {
     /// The core egraph (union-find, congruence closure, predecessors, backtracking).
     pub egraph: Egraph,
 
+    /// Bidirectional mapping between solver term UIDs and egraph term IDs
+    pub id_map: bimap::BiMap<u64, u64>,
+
     /// Map from term UID to yaspar Term objects (solver-level, not in egraph)
     pub terms_list: Vec<TermOption>,
 
@@ -85,12 +88,13 @@ impl SolverState {
     pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
         let tru = context.get_true();
         let fal = context.get_false();
-        let egraph = Egraph::new(tru.uid(), fal.uid());
+        let mut egraph = Egraph::new();
         let datatype_info = DatatypeInfo::from_context(&context);
 
 
         SolverState {
             context,
+            id_map: bimap::BiMap::new(),
             terms_list: vec![TermOption::None],
             assertions: vec![],
             quantifiers: vec![],
@@ -158,25 +162,26 @@ impl SolverState {
         *self.cnf_cache.var_map.get(&num).unwrap()
     }
 
+    /// Convert an equality between two egraph IDs to a SAT literal.
     pub fn make_eq(&mut self, x: u64, y: u64) -> i32 {
-        if (x == self.egraph.false_term && y == self.egraph.true_term)
-            || (x == self.egraph.true_term && y == self.egraph.false_term)
-        {
-            self.get_lit_from_u64(self.egraph.false_term)
-        } else if (x == self.egraph.true_term && y == self.egraph.true_term)
-            || (x == self.egraph.false_term && y == self.egraph.false_term)
-        {
-            self.get_lit_from_u64(self.egraph.true_term)
-        } else if x == self.egraph.true_term {
-            self.get_lit_from_u64(y)
-        } else if y == self.egraph.true_term {
-            self.get_lit_from_u64(x)
-        } else if x == self.egraph.false_term {
-            -self.get_lit_from_u64(y)
-        } else if y == self.egraph.false_term {
-            -self.get_lit_from_u64(x)
+        let true_id = self.egraph.true_term;
+        let false_id = self.egraph.false_term;
+        if (x == false_id && y == true_id) || (x == true_id && y == false_id) {
+            self.get_lit_from_u64(self.to_solver_uid(false_id))
+        } else if (x == true_id && y == true_id) || (x == false_id && y == false_id) {
+            self.get_lit_from_u64(self.to_solver_uid(true_id))
+        } else if x == true_id {
+            self.get_lit_from_u64(self.to_solver_uid(y))
+        } else if y == true_id {
+            self.get_lit_from_u64(self.to_solver_uid(x))
+        } else if x == false_id {
+            -self.get_lit_from_u64(self.to_solver_uid(y))
+        } else if y == false_id {
+            -self.get_lit_from_u64(self.to_solver_uid(x))
         } else {
-            let eq_term_class = self.context.eq(self.get_term(x), self.get_term(y));
+            let sx = self.to_solver_uid(x);
+            let sy = self.to_solver_uid(y);
+            let eq_term_class = self.context.eq(self.get_term(sx), self.get_term(sy));
             self.get_lit_from_term(&eq_term_class)
         }
     }
@@ -200,9 +205,39 @@ impl SolverState {
         }
     }
 
+    /// Convert a solver term UID to the corresponding egraph ID.
+    pub fn to_egraph_id(&self, solver_uid: u64) -> u64 {
+        *self.id_map.get_by_left(&solver_uid)
+            .unwrap_or_else(|| panic!("to_egraph_id: no egraph ID for solver uid {}", solver_uid))
+    }
+
+    /// Convert an egraph term ID to the corresponding solver UID.
+    pub fn to_solver_uid(&self, egraph_id: u64) -> u64 {
+        *self.id_map.get_by_right(&egraph_id)
+            .unwrap_or_else(|| panic!("to_solver_uid: no solver uid for egraph id {}", egraph_id))
+    }
+
     pub fn check_for_recursive_datatypes(&self) -> Option<Str> {
         self.datatype_info
             .contains_recursive_datatype(&self.context)
+    }
+
+    /// Register true and false in both the egraph and the solver's ID mapping.
+    pub fn register_bool_constants(&mut self, true_term: &Term, false_term: &Term) {
+        use crate::egraphs::traits::EgraphTrait;
+        let true_egraph_id = self.egraph.register_true();
+        let false_egraph_id = self.egraph.register_false();
+
+        let true_uid = true_term.uid();
+        let false_uid = false_term.uid();
+        let max_uid = std::cmp::max(true_uid, false_uid) as usize;
+        while self.terms_list.len() <= max_uid {
+            self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
+        }
+        self.terms_list[true_uid as usize] = TermOption::Some(true_term.clone());
+        self.terms_list[false_uid as usize] = TermOption::Some(false_term.clone());
+        self.id_map.insert(true_uid, true_egraph_id);
+        self.id_map.insert(false_uid, false_egraph_id);
     }
 
     /// Extract Op from a yaspar Term.
@@ -242,58 +277,44 @@ impl SolverState {
         _parent: Option<u64>,
         guard: Option<u64>,
         from_quantifier: bool,
-    ) {
+    ) -> u64 {
         use crate::egraphs::utils::get_subterms;
+        use crate::egraphs::traits::EgraphTrait;
 
         let num = term.uid();
 
-        // For quantifier terms, register pattern subterms (for match_term) but no congruence
-        if let Exists(_, t) | Forall(_, t) = term.repr() {
-            // let (_, subterms) = get_subterms(term);
-            // for subterm in &subterms {
-            //     self.register_pattern_term(subterm);
-            // }
-            // Add term to solver's terms_list
+        // Early return if already registered
+        while self.terms_list.len() <= num as usize {
+            self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
+            
+        }
+        if let TermOption::Some(_) = &self.terms_list[num as usize] {
+            return self.to_egraph_id(num);
+        }
 
-            while self.terms_list.len() <= num as usize {
-                self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
-            }
-            self.terms_list[num as usize] = TermOption::Some(term.clone());
-            // Register as opaque in egraph (proof_forest entry, no congruence)
-            self.egraph.register_opaque_term(num);
-            // Solver bookkeeping
+        // Add term to solver's terms_list
+        self.terms_list[num as usize] = TermOption::Some(term.clone());
+
+        // For quantifier terms, register as opaque (no congruence)
+        if let Exists(_, _) | Forall(_, _) = term.repr() {
+            let egraph_id = self.egraph.register_opaque_term();
+            self.id_map.insert(num, egraph_id);
             self.solver_walk_term(term, guard);
-            return;
+            return egraph_id;
         }
 
         // Recurse into subterms first (bottom-up: children before parents)
         let (_, subterms) = get_subterms(term);
-        for subterm in &subterms {
-            self.insert_predecessor(subterm, None, None, from_quantifier);
-        }
-
-        // Add term to solver's terms_list
-        while self.terms_list.len() <= num as usize {
-            self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
-        }
-        if let TermOption::Some(_) = &self.terms_list[num as usize] {
-            // Already registered at solver level — still register in egraph (idempotent)
-            let op = Self::extract_op(term);
-            let children: Vec<u64> = subterms.iter().map(|s| s.uid()).collect();
-            self.egraph.register_term_with_id(num, op, &children, from_quantifier);
-            return;
-        }
-        self.terms_list[num as usize] = TermOption::Some(term.clone());
+        let egraph_children: Vec<u64> = subterms.iter()
+            .map(|subterm| self.insert_predecessor(subterm, None, None, from_quantifier))
+            .collect();
 
         // Register this term in the egraph
         let op = Self::extract_op(term);
-        let children: Vec<u64> = subterms.iter().map(|s| s.uid()).collect();
-        let already_registered = self.egraph.register_term_with_id(num, op, &children, from_quantifier);
-
-        // Solver-level bookkeeping only for newly registered terms
-        if !already_registered {
-            self.solver_walk_term(term, guard);
-        }
+        let egraph_id = self.egraph.register_term(op, &egraph_children, from_quantifier);
+        self.id_map.insert(num, egraph_id);
+        self.solver_walk_term(term, guard);
+        egraph_id
     }
 
     /// Register a pattern term recursively in the egraph (for match_term to inspect).
@@ -435,12 +456,13 @@ pub fn process_assignment(
     let mut tracker = ProofTracker::new();
 
     if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&lit) {
+        let egraph_t = solver_state.to_egraph_id(*t);
         let res = if let Some(r) = reason.clone() {
             r
         } else {
             ProofForestEdge::Equality {
                 size: 0,
-                term: Some((*t, solver_state.egraph.true_term)),
+                term: Some((egraph_t, solver_state.egraph.true_term)),
                 parent: 0,
                 child: 0,
                 disequalities: DeterministicHashMap::new(),
@@ -458,7 +480,7 @@ pub fn process_assignment(
             solver_state.egraph.true_term
         );
         let union_result = solver_state.egraph.cc_union(
-            *t,
+            egraph_t,
             solver_state.egraph.true_term,
             res,
             level,
@@ -476,12 +498,13 @@ pub fn process_assignment(
     }
 
     if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&-lit) {
+        let egraph_t = solver_state.to_egraph_id(*t);
         let res = if let Some(r) = reason.clone() {
             r
         } else {
             ProofForestEdge::Equality {
                 size: 0,
-                term: Some((*t, solver_state.egraph.false_term)),
+                term: Some((egraph_t, solver_state.egraph.false_term)),
                 parent: 0,
                 child: 0,
                 disequalities: DeterministicHashMap::new(),
@@ -499,7 +522,7 @@ pub fn process_assignment(
             solver_state.egraph.false_term
         );
         let union_result = solver_state.egraph.cc_union(
-            *t,
+            egraph_t,
             solver_state.egraph.false_term,
             res,
             level,
@@ -597,12 +620,14 @@ pub fn process_assignment(
                 solver_state.get_term(t2)
             );
 
+            let et1 = solver_state.to_egraph_id(t1);
+            let et2 = solver_state.to_egraph_id(t2);
             let reason = if let Some(r) = reason.clone() {
                 r
             } else {
                 ProofForestEdge::Equality {
                     size: 0,
-                    term: Some((t1, t2)),
+                    term: Some((et1, et2)),
                     parent: 0,
                     child: 0,
                     disequalities: DeterministicHashMap::new(),
@@ -611,7 +636,7 @@ pub fn process_assignment(
                     children: DeterministicHashSet::new(),
                 }
             };
-            let union_result = solver_state.egraph.cc_union(t1, t2, reason, level, fixed, from_quantifier);
+            let union_result = solver_state.egraph.cc_union(et1, et2, reason, level, fixed, from_quantifier);
             if let Some(conflict) = union_result.conflict {
                 let mut model_terms: Vec<i32> = conflict.equalities
                     .iter()
@@ -640,14 +665,16 @@ pub fn process_assignment(
             );
             // debug_println!(10, 0, "{}", solver_state);
 
+            let et1 = solver_state.to_egraph_id(t1);
+            let et2 = solver_state.to_egraph_id(t2);
             if let Some(negated_model) =
-                solver_state.egraph.leastcommonancestor(t1, t2, &mut ProofTracker::new())
+                solver_state.egraph.leastcommonancestor(et1, et2, &mut ProofTracker::new())
             {
                 let mut model_terms: Vec<i32> = negated_model
                     .into_iter()
                     .map(|x| -solver_state.make_eq(x.0, x.1))
                     .collect();
-                model_terms.push(solver_state.make_eq(t1, t2));
+                model_terms.push(solver_state.make_eq(et1, et2));
                 debug_println!(
                     16,
                     1,
@@ -660,13 +687,15 @@ pub fn process_assignment(
                 );
                 return Some(vec![model_terms]);
             }
-            solver_state.egraph.add_disequality(t1, t2, lit, level, hash);
+            solver_state.egraph.add_disequality(et1, et2, lit, level, hash);
             None
         }
         Assertion::Distinct { terms, level, hash } => {
             for i in 0..terms.len() {
                 for j in i + 1..terms.len() {
                     let (t1, t2) = (terms[i], terms[j]);
+                    let et1 = solver_state.to_egraph_id(t1);
+                    let et2 = solver_state.to_egraph_id(t2);
                     debug_println!(
                         12,
                         0,
@@ -677,7 +706,7 @@ pub fn process_assignment(
                         hash
                     );
                     if let Some(negated_model) =
-                        solver_state.egraph.leastcommonancestor(t1, t2, &mut ProofTracker::new())
+                        solver_state.egraph.leastcommonancestor(et1, et2, &mut ProofTracker::new())
                     {
                         let mut model_terms: Vec<i32> = negated_model
                             .into_iter()
@@ -697,7 +726,7 @@ pub fn process_assignment(
                         debug_println!(16, 0, "returning negated model {:?}", model_terms);
                         return Some(vec![model_terms]);
                     }
-                    solver_state.egraph.add_disequality(t1, t2, lit, level, hash);
+                    solver_state.egraph.add_disequality(et1, et2, lit, level, hash);
                     // debug_println!(11, 0, "{}", solver_state);
                 }
             }
