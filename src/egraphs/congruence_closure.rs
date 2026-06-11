@@ -8,10 +8,10 @@ use crate::egraphs::proofforest::ProofForestEdge;
 
 pub fn add_parent(
     proof_parent: ProofForestEdge,
-    parent: u64,
-    new_child: u64,
+    parent: u32,
+    new_child: u32,
     level: usize,
-    hash: u64,
+    hash: u32,
 ) -> ProofForestEdge {
     match proof_parent {
         ProofForestEdge::Root {
@@ -57,7 +57,7 @@ pub fn add_parent(
     }
 }
 
-pub fn get_parent(proof_parent: &ProofForestEdge) -> u64 {
+pub fn get_parent(proof_parent: &ProofForestEdge) -> u32 {
     debug_println!(6, 0, "We are getting the parent of {:?}", proof_parent);
     match proof_parent {
         ProofForestEdge::Root { .. } => {
@@ -74,7 +74,7 @@ pub fn get_parent(proof_parent: &ProofForestEdge) -> u64 {
     }
 }
 
-pub fn get_child(proof_parent: &ProofForestEdge) -> u64 {
+pub fn get_child(proof_parent: &ProofForestEdge) -> u32 {
     match proof_parent {
         ProofForestEdge::Root {
             child,

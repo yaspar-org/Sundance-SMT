@@ -70,9 +70,9 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], solver_state: &mu
     // todo: might be able to move this later
     let mut roots = vec![];
     for term_id in solver_state.arithmetic_terms.clone() {
-        // todo: see if I can avoid cloning
-        if let ProofForestEdge::Root { .. } = &solver_state.egraph.proof_forest[term_id as usize] {
-            let left_expr = Int::new_const(format!("var_{}", term_id));
+        let egraph_id = solver_state.to_egraph_id(term_id);
+        if let ProofForestEdge::Root { .. } = &solver_state.egraph.proof_forest[egraph_id as usize] {
+            let left_expr = Int::new_const(format!("var_{}", egraph_id));
 
             roots.push((term_id, left_expr.clone()));
             let (right, literals) = extract_linear_expression(term_id, solver_state);

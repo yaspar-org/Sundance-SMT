@@ -189,7 +189,7 @@ pub fn instantiate_quantifiers(
         // note we consider patterns in a multipattern conjunctively and multipatterns in a trigger disjunctively
         for multipattern in triggers {
             let body = quantifier.body;
-            let trigger_term_pairs = multipattern.iter().map(|t| (*t, None)).collect::<Vec<_>>();
+            let trigger_term_pairs: Vec<(usize, Option<u32>)> = multipattern.iter().map(|t| (*t, None)).collect();
 
             let mut assignments = DeterministicHashMap::default();
             debug_println!(12, 0, "after8");
@@ -201,7 +201,7 @@ pub fn instantiate_quantifiers(
                 trigger_term_pairs
             );
             debug_println!(12, 0, "after9");
-            let list_assignments = solver_state.egraph.match_term(&mut assignments, trigger_term_pairs);
+            let list_assignments = solver_state.egraph.match_patterns(&mut assignments, &trigger_term_pairs);
 
             if list_assignments.is_empty() {
                 debug_println!(

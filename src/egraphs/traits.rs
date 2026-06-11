@@ -8,6 +8,7 @@
 //! semi-persistent egraph) to be used interchangeably.
 
 use std::hash::Hash;
+use crate::egraphs::repr::PatternId;
 
 /// A SAT literal: positive means the variable is true, negative means false.
 /// Zero means "no decision" when returned from decision methods.
@@ -143,14 +144,14 @@ pub trait EgraphTrait {
 
     /// Match a multi-trigger pattern.
     ///
-    /// `trigger_term_pairs` is a list of (pattern_term_uid, optional_ground_term_uid).
+    /// `trigger_term_pairs` is a list of (PatternId, optional_ground_term_hint).
     /// - `Some(t)` means the pattern must match in the same equivalence class as `t`
     /// - `None` means the pattern can match any term of the right function
     ///
     /// Returns a list of substitution maps (variable name → matched term ID).
     fn match_triggers(
         &mut self,
-        trigger_term_pairs: Vec<(Self::TermId, Option<Self::TermId>)>,
+        trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
     ) -> Vec<crate::utils::DeterministicHashMap<String, Self::TermId>>;
 
     // --- Backtracking ---

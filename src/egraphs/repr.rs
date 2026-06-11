@@ -4,6 +4,10 @@
 //! Internal term representation for the Sundance egraph.
 //! These types are specific to our egraph implementation, not part of the generic trait.
 
+/// Egraph-internal term ID. Uses u32 so the type checker catches accidental
+/// mixing with solver-level u64 UIDs.
+pub type EgraphId = u32;
+
 /// Operator type for congruence closure.
 /// Two terms are congruent iff they have the same Op and pairwise-equal children.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -52,17 +56,17 @@ impl Op {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Children {
     Arity0,
-    Arity1([u64; 1]),
-    Arity2([u64; 2]),
-    Arity3([u64; 3]),
-    Arity4([u64; 4]),
-    Arity5([u64; 5]),
-    Arity6([u64; 6]),
-    ArityN(Vec<u64>),
+    Arity1([EgraphId; 1]),
+    Arity2([EgraphId; 2]),
+    Arity3([EgraphId; 3]),
+    Arity4([EgraphId; 4]),
+    Arity5([EgraphId; 5]),
+    Arity6([EgraphId; 6]),
+    ArityN(Vec<EgraphId>),
 }
 
 impl Children {
-    pub fn from_slice(children: &[u64]) -> Self {
+    pub fn from_slice(children: &[EgraphId]) -> Self {
         match children.len() {
             0 => Children::Arity0,
             1 => Children::Arity1([children[0]]),
@@ -75,7 +79,7 @@ impl Children {
         }
     }
 
-    pub fn as_slice(&self) -> &[u64] {
+    pub fn as_slice(&self) -> &[EgraphId] {
         match self {
             Children::Arity0 => &[],
             Children::Arity1(a) => a,
@@ -124,3 +128,16 @@ pub enum TermSlot {
     /// upward, but has no internal structure visible to the egraph.
     Opaque,
 }
+
+/// A pattern for e-matching. Recursive tree structure, never stored in the egraph.
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// A variable to be bound during matching
+    Var(String),
+    /// A ground term already in the egraph — match by equivalence class
+    Ground(EgraphId),
+    /// A function application with sub-patterns
+    App(Op, Vec<Pattern>),
+}
+
+pub type PatternId = usize;

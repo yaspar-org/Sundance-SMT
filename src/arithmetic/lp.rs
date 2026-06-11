@@ -106,7 +106,7 @@ pub enum FunctionType {
 
 #[derive(Eq, PartialEq, Debug, Clone, Ord, PartialOrd, Hash, Copy)]
 pub enum Coefficient {
-    Term(u64),
+    Term(u32),
     Constant,
 }
 
@@ -340,8 +340,8 @@ pub fn extract_linear_expression(
             }
         }
         Global(..) => {
-            // Handle variables
-            expr.insert(Coefficient::Term(term.uid()), IBig::from(1));
+            // TODO: consider whether we need egraph.find() here for correctness when variables are merged
+            expr.insert(Coefficient::Term(solver_state.to_egraph_id(term_id)), IBig::from(1));
         }
         App(identifier, args, _) => {
             // Handle arithmetic operations

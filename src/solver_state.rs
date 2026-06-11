@@ -37,7 +37,7 @@ pub struct SolverState {
     pub egraph: Egraph,
 
     /// Bidirectional mapping between solver term UIDs and egraph term IDs
-    pub id_map: bimap::BiMap<u64, u64>,
+    pub id_map: bimap::BiMap<u64, u32>,
 
     /// Map from term UID to yaspar Term objects (solver-level, not in egraph)
     pub terms_list: Vec<TermOption>,
@@ -163,7 +163,7 @@ impl SolverState {
     }
 
     /// Convert an equality between two egraph IDs to a SAT literal.
-    pub fn make_eq(&mut self, x: u64, y: u64) -> i32 {
+    pub fn make_eq(&mut self, x: u32, y: u32) -> i32 {
         let true_id = self.egraph.true_term;
         let false_id = self.egraph.false_term;
         if (x == false_id && y == true_id) || (x == true_id && y == false_id) {
@@ -206,13 +206,13 @@ impl SolverState {
     }
 
     /// Convert a solver term UID to the corresponding egraph ID.
-    pub fn to_egraph_id(&self, solver_uid: u64) -> u64 {
+    pub fn to_egraph_id(&self, solver_uid: u64) -> u32 {
         *self.id_map.get_by_left(&solver_uid)
             .unwrap_or_else(|| panic!("to_egraph_id: no egraph ID for solver uid {}", solver_uid))
     }
 
     /// Convert an egraph term ID to the corresponding solver UID.
-    pub fn to_solver_uid(&self, egraph_id: u64) -> u64 {
+    pub fn to_solver_uid(&self, egraph_id: u32) -> u64 {
         *self.id_map.get_by_right(&egraph_id)
             .unwrap_or_else(|| panic!("to_solver_uid: no solver uid for egraph id {}", egraph_id))
     }
@@ -277,7 +277,7 @@ impl SolverState {
         _parent: Option<u64>,
         guard: Option<u64>,
         from_quantifier: bool,
-    ) -> u64 {
+    ) -> u32 {
         use crate::egraphs::utils::get_subterms;
         use crate::egraphs::traits::EgraphTrait;
 
@@ -290,6 +290,12 @@ impl SolverState {
         }
         if let TermOption::Some(_) = &self.terms_list[num as usize] {
             return self.to_egraph_id(num);
+        }
+        // Reuse egraph ID if build_pattern already allocated one for this term
+        if let Some(eid) = self.id_map.get_by_left(&num).copied() {
+            self.terms_list[num as usize] = TermOption::Some(term.clone());
+            self.solver_walk_term(term, guard);
+            return eid;
         }
 
         // Add term to solver's terms_list
@@ -305,7 +311,7 @@ impl SolverState {
 
         // Recurse into subterms first (bottom-up: children before parents)
         let (_, subterms) = get_subterms(term);
-        let egraph_children: Vec<u64> = subterms.iter()
+        let egraph_children: Vec<u32> = subterms.iter()
             .map(|subterm| self.insert_predecessor(subterm, None, None, from_quantifier))
             .collect();
 
@@ -317,20 +323,54 @@ impl SolverState {
         egraph_id
     }
 
-    /// Register a pattern term recursively in the egraph (for match_term to inspect).
-    /// Only stores TermEntry — does NOT add to function_maps/predecessors/proof_forest.
-    fn register_pattern_term(&mut self, term: &Term) {
+    /// Build a Pattern tree from a yaspar Term and compile it into the egraph.
+    /// Returns the PatternId of the compiled pattern.
+    fn build_pattern(&mut self, term: &Term) -> crate::egraphs::repr::PatternId {
+        use crate::egraphs::repr::{Pattern, Op};
         use crate::egraphs::utils::get_subterms;
-        let num = term.uid();
-        // Recurse into subterms first
-        let (_, subterms) = get_subterms(term);
-        for subterm in &subterms {
-            self.register_pattern_term(subterm);
-        }
-        // Store pattern structure only (no function_maps, no congruence)
+
         let op = Self::extract_op(term);
-        let children: Vec<u64> = subterms.iter().map(|s| s.uid()).collect();
-        self.egraph.register_pattern_entry(num, op, &children);
+        match &op {
+            Op::Local(name) => {
+                let pattern = Pattern::Var(name.clone());
+                self.egraph.compile_pattern(pattern)
+            }
+            Op::Constant(_) | Op::App(_) | Op::Eq | Op::Ite | Op::Not
+            | Op::And | Op::Or | Op::Implies | Op::Distinct => {
+                let (_, subterms) = get_subterms(term);
+                if subterms.is_empty() {
+                    // Leaf term — get or register in the egraph
+                    let uid = term.uid();
+                    let egraph_id = if let Some(&eid) = self.id_map.get_by_left(&uid) {
+                        eid
+                    } else {
+                        use crate::egraphs::traits::EgraphTrait;
+                        let eid = self.egraph.register_term(op.clone(), &[], false);
+                        self.id_map.insert(uid, eid);
+                        // Also store in terms_list
+                        while self.terms_list.len() <= uid as usize {
+                            self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
+                        }
+                        if self.terms_list[uid as usize].is_none() {
+                            self.terms_list[uid as usize] = TermOption::Uninitialized(term.clone());
+                        }
+                        eid
+                    };
+                    let pattern = Pattern::Ground(egraph_id);
+                    self.egraph.compile_pattern(pattern)
+                } else {
+                    // Function application with sub-patterns
+                    let sub_patterns: Vec<Pattern> = subterms.iter()
+                        .map(|s| {
+                            let pid = self.build_pattern(s);
+                            self.egraph.compiled_patterns[pid].clone()
+                        })
+                        .collect();
+                    let pattern = Pattern::App(op, sub_patterns);
+                    self.egraph.compile_pattern(pattern)
+                }
+            }
+        }
     }
 
     /// Walk the term tree for solver-level bookkeeping only.
@@ -363,10 +403,10 @@ impl SolverState {
 
                 for attr in attrs.iter() {
                     if let Attribute::Pattern(s_exprs) = attr {
-                        trigger_ids.push(s_exprs.iter().map(|p| p.uid()).collect());
-                        for pattern in s_exprs {
-                            self.register_pattern_term(pattern);
-                        }
+                        let pattern_ids: Vec<crate::egraphs::repr::PatternId> = s_exprs.iter()
+                            .map(|p| self.build_pattern(p))
+                            .collect();
+                        trigger_ids.push(pattern_ids);
                     }
                 }
 

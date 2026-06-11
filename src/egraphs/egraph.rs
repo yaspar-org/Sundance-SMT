@@ -3,7 +3,7 @@
 
 use crate::debug_println;
 use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent};
-use crate::egraphs::repr::{Children, Op, TermEntry, TermSlot};
+use crate::egraphs::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
 use crate::egraphs::unionfind::ProofTracker;
 use crate::log::is_important;
@@ -56,7 +56,7 @@ impl fmt::Display for Egraph {
                         writeln!(
                             f,
                             "  {} -> root [Root (size: {}, child: {:?}, disequalities: {:?}, children: {:?}])",
-                            self.display_term(term_id as u64),
+                            self.display_term(term_id as u32),
                             size,
                             self.display_term(*child),
                             disequalities,
@@ -76,7 +76,7 @@ impl fmt::Display for Egraph {
                         writeln!(
                             f,
                             "  {} -> {} [Equality {} = {} (size: {}, parent: {}, child: {}, disequalities: {:?}, level: {}, hash: {}, children: {:?})]",
-                            self.display_term(term_id as u64),
+                            self.display_term(term_id as u32),
                             self.display_term(*parent),
                             self.display_term(*t1),
                             self.display_term(*t2),
@@ -102,7 +102,7 @@ impl fmt::Display for Egraph {
                         writeln!(
                             f,
                             "  {} -> {} [Equality None (size: {}, parent: {}, child: {}, disequalities: {:?}, level: {}, hash: {}, children: {:?})]",
-                            self.display_term(term_id as u64),
+                            self.display_term(term_id as u32),
                             self.display_term(*parent),
                             size,
                             self.display_term(*parent),
@@ -126,7 +126,7 @@ impl fmt::Display for Egraph {
                         writeln!(
                             f,
                             "  {} -> {} [Congruence {:?} (size: {}, parent: {}, child: {}, disequalities: {:?}, level: {}, hash: {}, children: {:?})]",
-                            self.display_term(term_id as u64),
+                            self.display_term(term_id as u32),
                             self.display_term(*parent),
                             pairs
                                 .iter()
@@ -152,7 +152,7 @@ impl fmt::Display for Egraph {
                 writeln!(
                     f,
                     "  {}: {} predecessors",
-                    self.display_term(term as u64),
+                    self.display_term(term as u32),
                     preds.len()
                 )?;
                 for pred in preds.values() {
@@ -188,33 +188,33 @@ impl fmt::Display for Egraph {
 /// The egraph datastructure that keeps track of terms, equalities and parents
 pub struct Egraph {
     /// Next ID to assign
-    next_id: u64,
+    next_id: u32,
     /// Internal term representation per term ID
     pub terms: Vec<TermSlot>,
-    /// Pattern terms (for e-matching only, separate from ground terms)
-    pub patterns: DeterministicHashMap<u64, TermEntry>,
-    /// map from vertices (u64) -> ProofForestEdge
+    /// Compiled patterns for e-matching (indexed by PatternId)
+    pub compiled_patterns: Vec<Pattern>,
+    /// map from vertices (u32) -> ProofForestEdge
     pub proof_forest: Vec<ProofForestEdge>,
     /// keeps track of a stack of "edges" to backtrack on
-    pub proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u64, ProofForestEdge)>,
-    /// this is a map from terms (u64) -> (term in the same egraph, predecessor of term in same egraph)
-    pub predecessors: Vec<FastDeterministicHashMap<u64, Predecessor>>,
+    pub proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u32, ProofForestEdge)>,
+    /// this is a map from terms (u32) -> (term in the same egraph, predecessor of term in same egraph)
+    pub predecessors: Vec<FastDeterministicHashMap<u32, Predecessor>>,
     /// number to keep track of the current hash
-    pub predecessor_hash: u64,
+    pub predecessor_hash: u32,
     /// mapping from levels -> corresponding hash
-    pub predecessor_level: Vec<u64>,
+    pub predecessor_level: Vec<u32>,
     /// map from functions (String) -> terms of this function
-    pub function_maps: DeterministicHashMap<String, Vec<(u64, Vec<u64>)>>,
+    pub function_maps: DeterministicHashMap<String, Vec<(u32, Vec<u32>)>>,
     /// uid for true
-    pub true_term: u64,
+    pub true_term: u32,
     /// uid for false
-    pub false_term: u64,
+    pub false_term: u32,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
     pub decision_level: usize,
     /// keeps track of terms created by quantifier instantiation and their predecessors
-    pub predecessors_created_by_quantifiers: DeterministicHashMap<u64, DeterministicHashSet<u64>>,
+    pub predecessors_created_by_quantifiers: DeterministicHashMap<u32, DeterministicHashSet<u32>>,
     /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()])
-    pub union_to_eclass: DeterministicHashSet<(u64, String, Vec<u64>)>,
+    pub union_to_eclass: DeterministicHashSet<(u32, String, Vec<u32>)>,
 }
 
 impl Egraph {
@@ -223,7 +223,7 @@ impl Egraph {
         Egraph {
             next_id: 0,
             terms: vec![TermSlot::Empty],
-            patterns: DeterministicHashMap::new(),
+            compiled_patterns: Vec::new(),
             proof_forest: vec![ProofForestEdge::Root {
                 size: 1000,
                 child: 0,
@@ -245,9 +245,9 @@ impl Egraph {
 
     /// Register an equality watch: when t1 ≡ t2, propagate lit.
 
-    /// Returns the u64 corresponding to a given lit with the correct polarity
+    /// Returns the u32 corresponding to a given lit with the correct polarity
     /// Display a term recursively using the internal representation.
-    pub fn display_term(&self, id: u64) -> String {
+    pub fn display_term(&self, id: u32) -> String {
         if id as usize >= self.terms.len() {
             return format!("?{}", id);
         }
@@ -278,7 +278,7 @@ impl Egraph {
     /// Returns true if the term was already registered.
     /// Register a single term (non-recursive). Children must already be registered.
     /// Takes raw IDs — no dependency on Term representation.
-    pub fn register_term_internal(&mut self, id: u64, op: Op, children: &[u64], dynamic: bool) -> bool {
+    pub fn register_term_internal(&mut self, id: u32, op: Op, children: &[u32], dynamic: bool) -> bool {
         // Resize storage if needed
         while self.terms.len() <= id as usize {
             self.terms.resize(self.terms.len() * 2, TermSlot::Empty);
@@ -376,7 +376,7 @@ impl Egraph {
     /// Extract the Op from a Term and its function name string.
     /// Ensure storage is allocated for the given term ID without fully registering it.
     /// Used for quantifier body subterms that are opaque to the egraph.
-    pub fn ensure_capacity(&mut self, id: u64) {
+    pub fn ensure_capacity(&mut self, id: u32) {
         while self.terms.len() <= id as usize {
             self.terms.resize(self.terms.len() * 2, TermSlot::Empty);
             self.proof_forest.resize(
@@ -395,21 +395,17 @@ impl Egraph {
         }
     }
 
-    /// Store a pattern term's structure (for match_term to inspect) without
-    /// adding to function_maps, proof_forest, or predecessors. Pattern terms
-    /// are only used for e-matching, never as ground terms.
-    /// Stored in a separate map so they don't interfere with ground term registration.
-    pub fn register_pattern_entry(&mut self, id: u64, op: Op, children: &[u64]) {
-        self.patterns.insert(id, TermEntry {
-            op,
-            children: Children::from_slice(children),
-        });
+    /// Store a compiled pattern and return its PatternId.
+    pub fn compile_pattern(&mut self, pattern: Pattern) -> PatternId {
+        let id = self.compiled_patterns.len();
+        self.compiled_patterns.push(pattern);
+        id
     }
 
     /// Register an opaque term — allocates a full slot with a proof_forest Root
     /// but no op/children/function_maps/predecessors. Used for quantifier terms
     /// that participate in union-find (merged with true/false) but not congruence.
-    pub fn register_opaque_term(&mut self) -> u64 {
+    pub fn register_opaque_term(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         self.ensure_capacity(id);
@@ -425,7 +421,7 @@ impl Egraph {
 
     /// If any predecessors of the first subterm are congruent to term_num
     /// (same function, all subterms equal), union them.
-    pub fn find_and_union_to_eclass(&mut self, term_num: u64, func: String, subterms: Vec<u64>) {
+    pub fn find_and_union_to_eclass(&mut self, term_num: u32, func: String, subterms: Vec<u32>) {
         let subterm_num = subterms[0];
         let subterm_root = self.find(subterm_num);
 
@@ -475,7 +471,7 @@ impl Egraph {
         }
     }
 
-    pub fn find(&self, x: u64) -> u64 {
+    pub fn find(&self, x: u32) -> u32 {
         let p: &ProofForestEdge = &self.proof_forest[x as usize];
         match p {
             ProofForestEdge::Root { .. } => x,
@@ -489,10 +485,10 @@ impl Egraph {
     // design decision: I do not implement path compression. I could, but would make recovering proof much harder
     pub fn find_with_level(
         &self,
-        x: u64,
+        x: u32,
         highest_level: usize,
-        highest_hash: u64,
-    ) -> (u64, usize, u64) {
+        highest_hash: u32,
+    ) -> (u32, usize, u32) {
         let p = self.proof_forest[x as usize].clone();
         match p {
             ProofForestEdge::Root { .. } => (x, highest_level, highest_hash),
@@ -521,7 +517,7 @@ impl Egraph {
     // checks if x and y are equal in union find datastructure
     // if they are equal, returns the largest level in both their paths to a
     // common ancestor and the corresponding hash
-    pub fn check_equal(&self, x: u64, y: u64) -> (bool, usize, u64) {
+    pub fn check_equal(&self, x: u32, y: u32) -> (bool, usize, u32) {
         let mut x_parent = x;
         let (mut highest_level_x, mut highest_hash_x) = (0, 0);
         let mut x_stack = vec![x];
@@ -660,7 +656,7 @@ impl Egraph {
     }
 
     /// Adds a disequality between t1 and t2 to the egraph
-    pub fn add_disequality(&mut self, t1: u64, t2: u64, diseq_lit: i32, level: usize, hash: u64) {
+    pub fn add_disequality(&mut self, t1: u32, t2: u32, diseq_lit: i32, level: usize, hash: u32) {
         let t1_root = self.find(t1);
         let t2_root = self.find(t2);
         let disequality1 = DisequalTerm {
@@ -703,7 +699,7 @@ impl Egraph {
     }
 
     /// Checks if term t is equal to itself
-    pub fn check_self_disequality(&self, t: u64) -> Option<DisequalTerm> {
+    pub fn check_self_disequality(&self, t: u32) -> Option<DisequalTerm> {
         assert!(t == self.find(t));
         debug_println!(
             19,
@@ -769,7 +765,7 @@ impl Egraph {
     /// Get the canonical form for some term
     /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  
     /// TODO: I don't support canonical forms for non-app, non-eq terms, non-ite terms, but will have to do that eventually
-    pub fn get_canonical_form(&self, term_num: u64, _level: usize) -> Option<CanonicalForm> {
+    pub fn get_canonical_form(&self, term_num: u32, _level: usize) -> Option<CanonicalForm> {
         let entry = match &self.terms[term_num as usize] {
             TermSlot::Term(e) => e,
             _ => return None,
@@ -783,7 +779,7 @@ impl Egraph {
             _ => return None,
         };
 
-        let canonical_subterms: Vec<u64> =
+        let canonical_subterms: Vec<u32> =
             original_subterms.iter().map(|&t| self.find(t)).collect();
         Some(CanonicalForm {
             original_subterms,
@@ -796,7 +792,7 @@ impl Egraph {
     ///
     /// TODO: right now this is preferring the smallest level, but this might not always be
     /// correct depending on the invariants
-    pub fn add_predecessor(&mut self, term: u64, new_pred_key: u64, new_pred: Predecessor) {
+    pub fn add_predecessor(&mut self, term: u32, new_pred_key: u32, new_pred: Predecessor) {
         debug_println!(
             5,
             0,
@@ -865,10 +861,10 @@ impl Egraph {
     /// Returns None if u and v are not in the same equivalence class.
     pub(crate) fn leastcommonancestor(
         &self,
-        u: u64,
-        v: u64,
+        u: u32,
+        v: u32,
         tracker: &mut ProofTracker,
-    ) -> Option<Vec<(u64, u64)>> {
+    ) -> Option<Vec<(u32, u32)>> {
         debug_println!(
             11,
             1,
@@ -881,11 +877,11 @@ impl Egraph {
 
     fn leastcommonancestor_helper(
         &self,
-        u: u64,
-        v: u64,
+        u: u32,
+        v: u32,
         tracker: &mut ProofTracker,
         indent: usize,
-    ) -> Option<Vec<(u64, u64)>> {
+    ) -> Option<Vec<(u32, u32)>> {
         debug_println!(
             20,
             indent,
@@ -1025,7 +1021,7 @@ impl Egraph {
 
     /// Assert t1 = t2 at the current decision level.
     /// Performs congruence closure. Returns a conflict if a disequality is violated.
-    pub fn assert_equal(&mut self, t1: u64, t2: u64, level: usize) -> EgraphResult<u64> {
+    pub fn assert_equal(&mut self, t1: u32, t2: u32, level: usize) -> EgraphResult<u32> {
         let fixed = level == 0;
         let from_quantifier = level > 0;
         let proof_parent = ProofForestEdge::Equality {
@@ -1043,7 +1039,7 @@ impl Egraph {
 
     /// Assert t1 ≠ t2 at the current decision level.
     /// Returns a conflict if t1 and t2 are already in the same equivalence class.
-    pub fn assert_disequal(&mut self, t1: u64, t2: u64, diseq_lit: i32, level: usize) -> EgraphResult<u64> {
+    pub fn assert_disequal(&mut self, t1: u32, t2: u32, diseq_lit: i32, level: usize) -> EgraphResult<u32> {
         let mut tracker = ProofTracker::new();
         if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
             return EgraphResult::with_conflict(Conflict {
@@ -1058,7 +1054,7 @@ impl Egraph {
     }
 
     /// Assert all terms are pairwise distinct at the current decision level.
-    pub fn assert_distinct(&mut self, terms: &[u64], diseq_lit: i32, level: usize) -> EgraphResult<u64> {
+    pub fn assert_distinct(&mut self, terms: &[u32], diseq_lit: i32, level: usize) -> EgraphResult<u32> {
         for i in 0..terms.len() {
             for j in i + 1..terms.len() {
                 let result = self.assert_disequal(terms[i], terms[j], diseq_lit, level);
@@ -1123,7 +1119,7 @@ impl Egraph {
     pub(crate) fn proof_forest_backtrack(
         &mut self,
         equality: ProofForestEdge,
-        y: u64,
+        y: u32,
         y_parent: ProofForestEdge,
     ) {
         let child = &get_child(&equality);
@@ -1221,13 +1217,13 @@ impl Egraph {
     /// design decision: don't have eager updates for equivalence class and inverting tree
     pub(crate) fn cc_union(
         &mut self,
-        x: u64,
-        y: u64,
+        x: u32,
+        y: u32,
         proof_parent: ProofForestEdge,
         level: usize,
         fixed: bool,
         from_quantifier: bool,
-    ) -> EgraphResult<u64> {
+    ) -> EgraphResult<u32> {
         let x_root = self.find(x);
         let y_root = self.find(y);
         debug_println!(6, 1, "{}", self);
@@ -1434,12 +1430,12 @@ impl Egraph {
     /// TODO: need to implement a backtracking where I change the predecessor hash
     pub(crate) fn union_predecessors(
         &mut self,
-        u: u64,
-        v: u64,
+        u: u32,
+        v: u32,
         level: usize,
         fixed: bool,
         from_quantifier: bool,
-    ) -> EgraphResult<u64> {
+    ) -> EgraphResult<u32> {
         debug_println!(
             11,
             1,
@@ -1473,7 +1469,7 @@ impl Egraph {
         let mut predecessors_u = std::mem::take(&mut self.predecessors[u as usize]);
         let predecessors_v = std::mem::take(&mut self.predecessors[v as usize]);
 
-        let mut canonical_forms_u: FastDeterministicHashMap<_, Vec<(Vec<u64>, u64)>> =
+        let mut canonical_forms_u: FastDeterministicHashMap<_, Vec<(Vec<u32>, u32)>> =
             FastDeterministicHashMap::default();
 
         // Stale entries are dropped in-place via retain before iterating.
@@ -1557,7 +1553,7 @@ impl Egraph {
         //
         // Precompute: store (key, predecessor_id, canonical_form) per entry.
         // No Predecessor clone — just the scalar `predecessor` field needed downstream.
-        let mut predecessor_v_canonical_forms: Vec<(u64, u64, Option<CanonicalForm>)> =
+        let mut predecessor_v_canonical_forms: Vec<(u32, u32, Option<CanonicalForm>)> =
             Vec::with_capacity(predecessors_v.len());
         for (pred_v_key, predecessor_v) in predecessors_v.iter() {
             let canonical_form = self.get_canonical_form(predecessor_v.predecessor, level);
@@ -1669,7 +1665,7 @@ impl Egraph {
                             .clone()
                             .into_iter()
                             .zip(original_subterms.clone())
-                            .collect::<Vec<(u64, u64)>>();
+                            .collect::<Vec<(u32, u32)>>();
                         let proof_parent = ProofForestEdge::Congruence {
                             size: 0,
                             pairs: terms_pairwise,
@@ -1708,7 +1704,7 @@ impl Egraph {
 
 
     /// Make vertex the root of its proof-forest tree.
-    pub(crate) fn make_root(&mut self, vertex: u64, proof_parent: ProofForestEdge) {
+    pub(crate) fn make_root(&mut self, vertex: u32, proof_parent: ProofForestEdge) {
         debug_println!(
             16,
             0,
@@ -1780,106 +1776,192 @@ impl Egraph {
     /// satisfying substitutions. This is the core e-matching algorithm.
     /// E-matching: given a partial assignment and trigger-term pairs, find all
     /// satisfying substitutions. Returns variable name → matched term ID.
-    pub fn match_term(
+    /// Match a list of (pattern, ground_hint) pairs against the egraph.
+    /// Returns all valid variable assignments.
+    pub fn match_patterns(
         &mut self,
-        assignment: &mut DeterministicHashMap<String, u64>,
-        trigger_term_pairs: Vec<(u64, Option<u64>)>,
-    ) -> Vec<DeterministicHashMap<String, u64>> {
-        if trigger_term_pairs.is_empty() {
+        assignment: &mut DeterministicHashMap<String, u32>,
+        pattern_term_pairs: &[(PatternId, Option<u32>)],
+    ) -> Vec<DeterministicHashMap<String, u32>> {
+        if pattern_term_pairs.is_empty() {
             return vec![assignment.clone()];
         }
-        let (trigger, term) = trigger_term_pairs[0];
-        let trigger_entry = self.patterns.get(&trigger)
-            .unwrap_or_else(|| panic!("match_term: trigger {} is not a registered pattern", trigger))
-            .clone();
+        let (pattern_id, ground_hint) = pattern_term_pairs[0];
+        let pattern = self.compiled_patterns[pattern_id].clone();
+        self.match_pattern_recursive(assignment, &pattern, ground_hint, &pattern_term_pairs[1..].to_vec())
+    }
 
-        match &trigger_entry.op {
-            Op::Constant(_) => {
-                if term.is_none() || self.find(trigger) == self.find(term.unwrap()) {
-                    self.match_term(assignment, trigger_term_pairs[1..].to_vec())
-                } else {
-                    vec![]
-                }
-            }
-            Op::Local(name) => {
+    /// Match a single pattern against an optional ground term, then continue with remaining pairs.
+    fn match_pattern_recursive(
+        &mut self,
+        assignment: &mut DeterministicHashMap<String, u32>,
+        pattern: &Pattern,
+        ground_hint: Option<u32>,
+        remaining: &Vec<(PatternId, Option<u32>)>,
+    ) -> Vec<DeterministicHashMap<String, u32>> {
+        match pattern {
+            Pattern::Var(name) => {
+                let ground = ground_hint.expect("Pattern::Var requires a ground term to bind");
                 match assignment.get(name) {
                     None => {
-                        assignment.insert(name.clone(), term.unwrap());
-                        let new_assignments =
-                            self.match_term(assignment, trigger_term_pairs[1..].to_vec());
-                        new_assignments
+                        assignment.insert(name.clone(), ground);
+                        let results = self.match_patterns(assignment, remaining);
+                        results
                     }
-                    Some(v) if self.find(*v) == self.find(term.unwrap()) => {
-                        self.match_term(assignment, trigger_term_pairs[1..].to_vec())
+                    Some(v) if self.find(*v) == self.find(ground) => {
+                        self.match_patterns(assignment, remaining)
                     }
-                    Some(_) => {
-                        vec![]
-                    }
+                    Some(_) => vec![],
                 }
             }
-            op if !trigger_entry.children.is_empty() => {
+            Pattern::Ground(egraph_id) => {
+                match ground_hint {
+                    Some(ground) if self.find(*egraph_id) == self.find(ground) => {
+                        self.match_patterns(assignment, remaining)
+                    }
+                    None => {
+                        self.match_patterns(assignment, remaining)
+                    }
+                    _ => vec![],
+                }
+            }
+            Pattern::App(op, sub_patterns) => {
                 let func_name = op.to_function_map_key();
-                let children: Vec<u64> = trigger_entry.children.as_slice().to_vec();
-                self.find_assignments_on_term(
-                    term,
+                self.find_assignments_on_pattern(
+                    ground_hint,
                     &func_name,
-                    children,
-                    trigger_term_pairs,
+                    sub_patterns,
+                    remaining,
                     assignment,
                 )
             }
-            _ => panic!(
-                "Trigger term {} is not an App or variable",
-                self.display_term(trigger)
-            ),
         }
     }
 
-    /// Given a function name and arguments, find all matching applications in the egraph.
-    /// Given a function name and trigger children (as IDs), find all matching applications.
-    fn find_assignments_on_term(
+    /// Find all function applications matching the given op, then recurse into sub-patterns.
+    fn find_assignments_on_pattern(
         &mut self,
-        term: Option<u64>,
+        ground_hint: Option<u32>,
         func_name: &str,
-        trigger_children: Vec<u64>,
-        trigger_term_pairs: Vec<(u64, Option<u64>)>,
-        assignment: &mut DeterministicHashMap<String, u64>,
-    ) -> Vec<DeterministicHashMap<String, u64>> {
+        sub_patterns: &[Pattern],
+        remaining: &Vec<(PatternId, Option<u32>)>,
+        assignment: &mut DeterministicHashMap<String, u32>,
+    ) -> Vec<DeterministicHashMap<String, u32>> {
+        let function_terms = match self.function_maps.get(func_name) {
+            Some(terms) => terms.clone(),
+            None => return vec![],
+        };
+
         let mut list_assignments = Vec::new();
-
-        let function_terms = self.function_maps.get(func_name);
-        if function_terms.is_none() {
-            return vec![];
-        }
-
-        let function_terms = function_terms.unwrap().clone();
         let mut considered_function_terms = DeterministicHashSet::default();
+        let ground_root = ground_hint.map(|t| self.find(t));
 
-        let term_root = term.map(|t| self.find(t));
         for (i, subterms) in function_terms {
-            assert!(subterms.len() == trigger_children.len());
+            if subterms.len() != sub_patterns.len() {
+                continue;
+            }
 
             let i_root = self.find(i);
-            if term_root.is_none() || term_root.unwrap() == i_root {
-                let subterms_canonical = subterms.iter().map(|s| self.find(*s)).collect::<Vec<_>>();
+            if ground_root.is_none() || ground_root.unwrap() == i_root {
+                let subterms_canonical: Vec<u32> = subterms.iter().map(|s| self.find(*s)).collect();
 
                 if considered_function_terms.contains(&subterms_canonical) {
                     continue;
                 }
                 considered_function_terms.insert(subterms_canonical);
 
-                let mut new_pairs: Vec<(u64, Option<u64>)> = trigger_children
-                    .iter()
-                    .zip(subterms.iter())
-                    .map(|(a, s)| (*a, Some(*s)))
-                    .collect();
-                new_pairs.extend(trigger_term_pairs[1..].to_vec());
-                let new_assignments = self.match_term(&mut assignment.clone(), new_pairs);
-
+                let new_assignments = self.match_subpatterns(
+                    &mut assignment.clone(),
+                    sub_patterns,
+                    &subterms,
+                    remaining,
+                );
                 list_assignments.extend(new_assignments);
             }
         }
         list_assignments
+    }
+
+    /// Match sub-patterns against ground subterms, then continue with remaining pattern pairs.
+    fn match_subpatterns(
+        &mut self,
+        assignment: &mut DeterministicHashMap<String, u32>,
+        sub_patterns: &[Pattern],
+        ground_subterms: &[u32],
+        remaining: &Vec<(PatternId, Option<u32>)>,
+    ) -> Vec<DeterministicHashMap<String, u32>> {
+        if sub_patterns.is_empty() {
+            return self.match_patterns(assignment, remaining);
+        }
+        let pattern = &sub_patterns[0];
+        let ground = ground_subterms[0];
+        let rest_patterns = &sub_patterns[1..];
+        let rest_grounds = &ground_subterms[1..];
+
+        match pattern {
+            Pattern::Var(name) => {
+                match assignment.get(name) {
+                    None => {
+                        assignment.insert(name.clone(), ground);
+                        self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
+                    }
+                    Some(v) if self.find(*v) == self.find(ground) => {
+                        self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
+                    }
+                    Some(_) => vec![],
+                }
+            }
+            Pattern::Ground(egraph_id) => {
+                if self.find(*egraph_id) == self.find(ground) {
+                    self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
+                } else {
+                    vec![]
+                }
+            }
+            Pattern::App(op, children) => {
+                let func_name = op.to_function_map_key();
+                let function_terms = match self.function_maps.get(&func_name) {
+                    Some(terms) => terms.clone(),
+                    None => return vec![],
+                };
+
+                let mut list_assignments = Vec::new();
+                let ground_root = self.find(ground);
+                let mut considered = DeterministicHashSet::default();
+
+                for (i, subterms) in function_terms {
+                    if subterms.len() != children.len() {
+                        continue;
+                    }
+                    let i_root = self.find(i);
+                    if ground_root == i_root {
+                        let subterms_canonical: Vec<u32> = subterms.iter().map(|s| self.find(*s)).collect();
+                        if considered.contains(&subterms_canonical) {
+                            continue;
+                        }
+                        considered.insert(subterms_canonical);
+
+                        let mut sub_assignment = assignment.clone();
+                        let sub_results = self.match_subpatterns(
+                            &mut sub_assignment,
+                            children,
+                            &subterms,
+                            &vec![],
+                        );
+                        for mut sub in sub_results {
+                            let more = self.match_subpatterns(
+                                &mut sub,
+                                rest_patterns,
+                                rest_grounds,
+                                remaining,
+                            );
+                            list_assignments.extend(more);
+                        }
+                    }
+                }
+                list_assignments
+            }
+        }
     }
 }
 
@@ -1888,7 +1970,7 @@ impl Egraph {
 // CNFConversion<Egraph> removed — use CNFConversion<SolverState> instead (in solver_state.rs)
 
 /// Checks if the hash is still valid at the given level
-pub fn valid_hash(hash: u64, level: usize, predecessor_level: &[u64]) -> bool {
+pub fn valid_hash(hash: u32, level: usize, predecessor_level: &[u32]) -> bool {
     debug_println!(
         5,
         0,
@@ -1901,7 +1983,7 @@ pub fn valid_hash(hash: u64, level: usize, predecessor_level: &[u64]) -> bool {
 
 impl EgraphTrait for Egraph {
     type Op = Op;
-    type TermId = u64;
+    type TermId = u32;
 
     fn register_true(&mut self) -> Self::TermId {
         let id = self.next_id;
@@ -1996,10 +2078,10 @@ impl EgraphTrait for Egraph {
 
     fn match_triggers(
         &mut self,
-        trigger_term_pairs: Vec<(Self::TermId, Option<Self::TermId>)>,
-    ) -> Vec<DeterministicHashMap<String, u64>> {
+        trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
+    ) -> Vec<DeterministicHashMap<String, u32>> {
         let mut assignment = DeterministicHashMap::default();
-        self.match_term(&mut assignment, trigger_term_pairs)
+        self.match_patterns(&mut assignment, &trigger_term_pairs)
     }
 
     fn backtrack_to(&mut self, level: usize) {

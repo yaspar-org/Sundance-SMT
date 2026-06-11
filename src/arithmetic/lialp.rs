@@ -44,10 +44,11 @@ pub fn check_integer_constraints_satisfiable_lia(
     let mut slack_to_lits: HashMap<Var, Vec<i32>> = HashMap::new();
 
     for term_id in solver_state.arithmetic_terms.clone() {
-        if let ProofForestEdge::Root { .. } = &solver_state.egraph.proof_forest[term_id as usize] {
+        let egraph_id = solver_state.to_egraph_id(term_id);
+        if let ProofForestEdge::Root { .. } = &solver_state.egraph.proof_forest[egraph_id as usize] {
             let (expr, additional_constraints) = extract_linear_expression(term_id, solver_state);
-            let root_var = *var_map.entry(term_id).or_insert_with(|| {
-                ctx.allocate_var(&format!("!ext_var_{}", term_id), VarType::Int)
+            let root_var = *var_map.entry(egraph_id).or_insert_with(|| {
+                ctx.allocate_var(&format!("!ext_var_{}", egraph_id), VarType::Int)
             });
             roots.push((term_id, root_var));
 
@@ -129,7 +130,7 @@ pub fn check_integer_constraints_satisfiable_lia(
 fn expr_to_monomials(
     expr: &DeterministicHashMap<Coefficient, Integer>,
     sign: Rational, // just one or negative one
-    var_map: &mut DeterministicHashMap<u64, Var>,
+    var_map: &mut DeterministicHashMap<u32, Var>,
     ctx: &mut ConvContext,
 ) -> (Vec<Mon<Rational>>, Rational) {
     // Each entry in expr is a (Coefficient, Integer) pair, but really the Integer part is what

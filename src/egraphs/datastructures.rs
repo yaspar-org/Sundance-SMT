@@ -9,11 +9,11 @@ use yaspar_ir::ast::{QualifiedIdentifier, Str, Term};
 /// Keeps track of disequalities used between multiple terms
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DisequalTerm {
-    pub term: u64,
+    pub term: u32,
     pub level: usize,
     pub diseq_lit: i32,
-    pub hash: u64,
-    pub original_disequality: (u64, u64),
+    pub hash: u32,
+    pub original_disequality: (u32, u32),
 }
 
 impl fmt::Display for DisequalTerm {
@@ -50,22 +50,22 @@ pub enum CanonicalOp {
 pub struct CanonicalForm {
     /// Raw uids of the term's subterms (not canonicalized). Used to build
     /// pairwise term equalities for the congruence proof.
-    pub original_subterms: Vec<u64>,
+    pub original_subterms: Vec<u32>,
     /// The operator (function name / Eq / Ite).
     pub op: CanonicalOp,
     /// The union-find roots of each subterm. Together with `op` these form
     /// the congruence key — two terms with the same `op` and `canonical_subterms`
     /// must be equal by congruence.
-    pub canonical_subterms: Vec<u64>,
+    pub canonical_subterms: Vec<u32>,
 }
 
 /// Represents a predecessor of a term
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct Predecessor {
     pub level: usize,
-    pub hash: u64,
-    pub predecessor: u64,
-    pub inner_term: u64,
+    pub hash: u32,
+    pub predecessor: u32,
+    pub inner_term: u32,
 }
 
 impl Ord for Predecessor {
@@ -87,18 +87,18 @@ pub enum Assertion {
         t1: u64,
         t2: u64,
         level: usize,
-        hash: u64,
+        hash: u32,
     },
     Disequality {
         t1: u64,
         t2: u64,
         level: usize,
-        hash: u64,
+        hash: u32,
     },
     Distinct {
         terms: Vec<u64>,
         level: usize,
-        hash: u64,
+        hash: u32,
     },
     // ConstructorEquality {
     //     ctor_name: String,
@@ -135,7 +135,7 @@ pub enum ConstructorType {
         name: Str,
         tester_term: Term,
         level: usize,
-        hash: u64,
+        hash: u32,
     },
 }
 
@@ -150,7 +150,7 @@ pub enum ConstructorType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quantifier {
-    pub triggers: Vec<Vec<u64>>,
+    pub triggers: Vec<Vec<crate::egraphs::repr::PatternId>>,
     pub variables: Vec<String>,
     pub body: u64,
     pub id: u64,
