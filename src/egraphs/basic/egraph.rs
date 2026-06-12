@@ -1842,7 +1842,7 @@ impl Egraph {
                 match assignment.get(name) {
                     None => {
                         assignment.insert(name.clone(), ground);
-                        
+
                         self.match_patterns(assignment, remaining)
                     }
                     Some(v) if self.find(*v) == self.find(ground) => {
