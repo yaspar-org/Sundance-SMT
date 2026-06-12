@@ -905,7 +905,7 @@ pub fn find_if_eq_diseq<'a>(
                     hash,
                 }
             } else {
-                panic!("We do not currently support the negation of a disstinct")
+                panic!("We do not currently support the negation of a distinct")
             }
         }
         Not(inner) => match inner.repr() {
