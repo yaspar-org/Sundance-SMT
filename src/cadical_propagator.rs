@@ -17,8 +17,6 @@ use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// Should we keep backtracking on stack at level
-
 /// Our implemetation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,

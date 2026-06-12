@@ -247,8 +247,6 @@ impl Egraph {
         }
     }
 
-    /// Register an equality watch: when t1 ≡ t2, propagate lit.
-
     /// Returns the u32 corresponding to a given lit with the correct polarity
     /// Display a term recursively using the internal representation.
     pub fn display_term(&self, id: u32) -> String {
@@ -764,9 +762,6 @@ impl Egraph {
         }
         None
     }
-
-    /// Set the terms corresponding to x and y equal in egraph
-    // TODO: make_eq moved to SolverState (uses cnf_cache, context)
 
     /// Get the canonical form for some term
     /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  

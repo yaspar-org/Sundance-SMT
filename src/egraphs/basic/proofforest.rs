@@ -177,15 +177,6 @@ impl ProofForestEdge {
         }
     }
 
-    /// Get a reference to the children vector for any ProofForestEdge variant
-    pub(super) fn get_children(&self) -> &DeterministicHashSet<u32> {
-        match self {
-            ProofForestEdge::Root { children, .. }
-            | ProofForestEdge::Equality { children, .. }
-            | ProofForestEdge::Congruence { children, .. } => children,
-        }
-    }
-
     /// Get a mutable reference to the disequalities vector for any ProofForestEdge variant
     pub(super) fn disequalities_mut(&mut self) -> &mut DeterministicHashMap<u32, DisequalTerm> {
         match self {
