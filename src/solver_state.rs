@@ -8,21 +8,24 @@
 //! with `SolverState`; the egraph is an internal component accessible via
 //! `solver_state.egraph`.
 
-use std::collections::{HashMap, HashSet};
 use sat_interface::Formula;
-use yaspar_ir::ast::alg::CheckIdentifier;
-use yaspar_ir::ast::{Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Str, Term, TermAllocator};
+use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
+use yaspar_ir::ast::alg::CheckIdentifier;
+use yaspar_ir::ast::{
+    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Str,
+    Term, TermAllocator,
+};
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
+use crate::egraphs::basic::egraph::Egraph;
+use crate::egraphs::traits::EgraphTrait;
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
-use crate::egraphs::basic::egraph::Egraph;
-use crate::egraphs::traits::EgraphTrait;
 
 use crate::log::is_important;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -151,7 +154,6 @@ impl SolverState {
         let egraph = Egraph::new();
         let datatype_info = DatatypeInfo::from_context(&context);
 
-
         SolverState {
             context,
             true_uid: 0,
@@ -275,13 +277,17 @@ impl SolverState {
 
     /// Convert a solver term UID to the corresponding egraph ID.
     pub fn to_egraph_id(&self, solver_uid: u64) -> u32 {
-        *self.id_map.get_by_left(&solver_uid)
+        *self
+            .id_map
+            .get_by_left(&solver_uid)
             .unwrap_or_else(|| panic!("to_egraph_id: no egraph ID for solver uid {}", solver_uid))
     }
 
     /// Convert an egraph term ID to the corresponding solver UID.
     pub fn to_solver_uid(&self, egraph_id: u32) -> u64 {
-        *self.id_map.get_by_right(&egraph_id)
+        *self
+            .id_map
+            .get_by_right(&egraph_id)
             .unwrap_or_else(|| panic!("to_solver_uid: no solver uid for egraph id {}", egraph_id))
     }
 
@@ -302,7 +308,8 @@ impl SolverState {
         self.false_uid = false_uid;
         let max_uid = std::cmp::max(true_uid, false_uid) as usize;
         while self.terms_list.len() <= max_uid {
-            self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
+            self.terms_list
+                .resize(self.terms_list.len() * 2, TermOption::None);
         }
         self.terms_list[true_uid as usize] = TermOption::Some(true_term.clone());
         self.terms_list[false_uid as usize] = TermOption::Some(false_term.clone());
@@ -348,13 +355,12 @@ impl SolverState {
         guard: Option<u64>,
         from_quantifier: bool,
     ) -> u32 {
-
         let num = term.uid();
 
         // Early return if already registered
         while self.terms_list.len() <= num as usize {
-            self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
-            
+            self.terms_list
+                .resize(self.terms_list.len() * 2, TermOption::None);
         }
         if let TermOption::Some(_) = &self.terms_list[num as usize] {
             return self.to_egraph_id(num);
@@ -379,13 +385,16 @@ impl SolverState {
 
         // Recurse into subterms first (bottom-up: children before parents)
         let (_, subterms) = get_subterms(term);
-        let egraph_children: Vec<u32> = subterms.iter()
+        let egraph_children: Vec<u32> = subterms
+            .iter()
             .map(|subterm| self.insert_predecessor(subterm, None, None, from_quantifier))
             .collect();
 
         // Register this term in the egraph
         let op = Self::extract_op(term);
-        let egraph_id = self.egraph.register_term(op, &egraph_children, from_quantifier);
+        let egraph_id = self
+            .egraph
+            .register_term(op, &egraph_children, from_quantifier);
         self.id_map.insert(num, egraph_id);
         self.solver_walk_term(term, guard);
         egraph_id
@@ -401,14 +410,21 @@ impl SolverState {
 
     /// Recursively build a Pattern tree from a yaspar Term (without compiling).
     fn build_pattern_tree(&mut self, term: &Term) -> crate::egraphs::repr::Pattern {
-        use crate::egraphs::repr::{Pattern, Op};
         use crate::egraphs::EgraphTrait;
+        use crate::egraphs::repr::{Op, Pattern};
 
         let op = Self::extract_op(term);
         match &op {
             Op::Local(name) => Pattern::Var(name.clone()),
-            Op::Constant(_) | Op::App(_) | Op::Eq | Op::Ite | Op::Not
-            | Op::And | Op::Or | Op::Implies | Op::Distinct => {
+            Op::Constant(_)
+            | Op::App(_)
+            | Op::Eq
+            | Op::Ite
+            | Op::Not
+            | Op::And
+            | Op::Or
+            | Op::Implies
+            | Op::Distinct => {
                 let (_, subterms) = get_subterms(term);
                 if subterms.is_empty() {
                     let uid = term.uid();
@@ -418,7 +434,8 @@ impl SolverState {
                         let eid = self.egraph.register_term(op.clone(), &[], false);
                         self.id_map.insert(uid, eid);
                         while self.terms_list.len() <= uid as usize {
-                            self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
+                            self.terms_list
+                                .resize(self.terms_list.len() * 2, TermOption::None);
                         }
                         if self.terms_list[uid as usize].is_none() {
                             self.terms_list[uid as usize] = TermOption::Uninitialized(term.clone());
@@ -427,7 +444,8 @@ impl SolverState {
                     };
                     Pattern::Ground(egraph_id)
                 } else {
-                    let sub_patterns: Vec<Pattern> = subterms.iter()
+                    let sub_patterns: Vec<Pattern> = subterms
+                        .iter()
                         .map(|s| self.build_pattern_tree(s))
                         .collect();
                     Pattern::App(op, sub_patterns)
@@ -439,8 +457,6 @@ impl SolverState {
     /// Walk the term tree for solver-level bookkeeping only.
     /// Tracks arithmetic terms and registers quantifiers.
     fn solver_walk_term(&mut self, term: &Term, guard: Option<u64>) {
-
-
         let num = term.uid();
 
         // Arithmetic term tracking
@@ -456,19 +472,20 @@ impl SolverState {
                 // Store quantifier body in terms_list (needed for substitution during instantiation)
                 let body_uid = inner_term.uid();
                 while self.terms_list.len() <= body_uid as usize {
-                    self.terms_list.resize(self.terms_list.len() * 2, TermOption::None);
+                    self.terms_list
+                        .resize(self.terms_list.len() * 2, TermOption::None);
                 }
                 if self.terms_list[body_uid as usize].is_none() {
-                    self.terms_list[body_uid as usize] = TermOption::Uninitialized(inner_term.clone());
+                    self.terms_list[body_uid as usize] =
+                        TermOption::Uninitialized(inner_term.clone());
                 }
 
                 let mut trigger_ids = vec![];
 
                 for attr in attrs.iter() {
                     if let Attribute::Pattern(s_exprs) = attr {
-                        let pattern_ids: Vec<crate::egraphs::repr::PatternId> = s_exprs.iter()
-                            .map(|p| self.build_pattern(p))
-                            .collect();
+                        let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
+                            s_exprs.iter().map(|p| self.build_pattern(p)).collect();
                         trigger_ids.push(pattern_ids);
                     }
                 }
@@ -568,9 +585,12 @@ pub fn process_assignment(
             t,
             true_egraph_id
         );
-        let union_result = solver_state.egraph.assert_equal(egraph_t, true_egraph_id, level);
+        let union_result = solver_state
+            .egraph
+            .assert_equal(egraph_t, true_egraph_id, level);
         if let Some(conflict) = union_result.conflict {
-            let mut model_terms: Vec<i32> = conflict.equalities
+            let mut model_terms: Vec<i32> = conflict
+                .equalities
                 .iter()
                 .map(|(a, b)| -solver_state.make_eq(*a, *b))
                 .collect();
@@ -589,9 +609,12 @@ pub fn process_assignment(
             t,
             false_egraph_id
         );
-        let union_result = solver_state.egraph.assert_equal(egraph_t, false_egraph_id, level);
+        let union_result = solver_state
+            .egraph
+            .assert_equal(egraph_t, false_egraph_id, level);
         if let Some(conflict) = union_result.conflict {
-            let mut model_terms: Vec<i32> = conflict.equalities
+            let mut model_terms: Vec<i32> = conflict
+                .equalities
                 .iter()
                 .map(|(a, b)| -solver_state.make_eq(*a, *b))
                 .collect();
@@ -610,7 +633,11 @@ pub fn process_assignment(
             let dt_sort = inner_term.get_sort(solver_state);
             let _term_lit = solver_state.get_lit_from_term(&term);
             debug_println!(19, 0, "trying to get for the term {}", inner_term);
-            match solver_state.term_constructors.get(&inner_term.uid()).unwrap() {
+            match solver_state
+                .term_constructors
+                .get(&inner_term.uid())
+                .unwrap()
+            {
                 Constructor {
                     name,
                     tester_term,
@@ -650,7 +677,11 @@ pub fn process_assignment(
                     );
 
                     if lazy_dt {
-                        let dt_name = solver_state.datatype_info.constructors.get(&ctor_name).unwrap();
+                        let dt_name = solver_state
+                            .datatype_info
+                            .constructors
+                            .get(&ctor_name)
+                            .unwrap();
                         let dt_dec = solver_state.datatype_info.datatypes.get(dt_name).unwrap();
                         let dt_dec = dt_dec
                             .monomorphize(&dt_sort, solver_state.context.arena())
@@ -663,8 +694,15 @@ pub fn process_assignment(
                             .expect("type checking invariance violation: datatypes")
                             .clone();
 
-                        let ctor_selector_clauses: Vec<Vec<i32>> =
-                            learn_ctor_selector_clauses(solver_state, &inner_term, &ctor, &dt_sort, true, ddsmt, lazy_dt);
+                        let ctor_selector_clauses: Vec<Vec<i32>> = learn_ctor_selector_clauses(
+                            solver_state,
+                            &inner_term,
+                            &ctor,
+                            &dt_sort,
+                            true,
+                            ddsmt,
+                            lazy_dt,
+                        );
                         Some(ctor_selector_clauses)
                     } else {
                         None
@@ -685,7 +723,8 @@ pub fn process_assignment(
             let et2 = solver_state.to_egraph_id(t2);
             let union_result = solver_state.egraph.assert_equal(et1, et2, level);
             if let Some(conflict) = union_result.conflict {
-                let mut model_terms: Vec<i32> = conflict.equalities
+                let mut model_terms: Vec<i32> = conflict
+                    .equalities
                     .iter()
                     .map(|(a, b)| -solver_state.make_eq(*a, *b))
                     .collect();
@@ -695,12 +734,7 @@ pub fn process_assignment(
                 None
             }
         }
-        Assertion::Disequality {
-            t1,
-            t2,
-            level,
-            ..
-        } => {
+        Assertion::Disequality { t1, t2, level, .. } => {
             debug_println!(
                 16,
                 0,
@@ -714,7 +748,8 @@ pub fn process_assignment(
             let et2 = solver_state.to_egraph_id(t2);
             let result = solver_state.egraph.assert_disequal(et1, et2, lit, level);
             if let Some(conflict) = result.conflict {
-                let mut model_terms: Vec<i32> = conflict.equalities
+                let mut model_terms: Vec<i32> = conflict
+                    .equalities
                     .into_iter()
                     .map(|(a, b)| -solver_state.make_eq(a, b))
                     .collect();
@@ -734,12 +769,16 @@ pub fn process_assignment(
             None
         }
         Assertion::Distinct { terms, level, .. } => {
-            let egraph_terms: Vec<u32> = terms.iter()
+            let egraph_terms: Vec<u32> = terms
+                .iter()
                 .map(|t| solver_state.to_egraph_id(*t))
                 .collect();
-            let result = solver_state.egraph.assert_distinct(&egraph_terms, lit, level);
+            let result = solver_state
+                .egraph
+                .assert_distinct(&egraph_terms, lit, level);
             if let Some(conflict) = result.conflict {
-                let mut model_terms: Vec<i32> = conflict.equalities
+                let mut model_terms: Vec<i32> = conflict
+                    .equalities
                     .into_iter()
                     .map(|(a, b)| -solver_state.make_eq(a, b))
                     .collect();
@@ -757,8 +796,9 @@ pub fn process_assignment(
         0,
         "We are in process_assignment, checking for contradiction with true and false",
     );
-    if let Some(negated_model) =
-        solver_state.egraph.explain_equality(true_egraph_id, false_egraph_id)
+    if let Some(negated_model) = solver_state
+        .egraph
+        .explain_equality(true_egraph_id, false_egraph_id)
     {
         let negated_model_terms: Vec<i32> = negated_model
             .into_iter()

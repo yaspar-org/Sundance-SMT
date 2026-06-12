@@ -6,11 +6,11 @@ use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
-use crate::solver_state::{SolverState, process_assignment};
 use crate::log::is_important;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
+use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, ExternalPropagator};
@@ -18,7 +18,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Should we keep backtracking on stack at level
-
 
 /// Our implemetation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
@@ -220,7 +219,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.decision_level += 1;
         // Record solver hash at new level
         while self.decision_level >= self.solver_state.hash_at_level.len() {
-            self.solver_state.hash_at_level.resize(self.solver_state.hash_at_level.len() * 2, 0);
+            self.solver_state
+                .hash_at_level
+                .resize(self.solver_state.hash_at_level.len() * 2, 0);
         }
         self.solver_state.hash_at_level[self.decision_level] = self.solver_state.current_hash;
     }
@@ -330,7 +331,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             (term, first)
                         };
 
-                        if let Some(term) = nelson_oppen_clause_pair(*pair.0, *pair.1, &mut self.solver_state)
+                        if let Some(term) =
+                            nelson_oppen_clause_pair(*pair.0, *pair.1, &mut self.solver_state)
                         {
                             debug_println!(25, 0, "adding in the nelson oppen term {}", term);
                             let term_nnf = term.nnf(self.solver_state);

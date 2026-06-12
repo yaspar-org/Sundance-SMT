@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::arithmetic::lia::stats::Stats as LiaStats;
+use crate::egraphs::traits::EgraphTrait;
 use crate::solver_state::SolverState;
 use crate::{
     arithmetic::lp::{
@@ -17,10 +18,12 @@ use z3::{
     Solver,
     ast::{Bool, Int},
 };
-use crate::egraphs::traits::EgraphTrait;
 
 /// Checks if a conjunction of integer constraints is satisfiable using Z3
-pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], solver_state: &mut SolverState) -> ArithResult {
+pub fn check_integer_constraints_satisfiable_z3(
+    terms: &[i32],
+    solver_state: &mut SolverState,
+) -> ArithResult {
     let (constraints, arithmetic_literals) = extract_linear_constraints(terms, solver_state);
 
     if constraints.is_empty() && arithmetic_literals.is_empty() {

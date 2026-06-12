@@ -18,15 +18,17 @@ pub fn nelson_oppen_clause(literal: i32, solver_state: &mut SolverState) -> Opti
                 let bool_sort = solver_state.context.bool_sort();
 
                 let lt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol("<"));
-                let lt_term =
-                    solver_state
-                        .context
-                        .app(lt, vec![x.clone(), y.clone()], Some(bool_sort.clone()));
+                let lt_term = solver_state.context.app(
+                    lt,
+                    vec![x.clone(), y.clone()],
+                    Some(bool_sort.clone()),
+                );
 
                 let gt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol(">"));
-                let gt_term = solver_state
-                    .context
-                    .app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
+                let gt_term =
+                    solver_state
+                        .context
+                        .app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
 
                 let or = solver_state.context.or(vec![lt_term, gt_term, term]);
 
@@ -101,7 +103,9 @@ pub fn nelson_oppen_clause_pair(x: u64, y: u64, solver_state: &mut SolverState) 
         Some(bool_sort),
     );
 
-    let eq_term = solver_state.context.eq(solver_state.get_term(x), solver_state.get_term(y));
+    let eq_term = solver_state
+        .context
+        .eq(solver_state.get_term(x), solver_state.get_term(y));
 
     let or = solver_state.context.or(vec![lt_term, gt_term, eq_term]);
 

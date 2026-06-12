@@ -11,9 +11,9 @@ use yaspar_ir::ast::{ObjectAllocatorExt, Repr, StrAllocator, Term};
 
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
-use crate::solver_types::ConstructorType;
 use crate::preprocess::check_for_function_bool;
 use crate::solver_state::SolverState;
+use crate::solver_types::ConstructorType;
 
 /// For a term of datatype sort, we want to learn the following axioms:
 /// 1. isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
@@ -65,16 +65,26 @@ pub fn find_datatype_axioms(
     // Step 2.5. Learn the constraint (is-f t) => t = f(f^0(t) ... f^m(t))
     // as long as we are not doing lazy datatypes
     if !lazy_dt {
-        let ctor_selector_clauses = learn_ctors_selector_clauses(solver_state, term, sort, &dt_dec, ddsmt, lazy_dt);
+        let ctor_selector_clauses =
+            learn_ctors_selector_clauses(solver_state, term, sort, &dt_dec, ddsmt, lazy_dt);
         vector.extend(ctor_selector_clauses);
     }
 
     // Step 3. Learn the constraint  /\_i=1^k f_i(f(t1, ... tk)) = t_i
     if let App(f, terms, _) = term.repr()
-        && solver_state.datatype_info.constructors.contains_key(f.id_str())
+        && solver_state
+            .datatype_info
+            .constructors
+            .contains_key(f.id_str())
     {
-        let selector_ctor_clauses =
-            learn_selector_ctor_clause(solver_state, term, f.id_str(), terms, &dt_dec, from_quantifier);
+        let selector_ctor_clauses = learn_selector_ctor_clause(
+            solver_state,
+            term,
+            f.id_str(),
+            terms,
+            &dt_dec,
+            from_quantifier,
+        );
         vector.extend(selector_ctor_clauses);
     }
     vector
@@ -88,7 +98,10 @@ fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
     let num = term.uid();
     // todo: missing Global case?
     if let App(f, _, _) = term.repr()
-        && solver_state.datatype_info.constructors.contains_key(f.id_str())
+        && solver_state
+            .datatype_info
+            .constructors
+            .contains_key(f.id_str())
     {
         let bool_sort = solver_state.bool_sort();
         let is_symbol = solver_state.allocate_symbol("is");
@@ -158,7 +171,10 @@ fn learn_exactly_one_tester_clause(
                 debug_println!(12, 0, "TESTER Constructor CASE");
                 let tester_app_nnf = tester_app.nnf(solver_state);
                 solver_state.insert_predecessor(&tester_app_nnf, None, None, from_quantifier);
-                let tester_app_cnf = tester_app_nnf.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
+                let tester_app_cnf = tester_app_nnf
+                    .cnf_tseitin(solver_state)
+                    .into_iter()
+                    .map(|x| x.0);
                 debug_println!(25, 10, "(assert {})", tester_app);
                 vector.extend(tester_app_cnf);
             }
@@ -196,7 +212,8 @@ fn learn_ctors_selector_clauses(
     let mut vector = vec![];
 
     for ctor in &dt_dec.constructors {
-        let ctor_selector_clauses = learn_ctor_selector_clauses(solver_state, term, ctor, sort, false, ddsmt, lazy_dt);
+        let ctor_selector_clauses =
+            learn_ctor_selector_clauses(solver_state, term, ctor, sort, false, ddsmt, lazy_dt);
         vector.extend(ctor_selector_clauses);
     }
     vector

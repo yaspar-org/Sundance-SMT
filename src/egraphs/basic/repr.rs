@@ -73,8 +73,21 @@ impl Children {
             2 => Children::Arity2([children[0], children[1]]),
             3 => Children::Arity3([children[0], children[1], children[2]]),
             4 => Children::Arity4([children[0], children[1], children[2], children[3]]),
-            5 => Children::Arity5([children[0], children[1], children[2], children[3], children[4]]),
-            6 => Children::Arity6([children[0], children[1], children[2], children[3], children[4], children[5]]),
+            5 => Children::Arity5([
+                children[0],
+                children[1],
+                children[2],
+                children[3],
+                children[4],
+            ]),
+            6 => Children::Arity6([
+                children[0],
+                children[1],
+                children[2],
+                children[3],
+                children[4],
+                children[5],
+            ]),
             _ => Children::ArityN(children.to_vec()),
         }
     }

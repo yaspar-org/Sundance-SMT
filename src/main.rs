@@ -76,7 +76,6 @@ fn main() -> Result<(), String> {
 
     solver_state.register_bool_constants(&true_term, &false_term);
 
-
     // checking if we have any inductive datatypes -> if we do panic!
     // gets the info about our datatypes
     if let Some(dt) = solver_state.check_for_recursive_datatypes() {
@@ -99,12 +98,7 @@ fn main() -> Result<(), String> {
         let skolemized_term = expanded_term;
 
         let nnf_term = skolemized_term.nnf(&mut solver_state);
-        debug_println!(
-            12,
-            0,
-            "NNF form: {}",
-            nnf_term,
-        );
+        debug_println!(12, 0, "NNF form: {}", nnf_term,);
 
         nnf_terms.push(nnf_term.clone());
 
@@ -146,7 +140,13 @@ fn main() -> Result<(), String> {
     // somewhat inefficient especially since we have to clone nnf_term, but I couldn't come up with a
     // better way to do this
     for nnf_term in nnf_terms {
-        let additional_constraints = check_for_function_bool(&nnf_term, &mut solver_state, false, args.ddsmt, args.lazy_dt);
+        let additional_constraints = check_for_function_bool(
+            &nnf_term,
+            &mut solver_state,
+            false,
+            args.ddsmt,
+            args.lazy_dt,
+        );
         boolean_dt_constraints.extend(additional_constraints);
     }
 

@@ -7,8 +7,8 @@
 //! allowing different backends (e.g., the current Sundance egraph or the
 //! semi-persistent egraph) to be used interchangeably.
 
-use std::hash::Hash;
 use crate::egraphs::repr::{Pattern, PatternId};
+use std::hash::Hash;
 
 /// A SAT literal: positive means the variable is true, negative means false.
 /// Zero means "no decision" when returned from decision methods.

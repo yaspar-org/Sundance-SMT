@@ -1,15 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::debug_println;
-use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
-use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
-use super::unionfind::ProofTracker;
-use crate::log::is_important;
-use super::datastructures::{
-    CanonicalForm, CanonicalOp, DisequalTerm, Predecessor,
-};
+use super::datastructures::{CanonicalForm, CanonicalOp, DisequalTerm, Predecessor};
 use super::proofforest::*;
+use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
+use super::unionfind::ProofTracker;
+use crate::debug_println;
+use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
+use crate::log::is_important;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
 use std::default::Default;
 use std::fmt;
@@ -158,7 +156,9 @@ impl fmt::Display for Egraph {
                     writeln!(
                         f,
                         "    -> {} (level: {}, hash: {})",
-                        self.display_term(pred.predecessor), pred.level, pred.hash
+                        self.display_term(pred.predecessor),
+                        pred.level,
+                        pred.hash
                     )?; // TODO: it is bad form to use self.false_term as the fallback here
                 }
             }
@@ -218,7 +218,6 @@ pub struct Egraph {
 
 impl Egraph {
     pub fn new() -> Self {
-
         Egraph {
             next_id: 0,
             terms: vec![TermSlot::Empty],
@@ -257,11 +256,17 @@ impl Egraph {
                 if entry.children.is_empty() {
                     entry.op.to_function_map_key()
                 } else {
-                    let children_str: Vec<String> = entry.children.as_slice()
+                    let children_str: Vec<String> = entry
+                        .children
+                        .as_slice()
                         .iter()
                         .map(|c| self.display_term(*c))
                         .collect();
-                    format!("({} {})", entry.op.to_function_map_key(), children_str.join(" "))
+                    format!(
+                        "({} {})",
+                        entry.op.to_function_map_key(),
+                        children_str.join(" ")
+                    )
                 }
             }
         }
@@ -424,7 +429,10 @@ impl Egraph {
                 self.predecessors[subterm_root as usize].remove(pred_key);
                 continue;
             }
-            let pred_entry = match &self.terms[*pred_key as usize] { TermSlot::Term(e) => e, _ => continue };
+            let pred_entry = match &self.terms[*pred_key as usize] {
+                TermSlot::Term(e) => e,
+                _ => continue,
+            };
             let pred_func = pred_entry.op.to_function_map_key();
             let pred_children = pred_entry.children.as_slice();
             if func == pred_func && pred_children.len() == subterms.len() {
@@ -1014,7 +1022,8 @@ impl Egraph {
     /// Ensure internal bookkeeping is ready for operations at the given level.
     fn advance_to_level(&mut self, level: usize) {
         while level >= self.predecessor_level.len() {
-            self.predecessor_level.resize(self.predecessor_level.len() * 2, 0);
+            self.predecessor_level
+                .resize(self.predecessor_level.len() * 2, 0);
         }
         if level > self.decision_level {
             self.decision_level = level;
@@ -1043,7 +1052,13 @@ impl Egraph {
 
     /// Assert t1 ≠ t2 at the current decision level.
     /// Returns a conflict if t1 and t2 are already in the same equivalence class.
-    fn assert_disequal(&mut self, t1: u32, t2: u32, diseq_lit: i32, level: usize) -> EgraphResult<u32> {
+    fn assert_disequal(
+        &mut self,
+        t1: u32,
+        t2: u32,
+        diseq_lit: i32,
+        level: usize,
+    ) -> EgraphResult<u32> {
         self.advance_to_level(level);
         let mut tracker = ProofTracker::new();
         if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
@@ -1059,7 +1074,12 @@ impl Egraph {
     }
 
     /// Assert all terms are pairwise distinct at the current decision level.
-    fn assert_distinct(&mut self, terms: &[u32], diseq_lit: i32, level: usize) -> EgraphResult<u32> {
+    fn assert_distinct(
+        &mut self,
+        terms: &[u32],
+        diseq_lit: i32,
+        level: usize,
+    ) -> EgraphResult<u32> {
         for i in 0..terms.len() {
             for j in i + 1..terms.len() {
                 let result = self.assert_disequal(terms[i], terms[j], diseq_lit, level);
@@ -1447,7 +1467,8 @@ impl Egraph {
             "Unioning predecessors of {} [{}, Predecessors: {}] and {} [{}, Predecessors: {}]",
             self.display_term(u),
             u,
-            format!("{:?}",
+            format!(
+                "{:?}",
                 self.predecessors[u as usize]
                     .keys()
                     .map(|x| self.display_term(*x))
@@ -1455,7 +1476,8 @@ impl Egraph {
             ),
             self.display_term(v),
             v,
-            format!("{:?}",
+            format!(
+                "{:?}",
                 self.predecessors[v as usize]
                     .keys()
                     .map(|x| self.display_term(*x))
@@ -1707,7 +1729,6 @@ impl Egraph {
         result
     }
 
-
     /// Make vertex the root of its proof-forest tree.
     fn make_root(&mut self, vertex: u32, proof_parent: ProofForestEdge) {
         debug_println!(
@@ -1793,7 +1814,12 @@ impl Egraph {
         }
         let (pattern_id, ground_hint) = pattern_term_pairs[0];
         let pattern = self.compiled_patterns[pattern_id].clone();
-        self.match_pattern_recursive(assignment, &pattern, ground_hint, &pattern_term_pairs[1..].to_vec())
+        self.match_pattern_recursive(
+            assignment,
+            &pattern,
+            ground_hint,
+            &pattern_term_pairs[1..].to_vec(),
+        )
     }
 
     /// Match a single pattern against an optional ground term, then continue with remaining pairs.
@@ -1819,17 +1845,13 @@ impl Egraph {
                     Some(_) => vec![],
                 }
             }
-            Pattern::Ground(egraph_id) => {
-                match ground_hint {
-                    Some(ground) if self.find(*egraph_id) == self.find(ground) => {
-                        self.match_patterns(assignment, remaining)
-                    }
-                    None => {
-                        self.match_patterns(assignment, remaining)
-                    }
-                    _ => vec![],
+            Pattern::Ground(egraph_id) => match ground_hint {
+                Some(ground) if self.find(*egraph_id) == self.find(ground) => {
+                    self.match_patterns(assignment, remaining)
                 }
-            }
+                None => self.match_patterns(assignment, remaining),
+                _ => vec![],
+            },
             Pattern::App(op, sub_patterns) => {
                 let func_name = op.to_function_map_key();
                 self.find_assignments_on_pattern(
@@ -1904,18 +1926,16 @@ impl Egraph {
         let rest_grounds = &ground_subterms[1..];
 
         match pattern {
-            Pattern::Var(name) => {
-                match assignment.get(name) {
-                    None => {
-                        assignment.insert(name.clone(), ground);
-                        self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
-                    }
-                    Some(v) if self.find(*v) == self.find(ground) => {
-                        self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
-                    }
-                    Some(_) => vec![],
+            Pattern::Var(name) => match assignment.get(name) {
+                None => {
+                    assignment.insert(name.clone(), ground);
+                    self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
                 }
-            }
+                Some(v) if self.find(*v) == self.find(ground) => {
+                    self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
+                }
+                Some(_) => vec![],
+            },
             Pattern::Ground(egraph_id) => {
                 if self.find(*egraph_id) == self.find(ground) {
                     self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
@@ -1940,7 +1960,8 @@ impl Egraph {
                     }
                     let i_root = self.find(i);
                     if ground_root == i_root {
-                        let subterms_canonical: Vec<u32> = subterms.iter().map(|s| self.find(*s)).collect();
+                        let subterms_canonical: Vec<u32> =
+                            subterms.iter().map(|s| self.find(*s)).collect();
                         if considered.contains(&subterms_canonical) {
                             continue;
                         }

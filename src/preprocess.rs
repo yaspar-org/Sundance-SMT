@@ -74,7 +74,10 @@ pub fn check_for_function_bool(
                 // downstream code (e.g. the tautology clause below) can find its literal.
                 assert!(vector_lit.len() == 1);
                 if vector_lit.len() == 1 {
-                    solver_state.cnf_cache.var_map.insert(term.uid(), vector_lit[0]);
+                    solver_state
+                        .cnf_cache
+                        .var_map
+                        .insert(term.uid(), vector_lit[0]);
                     solver_state
                         .cnf_cache
                         .var_map_reverse
@@ -92,41 +95,98 @@ pub fn check_for_function_bool(
 
     // if a term has a datatype type, then create tester applications for each constructor
     if solver_state.datatype_info.is_datatype(sort.sort_name()) {
-        vector.extend(find_datatype_axioms(term, &sort, solver_state, from_quantifier, lazy_dt, ddsmt))
+        vector.extend(find_datatype_axioms(
+            term,
+            &sort,
+            solver_state,
+            from_quantifier,
+            lazy_dt,
+            ddsmt,
+        ))
     }
 
     match term.repr() {
         App(_, items, _) | And(items) | Or(items) | Xor(items) | Distinct(items) => {
-            vector.extend(
-                items
-                    .iter()
-                    .flat_map(|t| check_for_function_bool(t, solver_state, from_quantifier, ddsmt, lazy_dt)),
-            );
+            vector.extend(items.iter().flat_map(|t| {
+                check_for_function_bool(t, solver_state, from_quantifier, ddsmt, lazy_dt)
+            }));
         }
         Eq(a, b) => {
-            vector.extend(check_for_function_bool(a, solver_state, from_quantifier, ddsmt, lazy_dt));
-            vector.extend(check_for_function_bool(b, solver_state, from_quantifier, ddsmt, lazy_dt));
+            vector.extend(check_for_function_bool(
+                a,
+                solver_state,
+                from_quantifier,
+                ddsmt,
+                lazy_dt,
+            ));
+            vector.extend(check_for_function_bool(
+                b,
+                solver_state,
+                from_quantifier,
+                ddsmt,
+                lazy_dt,
+            ));
         }
         Not(t) | Annotated(t, _) => {
-            vector.extend(check_for_function_bool(t, solver_state, from_quantifier, ddsmt, lazy_dt));
+            vector.extend(check_for_function_bool(
+                t,
+                solver_state,
+                from_quantifier,
+                ddsmt,
+                lazy_dt,
+            ));
         }
         Implies(items, p) => {
-            vector.extend(check_for_function_bool(p, solver_state, from_quantifier, ddsmt, lazy_dt));
-            vector.extend(
-                items
-                    .iter()
-                    .flat_map(|t| check_for_function_bool(t, solver_state, from_quantifier, ddsmt, lazy_dt)),
-            );
+            vector.extend(check_for_function_bool(
+                p,
+                solver_state,
+                from_quantifier,
+                ddsmt,
+                lazy_dt,
+            ));
+            vector.extend(items.iter().flat_map(|t| {
+                check_for_function_bool(t, solver_state, from_quantifier, ddsmt, lazy_dt)
+            }));
         }
         Ite(b, x, y) => {
-            vector.extend(check_for_function_bool(b, solver_state, from_quantifier, ddsmt, lazy_dt));
-            vector.extend(check_for_function_bool(x, solver_state, from_quantifier, ddsmt, lazy_dt));
-            vector.extend(check_for_function_bool(y, solver_state, from_quantifier, ddsmt, lazy_dt));
+            vector.extend(check_for_function_bool(
+                b,
+                solver_state,
+                from_quantifier,
+                ddsmt,
+                lazy_dt,
+            ));
+            vector.extend(check_for_function_bool(
+                x,
+                solver_state,
+                from_quantifier,
+                ddsmt,
+                lazy_dt,
+            ));
+            vector.extend(check_for_function_bool(
+                y,
+                solver_state,
+                from_quantifier,
+                ddsmt,
+                lazy_dt,
+            ));
         }
         Matching(t, pattern_arms) => {
-            vector.extend(check_for_function_bool(t, solver_state, from_quantifier, ddsmt, lazy_dt));
+            vector.extend(check_for_function_bool(
+                t,
+                solver_state,
+                from_quantifier,
+                ddsmt,
+                lazy_dt,
+            ));
             vector.extend(pattern_arms.iter().flat_map(|pattern| {
-                check_for_function_bool(&pattern.body, solver_state, from_quantifier, ddsmt, lazy_dt)
+                check_for_function_bool(
+                    &pattern.body,
+                    solver_state,
+                    from_quantifier,
+                    ddsmt,
+                    lazy_dt,
+                )
             }));
         }
         Forall(var_bindings, t) | Exists(var_bindings, t) => {
@@ -142,7 +202,13 @@ pub fn check_for_function_bool(
                         .cnf_tseitin(solver_state)
                         .into_iter()
                         .map(|x| x.into_iter().collect::<Vec<_>>());
-                    let sub_formula = check_for_function_bool(&nnf_t, solver_state, from_quantifier, ddsmt, lazy_dt);
+                    let sub_formula = check_for_function_bool(
+                        &nnf_t,
+                        solver_state,
+                        from_quantifier,
+                        ddsmt,
+                        lazy_dt,
+                    );
                     debug_println!(
                         19,
                         0,
@@ -235,7 +301,14 @@ fn get_pattern_dt_constraints(
             }
         }
         Ite(b, t1, t2) => {
-            vector.extend(get_pattern_dt_constraints(b, vars, solver_state, from_quantifier, ddsmt, lazy_dt));
+            vector.extend(get_pattern_dt_constraints(
+                b,
+                vars,
+                solver_state,
+                from_quantifier,
+                ddsmt,
+                lazy_dt,
+            ));
             vector.extend(get_pattern_dt_constraints(
                 t1,
                 vars,
@@ -313,7 +386,9 @@ fn check_if_var_occurs_in_term(
         App(_, items, _) | Distinct(items) => items
             .iter()
             .any(|t| check_if_var_occurs_in_term(t, var_bindings, solver_state, ddsmt)),
-        Annotated(t, _) | Not(t) => check_if_var_occurs_in_term(t, var_bindings, solver_state, ddsmt),
+        Annotated(t, _) | Not(t) => {
+            check_if_var_occurs_in_term(t, var_bindings, solver_state, ddsmt)
+        }
         Eq(t1, t2) => {
             check_if_var_occurs_in_term(t1, var_bindings, solver_state, ddsmt)
                 || check_if_var_occurs_in_term(t2, var_bindings, solver_state, ddsmt)
@@ -339,7 +414,11 @@ fn check_if_var_occurs_in_term(
     }
 }
 
-fn process_ite(term: &Term, solver_state: &mut SolverState, from_quantifier: bool) -> Option<Formula> {
+fn process_ite(
+    term: &Term,
+    solver_state: &mut SolverState,
+    from_quantifier: bool,
+) -> Option<Formula> {
     if let Ite(b, t1, t2) = term.repr() {
         let eq1 = solver_state.eq(term.clone(), t1.clone());
         let imp1 = solver_state.implies(vec![b.clone()], eq1);

@@ -8,19 +8,17 @@ use std::rc::Rc;
 
 use crate::cnf::CNFConversion;
 use crate::egraphs::EgraphTrait;
-use crate::solver_types::Polarity;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::skolem::skolemize;
+use crate::solver_types::Polarity;
 // TODO: These functions should take &mut SolverState and use solver_state.egraph for egraph ops.
 // For now they take &mut Egraph directly since the fields haven't been moved yet.
 use crate::solver_state::SolverState;
 use crate::utils::DeterministicHashMap;
 
 use crate::debug_println;
-use yaspar_ir::ast::{
-    LetElim, Substitute, Substitution, Term, TermAllocator,
-};
+use yaspar_ir::ast::{LetElim, Substitute, Substitution, Term, TermAllocator};
 
 #[derive(Debug, Clone)]
 pub enum QuantifierInstance {
@@ -111,7 +109,8 @@ pub fn instantiate_quantifiers(
 
             solver_state.added_skolemizations.insert(quantifier.id);
 
-            let skolemized_quantifier: Term = skolemized_quantifier.let_elim(&mut solver_state.context);
+            let skolemized_quantifier: Term =
+                skolemized_quantifier.let_elim(&mut solver_state.context);
             // let (skolemized_quantifier, _) = skolemize(&skolemized_quantifier, solver_state.context, &mut solver_state.skolem_counter);
             let skolemized_quantifier = skolemized_quantifier.nnf(solver_state);
             let additional_constraints =
@@ -190,7 +189,8 @@ pub fn instantiate_quantifiers(
         // note we consider patterns in a multipattern conjunctively and multipatterns in a trigger disjunctively
         for multipattern in triggers {
             let body = quantifier.body;
-            let trigger_term_pairs: Vec<(usize, Option<u32>)> = multipattern.iter().map(|t| (*t, None)).collect();
+            let trigger_term_pairs: Vec<(usize, Option<u32>)> =
+                multipattern.iter().map(|t| (*t, None)).collect();
 
             debug_println!(12, 0, "after8");
             debug_println!(
@@ -218,7 +218,12 @@ pub fn instantiate_quantifiers(
                 // Convert ID map to Term map for substitution
                 let subs: DeterministicHashMap<String, Term> = subs_ids
                     .iter()
-                    .map(|(k, v)| (k.clone(), solver_state.get_term(solver_state.to_solver_uid(*v))))
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            solver_state.get_term(solver_state.to_solver_uid(*v)),
+                        )
+                    })
                     .collect();
 
                 if let Some(set) = solver_state.added_instantiations.get(&quantifier.id)
@@ -340,7 +345,8 @@ pub fn instantiate_quantifiers(
                 // the bug comes from the additional constraints
                 // basically the additional constraints are valid lits -> converted to valid u64, but may not be in the actual term mapping
                 // it should be added in insert_predecessor which calls get_or_insert which adds into terms_list
-                let additional_constraints = check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
+                let additional_constraints =
+                    check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
                 clauses.extend(additional_constraints);
 
                 // could activate bits here (the level should not be 0)

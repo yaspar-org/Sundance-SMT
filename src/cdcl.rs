@@ -39,7 +39,7 @@ pub fn cdcl_decision_procedure(
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
-    timeout: u64
+    timeout: u64,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
 

@@ -293,8 +293,10 @@ fn extract_constraint_from_term(
                 "[ARITH CHECK] Extracting linear constraint for EQ term {}",
                 term
             );
-            let (left_expr, additional_constraint_l) = extract_linear_expression(a.uid(), solver_state);
-            let (right_expr, additional_constraint_r) = extract_linear_expression(b.uid(), solver_state);
+            let (left_expr, additional_constraint_l) =
+                extract_linear_expression(a.uid(), solver_state);
+            let (right_expr, additional_constraint_r) =
+                extract_linear_expression(b.uid(), solver_state);
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
@@ -341,7 +343,10 @@ pub fn extract_linear_expression(
         }
         Global(..) => {
             // TODO: consider whether we need egraph.find() here for correctness when variables are merged
-            expr.insert(Coefficient::Term(solver_state.to_egraph_id(term_id)), IBig::from(1));
+            expr.insert(
+                Coefficient::Term(solver_state.to_egraph_id(term_id)),
+                IBig::from(1),
+            );
         }
         App(identifier, args, _) => {
             // Handle arithmetic operations
@@ -421,8 +426,9 @@ pub fn extract_linear_expression(
                 _ => {
                     let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
 
-                    if let Some(negated_model) =
-                        solver_state.egraph.explain_equality(root_id, solver_state.to_egraph_id(term_id))
+                    if let Some(negated_model) = solver_state
+                        .egraph
+                        .explain_equality(root_id, solver_state.to_egraph_id(term_id))
                     {
                         let model_terms: Vec<i32> = negated_model
                             .into_iter()
@@ -444,7 +450,9 @@ pub fn extract_linear_expression(
         }
         _ => {
             let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
-            if let Some(negated_model) = solver_state.egraph.explain_equality(root_id, solver_state.to_egraph_id(term_id))
+            if let Some(negated_model) = solver_state
+                .egraph
+                .explain_equality(root_id, solver_state.to_egraph_id(term_id))
             {
                 let model_terms: Vec<i32> = negated_model
                     .into_iter()
