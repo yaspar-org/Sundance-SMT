@@ -332,7 +332,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         };
 
                         if let Some(term) =
-                            nelson_oppen_clause_pair(*pair.0, *pair.1, &mut self.solver_state)
+                            nelson_oppen_clause_pair(*pair.0, *pair.1, self.solver_state)
                         {
                             debug_println!(25, 0, "adding in the nelson oppen term {}", term);
                             let term_nnf = term.nnf(self.solver_state);

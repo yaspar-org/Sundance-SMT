@@ -460,11 +460,10 @@ impl SolverState {
         let num = term.uid();
 
         // Arithmetic term tracking
-        if term.get_sort(self.context.arena()).to_string() == "Int" {
-            if !self.arithmetic_terms.contains(&num) {
+        if term.get_sort(self.context.arena()).to_string() == "Int"
+            && !self.arithmetic_terms.contains(&num) {
                 self.arithmetic_terms.push(num);
             }
-        }
 
         // Quantifier registration
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {

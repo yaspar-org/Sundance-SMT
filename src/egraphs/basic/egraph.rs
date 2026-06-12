@@ -216,6 +216,12 @@ pub struct Egraph {
     union_to_eclass: DeterministicHashSet<(u32, String, Vec<u32>)>,
 }
 
+impl Default for Egraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Egraph {
     pub fn new() -> Self {
         Egraph {
@@ -1836,8 +1842,8 @@ impl Egraph {
                 match assignment.get(name) {
                     None => {
                         assignment.insert(name.clone(), ground);
-                        let results = self.match_patterns(assignment, remaining);
-                        results
+                        
+                        self.match_patterns(assignment, remaining)
                     }
                     Some(v) if self.find(*v) == self.find(ground) => {
                         self.match_patterns(assignment, remaining)
