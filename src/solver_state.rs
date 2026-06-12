@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use sat_interface::Formula;
 use yaspar_ir::ast::alg::CheckIdentifier;
-use yaspar_ir::ast::{Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, ObjectAllocatorExt, Repr, Str, Term, TermAllocator};
+use yaspar_ir::ast::{Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Str, Term, TermAllocator};
 use yaspar_ir::ast::ATerm::*;
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -147,10 +147,8 @@ pub struct SolverState {
 impl SolverState {
     /// Create a new SolverState. Takes ownership of the Context and config flags,
     /// creates the inner Egraph using the existing constructor.
-    pub fn new(mut context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
-        let tru = context.get_true();
-        let fal = context.get_false();
-        let mut egraph = Egraph::new();
+    pub fn new(context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
+        let egraph = Egraph::new();
         let datatype_info = DatatypeInfo::from_context(&context);
 
 
@@ -179,7 +177,7 @@ impl SolverState {
         }
     }
 
-    pub fn cnf_env(&mut self) -> CNFEnv<'_> {
+    fn cnf_env(&mut self) -> CNFEnv<'_> {
         CNFEnv {
             context: &mut self.context,
             cache: &mut self.cnf_cache,
@@ -546,7 +544,6 @@ pub fn process_assignment(
     solver_state: &mut SolverState,
     level: usize,
     fixed: bool,
-    from_quantifier: bool,
 ) -> Option<Vec<Vec<i32>>> {
     use crate::egraphs::EgraphTrait;
     let lazy_dt = solver_state.lazy_dt;

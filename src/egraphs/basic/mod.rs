@@ -1,7 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-mod congruence_closure;
 mod datastructures;
 pub mod egraph;
 mod proofforest;

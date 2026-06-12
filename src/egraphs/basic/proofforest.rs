@@ -11,7 +11,7 @@ use std::fmt;
 /// Each edge is either a root (i.e. it has not parent)
 /// or is created by an equality or
 #[derive(Debug, Clone)]
-pub(crate) enum ProofForestEdge {
+pub(super)  enum ProofForestEdge {
     /// Represents being the root
     Root {
         size: u32, // TODO: I don't know of a good way to recover the size when backtracking, so I need to figure out an efficient way to do this or maybe just remove size
@@ -151,7 +151,7 @@ impl PartialEq for ProofForestEdge {
 
 impl ProofForestEdge {
     /// Get the child of any ProofForestEdge
-    pub(crate) fn get_child(&self) -> u32 {
+    pub(super)  fn get_child(&self) -> u32 {
         match self {
             ProofForestEdge::Root { child, .. }
             | ProofForestEdge::Equality { child, .. }
@@ -160,7 +160,7 @@ impl ProofForestEdge {
     }
 
     /// Get the parent of a ProofForestEdge
-    pub(crate) fn get_parent(&self) -> u32 {
+    pub(super)  fn get_parent(&self) -> u32 {
         match self {
             ProofForestEdge::Root { .. } => panic!("Root does not have a parent"),
             ProofForestEdge::Equality { parent, .. }
@@ -169,7 +169,7 @@ impl ProofForestEdge {
     }
 
     /// Get a reference to the disequalities vector for any ProofForestEdge variant
-    pub(crate) fn disequalities(&self) -> &DeterministicHashMap<u32, DisequalTerm> {
+    pub(super)  fn disequalities(&self) -> &DeterministicHashMap<u32, DisequalTerm> {
         match self {
             ProofForestEdge::Root { disequalities, .. } => disequalities,
             ProofForestEdge::Equality { disequalities, .. } => disequalities,
@@ -178,7 +178,7 @@ impl ProofForestEdge {
     }
 
     /// Get a reference to the children vector for any ProofForestEdge variant
-    pub(crate) fn get_children(&self) -> &DeterministicHashSet<u32> {
+    pub(super)  fn get_children(&self) -> &DeterministicHashSet<u32> {
         match self {
             ProofForestEdge::Root { children, .. }
             | ProofForestEdge::Equality { children, .. }
@@ -187,7 +187,7 @@ impl ProofForestEdge {
     }
 
     /// Get a mutable reference to the disequalities vector for any ProofForestEdge variant
-    pub(crate) fn disequalities_mut(&mut self) -> &mut DeterministicHashMap<u32, DisequalTerm> {
+    pub(super)  fn disequalities_mut(&mut self) -> &mut DeterministicHashMap<u32, DisequalTerm> {
         match self {
             ProofForestEdge::Root { disequalities, .. } => disequalities,
             ProofForestEdge::Equality { disequalities, .. } => disequalities,
@@ -196,7 +196,7 @@ impl ProofForestEdge {
     }
 
     /// Set the disequalities in a ProofForestEdge
-    pub(crate) fn set_disequalities(
+    pub(super)  fn set_disequalities(
         self,
         diseq: DeterministicHashMap<u32, DisequalTerm>,
     ) -> ProofForestEdge {
@@ -253,8 +253,27 @@ impl ProofForestEdge {
         }
     }
 
+    /// Set the parent and child fields of a non-root edge.
+    pub(super) fn with_parent(self, parent: u32, new_child: u32, level: usize, hash: u32) -> ProofForestEdge {
+        match self {
+            ProofForestEdge::Root { .. } => {
+                panic!("Cannot add a parent to a root");
+            }
+            ProofForestEdge::Congruence {
+                size, pairs, disequalities, children, ..
+            } => ProofForestEdge::Congruence {
+                size, pairs, parent, child: new_child, disequalities, level, hash, children,
+            },
+            ProofForestEdge::Equality {
+                size, term, disequalities, children, ..
+            } => ProofForestEdge::Equality {
+                size, term, parent, child: new_child, disequalities, level, hash, children,
+            },
+        }
+    }
+
     /// Add a single disequality to a ProofForestEdge
-    pub(crate) fn add_disequality(&mut self, key: u32, t: DisequalTerm, hash_level_map: &[u32]) {
+    pub(super) fn add_disequality(&mut self, key: u32, t: DisequalTerm, hash_level_map: &[u32]) {
         let disequalities = match self {
             ProofForestEdge::Root { disequalities, .. } => disequalities, // TODO: not sure if I want this clone here, but its kind've hard to do references for disequalities
             ProofForestEdge::Equality { disequalities, .. } => disequalities,

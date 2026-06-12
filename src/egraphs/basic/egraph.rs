@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::debug_println;
-use super::congruence_closure::{add_parent, get_child, get_parent};
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
 use super::unionfind::ProofTracker;
@@ -393,13 +392,6 @@ impl Egraph {
                 FastDeterministicHashMap::default(),
             );
         }
-    }
-
-    /// Store a compiled pattern and return its PatternId.
-    fn compile_pattern(&mut self, pattern: Pattern) -> PatternId {
-        let id = self.compiled_patterns.len();
-        self.compiled_patterns.push(pattern);
-        id
     }
 
     /// Register an opaque term — allocates a full slot with a proof_forest Root
@@ -912,7 +904,7 @@ impl Egraph {
                 visited.insert(curr);
                 break;
             }
-            curr = get_parent(&parent);
+            curr = parent.get_parent();
             path_from_u.push(parent);
         }
 
@@ -933,7 +925,7 @@ impl Egraph {
             {
                 return None;
             }
-            curr = get_parent(&parent);
+            curr = parent.get_parent();
             path_from_v.push(parent);
         }
 
@@ -1135,9 +1127,9 @@ impl Egraph {
         y: u32,
         y_parent: ProofForestEdge,
     ) {
-        let child = &get_child(&equality);
+        let child = &equality.get_child();
         let child_edge = self.proof_forest[*child as usize].clone();
-        let parent = &get_parent(&equality);
+        let parent = &equality.get_parent();
         let parent_edge = self.proof_forest[*parent as usize].clone();
 
         assert_eq!(self.find(*child), self.find(*parent));
@@ -1170,9 +1162,9 @@ impl Egraph {
         let (child, child_edge, _parent, _parent_edge) = if child_edge != equality {
             debug_println!(6, 0, "we are reversing the edge");
             debug_println!(10, 0, "{}", self);
-            assert_eq!(get_parent(&parent_edge), get_child(&equality));
+            assert_eq!(parent_edge.get_parent(), equality.get_child());
             debug_println!(6, 0, "after first assert");
-            assert_eq!(get_child(&parent_edge), get_parent(&equality));
+            assert_eq!(parent_edge.get_child(), equality.get_parent());
             (parent, parent_edge, child, child_edge)
         } else {
             (child, child_edge, parent, parent_edge)
@@ -1186,7 +1178,7 @@ impl Egraph {
             self.predecessors[*child as usize]
         );
 
-        let childs_child = get_child(&child_edge);
+        let childs_child = child_edge.get_child();
 
         let mut new_disequalities = DeterministicHashMap::new();
         for (k, v) in child_edge.disequalities().iter() {
@@ -1281,7 +1273,7 @@ impl Egraph {
 
         // making x the parent of y ~> could also do this based on relative depth of x and y tree
         let proof_parent: ProofForestEdge =
-            add_parent(proof_parent, x, y, level, self.predecessor_hash);
+            proof_parent.with_parent(x, y, level, self.predecessor_hash);
 
         let y_root_parent = &self.proof_forest[y_root as usize];
 
@@ -1977,10 +1969,6 @@ impl Egraph {
         }
     }
 }
-
-// HasArena for Egraph removed — use HasArena for SolverState instead (in solver_state.rs)
-
-// CNFConversion<Egraph> removed — use CNFConversion<SolverState> instead (in solver_state.rs)
 
 /// Checks if the hash is still valid at the given level
 fn valid_hash(hash: u32, level: usize, predecessor_level: &[u32]) -> bool {

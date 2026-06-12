@@ -9,25 +9,25 @@ use std::collections::HashMap;
 
 /// Value keeps of if a node is a root or what its parent is
 #[derive(Debug, Clone)]
-pub(crate) enum ProofTrackerValue {
+pub(super)  enum ProofTrackerValue {
     Root { size: i32 },
     Parent { parent: u32 },
 }
 
 /// Forest of the different proof trackers
-pub(crate) struct ProofTracker {
+pub(super)  struct ProofTracker {
     forest: HashMap<u32, ProofTrackerValue>,
 }
 
 impl ProofTracker {
-    pub(crate) fn new() -> Self {
+    pub(super)  fn new() -> Self {
         ProofTracker {
             forest: HashMap::default(),
         }
     }
 
     /// unioning terms x and y
-    pub(crate) fn union(&mut self, x: u32, y: u32) -> bool {
+    pub(super)  fn union(&mut self, x: u32, y: u32) -> bool {
         debug_println!(
             5,
             2,
