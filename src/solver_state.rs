@@ -507,8 +507,9 @@ impl SolverState {
                     polarity,
                     skolemized: false,
                 });
+            } else {
+                panic!("Quantifier {} does not have an annotation", term);
             }
-            // Don't recurse into quantifier bodies for solver bookkeeping
             return;
         }
 
