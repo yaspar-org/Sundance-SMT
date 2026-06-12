@@ -204,10 +204,6 @@ pub struct Egraph {
     predecessor_level: Vec<u32>,
     /// map from functions (String) -> terms of this function
     function_maps: DeterministicHashMap<String, Vec<(u32, Vec<u32>)>>,
-    /// uid for true
-    true_term: u32,
-    /// uid for false
-    false_term: u32,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
     decision_level: usize,
     /// keeps track of terms created by quantifier instantiation and their predecessors
@@ -239,8 +235,6 @@ impl Egraph {
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
             function_maps: DeterministicHashMap::default(),
-            true_term: 0,
-            false_term: 0,
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
             union_to_eclass: DeterministicHashSet::new(),
@@ -287,23 +281,7 @@ impl Egraph {
     /// Register a single term (non-recursive). Children must already be registered.
     /// Takes raw IDs — no dependency on Term representation.
     fn register_term_internal(&mut self, id: u32, op: Op, children: &[u32], dynamic: bool) -> bool {
-        // Resize storage if needed
-        while self.terms.len() <= id as usize {
-            self.terms.resize(self.terms.len() * 2, TermSlot::Empty);
-            self.proof_forest.resize(
-                self.proof_forest.len() * 2,
-                ProofForestEdge::Root {
-                    size: 1000,
-                    child: 0,
-                    disequalities: DeterministicHashMap::new(),
-                    children: DeterministicHashSet::new(),
-                },
-            );
-            self.predecessors.resize(
-                self.predecessors.len() * 2,
-                FastDeterministicHashMap::default(),
-            );
-        }
+        self.ensure_capacity(id);
 
         // Check if already inserted
         if !matches!(self.terms[id as usize], TermSlot::Empty) {
@@ -2009,33 +1987,11 @@ impl EgraphTrait for Egraph {
     type TermId = u32;
 
     fn register_true(&mut self) -> Self::TermId {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.ensure_capacity(id);
-        self.terms[id as usize] = TermSlot::Opaque;
-        self.proof_forest[id as usize] = ProofForestEdge::Root {
-            size: 1,
-            disequalities: DeterministicHashMap::new(),
-            child: 0,
-            children: DeterministicHashSet::new(),
-        };
-        self.true_term = id;
-        id
+        self.register_opaque_term()
     }
 
     fn register_false(&mut self) -> Self::TermId {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.ensure_capacity(id);
-        self.terms[id as usize] = TermSlot::Opaque;
-        self.proof_forest[id as usize] = ProofForestEdge::Root {
-            size: 1,
-            disequalities: DeterministicHashMap::new(),
-            child: 0,
-            children: DeterministicHashSet::new(),
-        };
-        self.false_term = id;
-        id
+        self.register_opaque_term()
     }
 
     fn register_term(
@@ -2125,8 +2081,8 @@ impl EgraphTrait for Egraph {
         0
     }
 
-    fn make_decision_lit(&self, lit: Lit, _assignments: &[i32]) -> Lit {
-        lit
+    fn make_decision_lit(&self, _lit: Lit, _assignments: &[i32]) -> Lit {
+        0
     }
 
     fn explain_equality(

@@ -51,13 +51,6 @@ impl<T> EgraphResult<T> {
     }
 }
 
-/// A single e-match result: a term and its children.
-#[derive(Debug, Clone)]
-pub struct MatchResult<T> {
-    pub term: T,
-    pub children: Vec<T>,
-}
-
 pub trait EgraphTrait {
     /// Operator key for congruence: two terms are congruent iff they have
     /// the same Op and pairwise-equal children.
