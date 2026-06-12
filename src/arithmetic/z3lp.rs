@@ -9,7 +9,6 @@ use crate::{
         extract_linear_expression,
     },
     debug_println,
-    egraphs::proofforest::ProofForestEdge,
     utils::{DeterministicHashMap, DeterministicHashSet},
 };
 use dashu::integer::IBig;
@@ -18,6 +17,7 @@ use z3::{
     Solver,
     ast::{Bool, Int},
 };
+use crate::egraphs::traits::EgraphTrait;
 
 /// Checks if a conjunction of integer constraints is satisfiable using Z3
 pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], solver_state: &mut SolverState) -> ArithResult {
@@ -71,7 +71,7 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], solver_state: &mu
     let mut roots = vec![];
     for term_id in solver_state.arithmetic_terms.clone() {
         let egraph_id = solver_state.to_egraph_id(term_id);
-        if let ProofForestEdge::Root { .. } = &solver_state.egraph.proof_forest[egraph_id as usize] {
+        if solver_state.egraph.find(egraph_id) == egraph_id {
             let left_expr = Int::new_const(format!("var_{}", egraph_id));
 
             roots.push((term_id, left_expr.clone()));

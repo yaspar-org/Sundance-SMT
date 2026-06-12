@@ -5,8 +5,8 @@ use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_
 use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
 use crate::cnf::CNFConversion as _;
 use crate::debug_println;
+use crate::egraphs::EgraphTrait;
 use crate::solver_state::{SolverState, process_assignment};
-use crate::egraphs::proofforest::ProofForestEdge;
 use crate::log::is_important;
 use crate::proof::proof_tracer::SMTProofTracker;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
@@ -18,20 +18,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Should we keep backtracking on stack at level
-///
-/// Note: we are currently not adding fixed levels to backtracking
-/// We treat fixed literals at level >0 as unfixed and so we trust the SAT solver to just give us new assignments if it backtracks past a certain point
-fn keep_backtracking(
-    proof_forest_stack: &[(usize, ProofForestEdge, u64, ProofForestEdge)],
-    level: usize,
-) -> bool {
-    if proof_forest_stack.is_empty() {
-        return false;
-    }
-    let last_elem_level = proof_forest_stack[proof_forest_stack.len() - 1].0;
 
-    last_elem_level > level // note that backtracking is >=
-}
 
 /// Our implemetation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
@@ -136,7 +123,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.add_lit_to_proof_tracker(*lit); // adding the literal to the proof_tracker
 
             let negated_model_or_datatype_constraints_opt =
-                process_assignment(*lit, self.solver_state, self.decision_level, false, false, None);
+                process_assignment(*lit, self.solver_state, self.decision_level, false, false);
 
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
@@ -230,27 +217,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level,
             self.decision_level + 1
         );
-        if self.decision_level + 2 >= self.solver_state.egraph.predecessor_level.len() {
-            debug_println!(
-                2,
-                2,
-                "Resizing predecessor level array to {}",
-                2 * self.solver_state.egraph.predecessor_level.len()
-            );
-            self.solver_state.egraph
-                .predecessor_level
-                .resize(2 * self.solver_state.egraph.predecessor_level.len(), 0);
-        }
         self.decision_level += 1;
-        self.solver_state.egraph.decision_level += 1;
-        debug_println!(
-            4,
-            0,
-            "Setting predecessor level for level {} to {}",
-            self.decision_level,
-            self.solver_state.egraph.predecessor_hash
-        );
-        self.solver_state.egraph.predecessor_level[self.decision_level] = self.solver_state.egraph.predecessor_hash;
+        // Record solver hash at new level
+        while self.decision_level >= self.solver_state.hash_at_level.len() {
+            self.solver_state.hash_at_level.resize(self.solver_state.hash_at_level.len() * 2, 0);
+        }
+        self.solver_state.hash_at_level[self.decision_level] = self.solver_state.current_hash;
     }
 
     fn notify_backtrack(&mut self, level: usize) {
@@ -267,6 +239,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         for i in 1..self.assignments.len() {
             if self.assignments[i].abs() > (level + 1) as i32 {
                 self.assignments[i] = 0;
+            }
+        }
+
+        // Bump solver hash on backtrack and invalidate higher levels
+        self.solver_state.current_hash += 1;
+        for i in level + 1..self.decision_level + 1 {
+            if i < self.solver_state.hash_at_level.len() {
+                self.solver_state.hash_at_level[i] = self.solver_state.current_hash;
             }
         }
 

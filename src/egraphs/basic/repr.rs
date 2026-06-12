@@ -131,13 +131,13 @@ pub enum TermSlot {
 
 /// A pattern for e-matching. Recursive tree structure, never stored in the egraph.
 #[derive(Debug, Clone)]
-pub enum Pattern {
+pub enum Pattern<T = EgraphId> {
     /// A variable to be bound during matching
     Var(String),
     /// A ground term already in the egraph — match by equivalence class
-    Ground(EgraphId),
+    Ground(T),
     /// A function application with sub-patterns
-    App(Op, Vec<Pattern>),
+    App(Op, Vec<Pattern<T>>),
 }
 
 pub type PatternId = usize;

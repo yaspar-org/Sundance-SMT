@@ -14,7 +14,7 @@ use crate::arithmetic::lp::{
     extract_linear_expression,
 };
 use crate::debug_println;
-use crate::egraphs::proofforest::ProofForestEdge;
+use crate::egraphs::EgraphTrait;
 use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use dashu::{Integer, Rational};
@@ -45,7 +45,7 @@ pub fn check_integer_constraints_satisfiable_lia(
 
     for term_id in solver_state.arithmetic_terms.clone() {
         let egraph_id = solver_state.to_egraph_id(term_id);
-        if let ProofForestEdge::Root { .. } = &solver_state.egraph.proof_forest[egraph_id as usize] {
+        if solver_state.egraph.find(egraph_id) == egraph_id {
             let (expr, additional_constraints) = extract_linear_expression(term_id, solver_state);
             let root_var = *var_map.entry(egraph_id).or_insert_with(|| {
                 ctx.allocate_var(&format!("!ext_var_{}", egraph_id), VarType::Int)

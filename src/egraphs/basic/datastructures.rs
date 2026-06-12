@@ -7,12 +7,12 @@ use std::{cmp::Ordering, fmt};
 
 /// Keeps track of disequalities used between multiple terms
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DisequalTerm {
-    pub term: u32,
-    pub level: usize,
-    pub diseq_lit: i32,
-    pub hash: u32,
-    pub original_disequality: (u32, u32),
+pub(crate) struct DisequalTerm {
+    pub(crate) term: u32,
+    pub(crate) level: usize,
+    pub(crate) diseq_lit: i32,
+    pub(crate) hash: u32,
+    pub(crate) original_disequality: (u32, u32),
 }
 
 impl fmt::Display for DisequalTerm {
@@ -28,7 +28,7 @@ impl fmt::Display for DisequalTerm {
 /// Identifies the "operator" of a canonical term form for the purposes of
 /// congruence-closure lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum CanonicalOp {
+pub(crate) enum CanonicalOp {
     App(String),
     Eq,
     Ite,
@@ -36,19 +36,19 @@ pub enum CanonicalOp {
 
 /// The canonical form of a term, produced by `Egraph::get_canonical_form`.
 #[derive(Debug, Clone)]
-pub struct CanonicalForm {
-    pub original_subterms: Vec<u32>,
-    pub op: CanonicalOp,
-    pub canonical_subterms: Vec<u32>,
+pub(crate) struct CanonicalForm {
+    pub(crate) original_subterms: Vec<u32>,
+    pub(crate) op: CanonicalOp,
+    pub(crate) canonical_subterms: Vec<u32>,
 }
 
 /// Represents a predecessor of a term
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct Predecessor {
-    pub level: usize,
-    pub hash: u32,
-    pub predecessor: u32,
-    pub inner_term: u32,
+pub(crate) struct Predecessor {
+    pub(crate) level: usize,
+    pub(crate) hash: u32,
+    pub(crate) predecessor: u32,
+    pub(crate) inner_term: u32,
 }
 
 impl Ord for Predecessor {

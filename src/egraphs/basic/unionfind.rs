@@ -15,7 +15,7 @@ pub(crate) enum ProofTrackerValue {
 }
 
 /// Forest of the different proof trackers
-pub struct ProofTracker {
+pub(crate) struct ProofTracker {
     forest: HashMap<u32, ProofTrackerValue>,
 }
 
@@ -27,7 +27,7 @@ impl ProofTracker {
     }
 
     /// unioning terms x and y
-    pub fn union(&mut self, x: u32, y: u32) -> bool {
+    pub(crate) fn union(&mut self, x: u32, y: u32) -> bool {
         debug_println!(
             5,
             2,

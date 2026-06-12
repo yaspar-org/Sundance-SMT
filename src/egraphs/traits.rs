@@ -8,7 +8,7 @@
 //! semi-persistent egraph) to be used interchangeably.
 
 use std::hash::Hash;
-use crate::egraphs::repr::PatternId;
+use crate::egraphs::repr::{Pattern, PatternId};
 
 /// A SAT literal: positive means the variable is true, negative means false.
 /// Zero means "no decision" when returned from decision methods.
@@ -85,6 +85,13 @@ pub trait EgraphTrait {
         children: &[Self::TermId],
         dynamic: bool,
     ) -> Self::TermId;
+
+    /// Register an opaque term — participates in union-find but has no
+    /// internal structure visible to congruence closure.
+    fn register_opaque(&mut self) -> Self::TermId;
+
+    /// Compile a pattern for e-matching and return its PatternId.
+    fn compile_pattern(&mut self, pattern: Pattern<Self::TermId>) -> PatternId;
 
     /// Register an equality `t1 = t2` with its corresponding SAT literal.
     /// Sets up a watch: when `t1` and `t2` become equal, `lit` is propagated.

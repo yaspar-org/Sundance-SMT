@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::cnf::CNFConversion;
+use crate::egraphs::EgraphTrait;
 use crate::solver_types::Polarity;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::proof_tracer::SMTProofTracker;
@@ -191,7 +192,6 @@ pub fn instantiate_quantifiers(
             let body = quantifier.body;
             let trigger_term_pairs: Vec<(usize, Option<u32>)> = multipattern.iter().map(|t| (*t, None)).collect();
 
-            let mut assignments = DeterministicHashMap::default();
             debug_println!(12, 0, "after8");
             debug_println!(
                 19,
@@ -201,7 +201,7 @@ pub fn instantiate_quantifiers(
                 trigger_term_pairs
             );
             debug_println!(12, 0, "after9");
-            let list_assignments = solver_state.egraph.match_patterns(&mut assignments, &trigger_term_pairs);
+            let list_assignments = solver_state.egraph.match_triggers(trigger_term_pairs);
 
             if list_assignments.is_empty() {
                 debug_println!(

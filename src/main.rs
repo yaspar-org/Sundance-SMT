@@ -102,9 +102,8 @@ fn main() -> Result<(), String> {
         debug_println!(
             12,
             0,
-            "NNF form: {} with hash {}",
+            "NNF form: {}",
             nnf_term,
-            solver_state.egraph.predecessor_hash
         );
 
         nnf_terms.push(nnf_term.clone());

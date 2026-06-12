@@ -4,9 +4,9 @@
 //! Proof forest helpers (add_parent, get_parent, get_child).
 
 use crate::debug_println;
-use crate::egraphs::proofforest::ProofForestEdge;
+use super::proofforest::ProofForestEdge;
 
-pub fn add_parent(
+pub(crate) fn add_parent(
     proof_parent: ProofForestEdge,
     parent: u32,
     new_child: u32,

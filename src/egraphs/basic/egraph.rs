@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::debug_println;
-use crate::egraphs::congruence_closure::{add_parent, get_child, get_parent};
-use crate::egraphs::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
+use super::congruence_closure::{add_parent, get_child, get_parent};
+use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
-use crate::egraphs::unionfind::ProofTracker;
+use super::unionfind::ProofTracker;
 use crate::log::is_important;
-use crate::egraphs::datastructures::{
+use super::datastructures::{
     CanonicalForm, CanonicalOp, DisequalTerm, Predecessor,
 };
-use crate::egraphs::proofforest::*;
+use super::proofforest::*;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
 use std::default::Default;
 use std::fmt;
@@ -190,31 +190,31 @@ pub struct Egraph {
     /// Next ID to assign
     next_id: u32,
     /// Internal term representation per term ID
-    pub terms: Vec<TermSlot>,
+    terms: Vec<TermSlot>,
     /// Compiled patterns for e-matching (indexed by PatternId)
-    pub compiled_patterns: Vec<Pattern>,
+    compiled_patterns: Vec<Pattern>,
     /// map from vertices (u32) -> ProofForestEdge
-    pub proof_forest: Vec<ProofForestEdge>,
+    proof_forest: Vec<ProofForestEdge>,
     /// keeps track of a stack of "edges" to backtrack on
-    pub proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u32, ProofForestEdge)>,
+    proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u32, ProofForestEdge)>,
     /// this is a map from terms (u32) -> (term in the same egraph, predecessor of term in same egraph)
-    pub predecessors: Vec<FastDeterministicHashMap<u32, Predecessor>>,
+    predecessors: Vec<FastDeterministicHashMap<u32, Predecessor>>,
     /// number to keep track of the current hash
-    pub predecessor_hash: u32,
+    predecessor_hash: u32,
     /// mapping from levels -> corresponding hash
-    pub predecessor_level: Vec<u32>,
+    predecessor_level: Vec<u32>,
     /// map from functions (String) -> terms of this function
-    pub function_maps: DeterministicHashMap<String, Vec<(u32, Vec<u32>)>>,
+    function_maps: DeterministicHashMap<String, Vec<(u32, Vec<u32>)>>,
     /// uid for true
-    pub true_term: u32,
+    true_term: u32,
     /// uid for false
-    pub false_term: u32,
+    false_term: u32,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
-    pub decision_level: usize,
+    decision_level: usize,
     /// keeps track of terms created by quantifier instantiation and their predecessors
-    pub predecessors_created_by_quantifiers: DeterministicHashMap<u32, DeterministicHashSet<u32>>,
+    predecessors_created_by_quantifiers: DeterministicHashMap<u32, DeterministicHashSet<u32>>,
     /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()])
-    pub union_to_eclass: DeterministicHashSet<(u32, String, Vec<u32>)>,
+    union_to_eclass: DeterministicHashSet<(u32, String, Vec<u32>)>,
 }
 
 impl Egraph {
@@ -278,7 +278,7 @@ impl Egraph {
     /// Returns true if the term was already registered.
     /// Register a single term (non-recursive). Children must already be registered.
     /// Takes raw IDs — no dependency on Term representation.
-    pub fn register_term_internal(&mut self, id: u32, op: Op, children: &[u32], dynamic: bool) -> bool {
+    fn register_term_internal(&mut self, id: u32, op: Op, children: &[u32], dynamic: bool) -> bool {
         // Resize storage if needed
         while self.terms.len() <= id as usize {
             self.terms.resize(self.terms.len() * 2, TermSlot::Empty);
@@ -376,7 +376,7 @@ impl Egraph {
     /// Extract the Op from a Term and its function name string.
     /// Ensure storage is allocated for the given term ID without fully registering it.
     /// Used for quantifier body subterms that are opaque to the egraph.
-    pub fn ensure_capacity(&mut self, id: u32) {
+    fn ensure_capacity(&mut self, id: u32) {
         while self.terms.len() <= id as usize {
             self.terms.resize(self.terms.len() * 2, TermSlot::Empty);
             self.proof_forest.resize(
@@ -396,7 +396,7 @@ impl Egraph {
     }
 
     /// Store a compiled pattern and return its PatternId.
-    pub fn compile_pattern(&mut self, pattern: Pattern) -> PatternId {
+    fn compile_pattern(&mut self, pattern: Pattern) -> PatternId {
         let id = self.compiled_patterns.len();
         self.compiled_patterns.push(pattern);
         id
@@ -405,7 +405,7 @@ impl Egraph {
     /// Register an opaque term — allocates a full slot with a proof_forest Root
     /// but no op/children/function_maps/predecessors. Used for quantifier terms
     /// that participate in union-find (merged with true/false) but not congruence.
-    pub fn register_opaque_term(&mut self) -> u32 {
+    fn register_opaque_term(&mut self) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         self.ensure_capacity(id);
@@ -421,7 +421,7 @@ impl Egraph {
 
     /// If any predecessors of the first subterm are congruent to term_num
     /// (same function, all subterms equal), union them.
-    pub fn find_and_union_to_eclass(&mut self, term_num: u32, func: String, subterms: Vec<u32>) {
+    fn find_and_union_to_eclass(&mut self, term_num: u32, func: String, subterms: Vec<u32>) {
         let subterm_num = subterms[0];
         let subterm_root = self.find(subterm_num);
 
@@ -471,7 +471,7 @@ impl Egraph {
         }
     }
 
-    pub fn find(&self, x: u32) -> u32 {
+    fn find(&self, x: u32) -> u32 {
         let p: &ProofForestEdge = &self.proof_forest[x as usize];
         match p {
             ProofForestEdge::Root { .. } => x,
@@ -483,7 +483,7 @@ impl Egraph {
     // FIND operation for union-find
     // lazy find, keep finding the representative until you get to something that is a representative of itself
     // design decision: I do not implement path compression. I could, but would make recovering proof much harder
-    pub fn find_with_level(
+    fn find_with_level(
         &self,
         x: u32,
         highest_level: usize,
@@ -517,7 +517,7 @@ impl Egraph {
     // checks if x and y are equal in union find datastructure
     // if they are equal, returns the largest level in both their paths to a
     // common ancestor and the corresponding hash
-    pub fn check_equal(&self, x: u32, y: u32) -> (bool, usize, u32) {
+    fn check_equal(&self, x: u32, y: u32) -> (bool, usize, u32) {
         let mut x_parent = x;
         let (mut highest_level_x, mut highest_hash_x) = (0, 0);
         let mut x_stack = vec![x];
@@ -656,7 +656,7 @@ impl Egraph {
     }
 
     /// Adds a disequality between t1 and t2 to the egraph
-    pub fn add_disequality(&mut self, t1: u32, t2: u32, diseq_lit: i32, level: usize, hash: u32) {
+    fn add_disequality(&mut self, t1: u32, t2: u32, diseq_lit: i32, level: usize, hash: u32) {
         let t1_root = self.find(t1);
         let t2_root = self.find(t2);
         let disequality1 = DisequalTerm {
@@ -699,7 +699,7 @@ impl Egraph {
     }
 
     /// Checks if term t is equal to itself
-    pub fn check_self_disequality(&self, t: u32) -> Option<DisequalTerm> {
+    fn check_self_disequality(&self, t: u32) -> Option<DisequalTerm> {
         assert!(t == self.find(t));
         debug_println!(
             19,
@@ -765,7 +765,7 @@ impl Egraph {
     /// Get the canonical form for some term
     /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  
     /// TODO: I don't support canonical forms for non-app, non-eq terms, non-ite terms, but will have to do that eventually
-    pub fn get_canonical_form(&self, term_num: u32, _level: usize) -> Option<CanonicalForm> {
+    fn get_canonical_form(&self, term_num: u32, _level: usize) -> Option<CanonicalForm> {
         let entry = match &self.terms[term_num as usize] {
             TermSlot::Term(e) => e,
             _ => return None,
@@ -792,7 +792,7 @@ impl Egraph {
     ///
     /// TODO: right now this is preferring the smallest level, but this might not always be
     /// correct depending on the invariants
-    pub fn add_predecessor(&mut self, term: u32, new_pred_key: u32, new_pred: Predecessor) {
+    fn add_predecessor(&mut self, term: u32, new_pred_key: u32, new_pred: Predecessor) {
         debug_println!(
             5,
             0,
@@ -859,7 +859,7 @@ impl Egraph {
 
     /// Explain why u ≡ v by walking the proof forest to their least common ancestor.
     /// Returns None if u and v are not in the same equivalence class.
-    pub(crate) fn leastcommonancestor(
+    fn leastcommonancestor(
         &self,
         u: u32,
         v: u32,
@@ -1019,11 +1019,23 @@ impl Egraph {
         Some(final_proof)
     }
 
-    /// Assert t1 = t2 at the current decision level.
+    /// Ensure internal bookkeeping is ready for operations at the given level.
+    fn advance_to_level(&mut self, level: usize) {
+        while level >= self.predecessor_level.len() {
+            self.predecessor_level.resize(self.predecessor_level.len() * 2, 0);
+        }
+        if level > self.decision_level {
+            self.decision_level = level;
+            self.predecessor_level[level] = self.predecessor_hash;
+        }
+    }
+
+    /// Assert t1 = t2 at the given decision level.
     /// Performs congruence closure. Returns a conflict if a disequality is violated.
-    pub fn assert_equal(&mut self, t1: u32, t2: u32, level: usize) -> EgraphResult<u32> {
+    fn assert_equal(&mut self, t1: u32, t2: u32, level: usize) -> EgraphResult<u32> {
+        self.advance_to_level(level);
         let fixed = level == 0;
-        let from_quantifier = level > 0;
+        let from_quantifier = false;
         let proof_parent = ProofForestEdge::Equality {
             size: 0,
             term: Some((t1, t2)),
@@ -1039,7 +1051,8 @@ impl Egraph {
 
     /// Assert t1 ≠ t2 at the current decision level.
     /// Returns a conflict if t1 and t2 are already in the same equivalence class.
-    pub fn assert_disequal(&mut self, t1: u32, t2: u32, diseq_lit: i32, level: usize) -> EgraphResult<u32> {
+    fn assert_disequal(&mut self, t1: u32, t2: u32, diseq_lit: i32, level: usize) -> EgraphResult<u32> {
+        self.advance_to_level(level);
         let mut tracker = ProofTracker::new();
         if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
             return EgraphResult::with_conflict(Conflict {
@@ -1054,7 +1067,7 @@ impl Egraph {
     }
 
     /// Assert all terms are pairwise distinct at the current decision level.
-    pub fn assert_distinct(&mut self, terms: &[u32], diseq_lit: i32, level: usize) -> EgraphResult<u32> {
+    fn assert_distinct(&mut self, terms: &[u32], diseq_lit: i32, level: usize) -> EgraphResult<u32> {
         for i in 0..terms.len() {
             for j in i + 1..terms.len() {
                 let result = self.assert_disequal(terms[i], terms[j], diseq_lit, level);
@@ -1067,7 +1080,7 @@ impl Egraph {
     }
 
     /// Undo all egraph operations at levels strictly greater than `level`.
-    pub fn backtrack_to(&mut self, level: usize) {
+    fn backtrack_to(&mut self, level: usize) {
         self.predecessor_hash += 1;
 
         for i in level + 1..self.decision_level + 1 {
@@ -1116,7 +1129,7 @@ impl Egraph {
     }
 
     /// Undo a single union operation during backtracking.
-    pub(crate) fn proof_forest_backtrack(
+    fn proof_forest_backtrack(
         &mut self,
         equality: ProofForestEdge,
         y: u32,
@@ -1215,7 +1228,7 @@ impl Egraph {
     /// but this could double/triple the max tree size at each iteration
     ///
     /// design decision: don't have eager updates for equivalence class and inverting tree
-    pub(crate) fn cc_union(
+    fn cc_union(
         &mut self,
         x: u32,
         y: u32,
@@ -1428,7 +1441,7 @@ impl Egraph {
     /// once you merge two predecessor states, then you don't need to look at it until you backtrack
     ///
     /// TODO: need to implement a backtracking where I change the predecessor hash
-    pub(crate) fn union_predecessors(
+    fn union_predecessors(
         &mut self,
         u: u32,
         v: u32,
@@ -1704,7 +1717,7 @@ impl Egraph {
 
 
     /// Make vertex the root of its proof-forest tree.
-    pub(crate) fn make_root(&mut self, vertex: u32, proof_parent: ProofForestEdge) {
+    fn make_root(&mut self, vertex: u32, proof_parent: ProofForestEdge) {
         debug_println!(
             16,
             0,
@@ -1778,7 +1791,7 @@ impl Egraph {
     /// satisfying substitutions. Returns variable name → matched term ID.
     /// Match a list of (pattern, ground_hint) pairs against the egraph.
     /// Returns all valid variable assignments.
-    pub fn match_patterns(
+    fn match_patterns(
         &mut self,
         assignment: &mut DeterministicHashMap<String, u32>,
         pattern_term_pairs: &[(PatternId, Option<u32>)],
@@ -1970,7 +1983,7 @@ impl Egraph {
 // CNFConversion<Egraph> removed — use CNFConversion<SolverState> instead (in solver_state.rs)
 
 /// Checks if the hash is still valid at the given level
-pub fn valid_hash(hash: u32, level: usize, predecessor_level: &[u32]) -> bool {
+fn valid_hash(hash: u32, level: usize, predecessor_level: &[u32]) -> bool {
     debug_println!(
         5,
         0,
@@ -2024,6 +2037,16 @@ impl EgraphTrait for Egraph {
         let id = self.next_id;
         self.next_id += 1;
         self.register_term_internal(id, op, children, dynamic);
+        id
+    }
+
+    fn register_opaque(&mut self) -> Self::TermId {
+        self.register_opaque_term()
+    }
+
+    fn compile_pattern(&mut self, pattern: Pattern) -> PatternId {
+        let id = self.compiled_patterns.len();
+        self.compiled_patterns.push(pattern);
         id
     }
 
