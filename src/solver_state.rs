@@ -561,7 +561,6 @@ pub fn process_assignment(
     lit: i32,
     solver_state: &mut SolverState,
     level: usize,
-    fixed: bool,
 ) -> Option<Vec<Vec<i32>>> {
     use crate::egraphs::EgraphTrait;
     let lazy_dt = solver_state.lazy_dt;
@@ -571,7 +570,7 @@ pub fn process_assignment(
 
     let term = solver_state.get_term_from_lit(lit.abs());
     debug_println!(24, 1, "Term: {}", term);
-    let assertion = find_if_eq_diseq(&term, sign, solver_state, level, fixed);
+    let assertion = find_if_eq_diseq(&term, sign, solver_state, level);
 
     let true_egraph_id = solver_state.to_egraph_id(solver_state.true_uid);
     let false_egraph_id = solver_state.to_egraph_id(solver_state.false_uid);
@@ -844,9 +843,8 @@ pub fn find_if_eq_diseq<'a>(
     sign: bool,
     solver_state: &'a SolverState,
     level: usize,
-    fixed: bool,
 ) -> Assertion {
-    let hash = if !fixed { solver_state.current_hash } else { 0 };
+    let hash = solver_state.current_hash;
     match term.repr() {
         App(f, t, _)
             if (matches!(f.get_kind(), Some(IdentifierKind::Is(_)))

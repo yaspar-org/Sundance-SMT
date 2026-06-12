@@ -440,14 +440,7 @@ impl Egraph {
                         hash: self.predecessor_hash,
                         children: DeterministicHashSet::new(),
                     };
-                    self.cc_union(
-                        term_num,
-                        *pred_key,
-                        equality,
-                        self.decision_level,
-                        false,
-                        true,
-                    );
+                    self.cc_union(term_num, *pred_key, equality, self.decision_level);
                 }
             }
         }
@@ -1014,8 +1007,6 @@ impl Egraph {
     /// Performs congruence closure. Returns a conflict if a disequality is violated.
     fn assert_equal(&mut self, t1: u32, t2: u32, level: usize) -> EgraphResult<u32> {
         self.advance_to_level(level);
-        let fixed = level == 0;
-        let from_quantifier = false;
         let proof_parent = ProofForestEdge::Equality {
             size: 0,
             term: Some((t1, t2)),
@@ -1026,7 +1017,7 @@ impl Egraph {
             hash: self.predecessor_hash,
             children: DeterministicHashSet::new(),
         };
-        self.cc_union(t1, t2, proof_parent, level, fixed, from_quantifier)
+        self.cc_union(t1, t2, proof_parent, level)
     }
 
     /// Assert t1 ≠ t2 at the current decision level.
@@ -1225,8 +1216,6 @@ impl Egraph {
         y: u32,
         proof_parent: ProofForestEdge,
         level: usize,
-        fixed: bool,
-        from_quantifier: bool,
     ) -> EgraphResult<u32> {
         let x_root = self.find(x);
         let y_root = self.find(y);
@@ -1276,8 +1265,7 @@ impl Egraph {
 
         let y_root_parent = &self.proof_forest[y_root as usize];
 
-        if !fixed {
-            // not adding fixed levels to backtracking based on what Armin said
+        if level > 0 {
             debug_println!(
                 16,
                 0,
@@ -1421,7 +1409,7 @@ impl Egraph {
             }
         }
 
-        self.union_predecessors(x_root, y_root, level, fixed, from_quantifier)
+        self.union_predecessors(x_root, y_root, level)
     }
 
     /// Given u and v (roots of u_original and v_original), check the predecessors of
@@ -1431,15 +1419,7 @@ impl Egraph {
     /// you only have to do it for predecessor terms that are roots of a congruent class
     /// once you merge two predecessor states, then you don't need to look at it until you backtrack
     ///
-    /// TODO: need to implement a backtracking where I change the predecessor hash
-    fn union_predecessors(
-        &mut self,
-        u: u32,
-        v: u32,
-        level: usize,
-        fixed: bool,
-        from_quantifier: bool,
-    ) -> EgraphResult<u32> {
+    fn union_predecessors(&mut self, u: u32, v: u32, level: usize) -> EgraphResult<u32> {
         debug_println!(
             11,
             1,
@@ -1683,14 +1663,8 @@ impl Egraph {
                             children: DeterministicHashSet::new(),
                         }; // TODO: I can't have a child of -1 anymore, but I think doing it like this is correct
 
-                        let sub_result = self.cc_union(
-                            *canonical_form_u,
-                            pred_predecessor,
-                            proof_parent,
-                            level,
-                            fixed,
-                            from_quantifier,
-                        );
+                        let sub_result =
+                            self.cc_union(*canonical_form_u, pred_predecessor, proof_parent, level);
                         if sub_result.conflict.is_some() {
                             return sub_result;
                         }

@@ -120,7 +120,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.add_lit_to_proof_tracker(*lit); // adding the literal to the proof_tracker
 
             let negated_model_or_datatype_constraints_opt =
-                process_assignment(*lit, self.solver_state, self.decision_level, false);
+                process_assignment(*lit, self.solver_state, self.decision_level);
 
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
