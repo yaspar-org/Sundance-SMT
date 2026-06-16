@@ -19,10 +19,7 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
     match term.repr() {
         Forall(var_bindings, body) => {
             if polarity {
-                panic!(
-                    "We can only skolemize an existenial or negated forall or existential term, not {}",
-                    term
-                );
+                panic_not_quant(term);
             } else {
                 // Create a fresh skolem variable for each existentially quantified variable
                 debug_println!(6, 0, "We are skolemizing the term {}", term);
@@ -47,7 +44,7 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                     skolem_substitutions.insert(var_binding.0.clone(), skolem_term);
                 }
 
-                let denannotated_body = if let Annotated(inner_term, _) = body.repr() {
+                let deannotated_body = if let Annotated(inner_term, _) = body.repr() {
                     inner_term
                 } else {
                     // if no annotation, assuming we have the body
@@ -56,7 +53,7 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                 // Substitute the skolem variables into the body
                 // todo: substitution needs a builder
                 let substituted_term =
-                    denannotated_body.subst(&Substitution::new_str(skolem_substitutions), context);
+                    deannotated_body.subst(&Substitution::new_str(skolem_substitutions), context);
 
                 let negated_substituted_term = context.not(substituted_term);
                 (negated_substituted_term, skolem_variables)
@@ -69,10 +66,7 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
 
             // Create a fresh skolem variable for each existentially quantified variable
             if !polarity {
-                panic!(
-                    "We can only skolemize a existenial or negated forall or existential term, not {}",
-                    term
-                );
+                panic_not_quant(term);
             } else {
                 // Create a fresh skolem variable for each existentially quantified variable
                 debug_println!(6, 0, "We are skolemizing the term {}", term);
@@ -97,7 +91,7 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                     skolem_substitutions.insert(var_binding.0.clone(), skolem_term);
                 }
 
-                let denannotated_body = if let Annotated(inner_term, _) = body.repr() {
+                let deannotated_body = if let Annotated(inner_term, _) = body.repr() {
                     inner_term
                 } else {
                     // if no annotation, assuming we have the body
@@ -106,14 +100,19 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                 // Substitute the skolem variables into the body
                 // todo: substitution needs a builder
                 let substituted_term =
-                    denannotated_body.subst(&Substitution::new_str(skolem_substitutions), context);
+                    deannotated_body.subst(&Substitution::new_str(skolem_substitutions), context);
 
                 (substituted_term, skolem_variables)
             }
         }
-        _ => panic!(
-            "We can only skolemize an existenial or negated forall or existential term, not {}",
-            term
-        ),
+        _ => panic_not_quant(term),
     }
+}
+
+/// Calls `panic!()` with a message that `term` is not a quantifier.
+fn panic_not_quant(term: &Term) -> ! {
+    panic!(
+        "We can only skolemize an existential or a negated forall, not {}",
+        term
+    );
 }
