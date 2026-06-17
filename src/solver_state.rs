@@ -298,10 +298,14 @@ impl SolverState {
 
     /// Register true and false in both the egraph and the solver's ID mapping.
     pub fn register_bool_constants(&mut self, true_term: &Term, false_term: &Term) {
-        use crate::egraphs::traits::EgraphTrait;
         use crate::egraphs::repr::Op;
-        let true_egraph_id = self.egraph.register_term(Op::Constant("true".to_string()), &[], false);
-        let false_egraph_id = self.egraph.register_term(Op::Constant("false".to_string()), &[], false);
+        use crate::egraphs::traits::EgraphTrait;
+        let true_egraph_id =
+            self.egraph
+                .register_term(Op::Constant("true".to_string()), &[], false);
+        let false_egraph_id =
+            self.egraph
+                .register_term(Op::Constant("false".to_string()), &[], false);
 
         let true_uid = true_term.uid();
         let false_uid = false_term.uid();
