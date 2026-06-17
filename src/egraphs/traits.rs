@@ -16,6 +16,7 @@ pub type Lit = i32;
 
 /// Conflict explanation: the equalities that were asserted (and their
 /// congruence consequences) that together violate a disequality.
+/// T is a generic parameter for the Term type that we use
 #[derive(Debug, Clone)]
 pub struct Conflict<T> {
     /// Equalities forming the proof path that made the two disequal terms equal.
