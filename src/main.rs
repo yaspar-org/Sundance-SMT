@@ -76,13 +76,6 @@ fn main() -> Result<(), String> {
 
     solver_state.register_bool_constants(&true_term, &false_term);
 
-    // checking if we have any inductive datatypes -> if we do panic!
-    // gets the info about our datatypes
-    if let Some(dt) = solver_state.check_for_recursive_datatypes() {
-        return Err(format!(
-            "Sundance does not support recursive datatype {dt}!"
-        ));
-    }
 
     let global_names = solver_state.context.all_defined_symbols();
     let mut nnf_terms = vec![];

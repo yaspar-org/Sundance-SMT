@@ -116,7 +116,16 @@ fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
             vec![term.clone()],
             Some(bool_sort.clone()),
         );
-        let child_uids: Vec<u64> = children.iter().map(|c| c.uid()).collect();
+        let child_uids: Vec<u64> = if solver_state.datatype_info.has_recursive_datatype {
+            solver_state
+                .datatype_info
+                .recursive_args
+                .get(f.id_str())
+                .map(|positions| positions.iter().map(|&pos| children[pos].uid()).collect())
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
         // todo: we are not handling is-X here
         solver_state.term_constructors.insert(
             num,
@@ -257,6 +266,22 @@ pub fn learn_ctor_selector_clauses(
             Some(sel.2.clone()),
         );
         selector_apps.push(sel_app);
+    }
+
+    // Store recursive children for the occurs check
+    if solver_state.datatype_info.has_recursive_datatype {
+        if let Some(rec_positions) = solver_state.datatype_info.recursive_args.get(ctor_name)
+            && !rec_positions.is_empty()
+        {
+            if let Some(ConstructorType::Constructor { children, .. }) =
+                solver_state.term_constructors.get_mut(&term.uid())
+            {
+                *children = rec_positions
+                    .iter()
+                    .map(|&pos| selector_apps[pos].uid())
+                    .collect();
+            }
+        }
     }
 
     // have the simple_sorted id for the global case and the simple id for the app case
