@@ -350,6 +350,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
+        // Occurs check for recursive datatypes (well-foundedness)
+        if self.solver_state.datatype_info.has_recursive_datatype {
+            if let Some(conflict_clause) =
+                crate::datatypes::occurs_check::datatype_occurs_check(self.solver_state)
+            {
+                self.disequalities.borrow_mut().push(conflict_clause);
+                return false;
+            }
+        }
+
         debug_println!(11, 0, "Starting quantifier instantiations");
         let quantifier_instantiations = instantiate_quantifiers(
             self.solver_state,

@@ -650,6 +650,7 @@ pub fn process_assignment(
                     tester_term,
                     hash,
                     level,
+                    ..
                 } if solver_state.is_valid_hash(*hash, *level) => {
                     debug_println!(
                         11,
@@ -678,6 +679,7 @@ pub fn process_assignment(
                         Constructor {
                             name: ctor_name.clone(),
                             tester_term: term.clone(),
+                            children: vec![],
                             level,
                             hash: solver_state.current_hash,
                         },
