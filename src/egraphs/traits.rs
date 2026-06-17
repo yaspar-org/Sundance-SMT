@@ -32,6 +32,7 @@ pub struct EgraphResult<T> {
     /// A conflict, if the operation caused a disequality violation.
     pub conflict: Option<Conflict<T>>,
     /// SAT literals to propagate (from watched equalities that became true).
+    /// This currently unused, but is useful for future optimizations
     pub propagations: Vec<Lit>,
 }
 
@@ -58,14 +59,6 @@ pub trait EgraphTrait {
 
     /// Term identifier. Opaque to the egraph, provided by the solver.
     type TermId: Copy + Eq + Hash;
-
-    // --- Initialization ---
-
-    /// Register the boolean true constant and return its ID.
-    fn register_true(&mut self) -> Self::TermId;
-
-    /// Register the boolean false constant and return its ID.
-    fn register_false(&mut self) -> Self::TermId;
 
     // --- Registration ---
 

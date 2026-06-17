@@ -270,16 +270,12 @@ impl Egraph {
         }
     }
 
-    /// Register a single term in the egraph (non-recursive).
+    /// Register a single term in the egraph
     /// Sets up terms_list, proof_forest, predecessors, function_maps for this term.
     /// Register a single term (non-recursive). Children must already be registered.
-    /// Sets up terms_list, proof_forest, function_maps, and adds this term as a
-    /// predecessor of each of its children.
     /// If `dynamic` is true, calls find_and_union_to_eclass to merge with any
     /// existing congruent term (needed for quantifier instantiation and datatype axioms).
     /// Returns true if the term was already registered.
-    /// Register a single term (non-recursive). Children must already be registered.
-    /// Takes raw IDs — no dependency on Term representation.
     fn register_term_internal(&mut self, id: u32, op: Op, children: &[u32], dynamic: bool) -> bool {
         self.ensure_capacity(id);
 
@@ -685,9 +681,7 @@ impl Egraph {
         let t_disequalities = &self.proof_forest[t as usize].disequalities();
         debug_println!(19, 2, "We have t_disequalities {:?}", t_disequalities);
 
-        // TODO: should not need to sort disequalities here if we are using a deterministic hashmap
         let sorted_disequalities: Vec<_> = t_disequalities.iter().collect();
-        // sorted_disequalities.sort_by_key(|(key, _)| **key);
 
         for (key, disequality) in sorted_disequalities {
             if !valid_hash(disequality.hash, disequality.level, &self.predecessor_level) {
@@ -727,7 +721,7 @@ impl Egraph {
                     self.display_term(disequality.original_disequality.0),
                     self.display_term(disequality.original_disequality.1)
                 );
-                // assert! ((smaller_term == self.find(disequality.original_disequality.0) && larger_term == self.find(disequality.original_disequality.1)) || (smaller_term == self.find(disequality.original_disequality.1) && larger_term == self.find(disequality.original_disequality.0)));
+                // we expect the two terms in the disequality to be equal to each other
                 return Some(disequality.clone());
             }
         }
@@ -1959,14 +1953,6 @@ fn valid_hash(hash: u32, level: usize, predecessor_level: &[u32]) -> bool {
 impl EgraphTrait for Egraph {
     type Op = Op;
     type TermId = u32;
-
-    fn register_true(&mut self) -> Self::TermId {
-        self.register_opaque_term()
-    }
-
-    fn register_false(&mut self) -> Self::TermId {
-        self.register_opaque_term()
-    }
 
     fn register_term(
         &mut self,

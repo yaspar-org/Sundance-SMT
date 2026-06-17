@@ -349,55 +349,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         }
                     }
                 }
-
-                // todo: have a helper function for this, because it gets included twice
-                // for literal in literals {
-                //     // if self.solver_state.egraph.nelson_oppen_literals.contains(&literal) {
-                //     //     continue;
-                //     // }
-                //     // self.solver_state.egraph.nelson_oppen_literals.insert(literal);
-
-                //     if let Some(term) = nelson_oppen_clause_ineq(literal, &mut self.solver_state.egraph) {
-                //         let term_nnf = term.sundance_nnf(&mut *self.solver_state.egraph.cnfenv.context);
-                //         // println!("we have the term {:?}", term);
-                //         self.solver_state.egraph.insert_predecessor(&term_nnf, None, None, false, None);
-                //         let term_cnf = term.cnf_tseitin(&mut *self.solver_state.egraph.cnfenv.context);
-                //         // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
-                //         for clause in term_cnf {
-                //             for lit in &clause.0 {
-                //                 self.add_observed_variable(*lit);
-                //                 self.add_lit_to_proof_tracker(*lit);
-                //             }
-                //             self.disequalities.borrow_mut().push(clause.0.clone());
-                //         }
-                //     }
-                // }
             }
             ArithResult::None => {}
         }
-
-        // do the Nelson-Oppen disequality check
-        // for literal in model {
-        //     if self.solver_state.egraph.nelson_oppen_literals.contains(literal) {
-        //         continue;
-        //     }
-        //     self.solver_state.egraph.nelson_oppen_literals.insert(*literal);
-
-        //     if let Some(term) = nelson_oppen_clause(*literal, &mut self.solver_state.egraph) {
-        //         let term_nnf = term.sundance_nnf(&mut self.solver_state.egraph.cnfenv);
-        //         // println!("we have the term {:?}", term);
-        //         self.solver_state.egraph.insert_predecessor(&term_nnf, None, None, false, None);
-        //         let term_cnf = term.sundance_cnf_tseitin(&mut self.solver_state.egraph.cnfenv);
-        //         // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
-        //         for clause in term_cnf {
-        //             for lit in &clause.0 {
-        //                 self.add_observed_variable(*lit);
-        //                 self.add_lit_to_proof_tracker(*lit);
-        //             }
-        //             self.disequalities.borrow_mut().push(clause.0.clone());
-        //         }
-        //     }
-        // }
 
         if !self.disequalities.borrow().is_empty() {
             return false;
