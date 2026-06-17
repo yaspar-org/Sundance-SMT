@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use yaspar_ir::ast::{Context, DatatypeDec, Sort, SortDef, Str};
 
-use crate::utils::DeterministicHashMap;
+use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
 #[derive(Debug, Clone)]
 pub struct DatatypeInfo {
@@ -12,6 +12,10 @@ pub struct DatatypeInfo {
     pub datatypes: DeterministicHashMap<Str, DatatypeDec>,
     /// Map constructor names to their datatypes
     pub constructors: DeterministicHashMap<Str, Str>,
+    /// For each constructor, the indices of arguments whose sort is a datatype
+    pub recursive_args: DeterministicHashMap<Str, Vec<usize>>,
+    /// Constructors with no recursive arguments (base cases)
+    pub base_constructors: DeterministicHashSet<Str>,
 }
 
 impl DatatypeInfo {
@@ -19,6 +23,8 @@ impl DatatypeInfo {
         Self {
             datatypes: Default::default(),
             constructors: Default::default(),
+            recursive_args: Default::default(),
+            base_constructors: Default::default(),
         }
     }
 
@@ -47,9 +53,30 @@ impl DatatypeInfo {
             }
         }
 
+        // Precompute which constructor arguments are of datatype sort
+        let mut recursive_args: DeterministicHashMap<_, _> = Default::default();
+        let mut base_constructors: DeterministicHashSet<_> = Default::default();
+        for dt in datatypes.values() {
+            for ctor in &dt.constructors {
+                let rec_positions: Vec<usize> = ctor
+                    .args
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, arg)| datatypes.contains_key(arg.2.sort_name()))
+                    .map(|(i, _)| i)
+                    .collect();
+                if rec_positions.is_empty() {
+                    base_constructors.insert(ctor.ctor.clone());
+                }
+                recursive_args.insert(ctor.ctor.clone(), rec_positions);
+            }
+        }
+
         Self {
             datatypes,
             constructors,
+            recursive_args,
+            base_constructors,
         }
     }
 

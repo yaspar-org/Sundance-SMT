@@ -41,6 +41,8 @@ pub enum ConstructorType {
     Constructor {
         name: Str,
         tester_term: Term,
+        /// UIDs of the constructor's child terms (selector applications or direct subterms)
+        children: Vec<u64>,
         level: usize,
         hash: u32,
     },
