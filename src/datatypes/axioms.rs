@@ -97,7 +97,7 @@ pub fn find_datatype_axioms(
 fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
     let num = term.uid();
     // todo: missing Global case?
-    if let App(f, _, _) = term.repr()
+    if let App(f, children, _) = term.repr()
         && solver_state
             .datatype_info
             .constructors
@@ -116,12 +116,14 @@ fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
             vec![term.clone()],
             Some(bool_sort.clone()),
         );
+        let child_uids: Vec<u64> = children.iter().map(|c| c.uid()).collect();
         // todo: we are not handling is-X here
         solver_state.term_constructors.insert(
             num,
             ConstructorType::Constructor {
                 name: f.id_str().clone(),
                 tester_term,
+                children: child_uids,
                 hash: 0,
                 level: 0,
             },
