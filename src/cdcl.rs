@@ -6,7 +6,7 @@ use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::CustomExternalPropagator;
 use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
-use crate::proof::proof_tracer::SMTProofTracker;
+use crate::proof::{SMTProofTracer,Theory};
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, Status, Terminator};
@@ -45,10 +45,10 @@ pub fn cdcl_decision_procedure(
 
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
     // todo: for right now always have hid_quantifiers to be true, need to change this
-    let proof_tracker = Rc::new(RefCell::new(SMTProofTracker::new(sorts, symbol_table)));
+    let proof_tracer = Rc::new(RefCell::new(SMTProofTracer::new(sorts, symbol_table)));
 
     // Connect the proof tracer (must be done in CONFIGURING state)
-    solver.connect_proof_tracer1(&mut *proof_tracker.borrow_mut(), true); // true for antecedents
+    solver.connect_proof_tracer1(&mut *proof_tracer.borrow_mut(), true); // true for antecedents
 
     let mut terminator = if timeout > 0 {
         Some(DeadlineTerminator {
@@ -66,7 +66,7 @@ pub fn cdcl_decision_procedure(
         egraph,
         disequalities: RefCell::new(vec![]),
         fixed_literals: DeterministicHashSet::default(),
-        proof_tracker: Rc::clone(&proof_tracker), // Clone the Rc reference
+        proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference
         assignments: vec![0, 0],
         solver: &mut solver as *mut CaDiCal,
         arithmetic,
@@ -74,7 +74,7 @@ pub fn cdcl_decision_procedure(
     };
 
     solver.connect_external_propagator(&mut propagator);
-    // note: not using a fixed listenere anymore
+    // note: not using a fixed listener anymore
     // solver.connect_fixed_listener(&mut propagator);
 
     debug_println!(2, 0, "CDCL: Starting CDCL solver");
@@ -83,24 +83,21 @@ pub fn cdcl_decision_procedure(
     // Add all clauses to the solver
     for (i, clause) in clauses.iter().enumerate() {
         debug_println!(11, 2, "Adding clause #{}: {:?}", i + 1, clause);
-        solver.clause6(clause); // there are function clause1 ... clause5 for adding in smaller clauses, might be more efficient
+        add_clause_to_solver_and_to_proof(clause, &mut solver, proof_tracer.clone(), None);
         for lit in clause {
-            // kind've annoying that I have to do this, but I don't thnk there is a better way
+            // kind've annoying that I have to do this, but I don't think there is a better way
             solver.add_observed_var(i32::abs(*lit));
             debug_println!(0, 2, "Added observed variable: {}", i32::abs(*lit));
         }
     }
 
-    // telling the proof_tracker that I am done with the original clauses
-    proof_tracker.borrow_mut().finished_original_clauses = true;
-
     // adding this into disequalities instead so that it appears as a theory lemma
     for clause in &boolean_dt_constraints {
-        solver.clause6(clause); // there are function clause1 ... clause5 for adding in smaller clauses, might be more efficient
+        add_clause_to_solver_and_to_proof(clause, &mut solver, proof_tracer.clone(), Some(Theory::Datatypes));
         for lit in clause {
-            // kind've annoying that I have to do this, but I don't thnk there is a better way
+            // kind've annoying that I have to do this, but I don't think there is a better way
             solver.add_observed_var(i32::abs(*lit));
-            propagator.add_lit_to_proof_tracker(*lit); // todo: calling this in too many places, need to cut down
+            propagator.add_lit_to_proof_tracer(*lit); // todo: calling this in too many places, need to cut down
             debug_println!(0, 2, "Added observed variable: {}", i32::abs(*lit));
         }
     }
@@ -113,8 +110,7 @@ pub fn cdcl_decision_procedure(
     solver.disconnect_proof_tracer1();
 
     // Generate proof after all borrows are released
-    let edrat_proof = proof_tracker.borrow_mut().generate_edrat();
-    // let quantifier_smt2_proof = proof_tracker.borrow_mut().generate_quantifier_smt2();
+    let edrat_proof = proof_tracer.borrow_mut().generate_edrat();
 
     // Write proof to file if requested
     if let Some(p) = proof_file
@@ -133,6 +129,28 @@ pub fn cdcl_decision_procedure(
         }
     }
     (result, propagator.stats)
+}
+
+/// Adds the clause to the eDRAT proof and gives it to the CaDiCaL solver.
+/// Notably, the clause is added to the proof *before* it is given to CaDiCaL.
+/// If `theory` is `None`, the clause is treated as an original CNF clause.
+/// 
+/// During the development of eDRAT proof production in summer 2026,
+/// we found that calling `.clause6()` causes CaDiCaL to immediately process
+/// the clause. In some cases, CaDiCaL immediately deletes the clause
+/// (such as when the clause is a tautology or when it is subsumed by some other
+/// clause already in the solver), and this deletion leads to CaDiCaL invoking
+/// its callback in `proof_tracer.rs`. As a result, the eDRAT proof would try
+/// to delete a clause before it is introduced. This function adds the clause
+/// to the proof before it is given to CaDiCaL to avoid this scenario.
+fn add_clause_to_solver_and_to_proof(clause: &Vec<i32>, solver: &mut CaDiCal, proof_tracer: Rc<RefCell<SMTProofTracer>>, theory: Option<Theory>) {
+    if let Some(theory) = theory {
+        proof_tracer.borrow_mut().add_theory_clause(clause, theory);
+    } else {
+        proof_tracer.borrow_mut().add_original_clause(clause);
+    }
+
+    solver.clause6(clause); // TODO `clause1()`, `clause2()`, etc. might be more efficient
 }
 
 fn solve(solver: &mut CaDiCal) -> Status {

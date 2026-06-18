@@ -58,6 +58,24 @@ impl CNFEnv<'_> {
         self.cache.next_var += 1;
         v
     }
+
+    /// If the term has not yet received a literal in the `CNFCache`,
+    /// allocates a fresh variable for it and stores it in the cache.
+    /// The fresh variable is always positive, even if the term itself has a leading `Not`.
+    /// 
+    /// Note: Only for use by the eDRAT proof system.
+    /// Consider simplifying your terms with `nnf()` or `cnf_tseitin()` instead.
+    pub fn new_var_for_term(&mut self, term: &Term) -> i32 {
+        let uid = term.uid();
+        if let Some(&lit) = self.cache.var_map.get(&uid) {
+            lit
+        } else {
+            let v = self.new_var();
+            self.cache.var_map.insert(uid, v);
+            self.cache.var_map_reverse.insert(v, uid);
+            v
+        }       
+    }
 }
 
 /// Helper trait for internal CNF conversion implementations
@@ -243,13 +261,11 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
         let v = match self.repr() {
             ATerm::Constant(AConstant::Bool(b), _) => {
                 let v = env.new_var();
-                if *b {
-                    // the CNF of true is just a fresh variable
-                    v
-                } else {
+                if !*b {
+                    // the CNF of false is the negation of the false literal
                     formula.add(Clause::single(-v));
-                    v
                 }
+                v
             }
             ATerm::And(ts) => match ts.len() {
                 0 => env.context.get_true().cnf_nnf_tseitin(env, formula),
@@ -352,6 +368,36 @@ fn has_no_disjunction(t: &Term) -> bool {
 /// Partition NNF terms into (those that have no disjunction, those that have disjunctions)
 pub fn partition_nnfs(ts: Vec<Term>) -> (Vec<Term>, Vec<Term>) {
     ts.into_iter().partition(has_no_disjunction)
+}
+
+/// Inserts the literal, if valid, and returns `true` if the literal was inserted.
+/// Otherwise, returns `false`.
+/// 
+/// The literal is not inserted if it is already in the clause
+/// or if adding it would cause the clause to become a tautology.
+pub fn push_literal(clause: &mut Vec<i32>, literal: i32) -> bool {
+    assert!(literal != 0);
+    if clause.contains(&-literal) || clause.contains(&literal) {
+        false
+    } else {
+        clause.push(literal);
+        true
+    }
+}
+
+/// Inserts the literal only if it isn't already present in the clause
+/// and if inserting it would not cause tautology.
+/// 
+/// Returns `true` if literal is in the clause after the function returns.
+/// In other words, returns `true` if it was added or if it was already present.
+pub fn push_literal_if_not_tautology(clause: &mut Vec<i32>, literal: i32) -> bool {
+    assert!(literal != 0);
+    if clause.contains(&-literal) {
+        return false;
+    } else if !clause.contains(&literal) {
+        clause.push(literal);
+    }
+    true
 }
 
 #[cfg(test)]

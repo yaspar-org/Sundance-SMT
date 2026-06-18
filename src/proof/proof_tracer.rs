@@ -4,44 +4,24 @@
 //! Keeps track of the eDRAT proof
 //!
 use crate::debug_println;
-use cadical_sys::ProofTracer;
+use crate::proof::{ProofStep,ProofStepType,Theory};
 use core::panic;
 use std::cmp::Eq;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::Neg;
 use yaspar_ir::ast::{
-    ATerm::*, Context, FunctionMeta, ObjectAllocatorExt, Repr, Sig, Sort, SortDef, Str, Term,
+    ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, Term,
 };
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
 /// to generate an eDRAT proof.
-pub struct SMTProofTracker {
-    proof_steps: Vec<ProofStepData>,
-    pub terms_list: HashMap<i32, (u64, Term, bool)>,
+pub struct SMTProofTracer {
+    proof_steps: Vec<ProofStep>,
+    terms_list: HashMap<i32, (u64, Term, bool)>,
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
-    quantifier_constants_defined: HashSet<u64>, // Track defined quantifier constants
-    literals_defined: HashSet<u64>,
     instantiations_for_smt2: Vec<(Term, Vec<(Term, bool)>)>,
-    pub finished_original_clauses: bool,
-    skolemizations: HashSet<Vec<i32>>, // super ugly way to do this, (todo: get rid of add_original_clause clauses and everything has a specific purpose)
-}
-
-// taking out of hash map so I don't have to remove them
-fn get_lit_info(
-    terms_list: &HashMap<i32, (u64, Term, bool)>,
-    lit: i32,
-) -> Option<(i32, u64, Term, bool)> {
-    if let Some((id, term, polarity)) = terms_list.get(&lit) {
-        // todo: if we only check one time, then we can just .remove(&lit) here
-        Some((lit, *id, term.clone(), *polarity))
-    } else if let Some((id, term, polarity)) = terms_list.get(&-lit) {
-        // todo: if we only check one time, then we can just .remove(&-lit) here
-        Some((-lit, *id, term.clone(), *polarity))
-    } else {
-        None
-    }
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -58,7 +38,7 @@ fn polarize_term(term: &Term, polarity: bool) -> Term {
 
 /// Returns true if the clause contains a literal and its negation (i.e., both `x` and `-x`).
 /// Written for generic iterators, since clauses in this file are both `Vec`s and `&[i32]` arrays.
-fn clause_is_tautology<'a, I, T>(clause: I) -> bool
+fn is_tautology<'a, I, T>(clause: I) -> bool
 where
     I: IntoIterator<Item = &'a T>,
     T: 'a + Copy + Eq + Hash + Neg<Output = T>,
@@ -71,32 +51,6 @@ where
         seen.insert(lit);
     }
     false
-}
-
-/// Represents a single step in the proof
-#[derive(Debug, Clone)]
-pub enum ProofStepData {
-    /// Original clause from the input formula
-    OriginalClause { clause: Vec<i32> },
-    /// Clause learned by the SAT solver
-    SATClause { clause: Vec<i32> },
-    /// Clause learned by a theory solver
-    TheoryClause { clause: Vec<i32> },
-    /// Clause learned by quantifier instantiation
-    Skolemization {
-        clause: Vec<i32>,
-        skolem_vars: Option<Vec<(Str, Sort)>>,
-    },
-    // InstantiationClause {
-    //     quantifier: Term,
-    //     other_lits: Vec<(Term, bool)>,
-    //     clause: Vec<i32>,
-    //     // skolemized: bool,
-    // },
-    /// DRAT-style clause deletion.
-    /// Despite CaDiCaL returning a clause ID, we store the entire clause.
-    /// TODO: Any way to store an index into `proof_steps`? It'll save on memory
-    Deletion { clause: Vec<i32> },
 }
 
 /// Format a sort definition as a declare-sort command
@@ -184,23 +138,7 @@ fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) 
     }
 }
 
-fn replace_quantifier_constants(
-    term: &Term,
-    context: &mut Context,
-    quantifier_constants_defined: &mut HashSet<u64>,
-    output: &mut String,
-) -> Term {
-    // println!("We have term {} with uid {}", term , term.uid());
-    let return_term = context.simple_symbol(format!("aux!{}", term.uid()).as_str());
-    if quantifier_constants_defined.contains(&term.uid()) {
-        return return_term;
-    }
-    output.push_str(&format!("(define-let {} {})\n", return_term, term));
-    quantifier_constants_defined.insert(term.uid());
-    return_term
-}
-
-impl SMTProofTracker {
+impl SMTProofTracer {
     /// Create a new proof tracker
     pub fn new(
         sorts: HashMap<Str, SortDef>,
@@ -211,36 +149,77 @@ impl SMTProofTracker {
             terms_list: HashMap::new(),
             sorts,
             symbol_table,
-            quantifier_constants_defined: HashSet::new(),
-            literals_defined: HashSet::new(),
             instantiations_for_smt2: Vec::new(),
-            finished_original_clauses: false,
-            skolemizations: HashSet::new(),
         }
     }
 
-    /// Add a skolemization clause to the proof
-    /// The caller must provide a closure to map each literal to (uid, Term)
-    pub fn add_skolem_clause(&mut self, clause: Vec<i32>, skolem_vars: Option<Vec<(Str, Sort)>>) {
-        let mut c = clause.clone();
-        self.proof_steps.push(ProofStepData::Skolemization {
-            clause,
-            skolem_vars,
-        });
-        c.reverse();
-        self.skolemizations.insert(c);
+    ////////////////////////////////////////////////////////////////////////////
+
+    pub fn push_step(&mut self, clause: &Vec<i32>, typ: ProofStepType) {
+        if !is_tautology(clause) {
+            self.proof_steps.push(ProofStep { clause: clause.clone(), typ })
+        }
+    }
+
+    pub fn push_steps(&mut self, clauses: &Vec<Vec<i32>>, typ: ProofStepType) {
+        for clause in clauses {
+            self.push_step(clause, typ.clone());
+        }
+    }
+
+    pub fn add_original_clause(&mut self, clause: &Vec<i32>) {
+        self.push_step(clause, ProofStepType::OriginalClause);
+    }
+
+    pub fn add_sat_clause(&mut self, clause: &Vec<i32>) {
+        self.push_step(clause, ProofStepType::SATClause);
+    }
+
+    pub fn delete_clause(&mut self, clause: &Vec<i32>) {
+        self.push_step(clause, ProofStepType::Deletion);
+    }
+
+    pub fn add_theory_clause(&mut self, clause: &Vec<i32>, theory: Theory) {
+        self.push_step(clause, ProofStepType::TheoryClause(theory));
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+
+    // TODO: If each literal is only needed once, then they can be removed from the hashmap
+    fn get_lit_info(&self, lit: i32) -> Option<(i32, u64, Term, bool)> {
+        if let Some((id, term, polarity)) = self.terms_list.get(&lit) {
+            Some((lit, *id, term.clone(), *polarity))
+        } else if let Some((id, term, polarity)) = self.terms_list.get(&-lit) {
+            Some((-lit, *id, term.clone(), *polarity))
+        } else {
+            None
+        }
+    }
+
+    /// Registers a `term` with the proof tracer.
+    /// Basically, each term registered this way gets an `(edrat-literal ...)`
+    /// line in the proof, and may be referenced in later DIMACS-style clauses.
+    pub fn register_term(&mut self, literal: i32, term: &Term, polarity: bool) {
+        if self.get_lit_info(literal).is_none() {
+            self.terms_list.insert(literal, (term.uid(), term.clone(), polarity));
+        }
+    }
+
+    /// Returns whether a term with the `literal` (or its negation) has been registered.
+    pub fn is_lit_registered(&self, literal: i32) -> bool {
+        self.get_lit_info(literal).is_some()
+        || self.get_lit_info(-literal).is_some()
     }
 
     /// Pushes literal definitions
     /// If one of the literals is not in terms list, then this clause is useless and we return false
-    fn introduce_literals(&mut self, clause: &Vec<i32>, out: &mut String) {
+    fn introduce_literals(&self, literals_defined: &mut HashSet<i32>, clause: &Vec<i32>, out: &mut String) {
         let mut temp_output = String::new();
         for &lit in clause {
             debug_println!(12, 2, "Introducing the literal {}", lit);
-            if let Some((lit, id, term, polarity)) = get_lit_info(&self.terms_list, lit) {
+            if let Some((lit, _id, term, polarity)) = self.get_lit_info(lit) {
                 debug_println!(9, 2, "The lit exists with term {}", term);
                 let lit = lit.abs();
-                let mut context = Context::new();
                 let polarized_term = polarize_term(&term, polarity);
 
                 debug_println!(
@@ -251,15 +230,9 @@ impl SMTProofTracker {
                     polarized_term
                 );
 
-                let output = replace_quantifier_constants(
-                    &polarized_term,
-                    &mut context,
-                    &mut self.quantifier_constants_defined,
-                    &mut temp_output,
-                );
-                if !self.literals_defined.contains(&id) {
-                    temp_output.push_str(&format!("(define-literal {} {})\n", lit, output));
-                    self.literals_defined.insert(id);
+                if !literals_defined.contains(&lit) {
+                    temp_output.push_str(&format!("(edrat-literal {} {})\n", lit, polarized_term));
+                    literals_defined.insert(lit);
                 }
             } else {
                 panic!(
@@ -271,180 +244,113 @@ impl SMTProofTracker {
         out.push_str(&temp_output);
     }
 
+    ////////////////////////////////////////////////////////////////////////////
+
+    /// Adds one or several proof steps to the proof to witness the derivation
+    /// of a Skolemization or an instantiation.
+    /// 
+    /// Supposing that `parent` is a top-level quantified formula (whether with
+    /// a leading `Not` or not), then we can Skolemize/instantiate the
+    /// parent in the eDRAT proof by: (1) introducing the instantiation as
+    /// a new eDRAT literal, and (2) adding an implication (parent => child)
+    /// to the proof. In CNF, this is written as (-p or c).
+    /// 
+    /// However, because Sundance assumes that all its terms are in NNF/CNF
+    /// form, and because Sundance does not reduce terms under quantifiers
+    /// during pre-processing, we end up with a situation where the
+    /// instantiated child may not match the reduced formula that Sundance
+    /// eventually adds to its e-graph. In summer 2026, we decided that
+    /// Skolem/instantiation eDRAT proof lines should focus solely on
+    /// the Skolemization/instantiation, and any formula reductions should
+    /// be handled on different proof lines.
+    /// 
+    /// As a result, we carefully register the un-reduced child with only
+    /// the eDRAT proof (although the caller must reserve a DIMACS literal
+    /// for it beforehand), and then if the reduction differs from the
+    /// un-reduced child, we derive the "e-graph implication" using modus ponens
+    /// via "parent => child", "child => reduced child".
+    pub fn push_skolem_or_instantiation_derivation(&mut self,
+        parent_literal: i32,
+        child_literal: i32, child: &Term,
+        reduced_literal: i32, reduced: &Term,
+        typ: ProofStepType,
+    ) {
+        assert!(parent_literal != 0 && reduced_literal != 0);
+        if child.uid() != reduced.uid() {
+            assert!(child_literal != 0);
+        }
+
+        // We ultimately want to derive this implication
+        let imp = vec![-parent_literal, reduced_literal];
+
+        // If the child doesn't reduce, we can add the implication directly
+        if child.uid() == reduced.uid() {
+            self.push_step(&imp, typ);
+        } else {
+            // Otherwise, we derive it through additional implications
+            let child_imp = vec![-parent_literal, child_literal];
+            let equiv_imp = vec![-child_literal, reduced_literal];
+
+            // The child term won't be registered anywhere else
+            self.register_term(child_literal, child, true);
+
+            // Derive `imp` through modus ponens via Boolean reasoning
+            self.push_step(&child_imp, typ);
+            self.add_theory_clause(&equiv_imp, Theory::Boolean);
+            self.add_sat_clause(&imp);
+
+            // Delete any clauses mentioning the un-reduced child
+            self.delete_clause(&child_imp);
+            self.delete_clause(&equiv_imp);
+        }
+    }
+
     /// Generate eDRAT proof as a string
     pub fn generate_edrat(&mut self) -> String {
         let mut output = String::new();
         self.instantiations_for_smt2.clear(); // Clear previous instantiations
+        let mut literals_defined: HashSet<i32> = HashSet::new();
 
-        // emit the sorts and symbol table
+        // emit the sorts, datatypes, and the symbol table
         for (sort, sort_def) in &self.sorts {
             output.push_str(&format_sort_declaration(sort, sort_def));
         }
-
+        
         let datatype_string = format_datatype_declaration(&self.sorts);
-
         output.push_str(&datatype_string);
 
-        // emit the symbol table
         for (symbol, sigs) in &self.symbol_table {
             output.push_str(&format_function_declaration(symbol, sigs));
         }
-        // Clone proof_steps to avoid borrow checker issues
-        let proof_steps = self.proof_steps.clone();
-        for step in &proof_steps {
-            match step {
-                ProofStepData::OriginalClause { clause, .. } => {
-                    self.introduce_literals(clause, &mut output);
-                    output.push_str("a ");
-                    for &lit in clause {
-                        output.push_str(&format!("{} ", lit));
-                    }
-                    output.push_str("0\n");
-                }
-                ProofStepData::SATClause { clause, .. } => {
-                    for &lit in clause {
-                        output.push_str(&format!("{} ", lit));
-                    }
-                    output.push_str("0\n");
 
-                    // Stop adding proof steps to the output once the empty clause is derived
-                    if clause.is_empty() {
-                        return output;
-                    }
+        // Depending on the proof step, introduce new eDRAT literals
+        for step in &self.proof_steps {
+            let clause = &step.clause;
+            let typ = &step.typ;
+            match typ {
+                ProofStepType::OriginalClause
+                | ProofStepType::TheoryClause(..)
+                | ProofStepType::Instantiation => {
+                    self.introduce_literals(&mut literals_defined, clause, &mut output)
                 }
-                ProofStepData::TheoryClause { clause, .. } => {
-                    self.introduce_literals(clause, &mut output);
-                    output.push_str("t ");
-                    for &lit in clause {
-                        output.push_str(&format!("{} ", lit));
+                ProofStepType::Skolemization { parent_term, skolem_vars } => {
+                    debug_println!(29, 2, "The skolem vars for clause {:?}: {:?}", clause, skolem_vars);
+                    for (i, var) in skolem_vars.iter().enumerate() {
+                        // CC TODO think about negated parent term, if (negated forall)
+                        output.push_str(&format!("(declare-skolem {} {} {} {})\n", parent_term, i, var.0, var.1));
                     }
-                    output.push_str("0\n");
+                    self.introduce_literals(&mut literals_defined, clause, &mut output);
                 }
-                ProofStepData::Skolemization {
-                    clause,
-                    skolem_vars,
-                } => {
-                    // for right now we assume skolemization to be true
-                    if let Some(vars) = skolem_vars {
-                        for var in vars {
-                            output.push_str(&format!("(declare-fun {} () {})\n", var.0, var.1));
-                        }
-                    }
+                _ => { }
+            }
 
-                    self.introduce_literals(clause, &mut output);
+            step.push_line_to(&mut output);
 
-                    output.push_str("a ");
-                    for &lit in clause {
-                        output.push_str(&format!("{} ", lit));
-                    }
-                    output.push_str("0\n");
-                }
-                ProofStepData::Deletion { clause } => {
-                    // Emit a DRAT-style deletion, which includes all literals in the clause
-                    output.push_str("d ");
-                    for &lit in clause {
-                        output.push_str(&format!("{} ", lit));
-                    }
-                    output.push_str("0\n");
-                }
+            // Stop adding proof steps to the output once the empty clause is derived
+            if matches!(typ, ProofStepType::SATClause) && clause.is_empty() {
+                break;
             }
         }
         output
     }
-}
-
-impl ProofTracer for SMTProofTracker {
-    fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], _restored: bool) {
-        if self.skolemizations.contains(clause) {
-            return;
-        }
-        if clause_is_tautology(clause) {
-            return;
-        }
-        if !self.finished_original_clauses {
-            // println!("original_clause {:?}", clause);
-            self.proof_steps.push(ProofStepData::OriginalClause {
-                clause: clause.to_vec(),
-            });
-        } else {
-            debug_println!(19, 0, "We are adding the theory clause {:?}", clause);
-            self.proof_steps.push(ProofStepData::TheoryClause {
-                clause: clause.to_vec(),
-            });
-        }
-    }
-
-    fn add_derived_clause(
-        &mut self,
-        id: u64,
-        _redundant: bool,
-        clause: &[i32],
-        antecedents: &[u64],
-    ) {
-        debug_println!(6, 0, "*** SAT SOLVER CONFLICT CLAUSE LEARNED ***");
-        debug_println!(6, 0, "Clause ID: {}", id);
-        debug_println!(6, 0, "Conflict clause: {:?}", clause);
-        debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
-        debug_println!(6, 0, "Clause size: {}", clause.len());
-
-        if clause_is_tautology(clause) {
-            return;
-        }
-
-        self.proof_steps.push(ProofStepData::SATClause {
-            clause: clause.to_vec(),
-        });
-    }
-
-    fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {
-        if clause_is_tautology(clause) {
-            return;
-        }
-        self.proof_steps.push(ProofStepData::Deletion {
-            clause: clause.to_vec(),
-        });
-    }
-
-    fn weaken_minus(&mut self, _id: u64, _clause: &[i32]) {
-        // Optional: track weakened clauses
-        panic!("Do not currently support weaken minus")
-    }
-
-    fn strengthen(&mut self, _id: u64) {
-        // Optional: track strengthened clauses
-        // panic!("Do not currently support strengthen")
-        // we are allowing this for right now: just clause vivification: https://www.cril.univ-artois.fr/~piette/revival/revival.pdf
-        // needed for example by tests/regression/smt_files/skolemization/skolem-negatedforall8.smt2
-    }
-
-    fn finalize_clause(&mut self, _id: u64, _clause: &[i32]) {
-        // Optional: track finalized clauses
-        panic!("Do not currently support finalize clause")
-    }
-
-    fn add_assumption(&mut self, _lit: i32) {
-        // Optional: SMTleveladding assumptions
-        panic!("Do not currently support assumptions")
-    }
-
-    fn add_constraint(&mut self, _clause: &[i32]) {
-        // Optional: Adding constraints
-    }
-
-    fn reset_assumptions(&mut self) {
-        // We are still not supporting assumptions, but unlike in add_assumption_clause we do not
-        // panic here. CaDiCaL rel 2.1.3 hits this in Solver::call_external_solve_and_check_results
-        // https://github.com/arminbiere/cadical/blob/rel-2.1.3/src/solver.cpp#L758-L759
-        // Specifically this happens when we get unknown, for example when we run with a timeout.
-    }
-
-    fn add_assumption_clause(&mut self, _id: u64, _clause: &[i32], _antecedents: &[u64]) {
-        panic!("Do not currently support assumptions")
-    }
-
-    fn conclude_sat(&mut self, _conclusion_type: i32, _model: &[i32]) {}
-
-    fn conclude_unsat(&mut self, _conclusion_type: i32, _clause_ids: &[u64]) {}
-
-    fn conclude_unknown(&mut self, _trail: &[i32]) {}
 }

@@ -34,7 +34,7 @@ pub fn process_assignment(
     debug_println!(2, 0, "Processing literal {:} at level {}", lit, level);
     let sign = lit > 0;
 
-    // note this basically assumes the postive polarity is always in the map from i32->u64
+    // note this basically assumes the positive polarity is always in the map from i32->u64
     // this should be true based on how we do
     let term = egraph.get_term_from_lit(lit.abs());
     debug_println!(24, 1, "Term: {}", term);
