@@ -1,9 +1,13 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use yaspar_ir::ast::{FetchSort, HasArena, Monomorphization};
+
+use crate::datatypes::axioms::learn_exactly_one_tester_clause;
 use crate::egraphs::traits::EgraphTrait;
 use crate::solver_state::SolverState;
 use crate::solver_types::ConstructorType;
+use crate::solver_types::TermOption;
 use crate::utils::DeterministicHashMap;
 
 /// Edge in the constructor graph, recording egraph IDs for conflict clause generation.
@@ -128,4 +132,42 @@ fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[CtorEdge
     }
 
     clause
+}
+
+/// Generate tester clauses for datatype terms that are still Uninitialized.
+/// Called from cb_check_found_model to lazily add case splits (matching Z3's final_check).
+pub fn generate_deferred_tester_clauses(solver_state: &mut SolverState) -> Vec<Vec<i32>> {
+    let mut all_clauses = vec![];
+
+    // Collect UIDs of uninitialized terms (can't mutate term_constructors while iterating)
+    let uninitialized_uids: Vec<u64> = solver_state
+        .term_constructors
+        .iter()
+        .filter_map(|(&uid, ctor_type)| match ctor_type {
+            ConstructorType::Uninitialized => Some(uid),
+            _ => None,
+        })
+        .collect();
+
+    for uid in uninitialized_uids {
+        let term = match &solver_state.terms_list[uid as usize] {
+            TermOption::Some(t) => t.clone(),
+            _ => continue,
+        };
+
+        let sort = term.get_sort(solver_state.context.arena());
+        let dt_dec = match solver_state.datatype_info.datatypes.get(sort.sort_name()).cloned() {
+            Some(dt) => dt,
+            None => continue,
+        };
+        let dt_dec = match dt_dec.monomorphize(&sort, solver_state.context.arena()) {
+            Ok(dt) => dt,
+            Err(_) => continue,
+        };
+
+        let clauses = learn_exactly_one_tester_clause(solver_state, &term, &dt_dec, false);
+        all_clauses.extend(clauses);
+    }
+
+    all_clauses
 }
