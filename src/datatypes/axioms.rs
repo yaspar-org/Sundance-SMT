@@ -17,11 +17,10 @@ use crate::solver_types::ConstructorType;
 
 /// For a term of datatype sort, we want to learn the following axioms:
 /// 1. isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
-/// 2. (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the   datatype where f^0, ..., f^m are the selectors of f
-/// 3. (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f (by default we add this lazily based on the assignment in term_constructors)
-/// 4. /\_i=1^k f_i(f(t1, ... tk)) = t_i for term = f(t1, ..., tk) where f is a constructor with selectors f_1, ..., f_k and subterms t1, ..., tk.
+/// 2. (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f (by default we add this lazily based on the assignment in term_constructors)
+/// 3. /\_i=1^k f_i(f(t1, ... tk)) = t_i for term = f(t1, ..., tk) where f is a constructor with selectors f_1, ..., f_k and subterms t1, ..., tk.
 ///    (done lazily)
-/// 5. We also need to ~isCi(t) \/ ~isCj(t) for each pair of distinct constructors Ci and Cj of the datatype (we do this lazily based on the assignment in term_constructors)
+/// 4. We also need to ~isCi(t) \/ ~isCj(t) for each pair of distinct constructors Ci and Cj of the datatype (we do this lazily based on the assignment in term_constructors)
 ///    Note that we also need to include the datatype axioms for the selectors if they are of datatype sort, so we need to recursively call find_datatype_axioms on the selector applications as well.
 pub fn find_datatype_axioms(
     term: &Term, // must be a datatype term
@@ -59,8 +58,12 @@ pub fn find_datatype_axioms(
     }
 
     // Step 2. Learn the clause isC1(t) \/ ... \/ isCm(t)
-    let tester_apps = learn_exactly_one_tester_clause(solver_state, term, &dt_dec, from_quantifier);
-    vector.extend(tester_apps);
+    // For recursive sorts, defer to cb_check_found_model to avoid infinite unfolding.
+    if !solver_state.datatype_info.recursive_sorts.contains(sort.sort_name()) {
+        let tester_apps =
+            learn_exactly_one_tester_clause(solver_state, term, &dt_dec, from_quantifier);
+        vector.extend(tester_apps);
+    }
 
     // Step 2.5. Learn the constraint (is-f t) => t = f(f^0(t) ... f^m(t))
     // as long as we are not doing lazy datatypes
@@ -195,6 +198,20 @@ fn learn_exactly_one_tester_clause(
         tester_apps.push(tester_app);
     }
 
+    // Record base-case tester literals for the decision heuristic (after CNF conversion
+    // assigns them SAT literals)
+    let base_case_uids: Vec<u64> = if solver_state.datatype_info.has_recursive_datatype {
+        dt_dec
+            .constructors
+            .iter()
+            .zip(tester_apps.iter())
+            .filter(|(ctor, _)| solver_state.datatype_info.base_constructors.contains(&ctor.ctor))
+            .map(|(_, app)| app.uid())
+            .collect()
+    } else {
+        vec![]
+    };
+
     let tester_or = if tester_apps.len() == 1 {
         tester_apps.pop().unwrap()
     } else {
@@ -205,6 +222,13 @@ fn learn_exactly_one_tester_clause(
     solver_state.insert_predecessor(&tester_or, None, None, from_quantifier);
     let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
+
+    for uid in base_case_uids {
+        if let Some(&lit) = solver_state.cnf_cache.var_map.get(&uid) {
+            solver_state.base_case_tester_lits.push(lit);
+        }
+    }
+
     vector
 }
 

@@ -413,7 +413,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn cb_decide(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
-        // always no decision
+
+        // For recursive datatypes, prefer base-case constructors to avoid infinite expansion
+        if self.solver_state.datatype_info.has_recursive_datatype {
+            for &lit in &self.solver_state.base_case_tester_lits {
+                if self.assignments[lit as usize] == 0 {
+                    return lit;
+                }
+            }
+        }
+
         0
     }
 
