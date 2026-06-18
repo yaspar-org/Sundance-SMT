@@ -358,6 +358,20 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.disequalities.borrow_mut().push(conflict_clause);
                 return false;
             }
+
+            // Lazy case split: add tester clauses for uninitialized datatype terms
+            let new_clauses =
+                crate::datatypes::occurs_check::generate_deferred_tester_clauses(self.solver_state);
+            if !new_clauses.is_empty() {
+                for clause in &new_clauses {
+                    for lit in clause {
+                        self.add_observed_variable(*lit);
+                        self.add_lit_to_proof_tracker(*lit);
+                    }
+                }
+                self.disequalities.borrow_mut().extend(new_clauses);
+                return false;
+            }
         }
 
         debug_println!(11, 0, "Starting quantifier instantiations");

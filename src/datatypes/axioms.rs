@@ -149,7 +149,7 @@ fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
 
 /// For a term of datatype sort, learn the clause isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
 /// if the term is of the form C(t1, ..., tm) where C is a constructor, we also add the clause (isC1(t) \/ ... \/ isCm(t)) /\ isC(t) where C is the constructor of the term
-fn learn_exactly_one_tester_clause(
+pub fn learn_exactly_one_tester_clause(
     solver_state: &mut SolverState,
     term: &Term,
     dt_dec: &DatatypeDec,
