@@ -304,15 +304,15 @@ pub fn learn_ctor_selector_clauses(
     // Store recursive children for the occurs check
     if solver_state.datatype_info.has_recursive_datatype
         && let Some(rec_positions) = solver_state.datatype_info.recursive_args.get(ctor_name)
-            && !rec_positions.is_empty()
-            && let Some(ConstructorType::Constructor { children, .. }) =
-                solver_state.term_constructors.get_mut(&term.uid())
-            {
-                *children = rec_positions
-                    .iter()
-                    .map(|&pos| selector_apps[pos].uid())
-                    .collect();
-            }
+        && !rec_positions.is_empty()
+        && let Some(ConstructorType::Constructor { children, .. }) =
+            solver_state.term_constructors.get_mut(&term.uid())
+    {
+        *children = rec_positions
+            .iter()
+            .map(|&pos| selector_apps[pos].uid())
+            .collect();
+    }
 
     // have the simple_sorted id for the global case and the simple id for the app case
     let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
