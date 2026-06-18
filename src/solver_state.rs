@@ -145,6 +145,9 @@ pub struct SolverState {
 
     /// Whether to skolemize eagerly.
     pub eager_skolem: bool,
+
+    /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
+    pub base_case_tester_lits: Vec<i32>,
 }
 
 impl SolverState {
@@ -176,6 +179,7 @@ impl SolverState {
             ddsmt,
             eager_skolem,
             egraph,
+            base_case_tester_lits: vec![],
         }
     }
 
