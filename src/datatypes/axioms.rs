@@ -123,7 +123,7 @@ fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
             vec![term.clone()],
             Some(bool_sort.clone()),
         );
-        let child_uids: Vec<u64> = if solver_state.datatype_info.has_recursive_datatype {
+        let child_uids: Vec<u64> = if solver_state.datatype_info.has_recursive_datatype() {
             solver_state
                 .datatype_info
                 .recursive_args
@@ -204,7 +204,7 @@ pub fn learn_exactly_one_tester_clause(
 
     // Record base-case tester literals for the decision heuristic (after CNF conversion
     // assigns them SAT literals)
-    let base_case_uids: Vec<u64> = if solver_state.datatype_info.has_recursive_datatype {
+    let base_case_uids: Vec<u64> = if solver_state.datatype_info.has_recursive_datatype() {
         dt_dec
             .constructors
             .iter()
@@ -302,7 +302,7 @@ pub fn learn_ctor_selector_clauses(
     }
 
     // Store recursive children for the occurs check
-    if solver_state.datatype_info.has_recursive_datatype
+    if solver_state.datatype_info.has_recursive_datatype()
         && let Some(rec_positions) = solver_state.datatype_info.recursive_args.get(ctor_name)
         && !rec_positions.is_empty()
         && let Some(ConstructorType::Constructor { children, .. }) =

@@ -351,7 +351,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         // Occurs check for recursive datatypes (well-foundedness)
-        if self.solver_state.datatype_info.has_recursive_datatype {
+        if self.solver_state.datatype_info.has_recursive_datatype() {
             if let Some(conflict_clause) =
                 crate::datatypes::occurs_check::datatype_occurs_check(self.solver_state)
             {
@@ -429,7 +429,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
 
         // For recursive datatypes, prefer base-case constructors to avoid infinite expansion
-        if self.solver_state.datatype_info.has_recursive_datatype {
+        if self.solver_state.datatype_info.has_recursive_datatype() {
             for &lit in &self.solver_state.base_case_tester_lits {
                 if self.assignments[lit as usize] == 0 {
                     return lit;

@@ -16,8 +16,6 @@ pub struct DatatypeInfo {
     pub recursive_args: DeterministicHashMap<Str, Vec<usize>>,
     /// Constructors with no recursive arguments (base cases)
     pub base_constructors: DeterministicHashSet<Str>,
-    /// Whether any recursive (inductive) datatype exists — gates the occurs check
-    pub has_recursive_datatype: bool,
     /// Sort names that are recursive/inductive (have at least one constructor with recursive args)
     pub recursive_sorts: DeterministicHashSet<Str>,
 }
@@ -29,13 +27,16 @@ impl DatatypeInfo {
             constructors: Default::default(),
             recursive_args: Default::default(),
             base_constructors: Default::default(),
-            has_recursive_datatype: false,
             recursive_sorts: Default::default(),
         }
     }
 
     pub fn is_datatype(&self, sort: &Str) -> bool {
         self.datatypes.contains_key(sort)
+    }
+
+    pub fn has_recursive_datatype(&self) -> bool {
+        !self.recursive_sorts.is_empty()
     }
 }
 
@@ -86,14 +87,11 @@ impl DatatypeInfo {
                 recursive_sorts.insert(name.clone());
             }
         }
-        let has_recursive_datatype = !recursive_sorts.is_empty();
-
         Self {
             datatypes,
             constructors,
             recursive_args,
             base_constructors,
-            has_recursive_datatype,
             recursive_sorts,
         }
     }
