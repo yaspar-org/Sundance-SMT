@@ -124,7 +124,10 @@ fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[CtorEdge
             continue;
         }
 
-        if let Some(equalities) = solver_state.egraph.explain_equality(this_child, next_parent) {
+        if let Some(equalities) = solver_state
+            .egraph
+            .explain_equality(this_child, next_parent)
+        {
             for (a, b) in equalities {
                 clause.push(-solver_state.make_eq(a, b));
             }
@@ -156,7 +159,12 @@ pub fn generate_deferred_tester_clauses(solver_state: &mut SolverState) -> Vec<V
         };
 
         let sort = term.get_sort(solver_state.context.arena());
-        let dt_dec = match solver_state.datatype_info.datatypes.get(sort.sort_name()).cloned() {
+        let dt_dec = match solver_state
+            .datatype_info
+            .datatypes
+            .get(sort.sort_name())
+            .cloned()
+        {
             Some(dt) => dt,
             None => continue,
         };
