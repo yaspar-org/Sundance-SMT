@@ -76,7 +76,6 @@ fn main() -> Result<(), String> {
 
     solver_state.register_bool_constants(&true_term, &false_term);
 
-
     let global_names = solver_state.context.all_defined_symbols();
     let mut nnf_terms = vec![];
     for assert in assertions {

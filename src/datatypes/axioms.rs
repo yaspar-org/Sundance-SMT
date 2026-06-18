@@ -59,7 +59,11 @@ pub fn find_datatype_axioms(
 
     // Step 2. Learn the clause isC1(t) \/ ... \/ isCm(t)
     // For recursive sorts, defer to cb_check_found_model to avoid infinite unfolding.
-    if !solver_state.datatype_info.recursive_sorts.contains(sort.sort_name()) {
+    if !solver_state
+        .datatype_info
+        .recursive_sorts
+        .contains(sort.sort_name())
+    {
         let tester_apps =
             learn_exactly_one_tester_clause(solver_state, term, &dt_dec, from_quantifier);
         vector.extend(tester_apps);
@@ -205,7 +209,12 @@ pub fn learn_exactly_one_tester_clause(
             .constructors
             .iter()
             .zip(tester_apps.iter())
-            .filter(|(ctor, _)| solver_state.datatype_info.base_constructors.contains(&ctor.ctor))
+            .filter(|(ctor, _)| {
+                solver_state
+                    .datatype_info
+                    .base_constructors
+                    .contains(&ctor.ctor)
+            })
             .map(|(_, app)| app.uid())
             .collect()
     } else {
@@ -293,11 +302,10 @@ pub fn learn_ctor_selector_clauses(
     }
 
     // Store recursive children for the occurs check
-    if solver_state.datatype_info.has_recursive_datatype {
-        if let Some(rec_positions) = solver_state.datatype_info.recursive_args.get(ctor_name)
+    if solver_state.datatype_info.has_recursive_datatype
+        && let Some(rec_positions) = solver_state.datatype_info.recursive_args.get(ctor_name)
             && !rec_positions.is_empty()
-        {
-            if let Some(ConstructorType::Constructor { children, .. }) =
+            && let Some(ConstructorType::Constructor { children, .. }) =
                 solver_state.term_constructors.get_mut(&term.uid())
             {
                 *children = rec_positions
@@ -305,8 +313,6 @@ pub fn learn_ctor_selector_clauses(
                     .map(|&pos| selector_apps[pos].uid())
                     .collect();
             }
-        }
-    }
 
     // have the simple_sorted id for the global case and the simple id for the app case
     let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
