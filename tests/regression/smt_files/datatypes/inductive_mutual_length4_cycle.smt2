@@ -1,0 +1,17 @@
+; Length-4 cycle through variable equalities:
+; x = ctorA_rec(b1), y = ctorA_rec(b2), b1 = ctorB_rec(y), b2 = ctorB_rec(x)
+; Cycle: x -> b1 -> y -> b2 -> x
+(set-logic ALL)
+(declare-datatypes ((A 0) (B 0) (D 0))
+  (((ctorA_rec (selAr B)) (ctorA_safe (selAs D)))
+   ((ctorB_rec (selBr A)) (ctorB_safe (selBs D)))
+   ((ctorD_val (selD Int)))))
+(declare-const x A)
+(declare-const y A)
+(declare-const b1 B)
+(declare-const b2 B)
+(assert (= x (ctorA_rec b1)))
+(assert (= y (ctorA_rec b2)))
+(assert (= b1 (ctorB_rec y)))
+(assert (= b2 (ctorB_rec x)))
+(check-sat)

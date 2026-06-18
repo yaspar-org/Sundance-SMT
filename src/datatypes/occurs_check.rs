@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashSet;
 use yaspar_ir::ast::{FetchSort, HasArena, Monomorphization};
 
 use crate::datatypes::axioms::learn_exactly_one_tester_clause;
@@ -10,14 +11,10 @@ use crate::solver_types::ConstructorType;
 use crate::solver_types::TermOption;
 use crate::utils::DeterministicHashMap;
 
-/// Edge in the constructor graph, recording egraph IDs for conflict clause generation.
-#[derive(Debug, Clone)]
-struct CtorEdge {
-    /// Egraph ID of the datatype term (the parent node in the cycle)
-    parent_eid: u32,
-    /// Egraph ID of the selector application (the child reaching the next node)
-    child_eid: u32,
-}
+/// An edge in the constructor graph: (parent_eid, child_eid).
+/// parent_eid is the egraph ID of the constructor term,
+/// child_eid is the egraph ID of its recursive child (selector application).
+type Edge = (u32, u32);
 
 /// Performs the occurs check for inductive datatypes.
 ///
@@ -25,12 +22,17 @@ struct CtorEdge {
 /// a term is a subterm of itself, which violates well-foundedness.
 /// Returns a conflict clause if a cycle is found, None otherwise.
 pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>> {
-    // Build directed graph: canonical parent eid -> [(canonical child eid, edge info)]
-    let mut graph: DeterministicHashMap<u32, Vec<(u32, CtorEdge)>> = Default::default();
+    // Build directed graph: canonical parent eid -> [(canonical child eid, edge)]
+    let mut graph: DeterministicHashMap<u32, Vec<(u32, Edge)>> = Default::default();
 
     for (&uid, ctor_type) in solver_state.term_constructors.iter() {
         let children = match ctor_type {
-            ConstructorType::Constructor { children, .. } if !children.is_empty() => children,
+            ConstructorType::Constructor {
+                children,
+                hash,
+                level,
+                ..
+            } if !children.is_empty() && solver_state.is_valid_hash(*hash, *level) => children,
             _ => continue,
         };
 
@@ -44,27 +46,26 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
                 continue;
             };
             let child_canonical = solver_state.egraph.find(child_eid);
-
-            graph.entry(parent_canonical).or_default().push((
-                child_canonical,
-                CtorEdge {
-                    parent_eid: term_eid,
-                    child_eid,
-                },
-            ));
+            graph
+                .entry(parent_canonical)
+                .or_default()
+                .push((child_canonical, (term_eid, child_eid)));
         }
     }
 
-    // DFS cycle detection (three-color: 0=white, 1=gray, 2=black)
-    let mut color: DeterministicHashMap<u32, u8> = Default::default();
-    let mut parent_map: DeterministicHashMap<u32, (u32, CtorEdge)> = Default::default();
+    // DFS with path tracking — when we find a back-edge, the path IS the cycle.
+    let mut visited: HashSet<u32> = Default::default();
 
     for &start in graph.keys() {
-        if *color.get(&start).unwrap_or(&0) != 0 {
+        if visited.contains(&start) {
             continue;
         }
+
+        let mut on_path: HashSet<u32> = HashSet::from([start]);
+        // path[i] = (canonical_node, edge that brought us here)
+        // The first entry has a dummy edge since nothing "brought us" to start.
+        let mut path: Vec<(u32, Edge)> = vec![(start, (0, 0))];
         let mut stack: Vec<(u32, usize)> = vec![(start, 0)];
-        color.insert(start, 1);
 
         while let Some((node, idx)) = stack.last_mut() {
             let node = *node;
@@ -72,32 +73,34 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
             let neighbor_count = neighbors.map_or(0, |n| n.len());
 
             if *idx >= neighbor_count {
-                color.insert(node, 2);
+                on_path.remove(&node);
+                visited.insert(node);
+                path.pop();
                 stack.pop();
                 continue;
             }
 
-            let (child, edge) = neighbors.unwrap()[*idx].clone();
+            let &(child_canonical, edge) = &neighbors.unwrap()[*idx];
             *idx += 1;
 
-            match color.get(&child).unwrap_or(&0) {
-                0 => {
-                    color.insert(child, 1);
-                    parent_map.insert(child, (node, edge));
-                    stack.push((child, 0));
-                }
-                1 => {
-                    // Found a cycle — reconstruct path from child -> ... -> node -> child
-                    let mut cycle_edges: Vec<CtorEdge> = vec![edge];
-                    let mut cur = node;
-                    while cur != child {
-                        let (prev, prev_edge) = parent_map.get(&cur).unwrap().clone();
-                        cycle_edges.push(prev_edge);
-                        cur = prev;
-                    }
-                    return Some(build_conflict_clause(solver_state, &cycle_edges));
-                }
-                _ => {} // black — already fully explored
+            if on_path.contains(&child_canonical) {
+                // Found a cycle. Extract the cycle edges from the path.
+                let cycle_start = path
+                    .iter()
+                    .position(|(n, _)| *n == child_canonical)
+                    .unwrap();
+                // Edges forming the cycle: from path[cycle_start+1..] (edges into each node)
+                // plus the closing back-edge we just found.
+                let mut cycle_edges: Vec<Edge> =
+                    path[cycle_start + 1..].iter().map(|(_, e)| *e).collect();
+                cycle_edges.push(edge);
+                return Some(build_conflict_clause(solver_state, &cycle_edges));
+            }
+
+            if !visited.contains(&child_canonical) {
+                on_path.insert(child_canonical);
+                path.push((child_canonical, edge));
+                stack.push((child_canonical, 0));
             }
         }
     }
@@ -107,18 +110,16 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
 
 /// Build a conflict clause from the edges forming a cycle.
 ///
-/// The cycle is edge_0, edge_1, ..., edge_k where each edge_i goes from one
-/// e-class to the next. The key equality justifying each step is:
-///   edge_i.child_eid ≡ edge_{(i+1) % k}.parent_eid
-/// i.e., the selector application of term_i ended up equal to term_{i+1}.
-/// The conflict clause negates these equalities.
-fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[CtorEdge]) -> Vec<i32> {
+/// Each edge (parent_eid, child_eid) represents a constructor-to-child step.
+/// Consecutive edges are linked: edge_i.child_eid and edge_{i+1}.parent_eid
+/// are in the same e-class. The conflict clause negates these equalities.
+fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[Edge]) -> Vec<i32> {
     let mut clause: Vec<i32> = Vec::new();
     let n = cycle_edges.len();
 
     for i in 0..n {
-        let this_child = cycle_edges[i].child_eid;
-        let next_parent = cycle_edges[(i + 1) % n].parent_eid;
+        let this_child = cycle_edges[i].1;
+        let next_parent = cycle_edges[(i + 1) % n].0;
 
         if this_child == next_parent {
             continue;
@@ -142,12 +143,16 @@ fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[CtorEdge
 pub fn generate_deferred_tester_clauses(solver_state: &mut SolverState) -> Vec<Vec<i32>> {
     let mut all_clauses = vec![];
 
-    // Collect UIDs of uninitialized terms (can't mutate term_constructors while iterating)
     let uninitialized_uids: Vec<u64> = solver_state
         .term_constructors
         .iter()
         .filter_map(|(&uid, ctor_type)| match ctor_type {
             ConstructorType::Uninitialized => Some(uid),
+            ConstructorType::Constructor { hash, level, .. }
+                if !solver_state.is_valid_hash(*hash, *level) =>
+            {
+                Some(uid)
+            }
             _ => None,
         })
         .collect();
