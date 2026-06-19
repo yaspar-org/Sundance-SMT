@@ -78,12 +78,16 @@ pub fn find_datatype_axioms(
     }
 
     // Step 3. Learn the constraint  /\_i=1^k f_i(f(t1, ... tk)) = t_i
+    //         and assert is-f(f(t1, ..., tk))
     if let App(f, terms, _) = term.repr()
         && solver_state
             .datatype_info
             .constructors
             .contains_key(f.id_str())
     {
+        let tester_clause = learn_tester_for_ctor_app(solver_state, term, f.id_str(), from_quantifier);
+        vector.extend(tester_clause);
+
         let selector_ctor_clauses = learn_selector_ctor_clause(
             solver_state,
             term,
@@ -340,6 +344,35 @@ pub fn learn_ctor_selector_clauses(
     let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
     vector.extend(clauses);
     vector
+}
+
+/// For a term of the form f(t1, ..., tk) where f is a constructor, assert is-f(term) as a unit clause.
+///
+/// This is needed because tester clauses are deferred for recursive sorts (to avoid infinite
+/// unfolding). Without this, the SAT solver doesn't know that a constructor application implies
+/// its tester, which can lead to spurious occurs check conflicts when cb_decide forces a
+/// conflicting tester (e.g., is-Nil on a term that is syntactically Cons(...)).
+/// See: tests/regression/smt_files/datatypes/inductive_disequality_no_cycle_sat.smt2
+fn learn_tester_for_ctor_app(
+    solver_state: &mut SolverState,
+    term: &Term,
+    ctor_name: &Str,
+    from_quantifier: bool,
+) -> Vec<Vec<i32>> {
+    let bool_sort = solver_state.bool_sort();
+    let is_symbol = solver_state.allocate_symbol("is");
+    let tester_identifier = Identifier {
+        symbol: is_symbol,
+        indices: vec![Index::Symbol(ctor_name.clone())],
+    };
+    let tester_app = solver_state.app(
+        tester_identifier.into(),
+        vec![term.clone()],
+        Some(bool_sort),
+    );
+    let tester_nnf = tester_app.nnf(solver_state);
+    solver_state.insert_predecessor(&tester_nnf, None, None, from_quantifier);
+    tester_nnf.cnf_tseitin(solver_state).into_iter().map(|x| x.0).collect()
 }
 
 /// We are learning the clause /\_i=1^k f_i(f(t1, ... tk)) = t_i

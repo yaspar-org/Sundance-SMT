@@ -363,7 +363,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let new_clauses =
                 crate::datatypes::occurs_check::generate_deferred_tester_clauses(self.solver_state);
             if !new_clauses.is_empty() {
-                eprintln!("deferred: {} clauses, term_ctors={}", new_clauses.len(), self.solver_state.term_constructors.len());
                 for clause in &new_clauses {
                     for lit in clause {
                         self.add_observed_variable(*lit);
@@ -437,6 +436,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     self.assignments.resize(self.assignments.len() * 2, 0);
                 }
                 if self.assignments[idx] == 0 {
+                    eprintln!("    cb_decide -> {}", lit);
                     return lit;
                 }
             }
