@@ -202,8 +202,7 @@ pub fn learn_exactly_one_tester_clause(
         tester_apps.push(tester_app);
     }
 
-    // Record base-case tester literals for the decision heuristic (after CNF conversion
-    // assigns them SAT literals)
+    // Record base-case tester literals for the decision heuristic
     let base_case_uids: Vec<u64> = if solver_state.datatype_info.has_recursive_datatype() {
         dt_dec
             .constructors

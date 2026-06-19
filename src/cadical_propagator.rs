@@ -363,6 +363,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let new_clauses =
                 crate::datatypes::occurs_check::generate_deferred_tester_clauses(self.solver_state);
             if !new_clauses.is_empty() {
+                eprintln!("deferred: {} clauses, term_ctors={}", new_clauses.len(), self.solver_state.term_constructors.len());
                 for clause in &new_clauses {
                     for lit in clause {
                         self.add_observed_variable(*lit);
@@ -431,7 +432,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // For recursive datatypes, prefer base-case constructors to avoid infinite expansion
         if self.solver_state.datatype_info.has_recursive_datatype() {
             for &lit in &self.solver_state.base_case_tester_lits {
-                if self.assignments[lit as usize] == 0 {
+                let idx = lit.unsigned_abs() as usize;
+                if idx >= self.assignments.len() {
+                    self.assignments.resize(self.assignments.len() * 2, 0);
+                }
+                if self.assignments[idx] == 0 {
                     return lit;
                 }
             }

@@ -279,6 +279,7 @@
     "datatypes/inductive_mutual_length4_cycle.smt2": "unsat",
     "datatypes/inductive_mutual_no_cycle_sat.smt2": "sat",
     "datatypes/inductive_forced_recursive_sat.smt2": "sat",
+    "datatypes/inductive_disequality_no_cycle_sat.smt2": "sat",
     "arithmetic/atmosphere_reduced_reduced_reduced.smt2": "unsat",
     "arithmetic/atmosphere_reduced_reduced.smt2": "unsat",
     "arithmetic/atmosphere_reduced.smt2": "unsat",
