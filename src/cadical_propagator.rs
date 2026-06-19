@@ -12,7 +12,7 @@ use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::log::is_important;
-use crate::proof::proof_tracer::SMTProofTracker;
+use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::stats::SolverStats;
@@ -37,13 +37,13 @@ fn keep_backtracking(
     last_elem_level > level // note that backtracking is >=
 }
 
-/// Our implemetation of a Cadical Propagator
+/// Our implementation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
     pub egraph: &'a mut Egraph,
     pub disequalities: RefCell<Vec<Vec<i32>>>, // might be paying a bit of overhead for RefCell
     pub fixed_literals: DeterministicHashSet<i32>,
-    pub proof_tracker: Rc<RefCell<SMTProofTracker>>,
+    pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
     pub solver: *mut CaDiCal,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
@@ -51,11 +51,9 @@ pub struct CustomExternalPropagator<'a> {
 }
 
 impl<'a> CustomExternalPropagator<'a> {
-    pub fn add_lit_to_proof_tracker(&mut self, lit: i32) {
+    pub fn add_lit_to_proof_tracer(&mut self, lit: i32) {
         let lit = lit.abs(); // only add the positive version
-        if self.proof_tracker.borrow().terms_list.contains_key(&lit)
-        // || self.proof_tracker.borrow().terms_list.contains_key(&-lit)
-        {
+        if self.proof_tracer.borrow().is_lit_registered(lit) {
             debug_println!(
                 19,
                 0,
@@ -73,16 +71,14 @@ impl<'a> CustomExternalPropagator<'a> {
 
         if let Some(id) = self.egraph.cnf_cache.var_map_reverse.get(&lit) {
             let term = self.egraph.get_term(*id);
-            self.proof_tracker
+            self.proof_tracer
                 .borrow_mut()
-                .terms_list
-                .insert(lit, (*id, term, true));
+                .register_term(lit, &term, true);
         } else if let Some(id) = self.egraph.cnf_cache.var_map_reverse.get(&-lit) {
             let term = self.egraph.get_term(*id);
-            self.proof_tracker
+            self.proof_tracer
                 .borrow_mut()
-                .terms_list
-                .insert(-lit, (*id, term, false));
+                .register_term(-lit, &term, false);
         } else {
             panic!("Literal {lit} does not occur positively or negatively in the terms list");
         }
@@ -137,7 +133,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 continue;
             }
 
-            self.add_lit_to_proof_tracker(*lit); // adding the literal to the proof_tracker
+            self.add_lit_to_proof_tracer(*lit);
 
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.egraph, self.decision_level, false, false, None);
@@ -187,7 +183,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     );
                     debug_println!(11, 1, "This corresponds to ");
                     for lit in shrunk_constraint.iter() {
-                        self.add_lit_to_proof_tracker(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
                         self.add_observed_variable(*lit);
                         debug_println!(11, 1, "  {}", self.egraph.get_term_from_lit(*lit));
                     }
@@ -203,15 +199,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         self.disequalities.borrow()
                     );
 
-                    // self.theory_lemmas.borrow_mut().push((shrunk_constraint.clone(), proof_steps));
-
-                    // Add theory clause to proof tracker
-                    // note that this is not necessary anymore
+                    // CC TODO: Are these congruence closure/EUF atoms? Comment just below this one suggests so.
+                    self.proof_tracer
+                        .borrow_mut()
+                        .add_theory_clause(&shrunk_constraint, Theory::Background);
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
-                    // self.proof_tracker
-                    //     .borrow_mut()
-                    //     .add_theory_clause(shrunk_constraint.clone(), theory_reason);
 
                     self.disequalities.borrow_mut().push(shrunk_constraint);
                     debug_println!(
@@ -501,7 +494,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             for clause in term_cnf {
                                 for lit in &clause.0 {
                                     self.add_observed_variable(*lit);
-                                    self.add_lit_to_proof_tracker(*lit);
+                                    self.add_lit_to_proof_tracer(*lit);
                                 }
                                 self.disequalities.borrow_mut().push(clause.0.clone());
                             }
@@ -525,7 +518,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 //         for clause in term_cnf {
                 //             for lit in &clause.0 {
                 //                 self.add_observed_variable(*lit);
-                //                 self.add_lit_to_proof_tracker(*lit);
+                //                 self.add_lit_to_proof_tracer(*lit);
                 //             }
                 //             self.disequalities.borrow_mut().push(clause.0.clone());
                 //         }
@@ -551,7 +544,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         //         for clause in term_cnf {
         //             for lit in &clause.0 {
         //                 self.add_observed_variable(*lit);
-        //                 self.add_lit_to_proof_tracker(*lit);
+        //                 self.add_lit_to_proof_tracer(*lit);
         //             }
         //             self.disequalities.borrow_mut().push(clause.0.clone());
         //         }
@@ -565,7 +558,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(11, 0, "Starting quantifier instantiations");
         let quantifier_instantiations = instantiate_quantifiers(
             self.egraph,
-            &self.proof_tracker,
+            &self.proof_tracer,
             &self.assignments,
             self.decision_level,
         );
@@ -591,7 +584,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     // , skolemized
                     for lit in clause {
                         self.add_observed_variable(*lit);
-                        self.add_lit_to_proof_tracker(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
                     }
 
                     // TODO: since I am adding literals, I might have to add them as observed literals
@@ -601,7 +594,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 Skolemization { clause } => {
                     for lit in clause {
                         self.add_observed_variable(*lit);
-                        self.add_lit_to_proof_tracker(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
                     }
 
                     self.disequalities.borrow_mut().push(clause.clone());
@@ -676,7 +669,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         };
         drop(v);
         if literal != 0 {
-            self.add_lit_to_proof_tracker(literal);
+            self.add_lit_to_proof_tracer(literal);
         }
         if let Some(term) = self.egraph.get_term_from_lit_safe(literal) {
             debug_println!(

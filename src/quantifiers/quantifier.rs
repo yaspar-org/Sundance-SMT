@@ -6,11 +6,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::cnf::CNFConversion;
+use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::datastructures::Polarity;
 use crate::egraphs::egraph::Egraph;
 use crate::preprocess::check_for_function_bool;
-use crate::proof::proof_tracer::SMTProofTracker;
+use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
@@ -29,29 +29,33 @@ pub enum QuantifierInstance {
 /// Returns a list of quantifier instantiation given the assignment and current state of the egraph
 ///  
 /// TODO: level is only used for printing, can get rid of it later
-/// (could use it for actiavte_bits, but right now we are activating everything at level 0)
+/// (could use it for activate_bits, but right now we are activating everything at level 0)
 pub fn instantiate_quantifiers(
     egraph: &mut Egraph,
-    proof_tracker: &Rc<RefCell<SMTProofTracker>>,
+    proof_tracer: &Rc<RefCell<SMTProofTracer>>,
     assignments: &Vec<i32>,
     level: usize,
 ) -> Vec<QuantifierInstance> {
+    debug_println!(24, 0, "Starting a matching round");
     let quantifiers = &egraph.quantifiers.clone();
     let mut instantiations = vec![];
-    debug_println!(24, 0, "Starting a matching round");
-    for quantifier in quantifiers {
+    let mut skolemized_quantifier_idxs = vec![];
+
+    // We `enumerate()` so we can update quantifiers[i].skolemized after the loop
+    for (i, quantifier) in quantifiers.iter().enumerate() {
         debug_println!(
             19,
             0,
             "We have the quantifier {}",
             egraph.get_term(quantifier.id)
         );
+
         // check if the quantifier is assigned
         let quantifier_literal = egraph.get_lit_from_u64(quantifier.id);
         assert!(quantifier_literal != 0); // todo: note I think this should actually always be positive but not sure
         let quantifier_assignment = assignments[quantifier_literal.unsigned_abs() as usize];
 
-        // if the quantifier is unsassigned, we can skip it
+        // if the quantifier is unassigned, we can skip it
         if quantifier_assignment == 0
         // || (quantifier_assignment > 0 && quantifier_literal < 0)
         // || (quantifier_assignment < 0 && quantifier_literal > 0)
@@ -69,17 +73,14 @@ pub fn instantiate_quantifiers(
             continue;
         }
 
-        // if an odd number of these is true -> XOR true -> skolemize
-        // if an even number of these is true -> XOR false -> instantiate
-        let quantifier_polarity = (quantifier_assignment > 0)
-            ^ (quantifier_literal > 0)
-            ^ (quantifier.polarity == Polarity::Existential);
+        // if an odd number of these is true (i.e., XOR true) -> skolemize
+        // if an even number of these is true (i.e., XOR false) -> instantiate
+        let quantifier_is_exists = quantifier.polarity == Polarity::Existential;
+        let quantifier_polarity =
+            (quantifier_assignment > 0) ^ (quantifier_literal > 0) ^ quantifier_is_exists;
 
-        // if the quantifier in a negative polarity or we doin g ddsmt optimizations, and we haven't skolemized it yet, then we skolemize it
-        // todo: replace egraph.added_skolemizations. with the skolemized flag in the quantifier
-        if (quantifier_polarity || egraph.eager_skolem)
-            && !egraph.added_skolemizations.contains(&quantifier.id)
-        {
+        // if the quantifier has positive polarity or we are doing ddsmt optimizations, and we haven't skolemized it yet, then we skolemize it
+        if (quantifier_polarity || egraph.eager_skolem) && !quantifier.skolemized {
             debug_println!(
                 6,
                 0,
@@ -87,90 +88,98 @@ pub fn instantiate_quantifiers(
                 egraph.get_term(quantifier.id),
                 quantifier_literal,
                 quantifier_assignment,
-                assignments
+                assignments,
             );
 
+            // Record this `Quantifier`'s index, so we can update its `.skolemized` field at the end
+            skolemized_quantifier_idxs.push(i);
+
+            // Skolemize the term
             let term = egraph.get_term(quantifier.id);
-            // let negated_term =
-            //     if let Universal = quantifier.polarity {egraph.context.not(term)} else {term};
+            let (skolem, skolem_vars) = skolemize(&term, &mut egraph.context, quantifier_is_exists);
 
-            let polarity = quantifier.polarity != Polarity::Universal;
+            // Reduce the skolemized term, since Sundance doesn't simplify formulas under quantifiers during parsing
+            let reduced_skolem: Term = skolem.let_elim(&mut egraph.context);
+            let reduced_skolem = reduced_skolem.nnf(egraph);
+            let additional_constraints = check_for_function_bool(&reduced_skolem, egraph, true);
 
-            // todo: replace this with the skolemized flag in the quantifier
-            if egraph.added_skolemizations.contains(&quantifier.id) {
-                continue;
-            }
+            // Register the reduction with the egraph
+            egraph.insert_predecessor(&reduced_skolem, None, None, true, None);
 
-            let (skolemized_quantifier, skolem_vars) =
-                skolemize(&term, &mut egraph.context, polarity);
+            // Apply the Tseitin transformation to the reduced formula.
+            // NOTE: We must do this step *before* we add a Skolemization eDRAT proof step,
+            // since Sundance aggressively caches boolean sub-terms in its `CNFEnv` cache.
+            // We want Sundance to register those DIMACS literals before we specially
+            // request a new one for the un-reduced skolem term, just in case they match.
+            // (If they match, then `cnf_tseitin()` won't process any sub-terms, since
+            // the function otherwise has a cache hit.)
+            let clauses = reduced_skolem.cnf_tseitin(egraph);
 
-            egraph.added_skolemizations.insert(quantifier.id);
-
-            let skolemized_quantifier: Term = skolemized_quantifier.let_elim(&mut egraph.context);
-            // let (skolemized_quantifier, _) = skolemize(&skolemized_quantifier, egraph.context, &mut egraph.skolem_counter);
-            let skolemized_quantifier = skolemized_quantifier.nnf(egraph);
-            let additional_constraints =
-                check_for_function_bool(&skolemized_quantifier, egraph, true);
             debug_println!(19, 0, "we are skolemizing {}", term);
-            debug_println!(26, 0, "(assert {})", skolemized_quantifier);
+            debug_println!(26, 0, "(assert {})", reduced_skolem);
             debug_println!(
                 24,
                 8,
                 "from quantifier {} [{}]",
                 egraph.get_term(quantifier.id),
-                quantifier.id
+                quantifier.id,
             );
 
-            // note that from_quantifier is true here
-            egraph.insert_predecessor(&skolemized_quantifier, None, None, true, None);
-            let clauses = skolemized_quantifier.cnf_tseitin(egraph);
-
-            // learning (not \forall P(x)) => P(c)
-            // equivalent to \forall P(x) \/ P(c)
-            // if it comes from existential, it becomes (not \exists P(x)) \/ P(c)
-            let quantifier_literal = if quantifier.polarity == Polarity::Universal {
+            // Now we add proof clause(s) to the eDRAT proof to justify the Skolemization.
+            // Store the DIMACS literals we need beforehand.
+            let quantifier_dimacs_literal = if quantifier_is_exists {
                 quantifier_literal
             } else {
                 -quantifier_literal
             };
+            let reduced_skolem_literal = egraph.get_lit_from_term(&reduced_skolem);
+            let skolem_literal = if skolem.uid() != reduced_skolem.uid() {
+                // Note: This must happen *after* calling `reduced_skolem.cnf_tseitin()`
+                egraph.get_or_allocate_lit_for_term(&skolem)
+            } else {
+                0
+            };
 
-            let skolemized_term_literal = egraph.get_lit_from_term(&skolemized_quantifier);
+            proof_tracer
+                .borrow_mut()
+                .push_skolem_or_instantiation_derivation(
+                    quantifier_dimacs_literal,
+                    skolem_literal,
+                    &skolem,
+                    reduced_skolem_literal,
+                    &reduced_skolem,
+                    ProofStepType::Skolemization {
+                        parent_term: quantifier_literal,
+                        skolem_vars,
+                    },
+                );
 
-            let quantifier_implies_skolemization_clause =
-                vec![quantifier_literal, skolemized_term_literal];
-            proof_tracker.borrow_mut().add_skolem_clause(
-                quantifier_implies_skolemization_clause.clone(),
-                Some(skolem_vars.clone()),
-            );
-            // this is the only skolemization clause we need to assume in the proof. Everything else is just a theory literal
-            instantiations.push(QuantifierInstance::Skolemization {
-                clause: quantifier_implies_skolemization_clause,
-            });
+            // The SAT solver ultimately learns the Skolem as an implication
+            let skolem_imp = vec![-quantifier_dimacs_literal, reduced_skolem_literal];
+            instantiations.push(QuantifierInstance::Skolemization { clause: skolem_imp });
 
-            // todo: ideally, we want a whole term that is implied via skolemization and is assumed to be true and then everything else can still be checked
+            // Finally, clauses from the Tseitin transformation and from `additional_constraints`
+            // are implied by the reduced skolem formula.
+
+            // Lambda to add the skolem literal to the Tseitin/additional_constraints clauses
+            let mut add_clause = |mut clause: Vec<i32>, theory: Theory| {
+                if push_literal_if_not_tautology(&mut clause, -reduced_skolem_literal) {
+                    proof_tracer.borrow_mut().add_theory_clause(&clause, theory);
+                    instantiations.push(QuantifierInstance::Skolemization { clause })
+                }
+            };
+
             for clause in clauses {
-                let mut clause = clause.0;
-                clause.push(-skolemized_term_literal);
-
-                // only want the declaration on the first go around
-                // if first {
-                //     proof_tracker.borrow_mut().add_skolem_clause(clause.clone(), Some(skolem_vars.clone()));
-                //     first = false;
-                // } else {
-                //     proof_tracker.borrow_mut().add_skolem_clause(clause.clone(), None);
-                // }
-                instantiations.push(QuantifierInstance::Skolemization { clause })
+                add_clause(clause.0, Theory::Boolean);
             }
 
-            for mut clause in additional_constraints {
-                clause.push(-skolemized_term_literal);
-                // proof_tracker.borrow_mut().add_skolem_clause(clause.clone(), None);
-                instantiations.push(QuantifierInstance::Skolemization { clause })
+            // CC TODO: Differentiate between `ite` axioms and `datatype` axioms
+            for clause in additional_constraints {
+                add_clause(clause, Theory::Boolean);
             }
         }
 
         // if this was a skolemization case, we don't want to instantiate
-        //
         if quantifier_polarity {
             continue;
         }
@@ -265,9 +274,7 @@ pub fn instantiate_quantifiers(
                 // TODO: have egraph.added_instantiations as a string right now, really want to go back to u32
 
                 // if this came from a negated existential, we have to negate the term
-
-                // println!("original_t: {}", t);
-                let t = if quantifier.polarity == Polarity::Existential {
+                let t = if quantifier_is_exists {
                     egraph.context.not(t)
                 } else {
                     t
@@ -330,24 +337,45 @@ pub fn instantiate_quantifiers(
                     .map(|x| x.into_iter().collect::<Vec<_>>())
                     .collect();
 
-                let quantifier_literal = egraph.get_lit_from_u64(quantifier.id);
-
-                let quantifier_literal = if quantifier.polarity == Polarity::Universal {
+                let quantifier_dimacs_literal = if quantifier_is_exists {
                     -quantifier_literal
                 } else {
                     quantifier_literal
                 };
+                let nnf_term_literal = egraph.get_lit_from_term(&nnf_term);
+                let subst_literal = if t.uid() != nnf_term.uid() {
+                    // Reserve a fresh DIMACS literal for the un-reduced term.
+                    // Note: This must happen *after* calling `nnf_term.cnf_tseitin()`
+                    egraph.get_or_allocate_lit_for_term(&t)
+                } else {
+                    0
+                };
 
-                // basically the final clause from cnf is the top level term
-                // we want to say quantifier => top level term
-                let mut final_clause = clauses.pop().unwrap();
-                final_clause.push(quantifier_literal);
-                clauses.push(final_clause);
+                // Add the "quantifier implies instantiation" clause to the proof
+                proof_tracer
+                    .borrow_mut()
+                    .push_skolem_or_instantiation_derivation(
+                        quantifier_dimacs_literal,
+                        subst_literal,
+                        &t,
+                        nnf_term_literal,
+                        &nnf_term,
+                        ProofStepType::Instantiation,
+                    );
+
+                // Add proof steps witnessing the Tseitin transformation of `nnf_term`
+                proof_tracer
+                    .borrow_mut()
+                    .push_steps(&clauses, ProofStepType::TheoryClause(Theory::Boolean));
 
                 // the bug comes from the additional constraints
                 // basically the additional constraints are valid lits -> converted to valid u64, but may not be in the actual term mapping
                 // it should be added in insert_predecessor which calls get_or_insert which adds into terms_list
                 let additional_constraints = check_for_function_bool(&nnf_term, egraph, true);
+                proof_tracer.borrow_mut().push_steps(
+                    &additional_constraints,
+                    ProofStepType::TheoryClause(Theory::Background),
+                );
                 clauses.extend(additional_constraints);
 
                 // could activate bits here (the level should not be 0)
@@ -360,6 +388,12 @@ pub fn instantiate_quantifiers(
             }
         }
     }
+
+    // Now mark the quantifier indices as skolemized
+    for i in skolemized_quantifier_idxs {
+        egraph.quantifiers[i].skolemized = true;
+    }
+
     instantiations
 }
 

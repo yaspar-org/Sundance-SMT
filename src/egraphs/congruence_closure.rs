@@ -34,7 +34,7 @@ pub fn process_assignment(
     debug_println!(2, 0, "Processing literal {:} at level {}", lit, level);
     let sign = lit > 0;
 
-    // note this basically assumes the postive polarity is always in the map from i32->u64
+    // note this basically assumes the positive polarity is always in the map from i32->u64
     // this should be true based on how we do
     let term = egraph.get_term_from_lit(lit.abs());
     debug_println!(24, 1, "Term: {}", term);
@@ -1315,7 +1315,15 @@ fn union_process_assignment(
     let new_assignment = egraph.eq(egraph.get_term(x), egraph.get_term(y));
     // if there is a new assignment, we need to check if the equality term exists, if it does we need to work on that
     // otherwise we can just consider the union of these two terms
-    if let Some(new_assignment_lit) = egraph.cnf_cache.var_map.get(&new_assignment.uid()) {
+    // Skip terms that have a SAT literal but aren't in the e-graph (e.g. proof-only literals)
+    let new_uid = new_assignment.uid() as usize;
+    let in_egraph = new_uid < egraph.terms_list.len() && !egraph.terms_list[new_uid].is_none();
+    if let Some(new_assignment_lit) = egraph
+        .cnf_cache
+        .var_map
+        .get(&new_assignment.uid())
+        .filter(|_| in_egraph)
+    {
         // note we don't want reason to be the above thing because the explanation is still the same as teh explanation before
         let reason = proof_parent;
         debug_println!(

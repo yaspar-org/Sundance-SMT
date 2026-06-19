@@ -234,8 +234,6 @@ pub struct Egraph {
     pub false_term: u64,
     /// a list of quantifier instantiations indexed by the uid of the original quantifier (todo: why do we store a mapping from variable names to terms)
     pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<String, Term>>>,
-    /// this is a list of skolemized terms
-    pub added_skolemizations: DeterministicHashSet<u64>,
     /// keeps track of terms created by quantifier instantiation and their predecessors
     pub predecessors_created_by_quantifiers: DeterministicHashMap<u64, DeterministicHashSet<u64>>,
     /// keeps track of info about datatypes
@@ -288,7 +286,6 @@ impl Egraph {
             true_term: tru.uid(),
             false_term: fal.uid(),
             added_instantiations: HashMap::default(),
-            added_skolemizations: DeterministicHashSet::default(),
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
@@ -409,6 +406,35 @@ impl Egraph {
         );
         debug_println!(11, 0, "We have the var_map {:?}", self.cnf_cache.var_map);
         *self.cnf_cache.var_map.get(&num).unwrap()
+    }
+
+    pub fn get_lit_from_term_safe(&self, term: &Term) -> Option<i32> {
+        let num = term.uid();
+        debug_println!(
+            11,
+            0,
+            "We are in get_lit_from_term_safe with term {} and num {}",
+            term,
+            num
+        );
+        debug_println!(11, 0, "We have the var_map {:?}", self.cnf_cache.var_map);
+        self.cnf_cache.var_map.get(&num).copied()
+    }
+
+    /// Gets the literal assigned to the term, or allocates a fresh one
+    /// if one hasn't been assigned to it yet.
+    ///
+    /// Note: This function should almost certainly NOT be used.
+    /// Consider using `nnf()` or `cnf_tseitin()` instead.
+    ///
+    /// We implement this function rather than exposing the `cnf_env()`,
+    /// so we can access the `new_var_for_term()` function.
+    pub fn get_or_allocate_lit_for_term(&mut self, term: &Term) -> i32 {
+        if let Some(lit) = self.get_lit_from_term_safe(term) {
+            lit
+        } else {
+            self.cnf_env().new_var_for_term(term)
+        }
     }
 
     /// Adds basic information about term to egraph
