@@ -74,7 +74,7 @@ impl CNFEnv<'_> {
             self.cache.var_map.insert(uid, v);
             self.cache.var_map_reverse.insert(v, uid);
             v
-        }       
+        }
     }
 }
 
