@@ -176,7 +176,7 @@ impl SMTProofTracer {
         self.push_step(clause, ProofStepType::SATClause);
     }
 
-    pub fn delete_clause(&mut self, clause: &Vec<i32>) {
+    pub fn record_deletion(&mut self, clause: &Vec<i32>) {
         self.push_step(clause, ProofStepType::Deletion);
     }
 
@@ -309,8 +309,8 @@ impl SMTProofTracer {
             self.add_sat_clause(&imp);
 
             // Delete any clauses mentioning the un-reduced child
-            self.delete_clause(&child_imp);
-            self.delete_clause(&equiv_imp);
+            self.record_deletion(&child_imp);
+            self.record_deletion(&equiv_imp);
         }
     }
 
