@@ -216,7 +216,7 @@ pub struct Egraph {
     pub proof_forest: Vec<ProofForestEdge>, // u64 -> ProofForestEdge [t <- ]
     /// keeps track of a stack of "edges" to backtrack on
     pub proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u64, ProofForestEdge)>,
-    /// this is a map from terms (u64) -> (term in the same egraph, predecesssor of term in same egraph)
+    /// this is a map from terms (u64) -> (term in the same egraph, predecessor of term in same egraph)
     pub predecessors: Vec<FastDeterministicHashMap<u64, Predecessor>>, // u64 -> Vec<Predecessor> TODO: there might be a better way to do this
     /// number to keep track of the current hash
     pub predecessor_hash: u64,
@@ -785,7 +785,7 @@ impl Egraph {
                 inner_term: num,
             };
 
-            // this will not insert if something already exists. it should not matter for correctness, but should be slighlty more efficient
+            // this will not insert if something already exists. it should not matter for correctness, but should be slightly more efficient
             self.predecessors[num as usize]
                 .entry(parent_num)
                 .or_insert(predecessor);

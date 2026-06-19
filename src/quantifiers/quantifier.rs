@@ -317,7 +317,7 @@ pub fn instantiate_quantifiers(
 
                 // note we do this after nnf
                 // this might lead to weirdness when you have equality of booleans not being represented in egraph
-                // but it should be fine. This is necessary becasue we need to look up lits
+                // but it should be fine. This is necessary because we need to look up lits
                 // todo: also might be less efficient as well because we are losing structure from original formula in the egraph
                 egraph.insert_predecessor(&nnf_term, None, None, true, None);
 

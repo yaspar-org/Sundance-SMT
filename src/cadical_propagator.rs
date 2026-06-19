@@ -146,7 +146,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 negated_model_or_datatype_constraints_opt
             {
                 for constraint in negated_model_or_datatype_constraints {
-                    // todo: deleting this ordering thing -> just for debuggin
+                    // todo: deleting this ordering thing -> just for debugging
                     let mut constraint_ordered = constraint.clone();
                     constraint_ordered.sort();
                     debug_println!(
@@ -176,7 +176,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             already_considered.insert(lit);
                         }
                     }
-                    // todo: deleting this ordering thing -> just for debuggin
+                    // todo: deleting this ordering thing -> just for debugging
                     let mut shrunk_constraint_ordered = shrunk_constraint.clone();
                     shrunk_constraint_ordered.sort();
                     debug_println!(
