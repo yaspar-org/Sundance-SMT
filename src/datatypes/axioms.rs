@@ -85,7 +85,8 @@ pub fn find_datatype_axioms(
             .constructors
             .contains_key(f.id_str())
     {
-        let tester_clause = learn_tester_for_ctor_app(solver_state, term, f.id_str(), from_quantifier);
+        let tester_clause =
+            learn_tester_for_ctor_app(solver_state, term, f.id_str(), from_quantifier);
         vector.extend(tester_clause);
 
         let selector_ctor_clauses = learn_selector_ctor_clause(
@@ -372,7 +373,11 @@ fn learn_tester_for_ctor_app(
     );
     let tester_nnf = tester_app.nnf(solver_state);
     solver_state.insert_predecessor(&tester_nnf, None, None, from_quantifier);
-    tester_nnf.cnf_tseitin(solver_state).into_iter().map(|x| x.0).collect()
+    tester_nnf
+        .cnf_tseitin(solver_state)
+        .into_iter()
+        .map(|x| x.0)
+        .collect()
 }
 
 /// We are learning the clause /\_i=1^k f_i(f(t1, ... tk)) = t_i
