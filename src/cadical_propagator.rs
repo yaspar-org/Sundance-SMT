@@ -12,7 +12,7 @@ use crate::egraphs::datastructures::Predecessor;
 use crate::egraphs::egraph::Egraph;
 use crate::egraphs::proofforest::ProofForestEdge;
 use crate::log::is_important;
-use crate::proof::{SMTProofTracer,Theory};
+use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::stats::SolverStats;
@@ -53,8 +53,7 @@ pub struct CustomExternalPropagator<'a> {
 impl<'a> CustomExternalPropagator<'a> {
     pub fn add_lit_to_proof_tracer(&mut self, lit: i32) {
         let lit = lit.abs(); // only add the positive version
-        if self.proof_tracer.borrow().is_lit_registered(lit)
-        {
+        if self.proof_tracer.borrow().is_lit_registered(lit) {
             debug_println!(
                 19,
                 0,
@@ -201,7 +200,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     );
 
                     // CC TODO: Are these congruence closure/EUF atoms? Comment just below this one suggests so.
-                    self.proof_tracer.borrow_mut()
+                    self.proof_tracer
+                        .borrow_mut()
                         .add_theory_clause(&shrunk_constraint, Theory::Background);
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);

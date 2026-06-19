@@ -423,10 +423,10 @@ impl Egraph {
 
     /// Gets the literal assigned to the term, or allocates a fresh one
     /// if one hasn't been assigned to it yet.
-    /// 
+    ///
     /// Note: This function should almost certainly NOT be used.
     /// Consider using `nnf()` or `cnf_tseitin()` instead.
-    /// 
+    ///
     /// We implement this function rather than exposing the `cnf_env()`,
     /// so we can access the `new_var_for_term()` function.
     pub fn get_or_allocate_lit_for_term(&mut self, term: &Term) -> i32 {

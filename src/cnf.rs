@@ -62,7 +62,7 @@ impl CNFEnv<'_> {
     /// If the term has not yet received a literal in the `CNFCache`,
     /// allocates a fresh variable for it and stores it in the cache.
     /// The fresh variable is always positive, even if the term itself has a leading `Not`.
-    /// 
+    ///
     /// Note: Only for use by the eDRAT proof system.
     /// Consider simplifying your terms with `nnf()` or `cnf_tseitin()` instead.
     pub fn new_var_for_term(&mut self, term: &Term) -> i32 {
@@ -372,7 +372,7 @@ pub fn partition_nnfs(ts: Vec<Term>) -> (Vec<Term>, Vec<Term>) {
 
 /// Inserts the literal, if valid, and returns `true` if the literal was inserted.
 /// Otherwise, returns `false`.
-/// 
+///
 /// The literal is not inserted if it is already in the clause
 /// or if adding it would cause the clause to become a tautology.
 pub fn push_literal(clause: &mut Vec<i32>, literal: i32) -> bool {
@@ -387,7 +387,7 @@ pub fn push_literal(clause: &mut Vec<i32>, literal: i32) -> bool {
 
 /// Inserts the literal only if it isn't already present in the clause
 /// and if inserting it would not cause tautology.
-/// 
+///
 /// Returns `true` if literal is in the clause after the function returns.
 /// In other words, returns `true` if it was added or if it was already present.
 pub fn push_literal_if_not_tautology(clause: &mut Vec<i32>, literal: i32) -> bool {

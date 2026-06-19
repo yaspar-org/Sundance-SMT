@@ -6,7 +6,7 @@ use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::CustomExternalPropagator;
 use crate::debug_println;
 use crate::egraphs::egraph::Egraph;
-use crate::proof::{SMTProofTracer,Theory};
+use crate::proof::{SMTProofTracer, Theory};
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, Status, Terminator};
@@ -93,7 +93,12 @@ pub fn cdcl_decision_procedure(
 
     // adding this into disequalities instead so that it appears as a theory lemma
     for clause in &boolean_dt_constraints {
-        add_clause_to_solver_and_to_proof(clause, &mut solver, proof_tracer.clone(), Some(Theory::Datatypes));
+        add_clause_to_solver_and_to_proof(
+            clause,
+            &mut solver,
+            proof_tracer.clone(),
+            Some(Theory::Datatypes),
+        );
         for lit in clause {
             // kind've annoying that I have to do this, but I don't think there is a better way
             solver.add_observed_var(i32::abs(*lit));
@@ -134,7 +139,7 @@ pub fn cdcl_decision_procedure(
 /// Adds the clause to the eDRAT proof and gives it to the CaDiCaL solver.
 /// Notably, the clause is added to the proof *before* it is given to CaDiCaL.
 /// If `theory` is `None`, the clause is treated as an original CNF clause.
-/// 
+///
 /// During the development of eDRAT proof production in summer 2026,
 /// we found that calling `.clause6()` causes CaDiCaL to immediately process
 /// the clause. In some cases, CaDiCaL immediately deletes the clause
@@ -143,7 +148,12 @@ pub fn cdcl_decision_procedure(
 /// its callback in `proof_tracer.rs`. As a result, the eDRAT proof would try
 /// to delete a clause before it is introduced. This function adds the clause
 /// to the proof before it is given to CaDiCaL to avoid this scenario.
-fn add_clause_to_solver_and_to_proof(clause: &Vec<i32>, solver: &mut CaDiCal, proof_tracer: Rc<RefCell<SMTProofTracer>>, theory: Option<Theory>) {
+fn add_clause_to_solver_and_to_proof(
+    clause: &Vec<i32>,
+    solver: &mut CaDiCal,
+    proof_tracer: Rc<RefCell<SMTProofTracer>>,
+    theory: Option<Theory>,
+) {
     if let Some(theory) = theory {
         proof_tracer.borrow_mut().add_theory_clause(clause, theory);
     } else {

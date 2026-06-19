@@ -4,15 +4,13 @@
 //! Keeps track of the eDRAT proof
 //!
 use crate::debug_println;
-use crate::proof::{ProofStep,ProofStepType,Theory};
+use crate::proof::{ProofStep, ProofStepType, Theory};
 use core::panic;
 use std::cmp::Eq;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::Neg;
-use yaspar_ir::ast::{
-    ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, Term,
-};
+use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, Term};
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
 /// to generate an eDRAT proof.
@@ -157,7 +155,10 @@ impl SMTProofTracer {
 
     pub fn push_step(&mut self, clause: &Vec<i32>, typ: ProofStepType) {
         if !is_tautology(clause) {
-            self.proof_steps.push(ProofStep { clause: clause.clone(), typ })
+            self.proof_steps.push(ProofStep {
+                clause: clause.clone(),
+                typ,
+            })
         }
     }
 
@@ -201,19 +202,24 @@ impl SMTProofTracer {
     /// line in the proof, and may be referenced in later DIMACS-style clauses.
     pub fn register_term(&mut self, literal: i32, term: &Term, polarity: bool) {
         if self.get_lit_info(literal).is_none() {
-            self.terms_list.insert(literal, (term.uid(), term.clone(), polarity));
+            self.terms_list
+                .insert(literal, (term.uid(), term.clone(), polarity));
         }
     }
 
     /// Returns whether a term with the `literal` (or its negation) has been registered.
     pub fn is_lit_registered(&self, literal: i32) -> bool {
-        self.get_lit_info(literal).is_some()
-        || self.get_lit_info(-literal).is_some()
+        self.get_lit_info(literal).is_some() || self.get_lit_info(-literal).is_some()
     }
 
     /// Pushes literal definitions
     /// If one of the literals is not in terms list, then this clause is useless and we return false
-    fn introduce_literals(&self, literals_defined: &mut HashSet<i32>, clause: &Vec<i32>, out: &mut String) {
+    fn introduce_literals(
+        &self,
+        literals_defined: &mut HashSet<i32>,
+        clause: &Vec<i32>,
+        out: &mut String,
+    ) {
         let mut temp_output = String::new();
         for &lit in clause {
             debug_println!(12, 2, "Introducing the literal {}", lit);
@@ -248,13 +254,13 @@ impl SMTProofTracer {
 
     /// Adds one or several proof steps to the proof to witness the derivation
     /// of a Skolemization or an instantiation.
-    /// 
+    ///
     /// Supposing that `parent` is a top-level quantified formula (whether with
     /// a leading `Not` or not), then we can Skolemize/instantiate the
     /// parent in the eDRAT proof by: (1) introducing the instantiation as
     /// a new eDRAT literal, and (2) adding an implication (parent => child)
     /// to the proof. In CNF, this is written as (-p or c).
-    /// 
+    ///
     /// However, because Sundance assumes that all its terms are in NNF/CNF
     /// form, and because Sundance does not reduce terms under quantifiers
     /// during pre-processing, we end up with a situation where the
@@ -263,16 +269,19 @@ impl SMTProofTracer {
     /// Skolem/instantiation eDRAT proof lines should focus solely on
     /// the Skolemization/instantiation, and any formula reductions should
     /// be handled on different proof lines.
-    /// 
+    ///
     /// As a result, we carefully register the un-reduced child with only
     /// the eDRAT proof (although the caller must reserve a DIMACS literal
     /// for it beforehand), and then if the reduction differs from the
     /// un-reduced child, we derive the "e-graph implication" using modus ponens
     /// via "parent => child", "child => reduced child".
-    pub fn push_skolem_or_instantiation_derivation(&mut self,
+    pub fn push_skolem_or_instantiation_derivation(
+        &mut self,
         parent_literal: i32,
-        child_literal: i32, child: &Term,
-        reduced_literal: i32, reduced: &Term,
+        child_literal: i32,
+        child: &Term,
+        reduced_literal: i32,
+        reduced: &Term,
         typ: ProofStepType,
     ) {
         assert!(parent_literal != 0 && reduced_literal != 0);
@@ -315,7 +324,7 @@ impl SMTProofTracer {
         for (sort, sort_def) in &self.sorts {
             output.push_str(&format_sort_declaration(sort, sort_def));
         }
-        
+
         let datatype_string = format_datatype_declaration(&self.sorts);
         output.push_str(&datatype_string);
 
@@ -333,15 +342,27 @@ impl SMTProofTracer {
                 | ProofStepType::Instantiation => {
                     self.introduce_literals(&mut literals_defined, clause, &mut output)
                 }
-                ProofStepType::Skolemization { parent_term, skolem_vars } => {
-                    debug_println!(29, 2, "The skolem vars for clause {:?}: {:?}", clause, skolem_vars);
+                ProofStepType::Skolemization {
+                    parent_term,
+                    skolem_vars,
+                } => {
+                    debug_println!(
+                        29,
+                        2,
+                        "The skolem vars for clause {:?}: {:?}",
+                        clause,
+                        skolem_vars
+                    );
                     for (i, var) in skolem_vars.iter().enumerate() {
                         // CC TODO think about negated parent term, if (negated forall)
-                        output.push_str(&format!("(declare-skolem {} {} {} {})\n", parent_term, i, var.0, var.1));
+                        output.push_str(&format!(
+                            "(declare-skolem {} {} {} {})\n",
+                            parent_term, i, var.0, var.1
+                        ));
                     }
                     self.introduce_literals(&mut literals_defined, clause, &mut output);
                 }
-                _ => { }
+                _ => {}
             }
 
             step.push_line_to(&mut output);

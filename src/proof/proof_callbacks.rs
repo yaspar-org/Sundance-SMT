@@ -2,14 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::debug_println;
+use crate::proof::proof_tracer::SMTProofTracer;
 use cadical_sys::ProofTracer;
-use crate::proof::proof_tracer::{SMTProofTracer};
 
 /// An implementation of the cadical-sys `ProofTracer` trait,
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
-    fn add_original_clause(&mut self, _id: u64, _redundant: bool, _clause: &[i32], _restored: bool) {
+    fn add_original_clause(
+        &mut self,
+        _id: u64,
+        _redundant: bool,
+        _clause: &[i32],
+        _restored: bool,
+    ) {
         // Previously, this function added original formula clauses and theory clauses to the proof here.
         // However, because this function could only see the clause itself and whether Sundance was
         // still processing original formula clauses, it couldn't determine

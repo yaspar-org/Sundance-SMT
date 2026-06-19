@@ -1318,7 +1318,12 @@ fn union_process_assignment(
     // Skip terms that have a SAT literal but aren't in the e-graph (e.g. proof-only literals)
     let new_uid = new_assignment.uid() as usize;
     let in_egraph = new_uid < egraph.terms_list.len() && !egraph.terms_list[new_uid].is_none();
-    if let Some(new_assignment_lit) = egraph.cnf_cache.var_map.get(&new_assignment.uid()).filter(|_| in_egraph) {
+    if let Some(new_assignment_lit) = egraph
+        .cnf_cache
+        .var_map
+        .get(&new_assignment.uid())
+        .filter(|_| in_egraph)
+    {
         // note we don't want reason to be the above thing because the explanation is still the same as teh explanation before
         let reason = proof_parent;
         debug_println!(
