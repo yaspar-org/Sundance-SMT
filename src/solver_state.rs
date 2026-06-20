@@ -28,7 +28,7 @@ use crate::solver_types::{
 };
 
 use crate::log::is_important;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use crate::utils::DeterministicHashMap;
 
 fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     match term.repr() {
@@ -116,9 +116,6 @@ pub struct SolverState {
     /// Tracks quantifier instantiations to avoid duplicates.
     pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<String, Term>>>,
 
-    /// Tracks skolemized quantifiers.
-    pub added_skolemizations: DeterministicHashSet<u64>,
-
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
 
@@ -165,7 +162,6 @@ impl SolverState {
             assertions: vec![],
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
-            added_skolemizations: DeterministicHashSet::default(),
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
@@ -230,6 +226,19 @@ impl SolverState {
     pub fn get_lit_from_term(&self, term: &Term) -> i32 {
         let num = term.uid();
         *self.cnf_cache.var_map.get(&num).unwrap()
+    }
+
+    pub fn get_lit_from_term_safe(&self, term: &Term) -> Option<i32> {
+        let num = term.uid();
+        self.cnf_cache.var_map.get(&num).copied()
+    }
+
+    pub fn get_or_allocate_lit_for_term(&mut self, term: &Term) -> i32 {
+        if let Some(lit) = self.get_lit_from_term_safe(term) {
+            lit
+        } else {
+            self.cnf_env().new_var_for_term(term)
+        }
     }
 
     /// Convert an equality between two egraph IDs to a SAT literal.

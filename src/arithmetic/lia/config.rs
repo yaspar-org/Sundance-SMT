@@ -19,10 +19,7 @@ impl Default for SolverConfig {
     fn default() -> Self {
         Self {
             tableau_kind: TableauKind::Dense,
-            // 2^17; high enough that regression tests pass as expected
-            // i.e. they are either SAT/UNSAT or TIMEOUT. If this is lowered
-            // significantly, some will return UNKNOWN instead.
-            max_lra_solve_calls: Some(131_072),
+            max_lra_solve_calls: None,
         }
     }
 }
