@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::datastructures::{CanonicalForm, CanonicalOp, DisequalTerm, Predecessor};
+use super::datastructures::{CanonicalOp, DisequalTerm, Predecessor};
 use super::proofforest::*;
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use super::unionfind::ProofTracker;
@@ -11,6 +11,13 @@ use crate::log::is_important;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
 use std::default::Default;
 use std::fmt;
+
+/// Key for the signature table: (operator, canonical children).
+type SigKey = (CanonicalOp, Vec<u32>);
+
+/// Trail entry for undoing sig_table modifications on backtrack.
+/// (level, key, previous_value) — None means the key was freshly inserted.
+type SigTrailEntry = (usize, SigKey, Option<u32>);
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -210,6 +217,11 @@ pub struct Egraph {
     predecessors_created_by_quantifiers: DeterministicHashMap<u32, DeterministicHashSet<u32>>,
     /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()])
     union_to_eclass: DeterministicHashSet<(u32, String, Vec<u32>)>,
+    /// Signature table: maps (op, [find(c1),...,find(cn)]) → term_id.
+    /// Maintained in parallel with the existing congruence detection for now.
+    sig_table: FastDeterministicHashMap<SigKey, u32>,
+    /// Trail for backtracking the sig_table.
+    sig_trail: Vec<SigTrailEntry>,
 }
 
 impl Default for Egraph {
@@ -238,6 +250,8 @@ impl Egraph {
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
             union_to_eclass: DeterministicHashSet::new(),
+            sig_table: FastDeterministicHashMap::default(),
+            sig_trail: Vec::new(),
         }
     }
 
@@ -345,9 +359,37 @@ impl Egraph {
             }
         }
 
-        // If dynamic, find and merge with existing congruent terms
+        // Insert into sig_table; if dynamic and sig already exists, merge via congruence.
+        if let Some(sig) = self.compute_signature(id) {
+            if let Some(&existing) = self.sig_table.get(&sig) {
+                if dynamic && self.find(existing) != self.find(id) {
+                    let id_children = children.to_vec();
+                    let existing_children = match &self.terms[existing as usize] {
+                        TermSlot::Term(e) => e.children.as_slice().to_vec(),
+                        _ => Vec::new(),
+                    };
+                    let pairs: Vec<(u32, u32)> = existing_children
+                        .into_iter()
+                        .zip(id_children)
+                        .collect();
+                    let proof_parent = ProofForestEdge::Congruence {
+                        size: 0,
+                        pairs,
+                        parent: 0,
+                        child: 0,
+                        disequalities: DeterministicHashMap::new(),
+                        level: self.decision_level,
+                        hash: self.predecessor_hash,
+                        children: DeterministicHashSet::new(),
+                    };
+                    self.cc_union(id, existing, proof_parent, self.decision_level);
+                }
+            } else {
+                self.sig_table_insert(sig, id, 0);
+            }
+        }
+
         if dynamic && !children.is_empty() {
-            self.find_and_union_to_eclass(id, func_key.clone(), children.to_vec());
             self.union_to_eclass
                 .insert((id, func_key, children.to_vec()));
         }
@@ -394,53 +436,6 @@ impl Egraph {
         id
     }
 
-    /// If any predecessors of the first subterm are congruent to term_num
-    /// (same function, all subterms equal), union them.
-    fn find_and_union_to_eclass(&mut self, term_num: u32, func: String, subterms: Vec<u32>) {
-        let subterm_num = subterms[0];
-        let subterm_root = self.find(subterm_num);
-
-        let subterm_root_predecessor = &self.predecessors[subterm_root as usize].clone();
-
-        for (pred_key, pred) in subterm_root_predecessor {
-            if !valid_hash(pred.hash, pred.level, &self.predecessor_level) {
-                self.predecessors[subterm_root as usize].remove(pred_key);
-                continue;
-            }
-            let pred_entry = match &self.terms[*pred_key as usize] {
-                TermSlot::Term(e) => e,
-                _ => continue,
-            };
-            let pred_func = pred_entry.op.to_function_map_key();
-            let pred_children = pred_entry.children.as_slice();
-            if func == pred_func && pred_children.len() == subterms.len() {
-                let mut equal = true;
-                let mut congruence_pairs = vec![];
-                for (pred_subterm_uid, subterm) in pred_children.iter().zip(subterms.iter()) {
-                    let (pred_subterm_uid, subterm_uid) = (*pred_subterm_uid, *subterm);
-                    let (subterm_equal, _, _) = self.check_equal(pred_subterm_uid, subterm_uid);
-                    if !subterm_equal {
-                        equal = false;
-                        break;
-                    }
-                    congruence_pairs.push((pred_subterm_uid, subterm_uid));
-                }
-                if equal {
-                    let equality = ProofForestEdge::Congruence {
-                        pairs: congruence_pairs,
-                        size: 0,
-                        parent: term_num,
-                        child: *pred_key,
-                        disequalities: DeterministicHashMap::new(),
-                        level: self.decision_level,
-                        hash: self.predecessor_hash,
-                        children: DeterministicHashSet::new(),
-                    };
-                    self.cc_union(term_num, *pred_key, equality, self.decision_level);
-                }
-            }
-        }
-    }
 
     fn find(&self, x: u32) -> u32 {
         let p: &ProofForestEdge = &self.proof_forest[x as usize];
@@ -485,146 +480,6 @@ impl Egraph {
         }
     }
 
-    // checks if x and y are equal in union find datastructure
-    // if they are equal, returns the largest level in both their paths to a
-    // common ancestor and the corresponding hash
-    fn check_equal(&self, x: u32, y: u32) -> (bool, usize, u32) {
-        let mut x_parent = x;
-        let (mut highest_level_x, mut highest_hash_x) = (0, 0);
-        let mut x_stack = vec![x];
-        while x_parent != y {
-            match self.proof_forest[x_parent as usize] {
-                ProofForestEdge::Root { .. } => break,
-                ProofForestEdge::Congruence {
-                    parent: p,
-                    level,
-                    hash,
-                    ..
-                }
-                | ProofForestEdge::Equality {
-                    parent: p,
-                    level,
-                    hash,
-                    ..
-                } => {
-                    if level > highest_level_x {
-                        (highest_level_x, highest_hash_x) = (level, hash);
-                    }
-                    x_parent = p;
-                    x_stack.push(x_parent)
-                }
-            }
-        }
-
-        if x_parent == y {
-            return (true, highest_level_x, highest_hash_x);
-        };
-
-        let mut y_parent = y;
-        let (mut highest_level_y, mut highest_hash_y) = (0, 0);
-        let mut y_stack = vec![y];
-        while y_parent != x {
-            match self.proof_forest[y_parent as usize] {
-                ProofForestEdge::Root { .. } => break,
-                ProofForestEdge::Congruence {
-                    parent: p,
-                    level,
-                    hash,
-                    ..
-                }
-                | ProofForestEdge::Equality {
-                    parent: p,
-                    level,
-                    hash,
-                    ..
-                } => {
-                    if level > highest_level_y {
-                        (highest_level_y, highest_hash_y) = (level, hash);
-                    }
-                    y_parent = p;
-                    y_stack.push(y_parent)
-                }
-            }
-        }
-
-        if y_parent == x {
-            return (true, highest_level_y, highest_hash_y);
-        };
-
-        // if they are in the same tree need to recompute the root
-        // this is super gnarly -> make better
-        if y_parent == x_parent {
-            while x_stack.len() > 1
-                && y_stack.len() > 1
-                && x_stack[x_stack.len() - 2] == y_stack[y_stack.len() - 2]
-            {
-                assert!(x_stack[x_stack.len() - 1] == y_stack[y_stack.len() - 1]);
-                x_stack.pop();
-                y_stack.pop();
-            }
-
-            assert!(x_stack[x_stack.len() - 1] == y_stack[y_stack.len() - 1]);
-
-            let common_root = x_stack[x_stack.len() - 1];
-            let (mut highest_level, mut highest_hash) = (0, 0);
-
-            let mut x_parent = x;
-            while x_parent != common_root {
-                match self.proof_forest[x_parent as usize] {
-                    ProofForestEdge::Root { .. } => {
-                        panic!()
-                    }
-                    ProofForestEdge::Congruence {
-                        parent: p,
-                        level,
-                        hash,
-                        ..
-                    }
-                    | ProofForestEdge::Equality {
-                        parent: p,
-                        level,
-                        hash,
-                        ..
-                    } => {
-                        if level > highest_level {
-                            (highest_level, highest_hash) = (level, hash);
-                        }
-                        x_parent = p;
-                    }
-                }
-            }
-
-            let mut y_parent = y;
-            while y_parent != common_root {
-                match self.proof_forest[y_parent as usize] {
-                    ProofForestEdge::Root { .. } => {
-                        panic!()
-                    }
-                    ProofForestEdge::Congruence {
-                        parent: p,
-                        level,
-                        hash,
-                        ..
-                    }
-                    | ProofForestEdge::Equality {
-                        parent: p,
-                        level,
-                        hash,
-                        ..
-                    } => {
-                        if level > highest_level {
-                            (highest_level, highest_hash) = (level, hash);
-                        }
-                        y_parent = p;
-                    }
-                }
-            }
-
-            return (true, highest_level, highest_hash);
-        }
-
-        (false, 0, 0)
-    }
 
     /// Adds a disequality between t1 and t2 to the egraph
     fn add_disequality(&mut self, t1: u32, t2: u32, diseq_lit: i32, level: usize, hash: u32) {
@@ -728,30 +583,36 @@ impl Egraph {
         None
     }
 
-    /// Get the canonical form for some term
-    /// For example the canoncial form for f(x, y) is (f, root(x), root(y))  
-    /// TODO: I don't support canonical forms for non-app, non-eq terms, non-ite terms, but will have to do that eventually
-    fn get_canonical_form(&self, term_num: u32, _level: usize) -> Option<CanonicalForm> {
-        let entry = match &self.terms[term_num as usize] {
+    /// Compute the signature key for a term: (op, [find(c1), ..., find(cn)]).
+    /// Returns None for terms that don't participate in congruence (non-App/Eq/Ite ops, or opaque terms).
+    fn compute_signature(&self, term_id: u32) -> Option<SigKey> {
+        let entry = match &self.terms[term_id as usize] {
             TermSlot::Term(e) => e,
             _ => return None,
         };
-
-        let original_subterms = entry.children.as_slice().to_vec();
         let op = match &entry.op {
             Op::App(s) => CanonicalOp::App(s.to_string()),
             Op::Eq => CanonicalOp::Eq,
             Op::Ite => CanonicalOp::Ite,
             _ => return None,
         };
+        let canonical_children: Vec<u32> =
+            entry.children.as_slice().iter().map(|&c| self.find(c)).collect();
+        Some((op, canonical_children))
+    }
 
-        let canonical_subterms: Vec<u32> =
-            original_subterms.iter().map(|&t| self.find(t)).collect();
-        Some(CanonicalForm {
-            original_subterms,
-            op,
-            canonical_subterms,
-        })
+    /// Insert a term into the sig_table, recording a trail entry for backtracking.
+    fn sig_table_insert(&mut self, key: SigKey, term_id: u32, level: usize) {
+        let prev = self.sig_table.insert(key.clone(), term_id);
+        self.sig_trail.push((level, key, prev));
+    }
+
+    /// Remove a term from the sig_table (if it maps to expected_id), recording a trail entry.
+    fn sig_table_remove(&mut self, key: &SigKey, expected_id: u32, level: usize) {
+        if self.sig_table.get(key) == Some(&expected_id) {
+            self.sig_table.remove(key);
+            self.sig_trail.push((level, key.clone(), Some(expected_id)));
+        }
     }
 
     /// Adds a predecessor to a term (for example f(x) to x)
@@ -1065,6 +926,22 @@ impl Egraph {
 
         self.decision_level = level;
 
+        // Replay sig_trail in reverse to undo sig_table modifications at levels > target
+        while let Some(&(entry_level, _, _)) = self.sig_trail.last() {
+            if entry_level <= level {
+                break;
+            }
+            let (_, key, prev_value) = self.sig_trail.pop().unwrap();
+            match prev_value {
+                Some(old_term) => {
+                    self.sig_table.insert(key, old_term);
+                }
+                None => {
+                    self.sig_table.remove(&key);
+                }
+            }
+        }
+
         // Pop proof forest backtrack stack
         while !self.proof_forest_backtrack_stack.is_empty() {
             let last_level = self.proof_forest_backtrack_stack.last().unwrap().0;
@@ -1090,10 +967,40 @@ impl Egraph {
             }
         }
 
-        // Re-do union_to_eclass
+        // Re-do union_to_eclass via sig table probe
         let union_to_eclass_info = self.union_to_eclass.clone();
-        for (term, func, subterms) in union_to_eclass_info {
-            self.find_and_union_to_eclass(term, func, subterms);
+        for (term, _func, _subterms) in union_to_eclass_info {
+            if let Some(sig) = self.compute_signature(term) {
+                if let Some(&existing) = self.sig_table.get(&sig) {
+                    if self.find(existing) != self.find(term) {
+                        let term_children = match &self.terms[term as usize] {
+                            TermSlot::Term(e) => e.children.as_slice().to_vec(),
+                            _ => continue,
+                        };
+                        let existing_children = match &self.terms[existing as usize] {
+                            TermSlot::Term(e) => e.children.as_slice().to_vec(),
+                            _ => continue,
+                        };
+                        let pairs: Vec<(u32, u32)> = existing_children
+                            .into_iter()
+                            .zip(term_children)
+                            .collect();
+                        let proof_parent = ProofForestEdge::Congruence {
+                            size: 0,
+                            pairs,
+                            parent: 0,
+                            child: 0,
+                            disequalities: DeterministicHashMap::new(),
+                            level: self.decision_level,
+                            hash: self.predecessor_hash,
+                            children: DeterministicHashSet::new(),
+                        };
+                        self.cc_union(existing, term, proof_parent, self.decision_level);
+                    }
+                } else {
+                    self.sig_table.insert(sig, term);
+                }
+            }
         }
 
         // Clear at level 0
@@ -1101,6 +1008,7 @@ impl Egraph {
             self.predecessors_created_by_quantifiers = DeterministicHashMap::new();
             self.union_to_eclass = DeterministicHashSet::new();
             self.proof_forest_backtrack_stack = vec![];
+            self.sig_trail.clear();
         }
     }
 
@@ -1277,6 +1185,17 @@ impl Egraph {
             ));
         }
 
+        // Remove sig_table entries for y_root's predecessors BEFORE updating the UF.
+        // Their signatures currently use y_root as a child representative; after the UF
+        // update they'll need new entries with x_root instead.
+        let y_root_pred_keys: Vec<u32> =
+            self.predecessors[y_root as usize].keys().copied().collect();
+        for pred_id in &y_root_pred_keys {
+            if let Some(old_sig) = self.compute_signature(*pred_id) {
+                self.sig_table_remove(&old_sig, *pred_id, level);
+            }
+        }
+
         debug_println!(
             16,
             2,
@@ -1403,278 +1322,61 @@ impl Egraph {
             }
         }
 
-        self.union_predecessors(x_root, y_root, level)
-    }
-
-    /// Given u and v (roots of u_original and v_original), check the predecessors of
-    /// each of these and union them if they have become equal
-    ///
-    /// TODO: I probably actually don't want this to delete all of the predecessors of u because it will screw up backtracking
-    /// you only have to do it for predecessor terms that are roots of a congruent class
-    /// once you merge two predecessor states, then you don't need to look at it until you backtrack
-    ///
-    fn union_predecessors(&mut self, u: u32, v: u32, level: usize) -> EgraphResult<u32> {
-        debug_println!(
-            11,
-            1,
-            "Unioning predecessors of {} [{}, Predecessors: {}] and {} [{}, Predecessors: {}]",
-            self.display_term(u),
-            u,
-            format!(
-                "{:?}",
-                self.predecessors[u as usize]
-                    .keys()
-                    .map(|x| self.display_term(*x))
-                    .collect::<Vec<_>>()
-            ),
-            self.display_term(v),
-            v,
-            format!(
-                "{:?}",
-                self.predecessors[v as usize]
-                    .keys()
-                    .map(|x| self.display_term(*x))
-                    .collect::<Vec<_>>()
-            )
-        );
-
-        debug_assert!(u != v);
-        debug_assert!(self.find(u) == u);
-
-        let result = EgraphResult::ok();
-
-        // Move u's and v's predecessor maps out of the egraph so we can iterate
-        // without cloning. Both slots are restored before any re-entrant call
-        // (add_predecessor / union_process_assignment) can observe them.
-        let mut predecessors_u = std::mem::take(&mut self.predecessors[u as usize]);
-        let predecessors_v = std::mem::take(&mut self.predecessors[v as usize]);
-
-        let mut canonical_forms_u: FastDeterministicHashMap<_, Vec<(Vec<u32>, u32)>> =
-            FastDeterministicHashMap::default();
-
-        // Stale entries are dropped in-place via retain before iterating.
-        predecessors_u.retain(|_, p| {
-            let keep = valid_hash(p.hash, p.level, &self.predecessor_level);
-            if !keep {
-                debug_println!(
-                    11,
-                    2,
-                    "CANONICAL_FORMS_U: Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
-                    self.display_term(p.predecessor),
-                    self.display_term(u),
-                    self.display_term(p.inner_term),
-                    p.hash,
-                    p.level,
-                    self.predecessor_level[p.level]
-                );
-            }
-            keep
-        });
-
-        for (_pred_u_key, predecessor_u) in predecessors_u.iter() {
-            debug_println!(
-                11,
-                2,
-                "1.We are in union_predecessors trying to get term for {}",
-                self.display_term(predecessor_u.predecessor)
-            );
-
-            // checking if the ite leads to a contradiction
-            // if let Some(negated_model) =
-            //     union_process_ite(&egraph.get_term(predecessor_u.predecessor), egraph, level, from_quantifier)
-            // {
-            //      debug_println!(
-            //         4,
-            //         3,
-            //         "M. Contradiction found in union_predecessors, we have the following negated_model: {:?}",
-            //         negated_model
-            //     );
-            //     return Some(negated_model);
-            // }
-
-            if let Some(CanonicalForm {
-                original_subterms,
-                op,
-                canonical_subterms,
-            }) = self.get_canonical_form(predecessor_u.predecessor, level)
-            {
-                let canonical_form = (op, canonical_subterms);
-                debug_println!(
-                    11,
-                    4,
-                    "We are adding in the canonical_form {:?}",
-                    canonical_form
-                );
-                if let Some(forms) = canonical_forms_u.get_mut(&canonical_form) {
-                    forms.push((original_subterms, predecessor_u.predecessor))
-                } else {
-                    canonical_forms_u.insert(
-                        canonical_form,
-                        vec![(original_subterms, predecessor_u.predecessor)],
-                    );
-                }
-            }
-        }
-
-        debug_println!(
-            11,
-            4,
-            "2.We have the canonical_forms_u {:?}",
-            canonical_forms_u
-        );
-
-        // Restore u's slot before calling add_predecessor below, which writes to it.
-        self.predecessors[u as usize] = predecessors_u;
-
-        // basically the issue was that in `union_predecessors` when you create a `canonical_term_u`,
-        // you fix it, but then you compare to a for loop iterating through all terms in v and iteratively
-        // computing the canonical_term_v, but this could change as you are iterating through the loop
-        // so we want to precompute the canonical terms of v.
-        //
-        // Precompute: store (key, predecessor_id, canonical_form) per entry.
-        // No Predecessor clone — just the scalar `predecessor` field needed downstream.
-        let mut predecessor_v_canonical_forms: Vec<(u32, u32, Option<CanonicalForm>)> =
-            Vec::with_capacity(predecessors_v.len());
-        for (pred_v_key, predecessor_v) in predecessors_v.iter() {
-            let canonical_form = self.get_canonical_form(predecessor_v.predecessor, level);
-            predecessor_v_canonical_forms.push((
-                *pred_v_key,
-                predecessor_v.predecessor,
-                canonical_form,
-            ));
-        }
-
-        // moving predecessors from v to u
-        for (pred_key, pred_val) in predecessors_v.iter() {
-            debug_println!(
-                11,
-                0,
-                "We are are adding predecessor {} (of  {}) to {} [level: {}, hash: {}]",
-                self.display_term(*pred_key),
-                self.display_term(pred_val.inner_term),
-                self.display_term(u),
-                level,
-                self.predecessor_hash
-            );
+        // Phase 3: Reinsert y_root's predecessors into sig_table with new canonical forms
+        // and immediately merge any congruent pairs found.
+        // Also move predecessors from y_root to x_root.
+        let predecessors_v = std::mem::take(&mut self.predecessors[y_root as usize]);
+        for (pred_key, pred_val) in &predecessors_v {
             let new_pred = Predecessor {
                 level,
                 hash: self.predecessor_hash,
                 predecessor: *pred_key,
                 inner_term: pred_val.inner_term,
             };
-            self.add_predecessor(u, *pred_key, new_pred);
+            self.add_predecessor(x_root, *pred_key, new_pred);
         }
+        self.predecessors[y_root as usize] = predecessors_v;
 
-        // Restore v before the consuming loop — union_process_assignment can
-        // re-enter and read/write self.predecessors[v].
-        self.predecessors[v as usize] = predecessors_v;
-
-        for (pred_v_key, pred_predecessor, canonical_form_v) in predecessor_v_canonical_forms {
-            // Look up the predecessor's validity from the restored v slot.
-            // Extract only scalar fields — no Predecessor clone.
-            let (pred_hash, pred_level, pred_inner_term) =
-                match self.predecessors[v as usize].get(&pred_v_key) {
-                    Some(p) => (p.hash, p.level, p.inner_term),
-                    None => continue, // removed by a prior iteration
-                };
-            if !valid_hash(pred_hash, pred_level, &self.predecessor_level) {
-                debug_println!(
-                    11,
-                    5,
-                    "Skipping predecessor {} of {} [original: {}] as it has hash {} at level {} and correct hash is {}",
-                    self.display_term(pred_predecessor),
-                    self.display_term(v),
-                    self.display_term(pred_inner_term),
-                    pred_hash,
-                    pred_level,
-                    self.predecessor_level[pred_level]
-                );
-                debug_println!(
-                    11,
-                    5,
-                    "The current level is {} and hash is {}",
-                    level,
-                    self.predecessor_hash
-                );
-                self.predecessors[v as usize].remove(&pred_v_key);
-                continue;
-            }
-            debug_println!(
-                11,
-                3,
-                "L. We are in union_predecessors trying to get term for {}",
-                self.display_term(pred_predecessor)
-            );
-
-            if let Some(CanonicalForm {
-                original_subterms,
-                op,
-                canonical_subterms,
-            }) = canonical_form_v
-            {
-                let canonical_form = (op, canonical_subterms);
-                debug_println!(
-                    11,
-                    6,
-                    "3. We are in union_predecessors for v and have canonical form {:?} for {}",
-                    canonical_form,
-                    self.display_term(pred_predecessor)
-                );
-                if let Some(u_forms) = canonical_forms_u.get(&canonical_form) {
-                    debug_println!(5, 0, "We have the following u_forms {:?}", u_forms);
-                    for (u_original_subterms, canonical_form_u) in u_forms {
-                        debug_println!(
-                            16,
-                            0,
-                            "We are actually merging the two predecessors {} and {}",
-                            self.display_term(*canonical_form_u),
-                            self.display_term(pred_predecessor)
-                        );
-                        if is_important(16) {
-                            debug_println!(16, 0, "We have u_original_subterms: ");
-                            for term in u_original_subterms {
-                                debug_println!(16, 4, "{}", self.display_term(*term));
-                            }
-                            debug_println!(16, 0, "We have original_subterms: ");
-                            for term in original_subterms.clone() {
-                                debug_println!(16, 4, "{}", self.display_term(term));
-                            }
-                        }
-
-                        let terms_pairwise = u_original_subterms
-                            .clone()
+        for &pred_id in &y_root_pred_keys {
+            if let Some(new_sig) = self.compute_signature(pred_id) {
+                if let Some(&existing) = self.sig_table.get(&new_sig) {
+                    if self.find(existing) != self.find(pred_id) {
+                        let pred_children = match &self.terms[pred_id as usize] {
+                            TermSlot::Term(e) => e.children.as_slice().to_vec(),
+                            _ => continue,
+                        };
+                        let existing_children = match &self.terms[existing as usize] {
+                            TermSlot::Term(e) => e.children.as_slice().to_vec(),
+                            _ => continue,
+                        };
+                        let pairs: Vec<(u32, u32)> = existing_children
                             .into_iter()
-                            .zip(original_subterms.clone())
-                            .collect::<Vec<(u32, u32)>>();
+                            .zip(pred_children)
+                            .collect();
                         let proof_parent = ProofForestEdge::Congruence {
                             size: 0,
-                            pairs: terms_pairwise,
+                            pairs,
                             parent: 0,
                             child: 0,
                             disequalities: DeterministicHashMap::new(),
                             level,
                             hash: self.predecessor_hash,
                             children: DeterministicHashSet::new(),
-                        }; // TODO: I can't have a child of -1 anymore, but I think doing it like this is correct
-
-                        let sub_result =
-                            self.cc_union(*canonical_form_u, pred_predecessor, proof_parent, level);
+                        };
+                        let sub_result = self.cc_union(existing, pred_id, proof_parent, level);
                         if sub_result.conflict.is_some() {
                             return sub_result;
                         }
                     }
+                } else {
+                    self.sig_table_insert(new_sig, pred_id, level);
                 }
             }
         }
-        debug_println!(
-            11,
-            0,
-            "[exiting union_pred] of {} and {} with None",
-            self.display_term(u),
-            self.display_term(v)
-        );
-        result
+
+        EgraphResult::ok()
     }
+
 
     /// Make vertex the root of its proof-forest tree.
     fn make_root(&mut self, vertex: u32, proof_parent: ProofForestEdge) {

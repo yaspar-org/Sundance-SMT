@@ -34,14 +34,6 @@ pub(super) enum CanonicalOp {
     Ite,
 }
 
-/// The canonical form of a term, produced by `Egraph::get_canonical_form`.
-#[derive(Debug, Clone)]
-pub(super) struct CanonicalForm {
-    pub(super) original_subterms: Vec<u32>,
-    pub(super) op: CanonicalOp,
-    pub(super) canonical_subterms: Vec<u32>,
-}
-
 /// Represents a predecessor of a term
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub(super) struct Predecessor {
