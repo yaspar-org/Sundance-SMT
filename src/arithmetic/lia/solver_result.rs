@@ -58,6 +58,11 @@ impl<T: Ord + Eq> Assignment<T> {
     pub fn iter(&self) -> std::collections::btree_map::Iter<'_, T, Rational> {
         self.0.iter()
     }
+
+    /// Insert or update a variable's value in the assignment
+    pub fn insert(&mut self, var: T, value: Rational) {
+        self.0.insert(var, value);
+    }
 }
 
 impl Assignment<Var> {

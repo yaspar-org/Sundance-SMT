@@ -3,10 +3,11 @@
 
 //! Context tracked during SMT to [crate::arithmetic::lia::linear_system::LinearSystem] conversion
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use dashu::Rational;
 
+use crate::arithmetic::lia::equality_elim::Substitution;
 use crate::arithmetic::lia::linear_system::Rel;
 use crate::arithmetic::lia::variables::{Var, VarType};
 use yaspar_ir::ast::{self, Sort};
@@ -65,6 +66,11 @@ pub struct ConvContext {
     relation_vars: Vec<Var>,
     /// All variables in the context, no matter how they are allocated
     all_variables: HashSet<Var>,
+    /// Substitutions applied during equality elimination, for model back-substitution
+    eliminated_substitutions: Vec<Substitution>,
+    /// Provenance: maps each relation's slack var to the set of equality slack vars
+    /// that have been substituted into it during equality elimination
+    provenance: HashMap<Var, BTreeSet<Var>>,
 }
 
 impl ConvContext {
@@ -79,6 +85,8 @@ impl ConvContext {
             relations: Vec::new(),
             relation_vars: Vec::new(),
             all_variables: HashSet::new(),
+            eliminated_substitutions: Vec::new(),
+            provenance: HashMap::new(),
         }
     }
 
@@ -109,13 +117,13 @@ impl ConvContext {
     where
         P: Fn(&Var) -> bool,
     {
-        // TODO: filter_vars: find a better solution to var/relation filtering
+        // TODO: lia::context::filter_vars: find a better solution to var/relation filtering
         let mut new_relations = Vec::new();
         let mut new_relation_vars = Vec::new();
         for (i, v) in self.relation_vars.iter().enumerate() {
             if pred(v) {
                 new_relation_vars.push(*v);
-                new_relations.push(self.relations[i].clone()); // TODO: don't clone
+                new_relations.push(self.relations[i].clone()); // TODO: lia::context::filter_vars: don't clone
             }
         }
         self.relations = new_relations;
@@ -256,6 +264,26 @@ impl ConvContext {
     /// Return the [ast::Term] <-> [Var] mappings
     pub fn get_term_var_maps(&self) -> (HashMap<ast::Term, Var>, HashMap<Var, ast::Term>) {
         (self.term_to_var.clone(), self.var_to_term.clone())
+    }
+
+    /// Record a substitution applied during equality elimination
+    pub fn record_substitution(&mut self, subst: Substitution) {
+        self.eliminated_substitutions.push(subst);
+    }
+
+    /// Get recorded substitutions for model back-substitution
+    pub fn get_substitutions(&self) -> &[Substitution] {
+        &self.eliminated_substitutions
+    }
+
+    /// Add provenance: record that `sources` were folded into the relation with slack var `target`
+    pub fn add_provenance(&mut self, target: Var, sources: &BTreeSet<Var>) {
+        self.provenance.entry(target).or_default().extend(sources);
+    }
+
+    /// Get the provenance (set of equality vars folded in) for a relation's slack var
+    pub fn get_provenance(&self, var: &Var) -> Option<&BTreeSet<Var>> {
+        self.provenance.get(var)
     }
 }
 

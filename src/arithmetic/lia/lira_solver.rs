@@ -399,6 +399,11 @@ impl LIRASolver {
             if let Some(max) = self.config.max_lra_solve_calls
                 && self.stats.num_lra_solve > max
             {
+                debug_println!(
+                    21,
+                    0,
+                    "lia::lira_solver: max LRASolver calls reached, returning UNKNOWN"
+                );
                 return Ok(SolverReturn::new(
                     SolverDecision::UNKNOWN,
                     self.stats.clone(),

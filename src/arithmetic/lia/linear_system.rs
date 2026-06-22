@@ -76,6 +76,16 @@ impl<T> Mon<T> {
             var,
         }
     }
+
+    /// Return the variable of this monomial
+    pub fn var(&self) -> Var {
+        self.var
+    }
+
+    /// Return a reference to the coefficient
+    pub fn coeff_ref(&self) -> &T {
+        &self.coeff
+    }
 }
 
 impl<T: Zero + Ord> Mon<T> {
@@ -371,6 +381,21 @@ impl<T> Rel<T> {
         }
         let combined_constant = rhs_constant - lhs_constant;
         Self::mk(rel_type, combined_terms, combined_constant)
+    }
+
+    /// Return the constraint type
+    pub fn constraint_type(&self) -> Constraint {
+        self.constraint_type
+    }
+
+    /// Check whether this is an equality constraint
+    pub fn is_equality(&self) -> bool {
+        self.constraint_type == Constraint::Eq
+    }
+
+    /// Replace the terms vector
+    pub fn set_terms(&mut self, terms: Vec<Mon<T>>) {
+        self.terms = terms;
     }
 
     /// Return a reference to the homogeneous terms.
