@@ -382,7 +382,7 @@ impl SolverState {
         // Reuse egraph ID if build_pattern already allocated one for this term
         if let Some(eid) = self.id_map.get_by_left(&num).copied() {
             self.terms_list[num as usize] = TermOption::Some(term.clone());
-            self.solver_walk_term(term, guard);
+            self.register_arithmetic_and_quantifier(term, guard);
             return eid;
         }
 
@@ -393,7 +393,7 @@ impl SolverState {
         if let Exists(_, _) | Forall(_, _) = term.repr() {
             let egraph_id = self.egraph.register_opaque();
             self.id_map.insert(num, egraph_id);
-            self.solver_walk_term(term, guard);
+            self.register_arithmetic_and_quantifier(term, guard);
             return egraph_id;
         }
 
@@ -410,7 +410,7 @@ impl SolverState {
             .egraph
             .register_term(op, &egraph_children, from_quantifier);
         self.id_map.insert(num, egraph_id);
-        self.solver_walk_term(term, guard);
+        self.register_arithmetic_and_quantifier(term, guard);
         egraph_id
     }
 
@@ -468,9 +468,9 @@ impl SolverState {
         }
     }
 
-    /// Walk the term tree for solver-level bookkeeping only.
+    /// Register a term for solver-level bookkeeping.
     /// Tracks arithmetic terms and registers quantifiers.
-    fn solver_walk_term(&mut self, term: &Term, guard: Option<u64>) {
+    fn register_arithmetic_and_quantifier(&mut self, term: &Term, guard: Option<u64>) {
         let num = term.uid();
 
         // Arithmetic term tracking
@@ -524,13 +524,6 @@ impl SolverState {
             } else {
                 panic!("Quantifier {} does not have an annotation", term);
             }
-            return;
-        }
-
-        // Recurse into subterms
-        let (_, subterms) = get_subterms(term);
-        for subterm in &subterms {
-            self.solver_walk_term(subterm, None);
         }
     }
 }
