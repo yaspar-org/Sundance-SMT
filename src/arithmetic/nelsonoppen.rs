@@ -1,34 +1,36 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::egraphs::egraph::Egraph;
+use crate::solver_state::SolverState;
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::FetchSort;
 use yaspar_ir::ast::{
     ObjectAllocatorExt as _, Repr, StrAllocator, Term, TermAllocator, alg::QualifiedIdentifier,
 };
 
-pub fn nelson_oppen_clause(literal: i32, egraph: &mut Egraph) -> Option<Term> {
-    let term = egraph.get_term_from_lit(-literal);
+pub fn nelson_oppen_clause(literal: i32, solver_state: &mut SolverState) -> Option<Term> {
+    let term = solver_state.get_term_from_lit(-literal);
     match term.repr() {
         Eq(x, y) => {
-            if x.get_sort(&mut egraph.context).to_string() == "Int"
-                && y.get_sort(&mut egraph.context).to_string() == "Int"
+            if x.get_sort(&mut solver_state.context).to_string() == "Int"
+                && y.get_sort(&mut solver_state.context).to_string() == "Int"
             {
-                let bool_sort = egraph.context.bool_sort();
+                let bool_sort = solver_state.context.bool_sort();
 
-                let lt = QualifiedIdentifier::simple(egraph.context.allocate_symbol("<"));
-                let lt_term =
-                    egraph
+                let lt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol("<"));
+                let lt_term = solver_state.context.app(
+                    lt,
+                    vec![x.clone(), y.clone()],
+                    Some(bool_sort.clone()),
+                );
+
+                let gt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol(">"));
+                let gt_term =
+                    solver_state
                         .context
-                        .app(lt, vec![x.clone(), y.clone()], Some(bool_sort.clone()));
+                        .app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
 
-                let gt = QualifiedIdentifier::simple(egraph.context.allocate_symbol(">"));
-                let gt_term = egraph
-                    .context
-                    .app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
-
-                let or = egraph.context.or(vec![lt_term, gt_term, term]);
+                let or = solver_state.context.or(vec![lt_term, gt_term, term]);
 
                 Some(or)
             } else {
@@ -79,31 +81,33 @@ pub fn nelson_oppen_clause(literal: i32, egraph: &mut Egraph) -> Option<Term> {
 // }
 
 // learn the clause x = y \/ x > y \/ x < y
-pub fn nelson_oppen_clause_pair(x: u64, y: u64, egraph: &mut Egraph) -> Option<Term> {
-    if egraph.nelson_oppen_ineq_literals.contains(&(x, y)) {
+pub fn nelson_oppen_clause_pair(x: u64, y: u64, solver_state: &mut SolverState) -> Option<Term> {
+    if solver_state.nelson_oppen_ineq_literals.contains(&(x, y)) {
         return None;
     }
-    egraph.nelson_oppen_ineq_literals.insert((x, y));
+    solver_state.nelson_oppen_ineq_literals.insert((x, y));
 
-    let bool_sort = egraph.context.bool_sort();
+    let bool_sort = solver_state.context.bool_sort();
 
-    let lt = QualifiedIdentifier::simple(egraph.context.allocate_symbol("<"));
-    let lt_term = egraph.context.app(
+    let lt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol("<"));
+    let lt_term = solver_state.context.app(
         lt,
-        vec![egraph.get_term(x), egraph.get_term(y)],
+        vec![solver_state.get_term(x), solver_state.get_term(y)],
         Some(bool_sort.clone()),
     );
 
-    let gt = QualifiedIdentifier::simple(egraph.context.allocate_symbol(">"));
-    let gt_term = egraph.context.app(
+    let gt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol(">"));
+    let gt_term = solver_state.context.app(
         gt,
-        vec![egraph.get_term(x), egraph.get_term(y)],
+        vec![solver_state.get_term(x), solver_state.get_term(y)],
         Some(bool_sort),
     );
 
-    let eq_term = egraph.context.eq(egraph.get_term(x), egraph.get_term(y));
+    let eq_term = solver_state
+        .context
+        .eq(solver_state.get_term(x), solver_state.get_term(y));
 
-    let or = egraph.context.or(vec![lt_term, gt_term, eq_term]);
+    let or = solver_state.context.or(vec![lt_term, gt_term, eq_term]);
 
     Some(or)
 }

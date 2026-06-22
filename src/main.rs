@@ -7,8 +7,8 @@ use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
-use sundance_smt::egraphs::egraph::Egraph;
 use sundance_smt::preprocess::check_for_function_bool;
+use sundance_smt::solver_state::SolverState;
 use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
@@ -72,51 +72,44 @@ fn main() -> Result<(), String> {
     assertions.push(true_term.clone());
     assertions.push(not_false_term);
 
-    let mut egraph = Egraph::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
+    let mut solver_state = SolverState::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
 
-    egraph.insert_predecessor(&false_term, None, None, false, None);
-    egraph.insert_predecessor(&true_term, None, None, false, None);
+    solver_state.register_bool_constants(&true_term, &false_term);
 
     // checking if we have any inductive datatypes -> if we do panic!
     // gets the info about our datatypes
-    if let Some(dt) = egraph.check_for_recursive_datatypes() {
+    if let Some(dt) = solver_state.check_for_recursive_datatypes() {
         return Err(format!(
             "Sundance does not support recursive datatype {dt}!"
         ));
     }
 
-    let global_names = egraph.context.all_defined_symbols();
+    let global_names = solver_state.context.all_defined_symbols();
     let mut nnf_terms = vec![];
     for assert in assertions {
         debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
 
         // inline the let bindings
         let expanded_term = assert
-            .let_elim(&mut egraph.context)
-            .gsubst(global_names.clone(), &mut egraph.context);
+            .let_elim(&mut solver_state.context)
+            .gsubst(global_names.clone(), &mut solver_state.context);
         debug_println!(10, 0, "Expanded form: {}", expanded_term);
 
         let skolemized_term = expanded_term;
 
-        let nnf_term = skolemized_term.nnf(&mut egraph);
-        debug_println!(
-            12,
-            0,
-            "NNF form: {} with hash {}",
-            nnf_term,
-            egraph.predecessor_hash
-        );
+        let nnf_term = skolemized_term.nnf(&mut solver_state);
+        debug_println!(12, 0, "NNF form: {}", nnf_term,);
 
         nnf_terms.push(nnf_term.clone());
 
-        egraph.insert_predecessor(&nnf_term, None, None, false, None);
+        solver_state.insert_predecessor(&nnf_term, None, None, false);
 
         debug_println!(4, 0, "We have the nnf term {}", nnf_term);
 
         // Convert to CNF (Conjunctive Normal Form) using Sundance implementation
         // using tseitin transformation because if we have (and true b), we
         // want (and true b) <-> true \land b, not just the forwards direction
-        let cnf_formula = nnf_term.cnf_tseitin(&mut egraph);
+        let cnf_formula = nnf_term.cnf_tseitin(&mut solver_state);
 
         debug_println!(4, 0, "We have the cnf formula {}", cnf_formula);
 
@@ -131,23 +124,29 @@ fn main() -> Result<(), String> {
     }
 
     // save the sorts and symbol table for the proof file
-    let sorts = egraph.context.expose_sorts().clone();
-    let symbol_table = egraph.context.expose_symbol_table().clone();
+    let sorts = solver_state.context.expose_sorts().clone();
+    let symbol_table = solver_state.context.expose_symbol_table().clone();
 
     debug_println!(
         6,
         0,
         "before BOOL: We have the var_map {:?}",
-        egraph.cnf_cache.var_map
+        solver_state.cnf_cache.var_map
     );
 
     let mut boolean_dt_constraints = vec![];
 
-    // have to do this as a separate loop because `check_for_function_bool` uses egraph.context
+    // have to do this as a separate loop because `check_for_function_bool` uses solver_state.context
     // somewhat inefficient especially since we have to clone nnf_term, but I couldn't come up with a
     // better way to do this
     for nnf_term in nnf_terms {
-        let additional_constraints = check_for_function_bool(&nnf_term, &mut egraph, false);
+        let additional_constraints = check_for_function_bool(
+            &nnf_term,
+            &mut solver_state,
+            false,
+            args.ddsmt,
+            args.lazy_dt,
+        );
         boolean_dt_constraints.extend(additional_constraints);
     }
 
@@ -172,15 +171,15 @@ fn main() -> Result<(), String> {
             .iter()
             .map(|x| x
                 .iter()
-                .map(|y| egraph.get_term_from_lit(*y))
+                .map(|y| solver_state.get_term_from_lit(*y))
                 .collect::<Vec<_>>())
             .collect::<Vec<_>>()
     );
 
-    let quantifiers = !egraph.quantifiers.is_empty();
+    let quantifiers = !solver_state.quantifiers.is_empty();
 
     let (return_value, stats) = cdcl_decision_procedure(
-        &mut egraph,
+        &mut solver_state,
         prop_skeleton,
         boolean_dt_constraints,
         args.proof,

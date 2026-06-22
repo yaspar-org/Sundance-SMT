@@ -5,8 +5,8 @@
 use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::CustomExternalPropagator;
 use crate::debug_println;
-use crate::egraphs::egraph::Egraph;
 use crate::proof::{SMTProofTracer, Theory};
+use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, Status, Terminator};
@@ -32,7 +32,7 @@ impl Terminator for DeadlineTerminator {
 /// todo: reduce the number of arguments
 #[allow(clippy::too_many_arguments)]
 pub fn cdcl_decision_procedure(
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
     clauses: Vec<Vec<i32>>,
     boolean_dt_constraints: Vec<Vec<i32>>,
     proof_file: Option<PathBuf>,
@@ -63,7 +63,7 @@ pub fn cdcl_decision_procedure(
 
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
-        egraph,
+        solver_state,
         disequalities: RefCell::new(vec![]),
         fixed_literals: DeterministicHashSet::default(),
         proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference

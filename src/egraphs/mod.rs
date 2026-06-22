@@ -1,9 +1,10 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod congruence_closure;
-pub(crate) mod datastructures;
-pub mod egraph;
-pub(crate) mod proofforest;
-pub mod unionfind;
-mod utils;
+pub mod basic;
+pub mod traits;
+
+// Public re-exports (stable interface)
+pub use basic::egraph::Egraph;
+pub use basic::repr::{self, EgraphId, Op, Pattern, PatternId};
+pub use traits::{Conflict, EgraphResult, EgraphTrait, Lit};

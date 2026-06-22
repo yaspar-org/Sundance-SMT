@@ -8,9 +8,8 @@ use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
 #[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
 use crate::debug_println;
-use crate::egraphs::congruence_closure::leastcommonancestor;
-use crate::egraphs::egraph::Egraph;
-use crate::egraphs::unionfind::ProofTracker;
+use crate::egraphs::EgraphTrait;
+use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use clap::ValueEnum;
 use dashu::Integer;
@@ -88,12 +87,12 @@ pub fn check_integer_constraints_satisfiable(
     arith_solver: &ArithSolver,
     terms: &[i32],
     // TODO: lialp: check that taking egraph mutable is okay
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
 ) -> ArithResult {
     match arith_solver {
-        ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, egraph),
+        ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, solver_state),
         #[cfg(feature = "z3-solver")]
-        ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, egraph),
+        ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, solver_state),
         ArithSolver::None => ArithResult::None,
     }
 }
@@ -107,7 +106,7 @@ pub enum FunctionType {
 
 #[derive(Eq, PartialEq, Debug, Clone, Ord, PartialOrd, Hash, Copy)]
 pub enum Coefficient {
-    Term(u64),
+    Term(u32),
     Constant,
 }
 
@@ -145,14 +144,14 @@ impl LinearConstraint {
 /// This is a simplified version that handles basic arithmetic constraints
 pub fn extract_linear_constraints(
     terms: &[i32],
-    egraph: &mut crate::egraphs::egraph::Egraph,
+    solver_state: &mut SolverState,
 ) -> (Vec<LinearConstraint>, Vec<i32>) {
     let mut constraints = Vec::new();
     let mut arithmetic_literals = vec![];
 
     for &lit in terms {
-        let (term_id, polarity) = egraph.get_u64_from_lit_with_polarity(lit);
-        if let Some(constraint) = extract_constraint_from_term(term_id, polarity, egraph) {
+        let (term_id, polarity) = solver_state.get_u64_from_lit_with_polarity(lit);
+        if let Some(constraint) = extract_constraint_from_term(term_id, polarity, solver_state) {
             debug_println!(21, 4, "We get the constraint {:?}", constraint);
             constraints.push(constraint);
             arithmetic_literals.push(-lit);
@@ -166,9 +165,9 @@ pub fn extract_linear_constraints(
 fn extract_constraint_from_term(
     term_id: u64,
     polarity: bool,
-    egraph: &mut crate::egraphs::egraph::Egraph,
+    solver_state: &mut SolverState,
 ) -> Option<LinearConstraint> {
-    let term = egraph.get_term(term_id);
+    let term = solver_state.get_term(term_id);
     debug_println!(
         21,
         6,
@@ -194,9 +193,9 @@ fn extract_constraint_from_term(
                 return None;
             }
             let (left_expr, additional_constraint_l) =
-                extract_linear_expression(args[0].uid(), egraph);
+                extract_linear_expression(args[0].uid(), solver_state);
             let (right_expr, additional_constraint_r) =
-                extract_linear_expression(args[1].uid(), egraph);
+                extract_linear_expression(args[1].uid(), solver_state);
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
@@ -252,9 +251,9 @@ fn extract_constraint_from_term(
                 return None;
             }
             let (left_expr, additional_constraint_l) =
-                extract_linear_expression(args[0].uid(), egraph);
+                extract_linear_expression(args[0].uid(), solver_state);
             let (right_expr, additional_constraint_r) =
-                extract_linear_expression(args[1].uid(), egraph);
+                extract_linear_expression(args[1].uid(), solver_state);
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
@@ -294,8 +293,10 @@ fn extract_constraint_from_term(
                 "[ARITH CHECK] Extracting linear constraint for EQ term {}",
                 term
             );
-            let (left_expr, additional_constraint_l) = extract_linear_expression(a.uid(), egraph);
-            let (right_expr, additional_constraint_r) = extract_linear_expression(b.uid(), egraph);
+            let (left_expr, additional_constraint_l) =
+                extract_linear_expression(a.uid(), solver_state);
+            let (right_expr, additional_constraint_r) =
+                extract_linear_expression(b.uid(), solver_state);
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
@@ -318,15 +319,15 @@ fn extract_constraint_from_term(
 /// TODO: simplify this, we might not need DeterministicHashMap representation for z3
 pub fn extract_linear_expression(
     term_id: u64,
-    egraph: &mut crate::egraphs::egraph::Egraph,
+    solver_state: &mut SolverState,
 ) -> (DeterministicHashMap<Coefficient, Integer>, Vec<i32>) {
     debug_println!(
         21,
         8,
         "[ARITH CHECK] Extracting linear expression for term {:?}",
-        egraph.get_term(term_id)
+        solver_state.get_term(term_id)
     );
-    let term = egraph.get_term(term_id);
+    let term = solver_state.get_term(term_id);
     let mut expr = DeterministicHashMap::new();
     expr.insert(Coefficient::Constant, IBig::from(0));
     let mut additional_constraints = vec![];
@@ -341,8 +342,11 @@ pub fn extract_linear_expression(
             }
         }
         Global(..) => {
-            // Handle variables
-            expr.insert(Coefficient::Term(term.uid()), IBig::from(1));
+            // TODO: consider whether we need egraph.find() here for correctness when variables are merged
+            expr.insert(
+                Coefficient::Term(solver_state.to_egraph_id(term_id)),
+                IBig::from(1),
+            );
         }
         App(identifier, args, _) => {
             // Handle arithmetic operations
@@ -351,7 +355,7 @@ pub fn extract_linear_expression(
                     // Addition: sum all arguments
                     for arg_id in args.iter() {
                         let (arg_expr, additional_const) =
-                            extract_linear_expression(arg_id.uid(), egraph);
+                            extract_linear_expression(arg_id.uid(), solver_state);
                         additional_constraints.extend(additional_const);
                         for (var, coeff) in arg_expr {
                             if var != Coefficient::Constant {
@@ -366,9 +370,9 @@ pub fn extract_linear_expression(
                     // Multiplication: handle simple cases like c * x or x * c
                     if args.len() == 2 {
                         let (left_expr, additional_const_l) =
-                            extract_linear_expression(args[0].uid(), egraph);
+                            extract_linear_expression(args[0].uid(), solver_state);
                         let (right_expr, additional_const_r) =
-                            extract_linear_expression(args[1].uid(), egraph);
+                            extract_linear_expression(args[1].uid(), solver_state);
 
                         additional_constraints.extend(additional_const_l);
                         additional_constraints.extend(additional_const_r);
@@ -395,7 +399,7 @@ pub fn extract_linear_expression(
                     if args.len() == 1 {
                         // Unary minus: -expr
                         let (arg_expr, additional_const) =
-                            extract_linear_expression(args[0].uid(), egraph);
+                            extract_linear_expression(args[0].uid(), solver_state);
                         additional_constraints.extend(additional_const);
                         for (var, coeff) in arg_expr {
                             expr.insert(var, -coeff);
@@ -403,9 +407,9 @@ pub fn extract_linear_expression(
                     } else if args.len() == 2 {
                         // Binary minus: left - right
                         let (left_expr, additional_const_l) =
-                            extract_linear_expression(args[0].uid(), egraph);
+                            extract_linear_expression(args[0].uid(), solver_state);
                         let (right_expr, additional_const_r) =
-                            extract_linear_expression(args[1].uid(), egraph);
+                            extract_linear_expression(args[1].uid(), solver_state);
                         additional_constraints.extend(additional_const_l);
                         additional_constraints.extend(additional_const_r);
                         // Add left expression
@@ -420,18 +424,17 @@ pub fn extract_linear_expression(
                     }
                 }
                 _ => {
-                    let root_id = egraph.find(term_id);
+                    let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
 
-                    let mut tracker = ProofTracker::new();
-                    if let Some(negated_model) =
-                        leastcommonancestor(root_id, term_id, egraph, &mut tracker)
+                    if let Some(negated_model) = solver_state
+                        .egraph
+                        .explain_equality(root_id, solver_state.to_egraph_id(term_id))
                     {
                         let model_terms: Vec<i32> = negated_model
                             .into_iter()
-                            .map(|x| -egraph.make_eq(x.0, x.1))
+                            .map(|x| -solver_state.make_eq(x.0, x.1))
                             .collect();
 
-                        // For other operations, we treat as uninterpreted expr
                         debug_println!(
                             21,
                             10,
@@ -446,16 +449,16 @@ pub fn extract_linear_expression(
             }
         }
         _ => {
-            let root_id = egraph.find(term_id);
-            let mut tracker = ProofTracker::new();
-            if let Some(negated_model) = leastcommonancestor(root_id, term_id, egraph, &mut tracker)
+            let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
+            if let Some(negated_model) = solver_state
+                .egraph
+                .explain_equality(root_id, solver_state.to_egraph_id(term_id))
             {
                 let model_terms: Vec<i32> = negated_model
                     .into_iter()
-                    .map(|x| -egraph.make_eq(x.0, x.1))
+                    .map(|x| -solver_state.make_eq(x.0, x.1))
                     .collect();
 
-                // For other operations, we treat as uninterpreted expr
                 debug_println!(
                     21,
                     10,

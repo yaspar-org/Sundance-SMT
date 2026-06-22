@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::arithmetic::lia::stats::Stats as LiaStats;
-use crate::egraphs::egraph::Egraph;
+use crate::egraphs::traits::EgraphTrait;
+use crate::solver_state::SolverState;
 use crate::{
     arithmetic::lp::{
         ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
         extract_linear_expression,
     },
     debug_println,
-    egraphs::proofforest::ProofForestEdge,
     utils::{DeterministicHashMap, DeterministicHashSet},
 };
 use dashu::integer::IBig;
@@ -20,8 +20,11 @@ use z3::{
 };
 
 /// Checks if a conjunction of integer constraints is satisfiable using Z3
-pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egraph) -> ArithResult {
-    let (constraints, arithmetic_literals) = extract_linear_constraints(terms, egraph);
+pub fn check_integer_constraints_satisfiable_z3(
+    terms: &[i32],
+    solver_state: &mut SolverState,
+) -> ArithResult {
+    let (constraints, arithmetic_literals) = extract_linear_constraints(terms, solver_state);
 
     if constraints.is_empty() && arithmetic_literals.is_empty() {
         return ArithResult::None; // No constraints mean trivially satisfiable
@@ -69,13 +72,13 @@ pub fn check_integer_constraints_satisfiable_z3(terms: &[i32], egraph: &mut Egra
     // also save the roots
     // todo: might be able to move this later
     let mut roots = vec![];
-    for term_id in egraph.arithmetic_terms.clone() {
-        // todo: see if I can avoid cloning
-        if let ProofForestEdge::Root { .. } = &egraph.proof_forest[term_id as usize] {
-            let left_expr = Int::new_const(format!("var_{}", term_id));
+    for term_id in solver_state.arithmetic_terms.clone() {
+        let egraph_id = solver_state.to_egraph_id(term_id);
+        if solver_state.egraph.find(egraph_id) == egraph_id {
+            let left_expr = Int::new_const(format!("var_{}", egraph_id));
 
             roots.push((term_id, left_expr.clone()));
-            let (right, literals) = extract_linear_expression(term_id, egraph);
+            let (right, literals) = extract_linear_expression(term_id, solver_state);
 
             // Build the right-hand side expression
             let mut right_expr = Int::from_i64(0);

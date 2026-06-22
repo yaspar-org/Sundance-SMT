@@ -14,8 +14,8 @@ use crate::arithmetic::lp::{
     extract_linear_expression,
 };
 use crate::debug_println;
-use crate::egraphs::egraph::Egraph;
-use crate::egraphs::proofforest::ProofForestEdge;
+use crate::egraphs::EgraphTrait;
+use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use dashu::{Integer, Rational};
 use std::collections::HashMap;
@@ -23,9 +23,9 @@ use std::collections::HashMap;
 pub fn check_integer_constraints_satisfiable_lia(
     terms: &[i32],
     // TODO: lialp: check that taking egraph mutable is okay
-    egraph: &mut Egraph,
+    solver_state: &mut SolverState,
 ) -> ArithResult {
-    let (constraints, arithmetic_literals) = extract_linear_constraints(terms, egraph);
+    let (constraints, arithmetic_literals) = extract_linear_constraints(terms, solver_state);
 
     if constraints.is_empty() && arithmetic_literals.is_empty() {
         return ArithResult::None; // No constraints mean trivially satisfiable
@@ -43,11 +43,12 @@ pub fn check_integer_constraints_satisfiable_lia(
     // it. This is used later for translating an "infeasible" outcome into an unsat core.
     let mut slack_to_lits: HashMap<Var, Vec<i32>> = HashMap::new();
 
-    for term_id in egraph.arithmetic_terms.clone() {
-        if let ProofForestEdge::Root { .. } = &egraph.proof_forest[term_id as usize] {
-            let (expr, additional_constraints) = extract_linear_expression(term_id, egraph);
-            let root_var = *var_map.entry(term_id).or_insert_with(|| {
-                ctx.allocate_var(&format!("!ext_var_{}", term_id), VarType::Int)
+    for term_id in solver_state.arithmetic_terms.clone() {
+        let egraph_id = solver_state.to_egraph_id(term_id);
+        if solver_state.egraph.find(egraph_id) == egraph_id {
+            let (expr, additional_constraints) = extract_linear_expression(term_id, solver_state);
+            let root_var = *var_map.entry(egraph_id).or_insert_with(|| {
+                ctx.allocate_var(&format!("!ext_var_{}", egraph_id), VarType::Int)
             });
             roots.push((term_id, root_var));
 
@@ -129,7 +130,7 @@ pub fn check_integer_constraints_satisfiable_lia(
 fn expr_to_monomials(
     expr: &DeterministicHashMap<Coefficient, Integer>,
     sign: Rational, // just one or negative one
-    var_map: &mut DeterministicHashMap<u64, Var>,
+    var_map: &mut DeterministicHashMap<u32, Var>,
     ctx: &mut ConvContext,
 ) -> (Vec<Mon<Rational>>, Rational) {
     // Each entry in expr is a (Coefficient, Integer) pair, but really the Integer part is what
