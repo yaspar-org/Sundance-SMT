@@ -364,24 +364,7 @@ impl Egraph {
         if let Some(sig) = self.compute_signature(id) {
             if let Some(&existing) = self.sig_table.get(&sig) {
                 if dynamic && self.find(existing) != self.find(id) {
-                    let id_children = children.to_vec();
-                    let existing_children = match &self.terms[existing as usize] {
-                        TermSlot::Term(e) => e.children.as_slice().to_vec(),
-                        _ => Vec::new(),
-                    };
-                    let pairs: Vec<(u32, u32)> =
-                        existing_children.into_iter().zip(id_children).collect();
-                    let proof_parent = ProofForestEdge::Congruence {
-                        size: 0,
-                        pairs,
-                        parent: 0,
-                        child: 0,
-                        disequalities: DeterministicHashMap::new(),
-                        level: self.decision_level,
-                        hash: self.predecessor_hash,
-                        children: DeterministicHashSet::new(),
-                    };
-                    self.cc_union(id, existing, proof_parent, self.decision_level);
+                    self.congruence_merge(existing, id, self.decision_level);
                 }
             } else {
                 self.sig_table_insert(sig, id, self.decision_level);
@@ -615,6 +598,31 @@ impl Egraph {
             self.sig_trail
                 .push((level, key.clone(), expected_id, false));
         }
+    }
+
+    /// Build a congruence proof edge and merge two terms that have the same signature.
+    /// Returns the result of cc_union (which may contain a conflict).
+    fn congruence_merge(&mut self, a: u32, b: u32, level: usize) -> EgraphResult<u32> {
+        let a_children = match &self.terms[a as usize] {
+            TermSlot::Term(e) => e.children.as_slice().to_vec(),
+            _ => Vec::new(),
+        };
+        let b_children = match &self.terms[b as usize] {
+            TermSlot::Term(e) => e.children.as_slice().to_vec(),
+            _ => Vec::new(),
+        };
+        let pairs: Vec<(u32, u32)> = a_children.into_iter().zip(b_children).collect();
+        let proof_parent = ProofForestEdge::Congruence {
+            size: 0,
+            pairs,
+            parent: 0,
+            child: 0,
+            disequalities: DeterministicHashMap::new(),
+            level,
+            hash: self.predecessor_hash,
+            children: DeterministicHashSet::new(),
+        };
+        self.cc_union(a, b, proof_parent, level)
     }
 
     /// Adds a predecessor to a term (for example f(x) to x)
@@ -975,30 +983,10 @@ impl Egraph {
             if let Some(sig) = self.compute_signature(term) {
                 if let Some(&existing) = self.sig_table.get(&sig) {
                     if self.find(existing) != self.find(term) {
-                        let term_children = match &self.terms[term as usize] {
-                            TermSlot::Term(e) => e.children.as_slice().to_vec(),
-                            _ => continue,
-                        };
-                        let existing_children = match &self.terms[existing as usize] {
-                            TermSlot::Term(e) => e.children.as_slice().to_vec(),
-                            _ => continue,
-                        };
-                        let pairs: Vec<(u32, u32)> =
-                            existing_children.into_iter().zip(term_children).collect();
-                        let proof_parent = ProofForestEdge::Congruence {
-                            size: 0,
-                            pairs,
-                            parent: 0,
-                            child: 0,
-                            disequalities: DeterministicHashMap::new(),
-                            level: self.decision_level,
-                            hash: self.predecessor_hash,
-                            children: DeterministicHashSet::new(),
-                        };
-                        self.cc_union(existing, term, proof_parent, self.decision_level);
+                        self.congruence_merge(existing, term, self.decision_level);
                     }
                 } else {
-                    self.sig_table.insert(sig, term);
+                    self.sig_table_insert(sig, term, self.decision_level);
                 }
             }
         }
@@ -1345,27 +1333,7 @@ impl Egraph {
             if let Some(new_sig) = self.compute_signature(pred_id) {
                 if let Some(&existing) = self.sig_table.get(&new_sig) {
                     if self.find(existing) != self.find(pred_id) {
-                        let pred_children = match &self.terms[pred_id as usize] {
-                            TermSlot::Term(e) => e.children.as_slice().to_vec(),
-                            _ => continue,
-                        };
-                        let existing_children = match &self.terms[existing as usize] {
-                            TermSlot::Term(e) => e.children.as_slice().to_vec(),
-                            _ => continue,
-                        };
-                        let pairs: Vec<(u32, u32)> =
-                            existing_children.into_iter().zip(pred_children).collect();
-                        let proof_parent = ProofForestEdge::Congruence {
-                            size: 0,
-                            pairs,
-                            parent: 0,
-                            child: 0,
-                            disequalities: DeterministicHashMap::new(),
-                            level,
-                            hash: self.predecessor_hash,
-                            children: DeterministicHashSet::new(),
-                        };
-                        let sub_result = self.cc_union(existing, pred_id, proof_parent, level);
+                        let sub_result = self.congruence_merge(existing, pred_id, level);
                         if sub_result.conflict.is_some() {
                             return sub_result;
                         }
