@@ -945,14 +945,12 @@ impl Egraph {
             if *entry_level <= level {
                 break;
             }
-            let (_entry_level, key, term_id, was_inserted) = self.sig_trail.pop().unwrap();
+            let (_, key, term_id, was_inserted) = self.sig_trail.pop().unwrap();
             if was_inserted {
-                // Term was inserted during forward execution → remove it
                 if self.sig_table.get(&key) == Some(&term_id) {
                     self.sig_table.remove(&key);
                 }
             } else {
-                // Term was removed during forward execution → re-add it
                 self.sig_table.insert(key, term_id);
             }
         }
