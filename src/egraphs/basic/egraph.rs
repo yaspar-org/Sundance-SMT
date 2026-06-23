@@ -13,7 +13,7 @@ use std::default::Default;
 use std::fmt;
 
 /// Key for the signature table: (operator, canonical children).
-type SigKey = (CanonicalOp, Vec<u32>);
+type SigKey = (CanonicalOp, Children);
 
 /// Trail entry for undoing sig_table modifications on backtrack.
 /// Stores the actual key used, so undo doesn't depend on UF state.
@@ -364,6 +364,7 @@ impl Egraph {
         if let Some(sig) = self.compute_signature(id) {
             if let Some(&existing) = self.sig_table.get(&sig) {
                 if dynamic && self.find(existing) != self.find(id) {
+                    // TODO: propagate conflict — requires register_term_internal to return EgraphResult
                     self.congruence_merge(existing, id, self.decision_level);
                 }
             } else {
@@ -582,7 +583,7 @@ impl Egraph {
             .iter()
             .map(|&c| self.find(c))
             .collect();
-        Some((op, canonical_children))
+        Some((op, Children::from_slice(&canonical_children)))
     }
 
     /// Insert a term into the sig_table, recording a trail entry for backtracking.
