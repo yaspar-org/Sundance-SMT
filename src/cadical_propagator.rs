@@ -366,7 +366,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 for clause in &new_clauses {
                     for lit in clause {
                         self.add_observed_variable(*lit);
-                        self.add_lit_to_proof_tracker(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
                     }
                 }
                 self.disequalities.borrow_mut().extend(new_clauses);
