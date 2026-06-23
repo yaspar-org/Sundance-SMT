@@ -16,9 +16,9 @@ use std::fmt;
 type SigKey = (CanonicalOp, Vec<u32>);
 
 /// Trail entry for undoing sig_table modifications on backtrack.
-/// (level, term_id, was_inserted) — true means term was inserted, false means removed.
-/// On backtrack, recompute the signature from the live UF state.
-type SigTrailEntry = (usize, u32, bool);
+/// Stores the actual key used, so undo doesn't depend on UF state.
+/// (level, key, term_id, was_inserted)
+type SigTrailEntry = (usize, SigKey, u32, bool);
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -369,28 +369,22 @@ impl Egraph {
                         TermSlot::Term(e) => e.children.as_slice().to_vec(),
                         _ => Vec::new(),
                     };
-                    let all_equal = id_children.iter().zip(existing_children.iter())
-                        .all(|(&a, &b)| self.find(a) == self.find(b));
-                    if all_equal {
-                        let pairs: Vec<(u32, u32)> = existing_children
-                            .into_iter()
-                            .zip(id_children)
-                            .collect();
-                        let proof_parent = ProofForestEdge::Congruence {
-                            size: 0,
-                            pairs,
-                            parent: 0,
-                            child: 0,
-                            disequalities: DeterministicHashMap::new(),
-                            level: self.decision_level,
-                            hash: self.predecessor_hash,
-                            children: DeterministicHashSet::new(),
-                        };
-                        self.cc_union(id, existing, proof_parent, self.decision_level);
-                    }
+                    let pairs: Vec<(u32, u32)> =
+                        existing_children.into_iter().zip(id_children).collect();
+                    let proof_parent = ProofForestEdge::Congruence {
+                        size: 0,
+                        pairs,
+                        parent: 0,
+                        child: 0,
+                        disequalities: DeterministicHashMap::new(),
+                        level: self.decision_level,
+                        hash: self.predecessor_hash,
+                        children: DeterministicHashSet::new(),
+                    };
+                    self.cc_union(id, existing, proof_parent, self.decision_level);
                 }
             } else {
-                self.sig_table_insert(sig, id, 0);
+                self.sig_table_insert(sig, id, self.decision_level);
             }
         }
 
@@ -441,7 +435,6 @@ impl Egraph {
         id
     }
 
-
     fn find(&self, x: u32) -> u32 {
         let p: &ProofForestEdge = &self.proof_forest[x as usize];
         match p {
@@ -484,7 +477,6 @@ impl Egraph {
             }
         }
     }
-
 
     /// Adds a disequality between t1 and t2 to the egraph
     fn add_disequality(&mut self, t1: u32, t2: u32, diseq_lit: i32, level: usize, hash: u32) {
@@ -601,22 +593,27 @@ impl Egraph {
             Op::Ite => CanonicalOp::Ite,
             _ => return None,
         };
-        let canonical_children: Vec<u32> =
-            entry.children.as_slice().iter().map(|&c| self.find(c)).collect();
+        let canonical_children: Vec<u32> = entry
+            .children
+            .as_slice()
+            .iter()
+            .map(|&c| self.find(c))
+            .collect();
         Some((op, canonical_children))
     }
 
     /// Insert a term into the sig_table, recording a trail entry for backtracking.
     fn sig_table_insert(&mut self, key: SigKey, term_id: u32, level: usize) {
-        self.sig_table.insert(key, term_id);
-        self.sig_trail.push((level, term_id, true));
+        self.sig_table.insert(key.clone(), term_id);
+        self.sig_trail.push((level, key, term_id, true));
     }
 
     /// Remove a term from the sig_table (if it maps to expected_id), recording a trail entry.
     fn sig_table_remove(&mut self, key: &SigKey, expected_id: u32, level: usize) {
         if self.sig_table.get(key) == Some(&expected_id) {
             self.sig_table.remove(key);
-            self.sig_trail.push((level, expected_id, false));
+            self.sig_trail
+                .push((level, key.clone(), expected_id, false));
         }
     }
 
@@ -943,22 +940,20 @@ impl Egraph {
         }
 
         // Replay sig_trail in reverse AFTER UF is restored.
-        // Recompute signatures from the live find() state.
-        while let Some(&(entry_level, _, _)) = self.sig_trail.last() {
-            if entry_level <= level {
+        // Use the stored key directly — recomputing from find() would give the wrong key.
+        while let Some((entry_level, _, _, _)) = self.sig_trail.last() {
+            if *entry_level <= level {
                 break;
             }
-            let (_, term_id, was_inserted) = self.sig_trail.pop().unwrap();
-            if let Some(sig) = self.compute_signature(term_id) {
-                if was_inserted {
-                    // Term was inserted during forward execution → remove it
-                    if self.sig_table.get(&sig) == Some(&term_id) {
-                        self.sig_table.remove(&sig);
-                    }
-                } else {
-                    // Term was removed during forward execution → re-add it
-                    self.sig_table.insert(sig, term_id);
+            let (_entry_level, key, term_id, was_inserted) = self.sig_trail.pop().unwrap();
+            if was_inserted {
+                // Term was inserted during forward execution → remove it
+                if self.sig_table.get(&key) == Some(&term_id) {
+                    self.sig_table.remove(&key);
                 }
+            } else {
+                // Term was removed during forward execution → re-add it
+                self.sig_table.insert(key, term_id);
             }
         }
 
@@ -990,16 +985,16 @@ impl Egraph {
                             TermSlot::Term(e) => e.children.as_slice().to_vec(),
                             _ => continue,
                         };
-                        let all_equal = term_children.iter().zip(existing_children.iter())
+                        let all_equal = term_children
+                            .iter()
+                            .zip(existing_children.iter())
                             .all(|(&a, &b)| self.find(a) == self.find(b));
                         if !all_equal {
                             self.sig_table.insert(sig, term);
                             continue;
                         }
-                        let pairs: Vec<(u32, u32)> = existing_children
-                            .into_iter()
-                            .zip(term_children)
-                            .collect();
+                        let pairs: Vec<(u32, u32)> =
+                            existing_children.into_iter().zip(term_children).collect();
                         let proof_parent = ProofForestEdge::Congruence {
                             size: 0,
                             pairs,
@@ -1368,16 +1363,16 @@ impl Egraph {
                             TermSlot::Term(e) => e.children.as_slice().to_vec(),
                             _ => continue,
                         };
-                        let all_equal = pred_children.iter().zip(existing_children.iter())
+                        let all_equal = pred_children
+                            .iter()
+                            .zip(existing_children.iter())
                             .all(|(&a, &b)| self.find(a) == self.find(b));
                         if !all_equal {
                             self.sig_table_insert(new_sig, pred_id, level);
                             continue;
                         }
-                        let pairs: Vec<(u32, u32)> = existing_children
-                            .into_iter()
-                            .zip(pred_children)
-                            .collect();
+                        let pairs: Vec<(u32, u32)> =
+                            existing_children.into_iter().zip(pred_children).collect();
                         let proof_parent = ProofForestEdge::Congruence {
                             size: 0,
                             pairs,
@@ -1401,7 +1396,6 @@ impl Egraph {
 
         EgraphResult::ok()
     }
-
 
     /// Make vertex the root of its proof-forest tree.
     fn make_root(&mut self, vertex: u32, proof_parent: ProofForestEdge) {
