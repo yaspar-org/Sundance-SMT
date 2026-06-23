@@ -436,7 +436,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     self.assignments.resize(self.assignments.len() * 2, 0);
                 }
                 if self.assignments[idx] == 0 {
-                    eprintln!("    cb_decide -> {}", lit);
                     return lit;
                 }
             }
