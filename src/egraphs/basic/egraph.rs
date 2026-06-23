@@ -985,14 +985,6 @@ impl Egraph {
                             TermSlot::Term(e) => e.children.as_slice().to_vec(),
                             _ => continue,
                         };
-                        let all_equal = term_children
-                            .iter()
-                            .zip(existing_children.iter())
-                            .all(|(&a, &b)| self.find(a) == self.find(b));
-                        if !all_equal {
-                            self.sig_table.insert(sig, term);
-                            continue;
-                        }
                         let pairs: Vec<(u32, u32)> =
                             existing_children.into_iter().zip(term_children).collect();
                         let proof_parent = ProofForestEdge::Congruence {
@@ -1363,14 +1355,6 @@ impl Egraph {
                             TermSlot::Term(e) => e.children.as_slice().to_vec(),
                             _ => continue,
                         };
-                        let all_equal = pred_children
-                            .iter()
-                            .zip(existing_children.iter())
-                            .all(|(&a, &b)| self.find(a) == self.find(b));
-                        if !all_equal {
-                            self.sig_table_insert(new_sig, pred_id, level);
-                            continue;
-                        }
                         let pairs: Vec<(u32, u32)> =
                             existing_children.into_iter().zip(pred_children).collect();
                         let proof_parent = ProofForestEdge::Congruence {
