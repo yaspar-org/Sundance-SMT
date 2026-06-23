@@ -16,8 +16,9 @@ use std::fmt;
 type SigKey = (CanonicalOp, Vec<u32>);
 
 /// Trail entry for undoing sig_table modifications on backtrack.
-/// (level, key, previous_value) — None means the key was freshly inserted.
-type SigTrailEntry = (usize, SigKey, Option<u32>);
+/// (level, term_id, was_inserted) — true means term was inserted, false means removed.
+/// On backtrack, recompute the signature from the live UF state.
+type SigTrailEntry = (usize, u32, bool);
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -368,21 +369,25 @@ impl Egraph {
                         TermSlot::Term(e) => e.children.as_slice().to_vec(),
                         _ => Vec::new(),
                     };
-                    let pairs: Vec<(u32, u32)> = existing_children
-                        .into_iter()
-                        .zip(id_children)
-                        .collect();
-                    let proof_parent = ProofForestEdge::Congruence {
-                        size: 0,
-                        pairs,
-                        parent: 0,
-                        child: 0,
-                        disequalities: DeterministicHashMap::new(),
-                        level: self.decision_level,
-                        hash: self.predecessor_hash,
-                        children: DeterministicHashSet::new(),
-                    };
-                    self.cc_union(id, existing, proof_parent, self.decision_level);
+                    let all_equal = id_children.iter().zip(existing_children.iter())
+                        .all(|(&a, &b)| self.find(a) == self.find(b));
+                    if all_equal {
+                        let pairs: Vec<(u32, u32)> = existing_children
+                            .into_iter()
+                            .zip(id_children)
+                            .collect();
+                        let proof_parent = ProofForestEdge::Congruence {
+                            size: 0,
+                            pairs,
+                            parent: 0,
+                            child: 0,
+                            disequalities: DeterministicHashMap::new(),
+                            level: self.decision_level,
+                            hash: self.predecessor_hash,
+                            children: DeterministicHashSet::new(),
+                        };
+                        self.cc_union(id, existing, proof_parent, self.decision_level);
+                    }
                 }
             } else {
                 self.sig_table_insert(sig, id, 0);
@@ -603,15 +608,15 @@ impl Egraph {
 
     /// Insert a term into the sig_table, recording a trail entry for backtracking.
     fn sig_table_insert(&mut self, key: SigKey, term_id: u32, level: usize) {
-        let prev = self.sig_table.insert(key.clone(), term_id);
-        self.sig_trail.push((level, key, prev));
+        self.sig_table.insert(key, term_id);
+        self.sig_trail.push((level, term_id, true));
     }
 
     /// Remove a term from the sig_table (if it maps to expected_id), recording a trail entry.
     fn sig_table_remove(&mut self, key: &SigKey, expected_id: u32, level: usize) {
         if self.sig_table.get(key) == Some(&expected_id) {
             self.sig_table.remove(key);
-            self.sig_trail.push((level, key.clone(), Some(expected_id)));
+            self.sig_trail.push((level, expected_id, false));
         }
     }
 
@@ -926,23 +931,7 @@ impl Egraph {
 
         self.decision_level = level;
 
-        // Replay sig_trail in reverse to undo sig_table modifications at levels > target
-        while let Some(&(entry_level, _, _)) = self.sig_trail.last() {
-            if entry_level <= level {
-                break;
-            }
-            let (_, key, prev_value) = self.sig_trail.pop().unwrap();
-            match prev_value {
-                Some(old_term) => {
-                    self.sig_table.insert(key, old_term);
-                }
-                None => {
-                    self.sig_table.remove(&key);
-                }
-            }
-        }
-
-        // Pop proof forest backtrack stack
+        // Pop proof forest backtrack stack (restore UF first)
         while !self.proof_forest_backtrack_stack.is_empty() {
             let last_level = self.proof_forest_backtrack_stack.last().unwrap().0;
             if last_level <= level {
@@ -951,6 +940,26 @@ impl Egraph {
             let (_, backtrack_equality, y, y_root) =
                 self.proof_forest_backtrack_stack.pop().unwrap();
             self.proof_forest_backtrack(backtrack_equality, y, y_root);
+        }
+
+        // Replay sig_trail in reverse AFTER UF is restored.
+        // Recompute signatures from the live find() state.
+        while let Some(&(entry_level, _, _)) = self.sig_trail.last() {
+            if entry_level <= level {
+                break;
+            }
+            let (_, term_id, was_inserted) = self.sig_trail.pop().unwrap();
+            if let Some(sig) = self.compute_signature(term_id) {
+                if was_inserted {
+                    // Term was inserted during forward execution → remove it
+                    if self.sig_table.get(&sig) == Some(&term_id) {
+                        self.sig_table.remove(&sig);
+                    }
+                } else {
+                    // Term was removed during forward execution → re-add it
+                    self.sig_table.insert(sig, term_id);
+                }
+            }
         }
 
         // Re-add predecessors created by quantifiers at their new roots
@@ -981,6 +990,12 @@ impl Egraph {
                             TermSlot::Term(e) => e.children.as_slice().to_vec(),
                             _ => continue,
                         };
+                        let all_equal = term_children.iter().zip(existing_children.iter())
+                            .all(|(&a, &b)| self.find(a) == self.find(b));
+                        if !all_equal {
+                            self.sig_table.insert(sig, term);
+                            continue;
+                        }
                         let pairs: Vec<(u32, u32)> = existing_children
                             .into_iter()
                             .zip(term_children)
@@ -1188,8 +1203,12 @@ impl Egraph {
         // Remove sig_table entries for y_root's predecessors BEFORE updating the UF.
         // Their signatures currently use y_root as a child representative; after the UF
         // update they'll need new entries with x_root instead.
-        let y_root_pred_keys: Vec<u32> =
-            self.predecessors[y_root as usize].keys().copied().collect();
+        // Only process valid (non-stale) predecessors.
+        let y_root_pred_keys: Vec<u32> = self.predecessors[y_root as usize]
+            .iter()
+            .filter(|(_, p)| valid_hash(p.hash, p.level, &self.predecessor_level))
+            .map(|(k, _)| *k)
+            .collect();
         for pred_id in &y_root_pred_keys {
             if let Some(old_sig) = self.compute_signature(*pred_id) {
                 self.sig_table_remove(&old_sig, *pred_id, level);
@@ -1349,6 +1368,12 @@ impl Egraph {
                             TermSlot::Term(e) => e.children.as_slice().to_vec(),
                             _ => continue,
                         };
+                        let all_equal = pred_children.iter().zip(existing_children.iter())
+                            .all(|(&a, &b)| self.find(a) == self.find(b));
+                        if !all_equal {
+                            self.sig_table_insert(new_sig, pred_id, level);
+                            continue;
+                        }
                         let pairs: Vec<(u32, u32)> = existing_children
                             .into_iter()
                             .zip(pred_children)
