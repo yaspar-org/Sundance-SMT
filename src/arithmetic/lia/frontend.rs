@@ -226,7 +226,7 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                         ))
                     }
                 }
-                REAL_DIV_SYMBOL | INT_DIV_SYMBOL => {
+                REAL_DIV_SYMBOL => {
                     debug_assert!(args.len() == 2, "chainable division is not supported");
                     let e1 = convert_linear_term(ctx, &args[0])?;
                     let e2 = convert_linear_term(ctx, &args[1])?;
@@ -236,6 +236,60 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                     } else {
                         Err(FrontendError(
                             "non-linear division is not supported".to_string(),
+                        ))
+                    }
+                }
+                INT_DIV_SYMBOL => {
+                    // SMT-LIB integer division (Euclidean): (div e n) = q
+                    // where e = n * q + r, 0 <= r < |n|
+                    debug_assert!(args.len() == 2, "chainable division is not supported");
+                    let e1 = convert_linear_term(ctx, &args[0])?;
+                    let e2 = convert_linear_term(ctx, &args[1])?;
+                    if let Some(n) = e2.is_constant() {
+                        if n.is_zero() {
+                            return Err(FrontendError("integer division by zero".to_string()));
+                        }
+                        // Introduce fresh integer variable q for the quotient,
+                        // associated with the div term for model reporting
+                        let q = ctx.allocate_term(term.clone(), None, app_sort.clone());
+                        let abs_n = if n < Rational::ZERO {
+                            -n.clone()
+                        } else {
+                            n.clone()
+                        };
+                        // Constraint 1: e - n*q >= 0  (i.e., remainder >= 0)
+                        let rel_ge = Rel::from_addends_lhs_rhs(
+                            e1.0.iter()
+                                .cloned()
+                                .chain(std::iter::once(Addend::term(-n.clone(), q)))
+                                .collect(),
+                            Constraint::Ge,
+                            vec![Addend::Constant(Rational::ZERO)],
+                        );
+                        let slack_ge = ctx.allocate_var(
+                            &format!("$div_slack_ge_{}", ctx.num_variables()),
+                            VarType::Real,
+                        );
+                        ctx.push_relation(rel_ge, slack_ge);
+                        // Constraint 2: e - n*q <= |n| - 1  (i.e., remainder < |n|)
+                        let rel_le = Rel::from_addends_lhs_rhs(
+                            e1.0.iter()
+                                .cloned()
+                                .chain(std::iter::once(Addend::term(-n.clone(), q)))
+                                .collect(),
+                            Constraint::Le,
+                            vec![Addend::Constant(abs_n - Rational::ONE)],
+                        );
+                        let slack_le = ctx.allocate_var(
+                            &format!("$div_slack_le_{}", ctx.num_variables()),
+                            VarType::Real,
+                        );
+                        ctx.push_relation(rel_le, slack_le);
+                        // Return q as the result expression
+                        Ok(LinExpr(vec![Addend::term(Rational::ONE, q)]))
+                    } else {
+                        Err(FrontendError(
+                            "non-linear integer division is not supported".to_string(),
                         ))
                     }
                 }
@@ -754,47 +808,37 @@ mod tests {
     }
 
     #[test]
-    fn test_constant_division() {
+    fn test_constant_integer_division() {
+        // (div x 2) introduces a fresh quotient variable q with Euclidean constraints:
+        //   x - 2q >= 0 and x - 2q <= 1
+        // The equality (= 1 (div x 2)) means q = 1
         let smt = r#"
             (set-logic QF_LIA)
             (declare-fun x () Int)
-            (assert (= 1 (div x 2)))  ; 1 = (1/2) x
+            (assert (= 1 (div x 2)))
         "#;
         let ctx = convert_smt(smt).unwrap();
-        // normalizes to x = 2
-        let expected_rel = Rel::from_addends_lhs_rhs(
-            vec![Addend::term(Rational::ONE, Var::int(0))],
-            Constraint::Eq,
-            vec![Addend::constant(rbig!(2))],
-        );
-        let (rel, _) = ctx.get_relations().next().unwrap();
-        assert!(rel.equivalent(&expected_rel));
+        // Should produce 3 relations: the equality (1 = q) and two Euclidean constraints
+        assert_eq!(ctx.num_relations(), 3);
 
         // Test a non-linear division
         let smt = r#"
             (set-logic QF_LIA)
             (declare-fun x () Int)
-            (assert (= 1 (div 3 x)))  ; 3/x = 1
+            (assert (= 1 (div 3 x)))
         "#;
         assert!(convert_smt(smt).is_err());
 
-        // Test division by a constant polynomial; this goes beyond the extensions
-        // to the SMT standard which only allows division by _concrete_ constants
+        // Test division by a constant polynomial
         let smt = r#"
             (set-logic QF_LIA)
             (declare-fun x () Int)
             (declare-fun y () Int)
-            (assert (<= 1 (div x (+ 5 (+ y (- y))))))  ; 1 <= x / (5 + y + (-y))
+            (assert (<= 1 (div x (+ 5 (+ y (- y))))))
         "#;
         let ctx = convert_smt(smt).unwrap();
-        // normalizes to x >= 5
-        let expected_rel = Rel::from_addends_lhs_rhs(
-            vec![Addend::term(Rational::ONE, Var::int(0))],
-            Constraint::Ge,
-            vec![Addend::constant(rbig!(5))],
-        );
-        let (rel, _) = ctx.get_relations().next().unwrap();
-        assert!(rel.equivalent(&expected_rel));
+        // Should produce 3 relations: the inequality (1 <= q) and two Euclidean constraints
+        assert_eq!(ctx.num_relations(), 3);
     }
 
     // ---------------------------------------------------------------------
@@ -1067,10 +1111,99 @@ mod tests {
 (check-sat)
     "#;
         let result = solve_smtlib(smt_input, &SolverConfig::default());
+        assert!(result.is_err_and(
+            |e| e == FrontendError("non-linear integer division is not supported".to_string())
+        ));
+    }
+
+    /// Regression test for the integer-division bug fix.
+    ///
+    /// Before the fix, `(div x 2)` was treated as *real* division `x * (1/2)`,
+    /// so `(= (div x 2) 1)` forced `x = 2` exactly. Under correct SMT-LIB
+    /// Euclidean semantics, `(div x 2) = 1` means `2 <= x <= 3`, so `x = 3`
+    /// is feasible (`floor(3/2) = 1`).
+    ///
+    /// Pre-fix: INFEASIBLE (x = 3 contradicts x = 2). Post-fix: FEASIBLE.
+    #[test]
+    fn test_int_div_floor_semantics_sat() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const x Int)
+(assert (= x 3))
+(assert (= (div x 2) 1))  ; floor(3/2) = 1, holds under Euclidean div only
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
         assert!(
-            result.is_err_and(
-                |e| e == FrontendError("non-linear division is not supported".to_string())
-            )
+            matches!(result, SolverDecisionApi::FEASIBLE(_)),
+            "x = 3 satisfies floor(x/2) = 1; pre-fix real division would reject it"
+        );
+    }
+
+    /// Regression test: dividing a constant odd numerator must floor.
+    ///
+    /// Before the fix, `(div 7 2)` evaluated to the exact rational `7/2`, so
+    /// `(= r (div 7 2))` with `(= r 3)` was INFEASIBLE (3 != 3.5). Under
+    /// Euclidean semantics `(div 7 2) = 3`, so the system is FEASIBLE.
+    #[test]
+    fn test_int_div_constant_floor_sat() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const r Int)
+(assert (= r (div 7 2)))  ; Euclidean: 7 = 2*3 + 1, so r = 3
+(assert (= r 3))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(
+            matches!(result, SolverDecisionApi::FEASIBLE(_)),
+            "div 7 2 = 3 under Euclidean semantics; pre-fix it was the rational 3.5"
+        );
+    }
+
+    /// Regression test: the result of `(div x 2)` must be `(= r 3.5)`-free,
+    /// i.e. the exact-division witness must be rejected.
+    ///
+    /// Before the fix, `(= r (div 7 2))` with `(= r (/ 7 2))`-style reasoning
+    /// allowed `r = 7/2`. Here we assert `r = 4`, which is consistent with
+    /// neither semantics, but the *contrast* case `r = 3` (above) only passes
+    /// post-fix. This case stays INFEASIBLE under both, guarding the upper
+    /// bound of the Euclidean remainder constraint (7 - 2*4 = -1 < 0).
+    #[test]
+    fn test_int_div_constant_floor_unsat_wrong_quotient() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const r Int)
+(assert (= r (div 7 2)))
+(assert (= r 4))  ; 2*4 = 8 > 7, violates remainder bound 0 <= 7 - 2q
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(
+            matches!(result, SolverDecisionApi::INFEASIBLE(_)),
+            "q = 4 violates 0 <= 7 - 2q; div 7 2 must equal 3"
+        );
+    }
+
+    /// Regression test: Euclidean division of a negative numerator floors
+    /// toward negative infinity (remainder is non-negative).
+    ///
+    /// `(div (- 1) 2)`: -1 = 2*(-1) + 1 with 0 <= 1 < 2, so the quotient is -1
+    /// (not 0, which exact division toward zero would give, and not -0.5 which
+    /// the pre-fix real-division handling produced).
+    #[test]
+    fn test_int_div_negative_numerator_floors() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const r Int)
+(assert (= r (div (- 1) 2)))  ; Euclidean: -1 = 2*(-1) + 1, so r = -1
+(assert (= r (- 1)))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(
+            matches!(result, SolverDecisionApi::FEASIBLE(_)),
+            "div (-1) 2 = -1 under Euclidean semantics; pre-fix it was -0.5"
         );
     }
 
