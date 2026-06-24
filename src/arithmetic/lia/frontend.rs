@@ -1207,6 +1207,26 @@ mod tests {
         );
     }
 
+    /// Regression test: Euclidean division by a negative denominator floors
+    /// toward zero (remainder is non-negative).
+    ///
+    /// `(div 9 (- 2))`: 9 = (-2)*(-4) + 1 with 0 <= 1 < |-2|, so the quotient is -4
+    #[test]
+    fn test_int_div_negative_denominator_floors() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const r Int)
+(assert (= r (div 9 (- 2))))  ; Euclidean: 9 = (-2)*(-4) + 1, so r = -4
+(assert (= r (- 4)))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(
+            matches!(result, SolverDecisionApi::FEASIBLE(_)),
+            "div (-1) 2 = -1 under Euclidean semantics; pre-fix it was -0.5"
+        );
+    }
+
     /// Regression test: equality elimination conflict provenance must propagate
     /// through the solver when elimination doesn't produce trivial-unsat but the
     /// remaining system is infeasible.
