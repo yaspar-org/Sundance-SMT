@@ -11,7 +11,7 @@ use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, Status, Terminator};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
@@ -71,6 +71,7 @@ pub fn cdcl_decision_procedure(
         solver: &mut solver as *mut CaDiCal,
         arithmetic,
         stats: SolverStats::new(),
+        pending_instantiations: VecDeque::new(),
     };
 
     solver.connect_external_propagator(&mut propagator);

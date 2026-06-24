@@ -8,13 +8,14 @@ use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::log::is_important;
 use crate::proof::{SMTProofTracer, Theory};
-use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
+use crate::quantifiers::quantifier::QuantifierInstance::{self, Instantiation, Skolemization};
 use crate::quantifiers::quantifier::instantiate_quantifiers;
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// Our implementation of a Cadical Propagator
@@ -28,6 +29,7 @@ pub struct CustomExternalPropagator<'a> {
     pub solver: *mut CaDiCal,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
+    pub pending_instantiations: VecDeque<QuantifierInstance>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -61,6 +63,31 @@ impl<'a> CustomExternalPropagator<'a> {
                 .register_term(-lit, &term, false);
         } else {
             panic!("Literal {lit} does not occur positively or negatively in the terms list");
+        }
+    }
+
+    /// Push a single QuantifierInstance's clauses into disequalities for the SAT solver.
+    fn push_instance_to_disequalities(&mut self, inst: &QuantifierInstance) {
+        match inst {
+            Instantiation { clauses } => {
+                for clause in clauses {
+                    for lit in clause {
+                        self.add_observed_variable(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
+                    }
+                    self.disequalities.borrow_mut().push(clause.clone());
+                }
+                self.stats.instantiations += 1;
+            }
+            Skolemization { clauses } => {
+                for clause in clauses {
+                    for lit in clause {
+                        self.add_observed_variable(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
+                    }
+                    self.disequalities.borrow_mut().push(clause.clone());
+                }
+            }
         }
     }
 
@@ -227,6 +254,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             level
         );
 
+        // Queued instantiations may no longer be relevant after backtrack
+        self.pending_instantiations.clear();
+
         // Reset solver-level assignments
         for i in 1..self.assignments.len() {
             if self.assignments[i].abs() > (level + 1) as i32 {
@@ -263,16 +293,20 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .collect::<Vec<_>>(),
         );
 
-        // for lit in model{
-        //      debug_println!(11, 4, "{}", self.solver_state.get_term_from_lit(*lit))
-        // }
-
         if !self.disequalities.borrow_mut().is_empty() {
             debug_println!(
                 24,
                 0,
                 "Trying to check model when the disequalities are not empty"
             );
+            return false;
+        }
+
+        // If we have queued instantiations from a previous round, serve one without
+        // redoing arithmetic or trigger matching.
+        if let Some(inst) = self.pending_instantiations.pop_front() {
+            self.push_instance_to_disequalities(&inst);
+            debug_println!(4, 0, "Serving queued instantiation in cb_check_found_model");
             return false;
         }
 
@@ -304,7 +338,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         "PROPAGATOR: Arithmetic inconsistency detected: {:?}",
                         arithmetic_literals
                     );
-                    // let negated_arithmetic_literals = arithmetic_literals.iter().map(|x| -x).collect();
                     self.disequalities.borrow_mut().push(arithmetic_literals);
                     return false;
                 }
@@ -327,11 +360,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         {
                             debug_println!(25, 0, "adding in the nelson oppen term {}", term);
                             let term_nnf = term.nnf(self.solver_state);
-                            // println!("we have the term {:?}", term);
                             self.solver_state
                                 .insert_predecessor(&term_nnf, None, None, true);
                             let term_cnf = term.cnf_tseitin(self.solver_state);
-                            // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
                             for clause in term_cnf {
                                 for lit in &clause.0 {
                                     self.add_observed_variable(*lit);
@@ -371,31 +402,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return true;
         }
 
-        // Add each quantifier instantiation as an instantiation clause to the proof tracker
-        // adds clauses of the formal (or (not (forall ....)) (INSTANTIATED PART)) same as (forall ...) => INSTANTIATED PART
-        for instantiation in &quantifier_instantiations {
-            match instantiation {
-                Instantiation { clause, .. } => {
-                    // , skolemized
-                    for lit in clause {
-                        self.add_observed_variable(*lit);
-                        self.add_lit_to_proof_tracer(*lit);
-                    }
-
-                    // TODO: since I am adding literals, I might have to add them as observed literals
-                    self.disequalities.borrow_mut().push(clause.clone());
-                    self.stats.instantiations += 1;
-                }
-                Skolemization { clause } => {
-                    for lit in clause {
-                        self.add_observed_variable(*lit);
-                        self.add_lit_to_proof_tracer(*lit);
-                    }
-
-                    self.disequalities.borrow_mut().push(clause.clone());
-                }
-            }
-        }
+        // Queue all instantiations, then serve the first one now
+        self.pending_instantiations.extend(quantifier_instantiations);
+        let inst = self.pending_instantiations.pop_front().unwrap();
+        self.push_instance_to_disequalities(&inst);
 
         debug_println!(4, 0, "Returning false in cb_check_found_model");
         false

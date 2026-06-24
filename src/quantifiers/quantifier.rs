@@ -20,8 +20,8 @@ use yaspar_ir::ast::{LetElim, Substitute, Substitution, Term, TermAllocator};
 
 #[derive(Debug, Clone)]
 pub enum QuantifierInstance {
-    Instantiation { clause: Vec<i32> },
-    Skolemization { clause: Vec<i32> },
+    Instantiation { clauses: Vec<Vec<i32>> },
+    Skolemization { clauses: Vec<Vec<i32>> },
 }
 
 /// Returns a list of quantifier instantiation given the assignment and current state of the egraph
@@ -159,27 +159,28 @@ pub fn instantiate_quantifiers(
 
             // The SAT solver ultimately learns the Skolem as an implication
             let skolem_imp = vec![-quantifier_dimacs_literal, reduced_skolem_literal];
-            instantiations.push(QuantifierInstance::Skolemization { clause: skolem_imp });
+            let mut skolem_clauses = vec![skolem_imp];
 
             // Finally, clauses from the Tseitin transformation and from `additional_constraints`
             // are implied by the reduced skolem formula.
-
-            // Lambda to add the skolem literal to the Tseitin/additional_constraints clauses
-            let mut add_clause = |mut clause: Vec<i32>, theory: Theory| {
-                if push_literal_if_not_tautology(&mut clause, -reduced_skolem_literal) {
-                    proof_tracer.borrow_mut().add_theory_clause(&clause, theory);
-                    instantiations.push(QuantifierInstance::Skolemization { clause })
-                }
-            };
-
             for clause in clauses {
-                add_clause(clause.0, Theory::Boolean);
+                let mut c = clause.0;
+                if push_literal_if_not_tautology(&mut c, -reduced_skolem_literal) {
+                    proof_tracer.borrow_mut().add_theory_clause(&c, Theory::Boolean);
+                    skolem_clauses.push(c);
+                }
             }
 
             // CC TODO: Differentiate between `ite` axioms and `datatype` axioms
             for clause in additional_constraints {
-                add_clause(clause, Theory::Boolean);
+                let mut c = clause;
+                if push_literal_if_not_tautology(&mut c, -reduced_skolem_literal) {
+                    proof_tracer.borrow_mut().add_theory_clause(&c, Theory::Boolean);
+                    skolem_clauses.push(c);
+                }
             }
+
+            instantiations.push(QuantifierInstance::Skolemization { clauses: skolem_clauses });
         }
 
         // if this was a skolemization case, we don't want to instantiate
@@ -328,7 +329,7 @@ pub fn instantiate_quantifiers(
                 let cnf_term = nnf_term.cnf_tseitin(solver_state);
                 debug_println!(7, 0, "We have the cnf term {:?}", cnf_term);
 
-                let mut clauses: Vec<_> = cnf_term
+                let mut inst_clauses: Vec<_> = cnf_term
                     .clone()
                     .into_iter()
                     .map(|x| x.into_iter().collect::<Vec<_>>())
@@ -363,7 +364,7 @@ pub fn instantiate_quantifiers(
                 // Add proof steps witnessing the Tseitin transformation of `nnf_term`
                 proof_tracer
                     .borrow_mut()
-                    .push_steps(&clauses, ProofStepType::TheoryClause(Theory::Boolean));
+                    .push_steps(&inst_clauses, ProofStepType::TheoryClause(Theory::Boolean));
 
                 // the bug comes from the additional constraints
                 // basically the additional constraints are valid lits -> converted to valid u64, but may not be in the actual term mapping
@@ -374,15 +375,12 @@ pub fn instantiate_quantifiers(
                     &additional_constraints,
                     ProofStepType::TheoryClause(Theory::Background),
                 );
-                clauses.extend(additional_constraints);
+                inst_clauses.extend(additional_constraints);
 
                 // could activate bits here (the level should not be 0)
                 // activate_bits(&t, 0, egraph);
 
-                for clause in clauses {
-                    let instantiation = QuantifierInstance::Instantiation { clause };
-                    instantiations.push(instantiation); // TODO: I would prefer to push t.uid() here, but it seems like the uid is not getting adding to the terms list
-                }
+                instantiations.push(QuantifierInstance::Instantiation { clauses: inst_clauses });
             }
         }
     }
