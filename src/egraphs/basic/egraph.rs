@@ -692,8 +692,6 @@ impl Egraph {
         }
     }
 
-    // TODO: check_for_recursive_datatypes moved to SolverState
-
     /// Explain why u ≡ v by walking the proof forest to their least common ancestor.
     /// Returns None if u and v are not in the same equivalence class.
     fn leastcommonancestor(

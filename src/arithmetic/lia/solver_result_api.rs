@@ -31,17 +31,18 @@ impl SolverDecisionApi {
     ) -> SolverResult<Self> {
         match decision {
             SolverDecision::FEASIBLE(assg) => {
-                // let term_assign = BTreeMap::new();
                 let term_assign = assg
                     .into_iter()
-                    .map(|(var, value)| (var_term_map.get(&var).unwrap().clone(), value))
+                    .filter_map(|(var, value)| {
+                        var_term_map.get(&var).map(|term| (term.clone(), value))
+                    })
                     .collect();
                 Ok(SolverDecisionApi::FEASIBLE(Assignment::new(term_assign)))
             }
             SolverDecision::INFEASIBLE(conflict) => {
                 let term_conflict: Conflict<Term> = conflict
                     .iter()
-                    .map(|v| var_term_map.get(v).unwrap().clone())
+                    .filter_map(|v| var_term_map.get(v).cloned())
                     .collect();
                 Ok(SolverDecisionApi::INFEASIBLE(term_conflict))
             }

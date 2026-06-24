@@ -17,11 +17,10 @@ use crate::solver_types::ConstructorType;
 
 /// For a term of datatype sort, we want to learn the following axioms:
 /// 1. isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
-/// 2. (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the   datatype where f^0, ..., f^m are the selectors of f
-/// 3. (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f (by default we add this lazily based on the assignment in term_constructors)
-/// 4. /\_i=1^k f_i(f(t1, ... tk)) = t_i for term = f(t1, ..., tk) where f is a constructor with selectors f_1, ..., f_k and subterms t1, ..., tk.
+/// 2. (is-f t) => t = f(f^0(t) ... f^m(t)) for each constructor f of the datatype where f^0, ..., f^m are the selectors of f (by default we add this lazily based on the assignment in term_constructors)
+/// 3. /\_i=1^k f_i(f(t1, ... tk)) = t_i for term = f(t1, ..., tk) where f is a constructor with selectors f_1, ..., f_k and subterms t1, ..., tk.
 ///    (done lazily)
-/// 5. We also need to ~isCi(t) \/ ~isCj(t) for each pair of distinct constructors Ci and Cj of the datatype (we do this lazily based on the assignment in term_constructors)
+/// 4. We also need to ~isCi(t) \/ ~isCj(t) for each pair of distinct constructors Ci and Cj of the datatype (we do this lazily based on the assignment in term_constructors)
 ///    Note that we also need to include the datatype axioms for the selectors if they are of datatype sort, so we need to recursively call find_datatype_axioms on the selector applications as well.
 pub fn find_datatype_axioms(
     term: &Term, // must be a datatype term
@@ -59,8 +58,16 @@ pub fn find_datatype_axioms(
     }
 
     // Step 2. Learn the clause isC1(t) \/ ... \/ isCm(t)
-    let tester_apps = learn_exactly_one_tester_clause(solver_state, term, &dt_dec, from_quantifier);
-    vector.extend(tester_apps);
+    // For recursive sorts, defer to cb_check_found_model to avoid infinite unfolding.
+    if !solver_state
+        .datatype_info
+        .recursive_sorts
+        .contains(sort.sort_name())
+    {
+        let tester_apps =
+            learn_exactly_one_tester_clause(solver_state, term, &dt_dec, from_quantifier);
+        vector.extend(tester_apps);
+    }
 
     // Step 2.5. Learn the constraint (is-f t) => t = f(f^0(t) ... f^m(t))
     // as long as we are not doing lazy datatypes
@@ -71,12 +78,17 @@ pub fn find_datatype_axioms(
     }
 
     // Step 3. Learn the constraint  /\_i=1^k f_i(f(t1, ... tk)) = t_i
+    //         and assert is-f(f(t1, ..., tk))
     if let App(f, terms, _) = term.repr()
         && solver_state
             .datatype_info
             .constructors
             .contains_key(f.id_str())
     {
+        let tester_clause =
+            learn_tester_for_ctor_app(solver_state, term, f.id_str(), from_quantifier);
+        vector.extend(tester_clause);
+
         let selector_ctor_clauses = learn_selector_ctor_clause(
             solver_state,
             term,
@@ -97,7 +109,7 @@ pub fn find_datatype_axioms(
 fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
     let num = term.uid();
     // todo: missing Global case?
-    if let App(f, _, _) = term.repr()
+    if let App(f, children, _) = term.repr()
         && solver_state
             .datatype_info
             .constructors
@@ -116,12 +128,23 @@ fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
             vec![term.clone()],
             Some(bool_sort.clone()),
         );
+        let child_uids: Vec<u64> = if solver_state.datatype_info.has_recursive_datatype() {
+            solver_state
+                .datatype_info
+                .recursive_args
+                .get(f.id_str())
+                .map(|positions| positions.iter().map(|&pos| children[pos].uid()).collect())
+                .unwrap_or_default()
+        } else {
+            vec![]
+        };
         // todo: we are not handling is-X here
         solver_state.term_constructors.insert(
             num,
             ConstructorType::Constructor {
                 name: f.id_str().clone(),
                 tester_term,
+                children: child_uids,
                 hash: 0,
                 level: 0,
             },
@@ -135,7 +158,7 @@ fn add_to_term_constructors(solver_state: &mut SolverState, term: &Term) {
 
 /// For a term of datatype sort, learn the clause isC1(t) \/ ... \/ isCm(t) where C1, ..., Cm are the constructors of the datatype
 /// if the term is of the form C(t1, ..., tm) where C is a constructor, we also add the clause (isC1(t) \/ ... \/ isCm(t)) /\ isC(t) where C is the constructor of the term
-fn learn_exactly_one_tester_clause(
+pub fn learn_exactly_one_tester_clause(
     solver_state: &mut SolverState,
     term: &Term,
     dt_dec: &DatatypeDec,
@@ -184,6 +207,24 @@ fn learn_exactly_one_tester_clause(
         tester_apps.push(tester_app);
     }
 
+    // Record base-case tester literals for the decision heuristic
+    let base_case_uids: Vec<u64> = if solver_state.datatype_info.has_recursive_datatype() {
+        dt_dec
+            .constructors
+            .iter()
+            .zip(tester_apps.iter())
+            .filter(|(ctor, _)| {
+                solver_state
+                    .datatype_info
+                    .base_constructors
+                    .contains(&ctor.ctor)
+            })
+            .map(|(_, app)| app.uid())
+            .collect()
+    } else {
+        vec![]
+    };
+
     let tester_or = if tester_apps.len() == 1 {
         tester_apps.pop().unwrap()
     } else {
@@ -194,6 +235,13 @@ fn learn_exactly_one_tester_clause(
     solver_state.insert_predecessor(&tester_or, None, None, from_quantifier);
     let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
+
+    for uid in base_case_uids {
+        if let Some(&lit) = solver_state.cnf_cache.var_map.get(&uid) {
+            solver_state.base_case_tester_lits.push(lit);
+        }
+    }
+
     vector
 }
 
@@ -257,6 +305,19 @@ pub fn learn_ctor_selector_clauses(
         selector_apps.push(sel_app);
     }
 
+    // Store recursive children for the occurs check
+    if solver_state.datatype_info.has_recursive_datatype()
+        && let Some(rec_positions) = solver_state.datatype_info.recursive_args.get(ctor_name)
+        && !rec_positions.is_empty()
+        && let Some(ConstructorType::Constructor { children, .. }) =
+            solver_state.term_constructors.get_mut(&term.uid())
+    {
+        *children = rec_positions
+            .iter()
+            .map(|&pos| selector_apps[pos].uid())
+            .collect();
+    }
+
     // have the simple_sorted id for the global case and the simple id for the app case
     let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
     let ctor_app = if selector_apps.is_empty() {
@@ -284,6 +345,39 @@ pub fn learn_ctor_selector_clauses(
     let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
     vector.extend(clauses);
     vector
+}
+
+/// For a term of the form f(t1, ..., tk) where f is a constructor, assert is-f(term) as a unit clause.
+///
+/// This is needed because tester clauses are deferred for recursive sorts (to avoid infinite
+/// unfolding). Without this, the SAT solver doesn't know that a constructor application implies
+/// its tester, which can lead to spurious occurs check conflicts when cb_decide forces a
+/// conflicting tester (e.g., is-Nil on a term that is syntactically Cons(...)).
+/// See: tests/regression/smt_files/datatypes/inductive_disequality_no_cycle_sat.smt2
+fn learn_tester_for_ctor_app(
+    solver_state: &mut SolverState,
+    term: &Term,
+    ctor_name: &Str,
+    from_quantifier: bool,
+) -> Vec<Vec<i32>> {
+    let bool_sort = solver_state.bool_sort();
+    let is_symbol = solver_state.allocate_symbol("is");
+    let tester_identifier = Identifier {
+        symbol: is_symbol,
+        indices: vec![Index::Symbol(ctor_name.clone())],
+    };
+    let tester_app = solver_state.app(
+        tester_identifier.into(),
+        vec![term.clone()],
+        Some(bool_sort),
+    );
+    let tester_nnf = tester_app.nnf(solver_state);
+    solver_state.insert_predecessor(&tester_nnf, None, None, from_quantifier);
+    tester_nnf
+        .cnf_tseitin(solver_state)
+        .into_iter()
+        .map(|x| x.0)
+        .collect()
 }
 
 /// We are learning the clause /\_i=1^k f_i(f(t1, ... tk)) = t_i

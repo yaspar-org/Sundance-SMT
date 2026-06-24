@@ -94,6 +94,10 @@ impl Tableau for TableauSparse {
     fn ncols(&self) -> usize {
         self.matrix.ncols()
     }
+
+    fn col_nnz(&self, col: usize) -> usize {
+        self.matrix.col_nnz(col)
+    }
 }
 
 #[cfg(test)]

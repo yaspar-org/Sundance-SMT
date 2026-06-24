@@ -18,7 +18,11 @@ pub struct SolverConfig {
 impl Default for SolverConfig {
     fn default() -> Self {
         Self {
-            tableau_kind: TableauKind::Dense,
+            tableau_kind: TableauKind::Sparse,
+            // Note: 2^17 is high enough that regression tests pass as expected
+            // i.e. they are either SAT/UNSAT or TIMEOUT. If this is lowered
+            // significantly, some will return UNKNOWN instead since branch-and-bound
+            // will return UNKNOWN when the limit is hit.
             max_lra_solve_calls: None,
         }
     }
