@@ -217,7 +217,7 @@ pub struct Egraph {
     /// keeps track of terms created by quantifier instantiation and their predecessors
     predecessors_created_by_quantifiers: DeterministicHashMap<u32, DeterministicHashSet<u32>>,
     /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()])
-    union_to_eclass: DeterministicHashSet<(u32, String, Vec<u32>)>,
+    union_to_eclass: DeterministicHashSet<u32>,
     /// Signature table: maps (op, [find(c1),...,find(cn)]) → term_id.
     /// Maintained in parallel with the existing congruence detection for now.
     sig_table: FastDeterministicHashMap<SigKey, u32>,
@@ -373,8 +373,7 @@ impl Egraph {
         }
 
         if dynamic && !children.is_empty() {
-            self.union_to_eclass
-                .insert((id, func_key, children.to_vec()));
+            self.union_to_eclass.insert(id);
         }
 
         false
@@ -980,7 +979,7 @@ impl Egraph {
 
         // Re-do union_to_eclass via sig table probe
         let union_to_eclass_info = self.union_to_eclass.clone();
-        for (term, _func, _subterms) in union_to_eclass_info {
+        for term in union_to_eclass_info {
             if let Some(sig) = self.compute_signature(term) {
                 if let Some(&existing) = self.sig_table.get(&sig) {
                     if self.find(existing) != self.find(term) {
@@ -1174,7 +1173,7 @@ impl Egraph {
             ));
         }
 
-        // Remove sig_table entries for y_root's predecessors BEFORE updating the UF.
+        // Phase 1: Remove sig_table entries for y_root's predecessors BEFORE updating the UF.
         // Their signatures currently use y_root as a child representative; after the UF
         // update they'll need new entries with x_root instead.
         // Only process valid (non-stale) predecessors.
@@ -1189,6 +1188,7 @@ impl Egraph {
             }
         }
 
+        // Phase 2: Perform the union and propagate disequalities from y_root to x_root.
         debug_println!(
             16,
             2,
