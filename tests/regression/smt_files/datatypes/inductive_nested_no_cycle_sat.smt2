@@ -1,0 +1,12 @@
+; Nested list construction, no cycle
+(set-logic ALL)
+(declare-datatypes ((List 1)) ((par (T) ((Nil) (Cons (head T) (tail (List T)))))))
+(declare-const x (List Int))
+(declare-const y (List Int))
+(declare-const z (List Int))
+(assert (= z (as Nil (List Int))))
+(assert (= y (Cons 2 z)))
+(assert (= x (Cons 1 y)))
+(assert (= (head x) 1))
+(assert (= (head (tail x)) 2))
+(check-sat)

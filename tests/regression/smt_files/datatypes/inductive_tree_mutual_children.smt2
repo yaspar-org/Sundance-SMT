@@ -1,0 +1,10 @@
+(set-logic ALL)
+(declare-datatypes ((Tree 0)) (((Leaf (val Int)) (Node (left Tree) (right Tree)))))
+(declare-const t1 Tree)
+(declare-const t2 Tree)
+; t1's left is t2, t2's right is t1 — mutual cycle
+(assert ((_ is Node) t1))
+(assert ((_ is Node) t2))
+(assert (= (left t1) t2))
+(assert (= (right t2) t1))
+(check-sat)

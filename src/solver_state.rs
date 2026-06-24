@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
-    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Str,
-    Term, TermAllocator,
+    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Term,
+    TermAllocator,
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -142,6 +142,9 @@ pub struct SolverState {
 
     /// Whether to skolemize eagerly.
     pub eager_skolem: bool,
+
+    /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
+    pub base_case_tester_lits: Vec<i32>,
 }
 
 impl SolverState {
@@ -172,6 +175,7 @@ impl SolverState {
             ddsmt,
             eager_skolem,
             egraph,
+            base_case_tester_lits: vec![],
         }
     }
 
@@ -298,11 +302,6 @@ impl SolverState {
             .id_map
             .get_by_right(&egraph_id)
             .unwrap_or_else(|| panic!("to_solver_uid: no solver uid for egraph id {}", egraph_id))
-    }
-
-    pub fn check_for_recursive_datatypes(&self) -> Option<Str> {
-        self.datatype_info
-            .contains_recursive_datatype(&self.context)
     }
 
     /// Register true and false in both the egraph and the solver's ID mapping.
@@ -650,6 +649,7 @@ pub fn process_assignment(
                     tester_term,
                     hash,
                     level,
+                    ..
                 } if solver_state.is_valid_hash(*hash, *level) => {
                     debug_println!(
                         11,
@@ -678,6 +678,7 @@ pub fn process_assignment(
                         Constructor {
                             name: ctor_name.clone(),
                             tester_term: term.clone(),
+                            children: vec![],
                             level,
                             hash: solver_state.current_hash,
                         },

@@ -350,6 +350,30 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
+        // Occurs check for recursive datatypes (well-foundedness)
+        if self.solver_state.datatype_info.has_recursive_datatype() {
+            if let Some(conflict_clause) =
+                crate::datatypes::occurs_check::datatype_occurs_check(self.solver_state)
+            {
+                self.disequalities.borrow_mut().push(conflict_clause);
+                return false;
+            }
+
+            // Lazy case split: add tester clauses for uninitialized datatype terms
+            let new_clauses =
+                crate::datatypes::occurs_check::generate_deferred_tester_clauses(self.solver_state);
+            if !new_clauses.is_empty() {
+                for clause in &new_clauses {
+                    for lit in clause {
+                        self.add_observed_variable(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
+                    }
+                }
+                self.disequalities.borrow_mut().extend(new_clauses);
+                return false;
+            }
+        }
+
         debug_println!(11, 0, "Starting quantifier instantiations");
         let quantifier_instantiations = instantiate_quantifiers(
             self.solver_state,
@@ -403,7 +427,20 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn cb_decide(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
-        // always no decision
+
+        // For recursive datatypes, prefer base-case constructors to avoid infinite expansion
+        if self.solver_state.datatype_info.has_recursive_datatype() {
+            for &lit in &self.solver_state.base_case_tester_lits {
+                let idx = lit.unsigned_abs() as usize;
+                while idx >= self.assignments.len() {
+                    self.assignments.resize(self.assignments.len() * 2, 0);
+                }
+                if self.assignments[idx] == 0 {
+                    return lit;
+                }
+            }
+        }
+
         0
     }
 

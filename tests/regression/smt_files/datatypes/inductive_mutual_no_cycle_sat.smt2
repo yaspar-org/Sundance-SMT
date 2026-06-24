@@ -1,0 +1,13 @@
+; Mutually recursive types but no cycle: safe paths are taken.
+(set-logic ALL)
+(declare-datatypes ((A 0) (B 0) (D 0))
+  (((ctorA_rec (selAr B)) (ctorA_safe (selAs D)))
+   ((ctorB_rec (selBr A)) (ctorB_safe (selBs D)))
+   ((ctorD_val (selD Int)))))
+(declare-const x A)
+(declare-const y A)
+(declare-const z A)
+(assert (not (= x y)))
+(assert (not (= y z)))
+(assert (not (= x z)))
+(check-sat)

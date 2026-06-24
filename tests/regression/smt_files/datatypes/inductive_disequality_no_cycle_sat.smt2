@@ -1,0 +1,8 @@
+(set-logic ALL)
+(declare-datatypes ((List 1)) ((par (T) ((Nil) (Cons (head T) (tail (List T)))))))
+(declare-const x (List Int))
+(declare-const y (List Int))
+; x = Cons(1, y), x != y — sat (e.g. y = Nil)
+(assert (= x (Cons 1 y)))
+(assert (not (= x y)))
+(check-sat)
