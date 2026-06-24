@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
-    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Str,
-    Term, TermAllocator,
+    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Term,
+    TermAllocator,
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -302,11 +302,6 @@ impl SolverState {
             .id_map
             .get_by_right(&egraph_id)
             .unwrap_or_else(|| panic!("to_solver_uid: no solver uid for egraph id {}", egraph_id))
-    }
-
-    pub fn check_for_recursive_datatypes(&self) -> Option<Str> {
-        self.datatype_info
-            .contains_recursive_datatype(&self.context)
     }
 
     /// Register true and false in both the egraph and the solver's ID mapping.

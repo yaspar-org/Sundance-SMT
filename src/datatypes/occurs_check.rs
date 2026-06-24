@@ -121,10 +121,6 @@ fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[Edge]) -
         let this_child = cycle_edges[i].1;
         let next_parent = cycle_edges[(i + 1) % n].0;
 
-        if this_child == next_parent {
-            continue;
-        }
-
         if let Some(equalities) = solver_state
             .egraph
             .explain_equality(this_child, next_parent)

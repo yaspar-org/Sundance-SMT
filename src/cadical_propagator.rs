@@ -432,7 +432,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         if self.solver_state.datatype_info.has_recursive_datatype() {
             for &lit in &self.solver_state.base_case_tester_lits {
                 let idx = lit.unsigned_abs() as usize;
-                if idx >= self.assignments.len() {
+                while idx >= self.assignments.len() {
                     self.assignments.resize(self.assignments.len() * 2, 0);
                 }
                 if self.assignments[idx] == 0 {
