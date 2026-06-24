@@ -231,7 +231,7 @@ impl<V: Zero + Clone + fmt::Debug> Matrix<V> {
     fn validate_row_col(&self, row: usize, col: usize) -> SparseResult<()> {
         if row >= self.rows.len() || col >= self.cols.len() {
             return Err(SparseError(format!(
-                "pivot position ({}, {}) is out of bounds for matrix with dimensions {} x {}",
+                "position ({}, {}) is out of bounds for matrix with dimensions {} x {}",
                 row,
                 col,
                 self.rows.len(),
