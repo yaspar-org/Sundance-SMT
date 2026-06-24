@@ -111,8 +111,8 @@ impl Tableau for TableauImpl {
         ncols: usize,
         t: Vec<(usize, usize, Rational)>,
     ) -> TableauResult<Self> {
-        // Default to dense; use TableauImpl::new() for runtime selection
-        Ok(TableauImpl::Dense(TableauDense::from_tuples(
+        // Default to sparse; use TableauImpl::new() for runtime selection
+        Ok(TableauImpl::Sparse(TableauSparse::from_tuples(
             nrows, ncols, t,
         )?))
     }
