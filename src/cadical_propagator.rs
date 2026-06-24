@@ -66,25 +66,33 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
+    /// Register all literals in an instance with the proof tracer and as observed variables.
+    /// This must be done eagerly for all queued instances so the proof tracer knows about
+    /// all literals even if we backtrack before serving them.
+    fn register_instance_literals(&mut self, inst: &QuantifierInstance) {
+        let clauses = match inst {
+            Instantiation { clauses } => clauses,
+            Skolemization { clauses } => clauses,
+        };
+        for clause in clauses {
+            for lit in clause {
+                self.add_observed_variable(*lit);
+                self.add_lit_to_proof_tracer(*lit);
+            }
+        }
+    }
+
     /// Push a single QuantifierInstance's clauses into disequalities for the SAT solver.
     fn push_instance_to_disequalities(&mut self, inst: &QuantifierInstance) {
         match inst {
             Instantiation { clauses } => {
                 for clause in clauses {
-                    for lit in clause {
-                        self.add_observed_variable(*lit);
-                        self.add_lit_to_proof_tracer(*lit);
-                    }
                     self.disequalities.borrow_mut().push(clause.clone());
                 }
                 self.stats.instantiations += 1;
             }
             Skolemization { clauses } => {
                 for clause in clauses {
-                    for lit in clause {
-                        self.add_observed_variable(*lit);
-                        self.add_lit_to_proof_tracer(*lit);
-                    }
                     self.disequalities.borrow_mut().push(clause.clone());
                 }
             }
@@ -254,8 +262,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             level
         );
 
-        // Queued instantiations may no longer be relevant after backtrack
-        self.pending_instantiations.clear();
+        // Note: we do NOT clear pending_instantiations on backtrack.
+        // Queued clauses are logically valid consequences of quantifiers and remain sound
+        // regardless of the current model state.
 
         // Reset solver-level assignments
         for i in 1..self.assignments.len() {
@@ -400,6 +409,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             assert!(self.disequalities.borrow().is_empty());
 
             return true;
+        }
+
+        // Register all literals eagerly so the proof tracer knows about them
+        for inst in &quantifier_instantiations {
+            self.register_instance_literals(inst);
         }
 
         // Queue all instantiations, then serve the first one now
