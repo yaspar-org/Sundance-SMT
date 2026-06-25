@@ -116,6 +116,7 @@ impl<'a> CustomExternalPropagator<'a> {
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_assignment(&mut self, lits: &[i32]) {
+        eprintln!("NOTIFY_ASSIGNMENT: level={} lits={}", self.decision_level, lits.len());
         debug_println!(
             22,
             0,
@@ -235,6 +236,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_new_decision_level(&mut self) {
         self.stats.decisions += 1;
+        eprintln!("DECISION: level {} -> {}", self.decision_level, self.decision_level + 1);
         debug_println!(
             11,
             0,
@@ -254,6 +256,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_backtrack(&mut self, level: usize) {
         self.stats.backtracks += 1;
+        eprintln!("BACKTRACK: level {} -> {} (queue: {})", self.decision_level, level, self.pending_instantiations.len());
         debug_println!(
             23,
             0,
@@ -291,6 +294,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        eprintln!("CB_CHECK_FOUND_MODEL: level={} queue={}", self.decision_level, self.pending_instantiations.len());
         debug_println!(
             24,
             0,
@@ -311,11 +315,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
-        // If we have queued instantiations from a previous round, serve one without
-        // redoing arithmetic or trigger matching.
+        // If we still have queued instantiations at full model time, serve one.
+        // This is a fallback — normally cb_decide serves them during partial assignment.
         if let Some(inst) = self.pending_instantiations.pop_front() {
+            eprintln!("SERVE_QUEUED_AT_MODEL: remaining={}", self.pending_instantiations.len());
             self.push_instance_to_disequalities(&inst);
-            debug_println!(4, 0, "Serving queued instantiation in cb_check_found_model");
             return false;
         }
 
@@ -411,6 +415,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return true;
         }
 
+        eprintln!("FRESH_INSTANTIATIONS: count={}", quantifier_instantiations.len());
+
         // Register all literals eagerly so the proof tracer knows about them
         for inst in &quantifier_instantiations {
             self.register_instance_literals(inst);
@@ -426,12 +432,21 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_decide(&mut self) -> i32 {
+        eprintln!("CB_DECIDE: level={} queue={}", self.decision_level, self.pending_instantiations.len());
+        // If we have queued instantiations, serve one now. The solver is "stuck"
+        // (propagation reached fixpoint, about to make a decision). Adding a clause
+        // here means it's during partial assignment, so it may propagate without backtracking.
+        if let Some(inst) = self.pending_instantiations.pop_front() {
+            eprintln!("SERVE_IN_DECIDE: remaining={}", self.pending_instantiations.len());
+            self.push_instance_to_disequalities(&inst);
+        }
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
         // always no decision
         0
     }
 
     fn cb_propagate(&mut self) -> i32 {
+        eprintln!("CB_PROPAGATE: level={}", self.decision_level);
         debug_println!(7, 0, "PROPAGATOR: Propagation callback invoked");
         // For now, no propagation
         // This could deduce new assignments
@@ -439,6 +454,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_add_reason_clause_lit(&mut self, _propagated_lit: i32) -> i32 {
+        eprintln!("CB_ADD_REASON: lit={}", _propagated_lit);
         debug_println!(
             7,
             0,
@@ -451,17 +467,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_has_external_clause(&mut self, is_forgettable: &mut bool) -> bool {
+        eprintln!("CB_HAS_EXTERNAL_CLAUSE: diseq={} queue={}", self.disequalities.borrow().len(), self.pending_instantiations.len());
         debug_println!(
             7,
             0,
             "PROPAGATOR: Checking for external clauses (forgettable: {})",
             is_forgettable
         );
-        // For now, no external clauses
-        if (*self.disequalities.borrow_mut()).is_empty() {
+        if self.disequalities.borrow().is_empty() {
             false
         } else {
-            // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
             debug_println!(
                 4,
@@ -474,6 +489,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_add_external_clause_lit(&mut self) -> i32 {
+        eprintln!("CB_ADD_EXTERNAL_CLAUSE_LIT");
         // For now, no external clauses
         let mut v = self.disequalities.borrow_mut();
         assert!(!v.is_empty());
