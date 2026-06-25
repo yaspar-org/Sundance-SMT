@@ -41,6 +41,7 @@ pub fn instantiate_quantifiers(
     let quantifiers = &solver_state.quantifiers.clone();
     let mut instantiations = vec![];
     let mut skolemized_quantifier_idxs = vec![];
+    let mut deferred_instantiations: Vec<(Term, bool, i32, u64)> = vec![];
 
     // We `enumerate()` so we can update quantifiers[i].skolemized after the loop
     for (i, quantifier) in quantifiers.iter().enumerate() {
@@ -221,7 +222,6 @@ pub fn instantiate_quantifiers(
             }
 
             debug_println!(7, 0, "We have the following list of assignments:");
-            let mut substitutions = vec![];
             for subs_ids in list_assignments.iter() {
                 // Convert ID map to Term map for substitution
                 let subs: DeterministicHashMap<String, Term> = subs_ids
@@ -252,138 +252,118 @@ pub fn instantiate_quantifiers(
                     &mut solver_state.context,
                 );
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
-                substitutions.push((substituted_term, subs));
+                deferred_instantiations.push((
+                    substituted_term,
+                    quantifier_is_exists,
+                    quantifier_literal,
+                    quantifier.id,
+                ));
             }
+        }
+    }
 
-            if substitutions.is_empty() {
-                debug_println!(
-                    6,
-                    0,
-                    "We are skipping the quantifier {} because it has no substitutions",
-                    solver_state.get_term(quantifier.id)
-                );
-                continue;
-            }
+    // Phase 2: Process all deferred instantiations (substitute and add to egraph)
+    debug_println!(6, 0, "Starting to process deferred instantiations");
+    for (substituted_term, quantifier_is_exists, quantifier_literal, quantifier_id) in
+        deferred_instantiations
+    {
+        // if this came from a negated existential, we have to negate the term
+        let t = if quantifier_is_exists {
+            solver_state.context.not(substituted_term)
+        } else {
+            substituted_term
+        };
 
-            debug_println!(6, 0, "Starting to look at substitutions");
-            for (t, _) in substitutions {
-                // skipping instantiations that have already been added
-                // TODO: need to come up with a more efficient way to do this
-                // TODO: have solver_state.added_instantiations as a string right now, really want to go back to u32
+        debug_println!(
+            22,
+            0,
+            "We are adding the instantiation {} for quantifier {} at level {}",
+            t.clone(),
+            solver_state.get_term(quantifier_id),
+            level
+        );
 
-                // if this came from a negated existential, we have to negate the term
-                let t = if quantifier_is_exists {
-                    solver_state.context.not(t)
-                } else {
-                    t
-                };
+        debug_println!(4, 0, "We have the term {} with id {}", t, t.uid());
 
-                debug_println!(
-                    22,
-                    0,
-                    "We are adding the instantiation {} for quantifier {} at level {}",
-                    t.clone(),
-                    solver_state.get_term(quantifier.id),
-                    level
-                );
+        // eliminating lets
+        let let_elim_term = t.let_elim(&mut solver_state.context);
 
-                debug_println!(4, 0, "We have the term {} with id {}", t, t.uid());
+        debug_println!(
+            8,
+            0,
+            "{} is an instantiation of {}",
+            let_elim_term,
+            solver_state.get_term(quantifier_id)
+        );
 
-                // eliminating lets
-                let let_elim_term = t.let_elim(&mut solver_state.context);
+        let nnf_term = let_elim_term.nnf(solver_state);
 
-                debug_println!(
-                    8,
-                    0,
-                    "{} is an instantiation of {}",
-                    let_elim_term,
-                    solver_state.get_term(quantifier.id)
-                );
+        debug_println!(26, 4, "(assert {})", nnf_term.clone());
+        debug_println!(
+            24,
+            8,
+            "from quantifier {} [{}]",
+            solver_state.get_term(quantifier_id),
+            quantifier_id
+        );
 
-                let nnf_term = let_elim_term.nnf(solver_state);
+        debug_println!(
+            7,
+            0,
+            "We have the nnf term {} with id {}",
+            nnf_term,
+            nnf_term.uid()
+        );
 
-                debug_println!(26, 4, "(assert {})", nnf_term.clone());
-                debug_println!(
-                    24,
-                    8,
-                    "from quantifier {} [{}]",
-                    solver_state.get_term(quantifier.id),
-                    quantifier.id
-                );
+        solver_state.insert_predecessor(&nnf_term, None, None, true);
 
-                debug_println!(
-                    7,
-                    0,
-                    "We have the nnf term {} with id {}",
-                    nnf_term,
-                    nnf_term.uid()
-                );
+        let cnf_term = nnf_term.cnf_tseitin(solver_state);
+        debug_println!(7, 0, "We have the cnf term {:?}", cnf_term);
 
-                // note we do this after nnf
-                // this might lead to weirdness when you have equality of booleans not being represented in egraph
-                // but it should be fine. This is necessary because we need to look up lits
-                // todo: also might be less efficient as well because we are losing structure from original formula in the egraph
-                solver_state.insert_predecessor(&nnf_term, None, None, true);
+        let mut clauses: Vec<_> = cnf_term
+            .clone()
+            .into_iter()
+            .map(|x| x.into_iter().collect::<Vec<_>>())
+            .collect();
 
-                let cnf_term = nnf_term.cnf_tseitin(solver_state);
-                debug_println!(7, 0, "We have the cnf term {:?}", cnf_term);
+        let quantifier_dimacs_literal = if quantifier_is_exists {
+            -quantifier_literal
+        } else {
+            quantifier_literal
+        };
+        let nnf_term_literal = solver_state.get_lit_from_term(&nnf_term);
+        let subst_literal = if t.uid() != nnf_term.uid() {
+            solver_state.get_or_allocate_lit_for_term(&t)
+        } else {
+            0
+        };
 
-                let mut clauses: Vec<_> = cnf_term
-                    .clone()
-                    .into_iter()
-                    .map(|x| x.into_iter().collect::<Vec<_>>())
-                    .collect();
+        proof_tracer
+            .borrow_mut()
+            .push_skolem_or_instantiation_derivation(
+                quantifier_dimacs_literal,
+                subst_literal,
+                &t,
+                nnf_term_literal,
+                &nnf_term,
+                ProofStepType::Instantiation,
+            );
 
-                let quantifier_dimacs_literal = if quantifier_is_exists {
-                    -quantifier_literal
-                } else {
-                    quantifier_literal
-                };
-                let nnf_term_literal = solver_state.get_lit_from_term(&nnf_term);
-                let subst_literal = if t.uid() != nnf_term.uid() {
-                    // Reserve a fresh DIMACS literal for the un-reduced term.
-                    // Note: This must happen *after* calling `nnf_term.cnf_tseitin()`
-                    solver_state.get_or_allocate_lit_for_term(&t)
-                } else {
-                    0
-                };
+        proof_tracer
+            .borrow_mut()
+            .push_steps(&clauses, ProofStepType::TheoryClause(Theory::Boolean));
 
-                // Add the "quantifier implies instantiation" clause to the proof
-                proof_tracer
-                    .borrow_mut()
-                    .push_skolem_or_instantiation_derivation(
-                        quantifier_dimacs_literal,
-                        subst_literal,
-                        &t,
-                        nnf_term_literal,
-                        &nnf_term,
-                        ProofStepType::Instantiation,
-                    );
+        let additional_constraints =
+            check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
+        proof_tracer.borrow_mut().push_steps(
+            &additional_constraints,
+            ProofStepType::TheoryClause(Theory::Background),
+        );
+        clauses.extend(additional_constraints);
 
-                // Add proof steps witnessing the Tseitin transformation of `nnf_term`
-                proof_tracer
-                    .borrow_mut()
-                    .push_steps(&clauses, ProofStepType::TheoryClause(Theory::Boolean));
-
-                // the bug comes from the additional constraints
-                // basically the additional constraints are valid lits -> converted to valid u64, but may not be in the actual term mapping
-                // it should be added in insert_predecessor which calls get_or_insert which adds into terms_list
-                let additional_constraints =
-                    check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
-                proof_tracer.borrow_mut().push_steps(
-                    &additional_constraints,
-                    ProofStepType::TheoryClause(Theory::Background),
-                );
-                clauses.extend(additional_constraints);
-
-                // could activate bits here (the level should not be 0)
-                // activate_bits(&t, 0, egraph);
-
-                for clause in clauses {
-                    let instantiation = QuantifierInstance::Instantiation { clause };
-                    instantiations.push(instantiation); // TODO: I would prefer to push t.uid() here, but it seems like the uid is not getting adding to the terms list
-                }
-            }
+        for clause in clauses {
+            let instantiation = QuantifierInstance::Instantiation { clause };
+            instantiations.push(instantiation);
         }
     }
 
