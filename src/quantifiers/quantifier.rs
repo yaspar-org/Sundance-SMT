@@ -24,6 +24,13 @@ pub enum QuantifierInstance {
     Skolemization { clause: Vec<i32> },
 }
 
+struct DeferredInstantiation {
+    substituted_term: Term,
+    is_exists: bool,
+    literal: i32,
+    quantifier_id: u64,
+}
+
 /// Returns a list of quantifier instantiation given the assignment and current state of the egraph
 ///
 /// TODO: level is only used for printing, can get rid of it later
@@ -41,7 +48,7 @@ pub fn instantiate_quantifiers(
     let quantifiers = &solver_state.quantifiers.clone();
     let mut instantiations = vec![];
     let mut skolemized_quantifier_idxs = vec![];
-    let mut deferred_instantiations: Vec<(Term, bool, i32, u64)> = vec![];
+    let mut deferred_instantiations: Vec<DeferredInstantiation> = vec![];
 
     // We `enumerate()` so we can update quantifiers[i].skolemized after the loop
     for (i, quantifier) in quantifiers.iter().enumerate() {
@@ -214,11 +221,12 @@ pub fn instantiate_quantifiers(
 
             if list_assignments.is_empty() {
                 debug_println!(
-                    24,
+                    6,
                     0,
-                    "No substitutions for {}",
+                    "We are skipping the quantifier {} because it has no substitutions",
                     solver_state.get_term(quantifier.id)
                 );
+                continue;
             }
 
             debug_println!(7, 0, "We have the following list of assignments:");
@@ -252,23 +260,52 @@ pub fn instantiate_quantifiers(
                     &mut solver_state.context,
                 );
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
-                deferred_instantiations.push((
+                deferred_instantiations.push(DeferredInstantiation {
                     substituted_term,
-                    quantifier_is_exists,
-                    quantifier_literal,
-                    quantifier.id,
-                ));
+                    is_exists: quantifier_is_exists,
+                    literal: quantifier_literal,
+                    quantifier_id: quantifier.id,
+                });
             }
         }
     }
 
-    // Phase 2: Process all deferred instantiations (substitute and add to egraph)
+    process_deferred_instantiations(
+        deferred_instantiations,
+        solver_state,
+        proof_tracer,
+        ddsmt,
+        lazy_dt,
+        level,
+        &mut instantiations,
+    );
+
+    // Now mark the quantifier indices as skolemized
+    for i in skolemized_quantifier_idxs {
+        solver_state.quantifiers[i].skolemized = true;
+    }
+
+    instantiations
+}
+
+fn process_deferred_instantiations(
+    deferred_instantiations: Vec<DeferredInstantiation>,
+    solver_state: &mut SolverState,
+    proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+    ddsmt: bool,
+    lazy_dt: bool,
+    level: usize,
+    instantiations: &mut Vec<QuantifierInstance>,
+) {
     debug_println!(6, 0, "Starting to process deferred instantiations");
-    for (substituted_term, quantifier_is_exists, quantifier_literal, quantifier_id) in
-        deferred_instantiations
+    for DeferredInstantiation {
+        substituted_term,
+        is_exists,
+        literal,
+        quantifier_id,
+    } in deferred_instantiations
     {
-        // if this came from a negated existential, we have to negate the term
-        let t = if quantifier_is_exists {
+        let t = if is_exists {
             solver_state.context.not(substituted_term)
         } else {
             substituted_term
@@ -285,7 +322,6 @@ pub fn instantiate_quantifiers(
 
         debug_println!(4, 0, "We have the term {} with id {}", t, t.uid());
 
-        // eliminating lets
         let let_elim_term = t.let_elim(&mut solver_state.context);
 
         debug_println!(
@@ -326,12 +362,9 @@ pub fn instantiate_quantifiers(
             .map(|x| x.into_iter().collect::<Vec<_>>())
             .collect();
 
-        let quantifier_dimacs_literal = if quantifier_is_exists {
-            -quantifier_literal
-        } else {
-            quantifier_literal
-        };
+        let quantifier_dimacs_literal = if is_exists { -literal } else { literal };
         let nnf_term_literal = solver_state.get_lit_from_term(&nnf_term);
+        // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first
         let subst_literal = if t.uid() != nnf_term.uid() {
             solver_state.get_or_allocate_lit_for_term(&t)
         } else {
@@ -366,13 +399,6 @@ pub fn instantiate_quantifiers(
             instantiations.push(instantiation);
         }
     }
-
-    // Now mark the quantifier indices as skolemized
-    for i in skolemized_quantifier_idxs {
-        solver_state.quantifiers[i].skolemized = true;
-    }
-
-    instantiations
 }
 
 // match_term and find_assignments_on_term moved to Egraph methods in solver_state.rs
