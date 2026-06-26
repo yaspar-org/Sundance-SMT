@@ -130,7 +130,7 @@ fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) 
             if !meta.rec_deps.is_empty() {
                 panic!("We do not handle recursive function definitions!");
             }
-            format!("(define-fun {})", meta.def)
+            format!("(define-fun {})\n", meta.def)
         }
         _ => String::new(),
     }
