@@ -1161,9 +1161,10 @@ impl Egraph {
             let mut equalities = Vec::new();
             let mut tracker = ProofTracker::new();
             if x != x_root
-                && let Some(path) = self.leastcommonancestor(x, x_root, &mut tracker) {
-                    equalities.extend(path);
-                }
+                && let Some(path) = self.leastcommonancestor(x, x_root, &mut tracker)
+            {
+                equalities.extend(path);
+            }
             // Explain the current merge from the proof_parent edge
             match &proof_parent {
                 ProofForestEdge::Equality {
@@ -1184,9 +1185,10 @@ impl Egraph {
             }
             tracker = ProofTracker::new();
             if y != y_root
-                && let Some(path) = self.leastcommonancestor(y, y_root, &mut tracker) {
-                    equalities.extend(path);
-                }
+                && let Some(path) = self.leastcommonancestor(y, y_root, &mut tracker)
+            {
+                equalities.extend(path);
+            }
             return EgraphResult::with_conflict(Conflict {
                 equalities,
                 disequality: (x_root, y_root),
