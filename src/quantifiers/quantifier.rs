@@ -24,32 +24,41 @@ pub enum QuantifierInstance {
     Skolemization { clause: Vec<i32> },
 }
 
-struct DeferredInstantiation {
-    substituted_term: Term,
-    is_exists: bool,
-    literal: i32,
-    quantifier_id: u64,
+pub struct DeferredInstantiation {
+    pub substituted_term: Term,
+    pub is_exists: bool,
+    pub literal: i32,
+    pub quantifier_id: u64,
 }
 
-struct DeferredSkolemization {
-    skolem: Term,
-    skolem_vars: Vec<(Str, Sort)>,
-    is_exists: bool,
-    literal: i32,
+pub struct DeferredSkolemization {
+    pub skolem: Term,
+    pub skolem_vars: Vec<(Str, Sort)>,
+    pub is_exists: bool,
+    pub literal: i32,
 }
 
-/// Returns a list of quantifier instantiation given the assignment and current state of the egraph
+pub struct PendingInstantiations {
+    pub deferred_instantiations: Vec<DeferredInstantiation>,
+    pub deferred_skolemizations: Vec<DeferredSkolemization>,
+    pub skolemized_quantifier_idxs: Vec<usize>,
+}
+
+impl PendingInstantiations {
+    pub fn is_empty(&self) -> bool {
+        self.deferred_instantiations.is_empty() && self.deferred_skolemizations.is_empty()
+    }
+}
+
+/// Computes trigger matches and substitutions, returning deferred items
+/// that can be materialized one at a time.
 pub fn instantiate_quantifiers(
     solver_state: &mut SolverState,
-    proof_tracer: &Rc<RefCell<SMTProofTracer>>,
     assignments: &[i32],
-) -> Vec<QuantifierInstance> {
+) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
-    let ddsmt = solver_state.ddsmt;
-    let lazy_dt = solver_state.lazy_dt;
     debug_println!(24, 0, "Starting a matching round");
     let quantifiers = &solver_state.quantifiers.clone();
-    let mut instantiations = vec![];
     let mut skolemized_quantifier_idxs = vec![];
     let mut deferred_skolemizations: Vec<DeferredSkolemization> = vec![];
     let mut deferred_instantiations: Vec<DeferredInstantiation> = vec![];
@@ -152,28 +161,49 @@ pub fn instantiate_quantifiers(
         }
     }
 
-    instantiations.extend(process_deferred_skolemizations(
-        deferred_skolemizations,
-        solver_state,
-        proof_tracer,
-        ddsmt,
-        lazy_dt,
-    ));
-
-    instantiations.extend(process_deferred_instantiations(
+    PendingInstantiations {
         deferred_instantiations,
-        solver_state,
-        proof_tracer,
-        ddsmt,
-        lazy_dt,
-    ));
+        deferred_skolemizations,
+        skolemized_quantifier_idxs,
+    }
+}
 
-    // Now mark the quantifier indices as skolemized
-    for i in skolemized_quantifier_idxs {
-        solver_state.quantifiers[i].skolemized = true;
+/// Materializes the next pending instantiation or skolemization.
+/// This does the expensive work: insert_predecessor, cnf_tseitin, proof steps.
+/// Returns None if there's nothing left to materialize.
+pub fn materialize_next(
+    pending: &mut PendingInstantiations,
+    solver_state: &mut SolverState,
+    proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+) -> Option<Vec<QuantifierInstance>> {
+    let ddsmt = solver_state.ddsmt;
+    let lazy_dt = solver_state.lazy_dt;
+
+    // Skolemizations first
+    if let Some(deferred) = pending.deferred_skolemizations.pop() {
+        let results = process_deferred_skolemizations(
+            vec![deferred],
+            solver_state,
+            proof_tracer,
+            ddsmt,
+            lazy_dt,
+        );
+        return Some(results);
     }
 
-    instantiations
+    // Then instantiations
+    if let Some(deferred) = pending.deferred_instantiations.pop() {
+        let results = process_deferred_instantiations(
+            vec![deferred],
+            solver_state,
+            proof_tracer,
+            ddsmt,
+            lazy_dt,
+        );
+        return Some(results);
+    }
+
+    None
 }
 
 fn process_deferred_skolemizations(

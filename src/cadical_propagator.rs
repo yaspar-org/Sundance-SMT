@@ -9,7 +9,7 @@ use crate::egraphs::EgraphTrait;
 use crate::log::is_important;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
-use crate::quantifiers::quantifier::instantiate_quantifiers;
+use crate::quantifiers::quantifier::{instantiate_quantifiers, materialize_next, PendingInstantiations};
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
@@ -28,6 +28,7 @@ pub struct CustomExternalPropagator<'a> {
     pub solver: *mut CaDiCal,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
+    pub pending: Option<PendingInstantiations>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -374,47 +375,80 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
-        debug_println!(11, 0, "Starting quantifier instantiations");
-        let quantifier_instantiations =
-            instantiate_quantifiers(self.solver_state, &self.proof_tracer, &self.assignments);
-        debug_println!(
-            11,
-            0,
-            "Found quantifier instantiations {:?}",
-            quantifier_instantiations
-        );
+        // If we have pending instantiations from a previous round, materialize the next one
+        if let Some(mut pending) = self.pending.take() {
+            if let Some(clauses) =
+                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+            {
+                for inst in &clauses {
+                    match inst {
+                        Instantiation { clause } => {
+                            for lit in clause {
+                                self.add_observed_variable(*lit);
+                                self.add_lit_to_proof_tracer(*lit);
+                            }
+                            self.disequalities.borrow_mut().push(clause.clone());
+                            self.stats.instantiations += 1;
+                        }
+                        Skolemization { clause } => {
+                            for lit in clause {
+                                self.add_observed_variable(*lit);
+                                self.add_lit_to_proof_tracer(*lit);
+                            }
+                            self.disequalities.borrow_mut().push(clause.clone());
+                        }
+                    }
+                }
+                if pending.is_empty() {
+                    for i in &pending.skolemized_quantifier_idxs {
+                        self.solver_state.quantifiers[*i].skolemized = true;
+                    }
+                } else {
+                    self.pending = Some(pending);
+                }
+                return false;
+            }
+        }
 
-        if quantifier_instantiations.is_empty() {
+        debug_println!(11, 0, "Starting quantifier instantiations");
+        let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
+
+        if pending.is_empty() {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.disequalities.borrow().is_empty());
-
             return true;
         }
 
-        // Add each quantifier instantiation as an instantiation clause to the proof tracker
-        // adds clauses of the formal (or (not (forall ....)) (INSTANTIATED PART)) same as (forall ...) => INSTANTIATED PART
-        for instantiation in &quantifier_instantiations {
-            match instantiation {
-                Instantiation { clause, .. } => {
-                    // , skolemized
-                    for lit in clause {
-                        self.add_observed_variable(*lit);
-                        self.add_lit_to_proof_tracer(*lit);
+        // Materialize the first one now
+        if let Some(clauses) = materialize_next(&mut pending, self.solver_state, &self.proof_tracer) {
+            for inst in &clauses {
+                match inst {
+                    Instantiation { clause } => {
+                        for lit in clause {
+                            self.add_observed_variable(*lit);
+                            self.add_lit_to_proof_tracer(*lit);
+                        }
+                        self.disequalities.borrow_mut().push(clause.clone());
+                        self.stats.instantiations += 1;
                     }
-
-                    // TODO: since I am adding literals, I might have to add them as observed literals
-                    self.disequalities.borrow_mut().push(clause.clone());
-                    self.stats.instantiations += 1;
-                }
-                Skolemization { clause } => {
-                    for lit in clause {
-                        self.add_observed_variable(*lit);
-                        self.add_lit_to_proof_tracer(*lit);
+                    Skolemization { clause } => {
+                        for lit in clause {
+                            self.add_observed_variable(*lit);
+                            self.add_lit_to_proof_tracer(*lit);
+                        }
+                        self.disequalities.borrow_mut().push(clause.clone());
                     }
-
-                    self.disequalities.borrow_mut().push(clause.clone());
                 }
             }
+        }
+
+        // If there's more to materialize later, store the pending state
+        if pending.is_empty() {
+            for i in &pending.skolemized_quantifier_idxs {
+                self.solver_state.quantifiers[*i].skolemized = true;
+            }
+        } else {
+            self.pending = Some(pending);
         }
 
         debug_println!(4, 0, "Returning false in cb_check_found_model");
