@@ -307,6 +307,13 @@ impl SMTProofTracer {
         typ: ProofStepType,
     ) {
         assert!(parent_literal != 0 && reduced_literal != 0);
+        match typ {
+            ProofStepType::Skolemization { parent_term, .. } => {
+                assert!(parent_term.abs() == parent_literal.abs())
+            }
+            _ => assert!(matches!(typ, ProofStepType::Instantiation)),
+        }
+
         if child.uid() != reduced.uid() {
             assert!(child_literal != 0);
         }

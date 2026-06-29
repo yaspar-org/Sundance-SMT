@@ -601,15 +601,6 @@ impl Egraph {
         self.sig_trail.push((level, key, term_id, true));
     }
 
-    /// Remove a term from the sig_table (if it maps to expected_id), recording a trail entry.
-    fn sig_table_remove(&mut self, key: &SigKey, expected_id: u32, level: usize) {
-        if self.sig_table.get(key) == Some(&expected_id) {
-            self.sig_table.remove(key);
-            self.sig_trail
-                .push((level, key.clone(), expected_id, false));
-        }
-    }
-
     /// Build a congruence proof edge and merge two terms that have the same signature.
     /// Returns the result of cc_union (which may contain a conflict).
     fn congruence_merge(&mut self, a: u32, b: u32, level: usize) -> EgraphResult<u32> {
@@ -1134,14 +1125,6 @@ impl Egraph {
             level,
             proof_parent
         );
-        debug_println!(11, 0, "{}", self);
-        // assert_eq!(
-        //     self.display_term(x).get_sort(self),
-        //     self.display_term(y).get_sort(self),
-        //     "We are comparing terms {} and {}",
-        //     self.display_term(x),
-        //     self.display_term(y)
-        // );
 
         if x_root == y_root {
             debug_println!(
@@ -1266,21 +1249,6 @@ impl Egraph {
             }
         }
 
-        // Phase 1: Remove sig_table entries for y_root's predecessors.
-        // Their signatures use y_root as a child representative; after the union
-        // they need new entries with x_root instead.
-        // Only process valid (non-stale) predecessors.
-        let y_root_pred_keys: Vec<u32> = self.predecessors[y_root as usize]
-            .iter()
-            .filter(|(_, p)| valid_hash(p.hash, p.level, &self.predecessor_level))
-            .map(|(k, _)| *k)
-            .collect();
-        for pred_id in &y_root_pred_keys {
-            if let Some(old_sig) = self.compute_signature(*pred_id) {
-                self.sig_table_remove(&old_sig, *pred_id, level);
-            }
-        }
-
         // need to add the new disequalities into x_root
         // TODO: could also clean up some backtracking stuff here, probably want to factor this into its own function
         let (x_root_disequalities_edge, y_root_disequalities_edge) = if x_root > y_root {
@@ -1354,10 +1322,11 @@ impl Egraph {
             }
         }
 
-        // Phase 3: Reinsert y_root's predecessors into sig_table with new canonical forms
+        // Reinsert y_root's predecessors into sig_table with new canonical forms
         // and immediately merge any congruent pairs found.
         // Also move predecessors from y_root to x_root.
         let predecessors_v = std::mem::take(&mut self.predecessors[y_root as usize]);
+        let mut y_root_pred_keys: Vec<u32> = Vec::new();
         for (pred_key, pred_val) in &predecessors_v {
             let new_pred = Predecessor {
                 level,
@@ -1366,9 +1335,11 @@ impl Egraph {
                 inner_term: pred_val.inner_term,
             };
             self.add_predecessor(x_root, *pred_key, new_pred);
+            if valid_hash(pred_val.hash, pred_val.level, &self.predecessor_level) {
+                y_root_pred_keys.push(*pred_key);
+            }
         }
         self.predecessors[y_root as usize] = predecessors_v;
-
         for &pred_id in &y_root_pred_keys {
             if let Some(new_sig) = self.compute_signature(pred_id) {
                 if let Some(&existing) = self.sig_table.get(&new_sig) {
