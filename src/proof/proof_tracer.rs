@@ -212,8 +212,8 @@ impl SMTProofTracer {
         self.get_lit_info(literal).is_some() || self.get_lit_info(-literal).is_some()
     }
 
-    /// Pushes literal definitions
-    /// If one of the literals is not in terms list, then this clause is useless and we return false
+    /// Pushes literal definitions.
+    /// Panics if a literal is not in the terms list.
     fn introduce_literals(
         &self,
         literals_defined: &mut HashSet<i32>,
@@ -245,6 +245,28 @@ impl SMTProofTracer {
                     "We should have introduced the literal {} in the terms list",
                     lit
                 );
+            }
+        }
+        out.push_str(&temp_output);
+    }
+
+    /// Like `introduce_literals`, but skips literals not in the terms list
+    /// (e.g., SAT-internal auxiliary variables that were never registered).
+    fn introduce_literals_lenient(
+        &self,
+        literals_defined: &mut HashSet<i32>,
+        clause: &Vec<i32>,
+        out: &mut String,
+    ) {
+        let mut temp_output = String::new();
+        for &lit in clause {
+            if let Some((lit, _id, term, polarity)) = self.get_lit_info(lit) {
+                let lit = lit.abs();
+                let polarized_term = polarize_term(&term, polarity);
+                if !literals_defined.contains(&lit) {
+                    temp_output.push_str(&format!("(edrat-literal {} {})\n", lit, polarized_term));
+                    literals_defined.insert(lit);
+                }
             }
         }
         out.push_str(&temp_output);
@@ -339,8 +361,10 @@ impl SMTProofTracer {
             match typ {
                 ProofStepType::OriginalClause
                 | ProofStepType::TheoryClause(..)
-                | ProofStepType::Instantiation => {
-                    self.introduce_literals(&mut literals_defined, clause, &mut output)
+                | ProofStepType::Instantiation
+                | ProofStepType::SATClause
+                | ProofStepType::Deletion => {
+                    self.introduce_literals_lenient(&mut literals_defined, clause, &mut output)
                 }
                 ProofStepType::Skolemization {
                     parent_term,
@@ -362,7 +386,6 @@ impl SMTProofTracer {
                     }
                     self.introduce_literals(&mut literals_defined, clause, &mut output);
                 }
-                _ => {}
             }
 
             step.push_line_to(&mut output);
