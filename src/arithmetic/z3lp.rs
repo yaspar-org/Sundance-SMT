@@ -72,7 +72,8 @@ pub fn check_integer_constraints_satisfiable_z3(
     // also save the roots
     // todo: might be able to move this later
     let mut roots = vec![];
-    for term_id in solver_state.arithmetic_terms.clone() {
+    for idx in 0..solver_state.arithmetic_terms.len() {
+        let term_id = solver_state.arithmetic_terms[idx];
         let egraph_id = solver_state.to_egraph_id(term_id);
         if solver_state.egraph.find(egraph_id) == egraph_id {
             let left_expr = Int::new_const(format!("var_{}", egraph_id));
