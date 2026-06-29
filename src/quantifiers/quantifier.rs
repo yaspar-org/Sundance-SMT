@@ -20,8 +20,8 @@ use yaspar_ir::ast::{LetElim, Sort, Str, Substitute, Substitution, Term, TermAll
 
 #[derive(Debug, Clone)]
 pub enum QuantifierInstance {
-    Instantiation { clause: Vec<i32> },
-    Skolemization { clause: Vec<i32> },
+    Instantiation { clauses: Vec<Vec<i32>> },
+    Skolemization { clauses: Vec<Vec<i32>> },
 }
 
 pub struct DeferredInstantiation {
@@ -257,22 +257,25 @@ fn process_deferred_skolemizations(
             );
 
         let skolem_imp = vec![-quantifier_dimacs_literal, reduced_skolem_literal];
-        results.push(QuantifierInstance::Skolemization { clause: skolem_imp });
-
-        let mut add_clause = |mut clause: Vec<i32>, theory: Theory| {
-            if push_literal_if_not_tautology(&mut clause, -reduced_skolem_literal) {
-                proof_tracer.borrow_mut().add_theory_clause(&clause, theory);
-                results.push(QuantifierInstance::Skolemization { clause })
-            }
-        };
+        let mut skolem_clauses = vec![skolem_imp];
 
         for clause in clauses {
-            add_clause(clause.0, Theory::Boolean);
+            let mut c = clause.0;
+            if push_literal_if_not_tautology(&mut c, -reduced_skolem_literal) {
+                proof_tracer.borrow_mut().add_theory_clause(&c, Theory::Boolean);
+                skolem_clauses.push(c);
+            }
         }
 
         for clause in additional_constraints {
-            add_clause(clause, Theory::Boolean);
+            let mut c = clause;
+            if push_literal_if_not_tautology(&mut c, -reduced_skolem_literal) {
+                proof_tracer.borrow_mut().add_theory_clause(&c, Theory::Boolean);
+                skolem_clauses.push(c);
+            }
         }
+
+        results.push(QuantifierInstance::Skolemization { clauses: skolem_clauses });
     }
     results
 }
@@ -354,9 +357,7 @@ fn process_deferred_instantiations(
         );
         clauses.extend(additional_constraints);
 
-        for clause in clauses {
-            results.push(QuantifierInstance::Instantiation { clause });
-        }
+        results.push(QuantifierInstance::Instantiation { clauses });
     }
     results
 }

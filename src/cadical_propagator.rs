@@ -377,25 +377,29 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // If we have pending instantiations from a previous round, materialize the next one
         if let Some(mut pending) = self.pending.take() {
-            if let Some(clauses) =
+            if let Some(instances) =
                 materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
             {
-                for inst in &clauses {
+                for inst in &instances {
                     match inst {
-                        Instantiation { clause } => {
-                            for lit in clause {
-                                self.add_observed_variable(*lit);
-                                self.add_lit_to_proof_tracer(*lit);
+                        Instantiation { clauses } => {
+                            for clause in clauses {
+                                for lit in clause {
+                                    self.add_observed_variable(*lit);
+                                    self.add_lit_to_proof_tracer(*lit);
+                                }
+                                self.disequalities.borrow_mut().push(clause.clone());
                             }
-                            self.disequalities.borrow_mut().push(clause.clone());
                             self.stats.instantiations += 1;
                         }
-                        Skolemization { clause } => {
-                            for lit in clause {
-                                self.add_observed_variable(*lit);
-                                self.add_lit_to_proof_tracer(*lit);
+                        Skolemization { clauses } => {
+                            for clause in clauses {
+                                for lit in clause {
+                                    self.add_observed_variable(*lit);
+                                    self.add_lit_to_proof_tracer(*lit);
+                                }
+                                self.disequalities.borrow_mut().push(clause.clone());
                             }
-                            self.disequalities.borrow_mut().push(clause.clone());
                         }
                     }
                 }
@@ -420,23 +424,27 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         // Materialize the first one now
-        if let Some(clauses) = materialize_next(&mut pending, self.solver_state, &self.proof_tracer) {
-            for inst in &clauses {
+        if let Some(instances) = materialize_next(&mut pending, self.solver_state, &self.proof_tracer) {
+            for inst in &instances {
                 match inst {
-                    Instantiation { clause } => {
-                        for lit in clause {
-                            self.add_observed_variable(*lit);
-                            self.add_lit_to_proof_tracer(*lit);
+                    Instantiation { clauses } => {
+                        for clause in clauses {
+                            for lit in clause {
+                                self.add_observed_variable(*lit);
+                                self.add_lit_to_proof_tracer(*lit);
+                            }
+                            self.disequalities.borrow_mut().push(clause.clone());
                         }
-                        self.disequalities.borrow_mut().push(clause.clone());
                         self.stats.instantiations += 1;
                     }
-                    Skolemization { clause } => {
-                        for lit in clause {
-                            self.add_observed_variable(*lit);
-                            self.add_lit_to_proof_tracer(*lit);
+                    Skolemization { clauses } => {
+                        for clause in clauses {
+                            for lit in clause {
+                                self.add_observed_variable(*lit);
+                                self.add_lit_to_proof_tracer(*lit);
+                            }
+                            self.disequalities.borrow_mut().push(clause.clone());
                         }
-                        self.disequalities.borrow_mut().push(clause.clone());
                     }
                 }
             }
