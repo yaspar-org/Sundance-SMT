@@ -286,10 +286,9 @@ fn process_deferred_instantiations(
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
 
-        let mut clauses: Vec<_> = cnf_term
-            .clone()
+        let mut clauses: Vec<Vec<i32>> = cnf_term
             .into_iter()
-            .map(|x| x.into_iter().collect::<Vec<_>>())
+            .map(|x| x.into_iter().collect::<Vec<i32>>())
             .collect();
 
         let quantifier_dimacs_literal = if is_exists { -literal } else { literal };
