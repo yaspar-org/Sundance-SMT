@@ -188,7 +188,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         .add_theory_clause(&shrunk_constraint, Theory::Background);
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
-
                     self.disequalities.borrow_mut().push(shrunk_constraint);
                     debug_println!(
                         14 - 3,
@@ -279,6 +278,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // If we have pending instantiations from a previous round, serve one immediately
         // without redoing arithmetic or datatype checks.
         if let Some(mut pending) = self.pending.take() {
+            eprintln!("SERVE_PENDING: remaining_sk={} remaining_inst={}", pending.deferred_skolemizations.len(), pending.deferred_instantiations.len());
             if let Some(instances) =
                 materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
             {
@@ -413,6 +413,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         debug_println!(11, 0, "Starting quantifier instantiations");
         let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
+        eprintln!("FRESH_COMPUTE: sk={} inst={}", pending.deferred_skolemizations.len(), pending.deferred_instantiations.len());
 
         if pending.is_empty() {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
