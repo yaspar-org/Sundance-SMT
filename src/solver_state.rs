@@ -27,7 +27,6 @@ use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
 
-use crate::log::is_important;
 use crate::utils::DeterministicHashMap;
 
 fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
@@ -308,12 +307,12 @@ impl SolverState {
     pub fn register_bool_constants(&mut self, true_term: &Term, false_term: &Term) {
         use crate::egraphs::repr::Op;
         use crate::egraphs::traits::EgraphTrait;
-        let true_egraph_id =
-            self.egraph
-                .register_term(Op::Constant("true".to_string()), &[], false);
-        let false_egraph_id =
-            self.egraph
-                .register_term(Op::Constant("false".to_string()), &[], false);
+        let true_egraph_id = self
+            .egraph
+            .register_constant(Op::Constant("true".to_string()));
+        let false_egraph_id = self
+            .egraph
+            .register_constant(Op::Constant("false".to_string()));
 
         let true_uid = true_term.uid();
         let false_uid = false_term.uid();
@@ -351,7 +350,7 @@ impl SolverState {
                     Op::App(key)
                 }
             }
-            Global(qid, _) => Op::Constant(qid.id_str().get().to_string()),
+            Global(qid, _) => Op::App(qid.id_str().get().to_string()),
             Constant(c, _) => Op::Constant(format!("{:?}", c)),
             Local(local) => Op::Local(local.symbol.to_string()),
             _ => panic!("extract_op: unsupported term type {:?}", term.repr()),
@@ -368,6 +367,7 @@ impl SolverState {
         guard: Option<u64>,
         from_quantifier: bool,
     ) -> u32 {
+        use crate::egraphs::repr::Op;
         let num = term.uid();
 
         // Early return if already registered
@@ -405,9 +405,12 @@ impl SolverState {
 
         // Register this term in the egraph
         let op = Self::extract_op(term);
-        let egraph_id = self
-            .egraph
-            .register_term(op, &egraph_children, from_quantifier);
+        let egraph_id = if matches!(op, Op::Constant(_)) {
+            self.egraph.register_constant(op)
+        } else {
+            self.egraph
+                .register_term(op, &egraph_children, from_quantifier)
+        };
         self.id_map.insert(num, egraph_id);
         self.register_arithmetic_and_quantifier(term, guard);
         egraph_id
@@ -444,7 +447,11 @@ impl SolverState {
                     let egraph_id = if let Some(&eid) = self.id_map.get_by_left(&uid) {
                         eid
                     } else {
-                        let eid = self.egraph.register_term(op.clone(), &[], false);
+                        let eid = if matches!(op, Op::Constant(_)) {
+                            self.egraph.register_constant(op.clone())
+                        } else {
+                            self.egraph.register_term(op.clone(), &[], false)
+                        };
                         self.id_map.insert(uid, eid);
                         while self.terms_list.len() <= uid as usize {
                             self.terms_list
@@ -600,7 +607,9 @@ pub fn process_assignment(
                 .iter()
                 .map(|(a, b)| -solver_state.make_eq(*a, *b))
                 .collect();
-            model_terms.push(-conflict.diseq_lit);
+            if let Some(lit) = conflict.diseq_lit {
+                model_terms.push(-lit);
+            }
             return Some(vec![model_terms]);
         }
     }
@@ -624,7 +633,9 @@ pub fn process_assignment(
                 .iter()
                 .map(|(a, b)| -solver_state.make_eq(*a, *b))
                 .collect();
-            model_terms.push(-conflict.diseq_lit);
+            if let Some(lit) = conflict.diseq_lit {
+                model_terms.push(-lit);
+            }
             return Some(vec![model_terms]);
         };
     }
@@ -736,7 +747,9 @@ pub fn process_assignment(
                     .iter()
                     .map(|(a, b)| -solver_state.make_eq(*a, *b))
                     .collect();
-                model_terms.push(-conflict.diseq_lit);
+                if let Some(lit) = conflict.diseq_lit {
+                    model_terms.push(-lit);
+                }
                 Some(vec![model_terms])
             } else {
                 None
@@ -790,7 +803,7 @@ pub fn process_assignment(
                     .into_iter()
                     .map(|(a, b)| -solver_state.make_eq(a, b))
                     .collect();
-                model_terms.push(-conflict.diseq_lit);
+                model_terms.push(-lit);
                 debug_println!(16, 0, "Contradiction found in distinct: {:?}", model_terms);
                 return Some(vec![model_terms]);
             }
@@ -799,49 +812,11 @@ pub fn process_assignment(
         Assertion::Other => None,
     };
 
-    debug_println!(
-        4,
-        0,
-        "We are in process_assignment, checking for contradiction with true and false",
+    debug_assert!(
+        solver_state.egraph.find(true_egraph_id) != solver_state.egraph.find(false_egraph_id),
+        "true and false merged without conflict being detected"
     );
-    if let Some(negated_model) = solver_state
-        .egraph
-        .explain_equality(true_egraph_id, false_egraph_id)
-    {
-        let negated_model_terms: Vec<i32> = negated_model
-            .into_iter()
-            .map(|x| -solver_state.make_eq(x.0, x.1))
-            .collect();
-        debug_println!(
-            24,
-            1,
-            "Contradiction found [2] (setting true = false): {:?} [{:?}]",
-            negated_model_terms
-                .iter()
-                .map(|x| solver_state.get_term_from_lit(*x))
-                .collect::<Vec<_>>(),
-            negated_model_terms
-        );
-        if is_important(7) {
-            for lit in negated_model_terms.clone() {
-                debug_println!(7, 4, "{}", solver_state.get_term_from_lit(lit));
-            }
-        }
 
-        return if let Some(mut constraints) = additional_constraints {
-            constraints.push(negated_model_terms);
-            Some(constraints)
-        } else {
-            Some(vec![negated_model_terms])
-        };
-    }
-
-    debug_println!(
-        24,
-        0,
-        "We have the additional constraints {:?}",
-        additional_constraints
-    );
     additional_constraints
 }
 
