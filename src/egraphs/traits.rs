@@ -23,8 +23,8 @@ pub struct Conflict<T> {
     pub equalities: Vec<(T, T)>,
     /// The disequality that was violated.
     pub disequality: (T, T),
-    /// The SAT literal that asserted the disequality.
-    pub diseq_lit: Lit,
+    /// The SAT literal that asserted the disequality (if one exists).
+    pub diseq_lit: Option<Lit>,
 }
 
 /// Result of a mutating egraph operation (assert_equal, assert_disequal, etc.).
@@ -72,6 +72,9 @@ pub trait EgraphTrait {
         children: &[Self::TermId],
         dynamic: bool,
     ) -> Self::TermId;
+
+    /// Register a constant (0-arity term).
+    fn register_constant(&mut self, op: Self::Op) -> Self::TermId;
 
     /// Register an opaque term — participates in union-find but has no
     /// internal structure visible to congruence closure.

@@ -418,6 +418,16 @@ impl Egraph {
         id
     }
 
+    fn is_constant(&self, id: u32) -> bool {
+        matches!(
+            &self.terms[id as usize],
+            TermSlot::Term(TermEntry {
+                op: Op::Constant(_),
+                ..
+            })
+        )
+    }
+
     fn find(&self, x: u32) -> u32 {
         let p: &ProofForestEdge = &self.proof_forest[x as usize];
         match p {
@@ -589,15 +599,6 @@ impl Egraph {
     fn sig_table_insert(&mut self, key: SigKey, term_id: u32, level: usize) {
         self.sig_table.insert(key.clone(), term_id);
         self.sig_trail.push((level, key, term_id, true));
-    }
-
-    /// Remove a term from the sig_table (if it maps to expected_id), recording a trail entry.
-    fn sig_table_remove(&mut self, key: &SigKey, expected_id: u32, level: usize) {
-        if self.sig_table.get(key) == Some(&expected_id) {
-            self.sig_table.remove(key);
-            self.sig_trail
-                .push((level, key.clone(), expected_id, false));
-        }
     }
 
     /// Build a congruence proof edge and merge two terms that have the same signature.
@@ -895,10 +896,12 @@ impl Egraph {
         self.advance_to_level(level);
         let mut tracker = ProofTracker::new();
         if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
+            // diseq_lit is None: the disequality being asserted is implicit in the
+            // conflict (the caller reconstructs it from the assertion context).
             return EgraphResult::with_conflict(Conflict {
                 equalities,
                 disequality: (t1, t2),
-                diseq_lit,
+                diseq_lit: None,
             });
         }
         let hash = self.predecessor_hash;
@@ -1124,14 +1127,6 @@ impl Egraph {
             level,
             proof_parent
         );
-        debug_println!(11, 0, "{}", self);
-        // assert_eq!(
-        //     self.display_term(x).get_sort(self),
-        //     self.display_term(y).get_sort(self),
-        //     "We are comparing terms {} and {}",
-        //     self.display_term(x),
-        //     self.display_term(y)
-        // );
 
         if x_root == y_root {
             debug_println!(
@@ -1144,8 +1139,58 @@ impl Egraph {
             return EgraphResult::ok();
         }
 
-        // keep track of original proof_parent
-        let _proof_parent_original = proof_parent.clone();
+        let x_root_is_const = self.is_constant(x_root);
+        let y_root_is_const = self.is_constant(y_root);
+
+        // Two distinct constants merged — immediate conflict since constant
+        // disequality is implicit (no SAT literal needed).
+        if x_root_is_const && y_root_is_const {
+            debug_assert!(self.display_term(x_root) != self.display_term(y_root));
+            let mut equalities = Vec::new();
+            let mut tracker = ProofTracker::new();
+            if x != x_root
+                && let Some(path) = self.leastcommonancestor(x, x_root, &mut tracker)
+            {
+                equalities.extend(path);
+            }
+            // Explain the current merge from the proof_parent edge
+            match &proof_parent {
+                ProofForestEdge::Equality {
+                    term: Some((t1, t2)),
+                    ..
+                } => {
+                    equalities.push((*t1, *t2));
+                }
+                ProofForestEdge::Congruence { pairs, .. } => {
+                    for (a, b) in pairs {
+                        tracker = ProofTracker::new();
+                        if let Some(path) = self.leastcommonancestor(*a, *b, &mut tracker) {
+                            equalities.extend(path);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            tracker = ProofTracker::new();
+            if y != y_root
+                && let Some(path) = self.leastcommonancestor(y, y_root, &mut tracker)
+            {
+                equalities.extend(path);
+            }
+            return EgraphResult::with_conflict(Conflict {
+                equalities,
+                disequality: (x_root, y_root),
+                diseq_lit: None,
+            });
+        }
+
+        // Ensure the constant (if any) remains the root: make the constant
+        // side "x" so that x_root stays as root after the union.
+        let (x, y, x_root, y_root) = if y_root_is_const {
+            (y, x, y_root, x_root)
+        } else {
+            (x, y, x_root, y_root)
+        };
 
         // making x the parent of y ~> could also do this based on relative depth of x and y tree
         let proof_parent: ProofForestEdge =
@@ -1171,22 +1216,7 @@ impl Egraph {
             ));
         }
 
-        // Phase 1: Remove sig_table entries for y_root's predecessors BEFORE updating the UF.
-        // Their signatures currently use y_root as a child representative; after the UF
-        // update they'll need new entries with x_root instead.
-        // Only process valid (non-stale) predecessors.
-        let y_root_pred_keys: Vec<u32> = self.predecessors[y_root as usize]
-            .iter()
-            .filter(|(_, p)| valid_hash(p.hash, p.level, &self.predecessor_level))
-            .map(|(k, _)| *k)
-            .collect();
-        for pred_id in &y_root_pred_keys {
-            if let Some(old_sig) = self.compute_signature(*pred_id) {
-                self.sig_table_remove(&old_sig, *pred_id, level);
-            }
-        }
-
-        // Phase 2: Perform the union and propagate disequalities from y_root to x_root.
+        // Perform the union first so we can check for disequality violations early.
         debug_println!(
             16,
             2,
@@ -1195,6 +1225,31 @@ impl Egraph {
             self.display_term(y_root)
         );
         self.make_root(y, proof_parent);
+
+        // Early conflict check: x_root's existing disequalities may already be
+        // violated now that y's class has been merged in.
+        if let Some(disequality) = self.check_self_disequality(x_root) {
+            let mut tracker = ProofTracker::new();
+            if let Some(equalities) = self.leastcommonancestor(
+                disequality.original_disequality.0,
+                disequality.original_disequality.1,
+                &mut tracker,
+            ) {
+                return EgraphResult::with_conflict(Conflict {
+                    equalities,
+                    disequality: disequality.original_disequality,
+                    diseq_lit: Some(disequality.diseq_lit),
+                });
+            } else {
+                panic!(
+                    "Should have found a equality between {} [root: {}] and {} [root: {}]",
+                    self.display_term(disequality.original_disequality.0),
+                    self.display_term(self.find(disequality.original_disequality.0)),
+                    self.display_term(disequality.original_disequality.1),
+                    self.display_term(self.find(disequality.original_disequality.1)),
+                );
+            }
+        }
 
         // need to add the new disequalities into x_root
         // TODO: could also clean up some backtracking stuff here, probably want to factor this into its own function
@@ -1269,54 +1324,14 @@ impl Egraph {
             }
         }
 
-        // basically checking if the current equality that we just added violated any earlier disequalities and if it did, we learn a conflict clause
-        // TODO: now I am actually not sure if disequality checking is really necessary
-        // kind've a weird way to do it since we have already unioned, we are just checking if two things are unequal to themselves
-        debug_println!(
-            5,
-            0,
-            "A. Checking the equality {} = {} with disequalities {:?}",
-            self.display_term(x),
-            self.display_term(y),
-            self.proof_forest[x as usize].disequalities()
-        );
-        if let Some(disequality) = self.check_self_disequality(x_root).clone() {
-            debug_println!(
-                11,
-                0,
-                "B. Checking the equality {} = {} with disequality {} != {}",
-                self.display_term(x),
-                self.display_term(y),
-                self.display_term(disequality.original_disequality.0),
-                self.display_term(disequality.original_disequality.1)
-            );
-            let mut tracker = ProofTracker::new();
-            if let Some(equalities) = self.leastcommonancestor(
-                disequality.original_disequality.0,
-                disequality.original_disequality.1,
-                &mut tracker,
-            ) {
-                return EgraphResult::with_conflict(Conflict {
-                    equalities,
-                    disequality: disequality.original_disequality,
-                    diseq_lit: disequality.diseq_lit,
-                });
-            } else {
-                debug_println!(16, 0, "{}", self);
-                panic!(
-                    "Should have found a equality between {} [root: {}] and {} [root: {}]",
-                    self.display_term(disequality.original_disequality.0),
-                    self.display_term(self.find(disequality.original_disequality.0)),
-                    self.display_term(disequality.original_disequality.1),
-                    self.display_term(self.find(disequality.original_disequality.1)),
-                );
-            }
-        }
-
-        // Phase 3: Reinsert y_root's predecessors into sig_table with new canonical forms
+        // No explicit sig_table removal phase needed: old entries keyed on y_root
+        // become stale (unreachable by compute_signature after the union) and are
+        // naturally superseded by the fresh insertions below.
+        // Reinsert y_root's predecessors into sig_table with new canonical forms
         // and immediately merge any congruent pairs found.
         // Also move predecessors from y_root to x_root.
         let predecessors_v = std::mem::take(&mut self.predecessors[y_root as usize]);
+        let mut y_root_pred_keys: Vec<u32> = Vec::new();
         for (pred_key, pred_val) in &predecessors_v {
             let new_pred = Predecessor {
                 level,
@@ -1325,9 +1340,11 @@ impl Egraph {
                 inner_term: pred_val.inner_term,
             };
             self.add_predecessor(x_root, *pred_key, new_pred);
+            if valid_hash(pred_val.hash, pred_val.level, &self.predecessor_level) {
+                y_root_pred_keys.push(*pred_key);
+            }
         }
         self.predecessors[y_root as usize] = predecessors_v;
-
         for &pred_id in &y_root_pred_keys {
             if let Some(new_sig) = self.compute_signature(pred_id) {
                 if let Some(&existing) = self.sig_table.get(&new_sig) {
@@ -1342,6 +1359,12 @@ impl Egraph {
                 }
             }
         }
+
+        debug_assert!(
+            !x_root_is_const || self.find(x_root) == x_root,
+            "constant root invariant violated for {}",
+            self.display_term(x_root)
+        );
 
         EgraphResult::ok()
     }
@@ -1633,6 +1656,16 @@ impl EgraphTrait for Egraph {
         let id = self.next_id;
         self.next_id += 1;
         self.register_term_internal(id, op, children, dynamic);
+        id
+    }
+
+    fn register_constant(&mut self, op: Self::Op) -> Self::TermId {
+        // TODO: currently relies on Op::Constant variant to distinguish constants
+        // from other 0-arity terms. If Op is unified in the future, this method
+        // should mark the term as a constant via a separate mechanism.
+        let id = self.next_id;
+        self.next_id += 1;
+        self.register_term_internal(id, op, &[], false);
         id
     }
 

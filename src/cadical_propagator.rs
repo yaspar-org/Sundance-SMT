@@ -185,7 +185,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         .add_theory_clause(&shrunk_constraint, Theory::Background);
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
-
                     self.disequalities.borrow_mut().push(shrunk_constraint);
                     debug_println!(
                         14 - 3,
@@ -305,6 +304,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         arithmetic_literals
                     );
                     // let negated_arithmetic_literals = arithmetic_literals.iter().map(|x| -x).collect();
+                    // todo: add proof logging
                     self.disequalities.borrow_mut().push(arithmetic_literals);
                     return false;
                 }
