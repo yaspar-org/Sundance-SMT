@@ -280,39 +280,39 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         if let Some(mut pending) = self.pending.take()
             && let Some(instances) =
                 materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
-            {
-                for inst in &instances {
-                    match inst {
-                        Instantiation { clauses } => {
-                            for clause in clauses {
-                                for lit in clause {
-                                    self.add_observed_variable(*lit);
-                                    self.add_lit_to_proof_tracer(*lit);
-                                }
-                                self.disequalities.borrow_mut().push(clause.clone());
+        {
+            for inst in &instances {
+                match inst {
+                    Instantiation { clauses } => {
+                        for clause in clauses {
+                            for lit in clause {
+                                self.add_observed_variable(*lit);
+                                self.add_lit_to_proof_tracer(*lit);
                             }
-                            self.stats.instantiations += 1;
+                            self.disequalities.borrow_mut().push(clause.clone());
                         }
-                        Skolemization { clauses } => {
-                            for clause in clauses {
-                                for lit in clause {
-                                    self.add_observed_variable(*lit);
-                                    self.add_lit_to_proof_tracer(*lit);
-                                }
-                                self.disequalities.borrow_mut().push(clause.clone());
+                        self.stats.instantiations += 1;
+                    }
+                    Skolemization { clauses } => {
+                        for clause in clauses {
+                            for lit in clause {
+                                self.add_observed_variable(*lit);
+                                self.add_lit_to_proof_tracer(*lit);
                             }
+                            self.disequalities.borrow_mut().push(clause.clone());
                         }
                     }
                 }
-                if pending.is_empty() {
-                    for i in &pending.skolemized_quantifier_idxs {
-                        self.solver_state.quantifiers[*i].skolemized = true;
-                    }
-                } else {
-                    self.pending = Some(pending);
-                }
-                return false;
             }
+            if pending.is_empty() {
+                for i in &pending.skolemized_quantifier_idxs {
+                    self.solver_state.quantifiers[*i].skolemized = true;
+                }
+            } else {
+                self.pending = Some(pending);
+            }
+            return false;
+        }
 
         for term in model {
             let (u64_val, polarity) = self.solver_state.get_u64_from_lit_with_polarity(*term);
