@@ -934,29 +934,6 @@ impl Egraph {
 
         self.decision_level = level;
 
-        // Check for out-of-order entries: an entry at level > target that appears
-        // BEFORE (lower index = deeper in stack) an entry at level <= target
-        let mut has_above_target_after_stop = false;
-        let mut stop_idx = self.proof_forest_backtrack_stack.len();
-        // Find where we'd stop (last entry with level <= target from the top)
-        for (i, entry) in self.proof_forest_backtrack_stack.iter().enumerate().rev() {
-            if entry.0 <= level {
-                stop_idx = i;
-                break;
-            }
-        }
-        // Check if there are entries above target level below the stop point
-        for i in 0..stop_idx {
-            if self.proof_forest_backtrack_stack[i].0 > level {
-                has_above_target_after_stop = true;
-                eprintln!(
-                    "OUT_OF_ORDER: backtracking to level={}, stack[{}] has level={} (above target) but is below stop_idx={}",
-                    level, i, self.proof_forest_backtrack_stack[i].0, stop_idx
-                );
-                break;
-            }
-        }
-
         // Pop proof forest backtrack stack (restore UF first)
         while !self.proof_forest_backtrack_stack.is_empty() {
             let last_level = self.proof_forest_backtrack_stack.last().unwrap().0;
@@ -1236,12 +1213,7 @@ impl Egraph {
         // TODO: write helper functions to make copying over hased things easier
         for (key, value) in y_root_disequalities {
             // make sure we update the disequality level
-            if value.hash >= self.predecessor_level[value.level]
-                || value.hash == 0
-                || value.level == 0
-            {
-                // added value.level == 0 since I think all hashes should be valid at level 0
-                // TODO: borrowing issue so I can't use valid_hash function
+            if valid_hash(value.hash, value.level, &self.predecessor_level) {
 
                 // we can have that we introduce a new equality via eclass option after a quantifier instantiation
                 // this equality could be at level 0
@@ -1326,19 +1298,6 @@ impl Egraph {
                 });
             } else {
                 debug_println!(16, 0, "{}", self);
-                eprintln!("EGRAPH PANIC: merging x={} y={} at level={}", x, y, level);
-                eprintln!("  disequality nodes: {} != {}",
-                    disequality.original_disequality.0,
-                    disequality.original_disequality.1);
-                eprintln!("  disequality terms: {} != {}",
-                    self.display_term(disequality.original_disequality.0),
-                    self.display_term(disequality.original_disequality.1));
-                eprintln!("  find(diseq.0)={} find(diseq.1)={}",
-                    self.find(disequality.original_disequality.0),
-                    self.find(disequality.original_disequality.1));
-                eprintln!("  x_root={} y_root={}", self.find(x), self.find(y));
-                eprintln!("  proof_forest[diseq.0]={:?}", self.proof_forest[disequality.original_disequality.0 as usize]);
-                eprintln!("  proof_forest[diseq.1]={:?}", self.proof_forest[disequality.original_disequality.1 as usize]);
                 panic!(
                     "Should have found a equality between {} [root: {}] and {} [root: {}]",
                     self.display_term(disequality.original_disequality.0),
@@ -1653,7 +1612,7 @@ fn valid_hash(hash: u32, level: usize, predecessor_level: &[u32]) -> bool {
         hash,
         level
     );
-    hash >= predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
+    hash >= predecessor_level[level] || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
 }
 
 impl EgraphTrait for Egraph {

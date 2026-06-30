@@ -82,7 +82,6 @@ impl<'a> CustomExternalPropagator<'a> {
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_assignment(&mut self, lits: &[i32]) {
-        eprintln!("NOTIFY_ASSIGNMENT: level={} lits={:?}", self.decision_level, lits);
         debug_println!(
             22,
             0,
@@ -221,7 +220,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_backtrack(&mut self, level: usize) {
         self.stats.backtracks += 1;
-        eprintln!("BACKTRACK: {} -> {}", self.decision_level, level);
         debug_println!(
             23,
             0,
