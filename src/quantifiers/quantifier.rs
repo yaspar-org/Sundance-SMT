@@ -262,7 +262,9 @@ fn process_deferred_skolemizations(
         for clause in clauses {
             let mut c = clause.0;
             if push_literal_if_not_tautology(&mut c, -reduced_skolem_literal) {
-                proof_tracer.borrow_mut().add_theory_clause(&c, Theory::Boolean);
+                proof_tracer
+                    .borrow_mut()
+                    .add_theory_clause(&c, Theory::Boolean);
                 skolem_clauses.push(c);
             }
         }
@@ -270,12 +272,16 @@ fn process_deferred_skolemizations(
         for clause in additional_constraints {
             let mut c = clause;
             if push_literal_if_not_tautology(&mut c, -reduced_skolem_literal) {
-                proof_tracer.borrow_mut().add_theory_clause(&c, Theory::Boolean);
+                proof_tracer
+                    .borrow_mut()
+                    .add_theory_clause(&c, Theory::Boolean);
                 skolem_clauses.push(c);
             }
         }
 
-        results.push(QuantifierInstance::Skolemization { clauses: skolem_clauses });
+        results.push(QuantifierInstance::Skolemization {
+            clauses: skolem_clauses,
+        });
     }
     results
 }

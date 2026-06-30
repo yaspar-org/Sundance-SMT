@@ -1214,7 +1214,6 @@ impl Egraph {
         for (key, value) in y_root_disequalities {
             // make sure we update the disequality level
             if valid_hash(value.hash, value.level, &self.predecessor_level) {
-
                 // we can have that we introduce a new equality via eclass option after a quantifier instantiation
                 // this equality could be at level 0
                 // but then it's possible that there are disequalities that get copied over such that one of the disequalities are at a level higher than 0

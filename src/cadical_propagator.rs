@@ -9,7 +9,9 @@ use crate::egraphs::EgraphTrait;
 use crate::log::is_important;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
-use crate::quantifiers::quantifier::{instantiate_quantifiers, materialize_next, PendingInstantiations};
+use crate::quantifiers::quantifier::{
+    PendingInstantiations, instantiate_quantifiers, materialize_next,
+};
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
@@ -220,6 +222,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_backtrack(&mut self, level: usize) {
         self.stats.backtracks += 1;
+        eprintln!("BACKTRACK: {} -> {}", self.decision_level, level);
         debug_println!(
             23,
             0,
@@ -264,10 +267,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .collect::<Vec<_>>(),
         );
 
-        // for lit in model{
-        //      debug_println!(11, 4, "{}", self.solver_state.get_term_from_lit(*lit))
-        // }
-
         if !self.disequalities.borrow_mut().is_empty() {
             debug_println!(
                 24,
@@ -275,6 +274,46 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 "Trying to check model when the disequalities are not empty"
             );
             return false;
+        }
+
+        // If we have pending instantiations from a previous round, serve one immediately
+        // without redoing arithmetic or datatype checks.
+        if let Some(mut pending) = self.pending.take() {
+            if let Some(instances) =
+                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+            {
+                for inst in &instances {
+                    match inst {
+                        Instantiation { clauses } => {
+                            for clause in clauses {
+                                for lit in clause {
+                                    self.add_observed_variable(*lit);
+                                    self.add_lit_to_proof_tracer(*lit);
+                                }
+                                self.disequalities.borrow_mut().push(clause.clone());
+                            }
+                            self.stats.instantiations += 1;
+                        }
+                        Skolemization { clauses } => {
+                            for clause in clauses {
+                                for lit in clause {
+                                    self.add_observed_variable(*lit);
+                                    self.add_lit_to_proof_tracer(*lit);
+                                }
+                                self.disequalities.borrow_mut().push(clause.clone());
+                            }
+                        }
+                    }
+                }
+                if pending.is_empty() {
+                    for i in &pending.skolemized_quantifier_idxs {
+                        self.solver_state.quantifiers[*i].skolemized = true;
+                    }
+                } else {
+                    self.pending = Some(pending);
+                }
+                return false;
+            }
         }
 
         for term in model {
@@ -291,7 +330,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         debug_println!(24, 0, "{}", self.solver_state.egraph);
 
-        // Check arithmetic consistency before instantiating quantifiers
+        // Check arithmetic consistency
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
@@ -305,7 +344,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         "PROPAGATOR: Arithmetic inconsistency detected: {:?}",
                         arithmetic_literals
                     );
-                    // let negated_arithmetic_literals = arithmetic_literals.iter().map(|x| -x).collect();
                     self.disequalities.borrow_mut().push(arithmetic_literals);
                     return false;
                 }
@@ -328,11 +366,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         {
                             debug_println!(25, 0, "adding in the nelson oppen term {}", term);
                             let term_nnf = term.nnf(self.solver_state);
-                            // println!("we have the term {:?}", term);
                             self.solver_state
                                 .insert_predecessor(&term_nnf, None, None, true);
                             let term_cnf = term.cnf_tseitin(self.solver_state);
-                            // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
                             for clause in term_cnf {
                                 for lit in &clause.0 {
                                     self.add_observed_variable(*lit);
@@ -375,45 +411,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
-        // If we have pending instantiations from a previous round, materialize the next one
-        if let Some(mut pending) = self.pending.take() {
-            if let Some(instances) =
-                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
-            {
-                for inst in &instances {
-                    match inst {
-                        Instantiation { clauses } => {
-                            for clause in clauses {
-                                for lit in clause {
-                                    self.add_observed_variable(*lit);
-                                    self.add_lit_to_proof_tracer(*lit);
-                                }
-                                self.disequalities.borrow_mut().push(clause.clone());
-                            }
-                            self.stats.instantiations += 1;
-                        }
-                        Skolemization { clauses } => {
-                            for clause in clauses {
-                                for lit in clause {
-                                    self.add_observed_variable(*lit);
-                                    self.add_lit_to_proof_tracer(*lit);
-                                }
-                                self.disequalities.borrow_mut().push(clause.clone());
-                            }
-                        }
-                    }
-                }
-                if pending.is_empty() {
-                    for i in &pending.skolemized_quantifier_idxs {
-                        self.solver_state.quantifiers[*i].skolemized = true;
-                    }
-                } else {
-                    self.pending = Some(pending);
-                }
-                return false;
-            }
-        }
-
         debug_println!(11, 0, "Starting quantifier instantiations");
         let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
 
@@ -424,7 +421,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         // Materialize the first one now
-        if let Some(instances) = materialize_next(&mut pending, self.solver_state, &self.proof_tracer) {
+        if let Some(instances) =
+            materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+        {
             for inst in &instances {
                 match inst {
                     Instantiation { clauses } => {
