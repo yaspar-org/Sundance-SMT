@@ -899,7 +899,7 @@ impl Egraph {
             return EgraphResult::with_conflict(Conflict {
                 equalities,
                 disequality: (t1, t2),
-                diseq_lit,
+                diseq_lit: None,
             });
         }
         let hash = self.predecessor_hash;
@@ -1175,7 +1175,7 @@ impl Egraph {
             return EgraphResult::with_conflict(Conflict {
                 equalities,
                 disequality: (x_root, y_root),
-                diseq_lit: 0,
+                diseq_lit: None,
             });
         }
 
@@ -1236,7 +1236,7 @@ impl Egraph {
                 return EgraphResult::with_conflict(Conflict {
                     equalities,
                     disequality: disequality.original_disequality,
-                    diseq_lit: disequality.diseq_lit,
+                    diseq_lit: Some(disequality.diseq_lit),
                 });
             } else {
                 panic!(

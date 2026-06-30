@@ -23,8 +23,8 @@ pub struct Conflict<T> {
     pub equalities: Vec<(T, T)>,
     /// The disequality that was violated.
     pub disequality: (T, T),
-    /// The SAT literal that asserted the disequality.
-    pub diseq_lit: Lit,
+    /// The SAT literal that asserted the disequality (if one exists).
+    pub diseq_lit: Option<Lit>,
 }
 
 /// Result of a mutating egraph operation (assert_equal, assert_disequal, etc.).
