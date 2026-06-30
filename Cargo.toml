@@ -20,7 +20,7 @@ local-z3 = ["z3-solver"]
 [dependencies]
 yaspar-ir = "=2.7.2"
 sat-interface = "0.1.1"
-cadical-sys = { path = "cadical-sys-local" }
+cadical-sys = { git = "https://github.com/amarshah1/cadical-sys.git", branch = "elevate" }
 
 array2d = "^0.3"
 clap = { version = "4.5.40", features = ["derive"] }
