@@ -277,8 +277,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // If we have pending instantiations from a previous round, serve one immediately
         // without redoing arithmetic or datatype checks.
-        if let Some(mut pending) = self.pending.take() {
-            if let Some(instances) =
+        if let Some(mut pending) = self.pending.take()
+            && let Some(instances) =
                 materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
             {
                 for inst in &instances {
@@ -313,7 +313,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
                 return false;
             }
-        }
 
         for term in model {
             let (u64_val, polarity) = self.solver_state.get_u64_from_lit_with_polarity(*term);
