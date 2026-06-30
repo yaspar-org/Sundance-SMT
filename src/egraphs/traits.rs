@@ -73,12 +73,8 @@ pub trait EgraphTrait {
         dynamic: bool,
     ) -> Self::TermId;
 
-    /// Register a constant (0-arity term). The constant is guaranteed to be
-    /// the root of its equivalence class. When two constants are merged, it
-    /// is immediately detected as a conflict.
-    fn register_constant(&mut self, op: Self::Op) -> Self::TermId {
-        self.register_term(op, &[], false)
-    }
+    /// Register a constant (0-arity term).
+    fn register_constant(&mut self, op: Self::Op) -> Self::TermId;
 
     /// Register an opaque term — participates in union-find but has no
     /// internal structure visible to congruence closure.

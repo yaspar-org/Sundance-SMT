@@ -607,8 +607,8 @@ pub fn process_assignment(
                 .iter()
                 .map(|(a, b)| -solver_state.make_eq(*a, *b))
                 .collect();
-            if conflict.diseq_lit != 0 {
-                model_terms.push(-conflict.diseq_lit);
+            if let Some(lit) = conflict.diseq_lit {
+                model_terms.push(-lit);
             }
             return Some(vec![model_terms]);
         }
@@ -633,8 +633,8 @@ pub fn process_assignment(
                 .iter()
                 .map(|(a, b)| -solver_state.make_eq(*a, *b))
                 .collect();
-            if conflict.diseq_lit != 0 {
-                model_terms.push(-conflict.diseq_lit);
+            if let Some(lit) = conflict.diseq_lit {
+                model_terms.push(-lit);
             }
             return Some(vec![model_terms]);
         };
@@ -747,8 +747,8 @@ pub fn process_assignment(
                     .iter()
                     .map(|(a, b)| -solver_state.make_eq(*a, *b))
                     .collect();
-                if conflict.diseq_lit != 0 {
-                    model_terms.push(-conflict.diseq_lit);
+                if let Some(lit) = conflict.diseq_lit {
+                    model_terms.push(-lit);
                 }
                 Some(vec![model_terms])
             } else {
@@ -803,7 +803,7 @@ pub fn process_assignment(
                     .into_iter()
                     .map(|(a, b)| -solver_state.make_eq(a, b))
                     .collect();
-                model_terms.push(-conflict.diseq_lit);
+                model_terms.push(-lit);
                 debug_println!(16, 0, "Contradiction found in distinct: {:?}", model_terms);
                 return Some(vec![model_terms]);
             }

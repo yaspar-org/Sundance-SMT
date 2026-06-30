@@ -1141,6 +1141,7 @@ impl Egraph {
         let y_root_is_const = self.is_constant(y_root);
 
         if x_root_is_const && y_root_is_const {
+            debug_assert!(self.display_term(x_root) != self.display_term(y_root));
             let mut equalities = Vec::new();
             let mut tracker = ProofTracker::new();
             if x != x_root
