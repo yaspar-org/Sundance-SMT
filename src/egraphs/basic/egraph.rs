@@ -896,6 +896,8 @@ impl Egraph {
         self.advance_to_level(level);
         let mut tracker = ProofTracker::new();
         if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
+            // diseq_lit is None: the disequality being asserted is implicit in the
+            // conflict (the caller reconstructs it from the assertion context).
             return EgraphResult::with_conflict(Conflict {
                 equalities,
                 disequality: (t1, t2),
@@ -1140,6 +1142,8 @@ impl Egraph {
         let x_root_is_const = self.is_constant(x_root);
         let y_root_is_const = self.is_constant(y_root);
 
+        // Two distinct constants merged — immediate conflict since constant
+        // disequality is implicit (no SAT literal needed).
         if x_root_is_const && y_root_is_const {
             debug_assert!(self.display_term(x_root) != self.display_term(y_root));
             let mut equalities = Vec::new();
@@ -1187,9 +1191,6 @@ impl Egraph {
         } else {
             (x, y, x_root, y_root)
         };
-
-        // keep track of original proof_parent
-        let _proof_parent_original = proof_parent.clone();
 
         // making x the parent of y ~> could also do this based on relative depth of x and y tree
         let proof_parent: ProofForestEdge =
@@ -1323,6 +1324,9 @@ impl Egraph {
             }
         }
 
+        // No explicit sig_table removal phase needed: old entries keyed on y_root
+        // become stale (unreachable by compute_signature after the union) and are
+        // naturally superseded by the fresh insertions below.
         // Reinsert y_root's predecessors into sig_table with new canonical forms
         // and immediately merge any congruent pairs found.
         // Also move predecessors from y_root to x_root.
