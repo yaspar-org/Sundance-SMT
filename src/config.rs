@@ -38,6 +38,9 @@ pub struct Args {
     /// Eagerly skolemize every quantifier
     #[arg(long, default_value_t = false)]
     pub eager_skolem: bool,
+    /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
+    #[arg(long, default_value_t = 3)]
+    pub elevate: i32,
     /// Set timeout in seconds (0 means no timeout)
     #[arg(long, default_value_t = 0)]
     pub timeout: u64,

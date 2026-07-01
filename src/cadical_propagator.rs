@@ -80,6 +80,35 @@ impl<'a> CustomExternalPropagator<'a> {
             (*self.solver).add_observed_var(abs_lit);
         }
     }
+
+    fn apply_instances(
+        &mut self,
+        instances: &[crate::quantifiers::quantifier::QuantifierInstance],
+    ) {
+        for inst in instances {
+            match inst {
+                Instantiation { clauses } => {
+                    for clause in clauses {
+                        for lit in clause {
+                            self.add_observed_variable(*lit);
+                            self.add_lit_to_proof_tracer(*lit);
+                        }
+                        self.disequalities.borrow_mut().push(clause.clone());
+                    }
+                    self.stats.instantiations += 1;
+                }
+                Skolemization { clauses } => {
+                    for clause in clauses {
+                        for lit in clause {
+                            self.add_observed_variable(*lit);
+                            self.add_lit_to_proof_tracer(*lit);
+                        }
+                        self.disequalities.borrow_mut().push(clause.clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
@@ -280,29 +309,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             && let Some(instances) =
                 materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
         {
-            for inst in &instances {
-                match inst {
-                    Instantiation { clauses } => {
-                        for clause in clauses {
-                            for lit in clause {
-                                self.add_observed_variable(*lit);
-                                self.add_lit_to_proof_tracer(*lit);
-                            }
-                            self.disequalities.borrow_mut().push(clause.clone());
-                        }
-                        self.stats.instantiations += 1;
-                    }
-                    Skolemization { clauses } => {
-                        for clause in clauses {
-                            for lit in clause {
-                                self.add_observed_variable(*lit);
-                                self.add_lit_to_proof_tracer(*lit);
-                            }
-                            self.disequalities.borrow_mut().push(clause.clone());
-                        }
-                    }
-                }
-            }
+            self.apply_instances(&instances);
             if pending.is_empty() {
                 for i in &pending.skolemized_quantifier_idxs {
                     self.solver_state.quantifiers[*i].skolemized = true;
@@ -421,29 +428,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         if let Some(instances) =
             materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
         {
-            for inst in &instances {
-                match inst {
-                    Instantiation { clauses } => {
-                        for clause in clauses {
-                            for lit in clause {
-                                self.add_observed_variable(*lit);
-                                self.add_lit_to_proof_tracer(*lit);
-                            }
-                            self.disequalities.borrow_mut().push(clause.clone());
-                        }
-                        self.stats.instantiations += 1;
-                    }
-                    Skolemization { clauses } => {
-                        for clause in clauses {
-                            for lit in clause {
-                                self.add_observed_variable(*lit);
-                                self.add_lit_to_proof_tracer(*lit);
-                            }
-                            self.disequalities.borrow_mut().push(clause.clone());
-                        }
-                    }
-                }
-            }
+            self.apply_instances(&instances);
         }
 
         // If there's more to materialize later, store the pending state

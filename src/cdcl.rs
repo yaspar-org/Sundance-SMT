@@ -40,9 +40,10 @@ pub fn cdcl_decision_procedure(
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
     timeout: u64,
+    elevate: i32,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
-    solver.set("elevate".to_string(), 3);
+    solver.set("elevate".to_string(), elevate);
 
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
     // todo: for right now always have hid_quantifiers to be true, need to change this

@@ -326,7 +326,6 @@ fn process_deferred_instantiations(
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
 
         let mut clauses: Vec<_> = cnf_term
-            .clone()
             .into_iter()
             .map(|x| x.into_iter().collect::<Vec<_>>())
             .collect();
