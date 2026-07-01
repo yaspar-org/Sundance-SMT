@@ -221,7 +221,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_backtrack(&mut self, level: usize) {
         self.stats.backtracks += 1;
-        eprintln!("BACKTRACK: {} -> {}", self.decision_level, level);
         debug_println!(
             23,
             0,

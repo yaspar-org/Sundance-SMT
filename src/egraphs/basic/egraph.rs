@@ -1634,7 +1634,7 @@ fn valid_hash(hash: u32, level: usize, predecessor_level: &[u32]) -> bool {
         hash,
         level
     );
-    hash >= predecessor_level[level] || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
+    hash >= predecessor_level[level] || level == 0
 }
 
 impl EgraphTrait for Egraph {
