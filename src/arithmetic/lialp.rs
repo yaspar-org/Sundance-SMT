@@ -55,7 +55,7 @@ pub fn check_integer_constraints_satisfiable_lia(
 
             // We have "root_var = expr," make it into "root_var - expr = 0"
             let (mut monomials, constant) =
-                expr_to_monomials(&expr, -Rational::ONE, &mut var_map, &mut ctx);
+                expr_to_monomials(&expr, -Rational::ONE, &mut var_map, &mut ctx, solver_state);
             monomials.insert(0, Mon::new(Rational::ONE, root_var));
 
             let slack =
@@ -68,13 +68,19 @@ pub fn check_integer_constraints_satisfiable_lia(
     for (constraint_idx, constraint) in constraints.iter().enumerate() {
         debug_println!(4, 0, "WE ARE IN ARITH CHECK: Constraint: {:?}", constraint);
         // We have  "left_expr REL right_expr," make it into "(left_expr - right_expr) REL 0"
-        let (mut constr_monomials, mut constant) =
-            expr_to_monomials(&constraint.left_expr, Rational::ONE, &mut var_map, &mut ctx);
+        let (mut constr_monomials, mut constant) = expr_to_monomials(
+            &constraint.left_expr,
+            Rational::ONE,
+            &mut var_map,
+            &mut ctx,
+            solver_state,
+        );
         let (rhs_monomials, rhs_constant) = expr_to_monomials(
             &constraint.right_expr,
             -Rational::ONE,
             &mut var_map,
             &mut ctx,
+            solver_state,
         );
         constr_monomials.extend(rhs_monomials);
         constant += rhs_constant;
@@ -133,10 +139,8 @@ fn expr_to_monomials(
     sign: Rational, // just one or negative one
     var_map: &mut DeterministicHashMap<u32, Var>,
     ctx: &mut ConvContext,
+    solver_state: &mut SolverState,
 ) -> (Vec<Mon<Rational>>, Rational) {
-    // Each entry in expr is a (Coefficient, Integer) pair, but really the Integer part is what
-    // should be the coefficient in the monomial we create. The "Coefficient" here either has a
-    // term (by its id) or no term at all; i.e. 1.
     let mut monomials: Vec<Mon<Rational>> = Vec::new();
     let mut constant = Rational::ZERO;
     for (term_part, int_coeff) in expr {
@@ -149,7 +153,80 @@ fn expr_to_monomials(
                 monomials.push(Mon::new(&sign * &rational_coeff, v));
             }
             Coefficient::Constant => constant = -&sign * rational_coeff,
+            Coefficient::Div(a_id, b_id) => {
+                let n = resolve_constant_from_egraph_id(*b_id, solver_state);
+                let a_var = *var_map.entry(*a_id).or_insert_with(|| {
+                    ctx.allocate_var(&format!("!ext_var_{}", a_id), VarType::Int)
+                });
+                let q = ctx.allocate_var(&format!("!div_q_{}_{}", a_id, b_id), VarType::Int);
+                add_euclidean_constraints(a_var, q, &n, ctx);
+                monomials.push(Mon::new(&sign * &rational_coeff, q));
+            }
+            Coefficient::Mod(a_id, b_id) => {
+                let n = resolve_constant_from_egraph_id(*b_id, solver_state);
+                let a_var = *var_map.entry(*a_id).or_insert_with(|| {
+                    ctx.allocate_var(&format!("!ext_var_{}", a_id), VarType::Int)
+                });
+                let q = ctx.allocate_var(&format!("!mod_q_{}_{}", a_id, b_id), VarType::Int);
+                add_euclidean_constraints(a_var, q, &n, ctx);
+                // mod(a, n) = a - n*q
+                monomials.push(Mon::new(&sign * &rational_coeff, a_var));
+                monomials.push(Mon::new(&sign * &rational_coeff * (-n), q));
+            }
         }
     }
     (monomials, constant)
+}
+
+/// Resolve an egraph ID to its constant integer value by evaluating its linear expression.
+/// Handles cases like `(- 2)` which yaspar stores as `App("-", [2])`, not `Constant(-2)`.
+/// Panics if the expression is not a pure constant.
+fn resolve_constant_from_egraph_id(egraph_id: u32, solver_state: &mut SolverState) -> Rational {
+    let solver_uid = solver_state.to_solver_uid(egraph_id);
+    let (expr, _) = extract_linear_expression(solver_uid, solver_state);
+    if expr.len() == 1 && expr.contains_key(&Coefficient::Constant) {
+        Rational::from(expr[&Coefficient::Constant].clone())
+    } else {
+        panic!(
+            "div/mod with non-constant divisor not supported by the internal solver (egraph id {})",
+            egraph_id
+        );
+    }
+}
+
+/// Add Euclidean division constraints for quotient q = div(a, n):
+///   a - n*q >= 0  (remainder is non-negative)
+///   a - n*q <= |n| - 1  (remainder < |n|)
+fn add_euclidean_constraints(a_var: Var, q: Var, n: &Rational, ctx: &mut ConvContext) {
+    let abs_n = if *n < Rational::ZERO {
+        -n.clone()
+    } else {
+        n.clone()
+    };
+
+    // a - n*q >= 0
+    let slack_ge = ctx.allocate_var(
+        &format!("!div_slack_ge_{}", ctx.num_variables()),
+        VarType::Real,
+    );
+    ctx.push_relation(
+        Rel::mk_ge(
+            vec![Mon::new(Rational::ONE, a_var), Mon::new(-n.clone(), q)],
+            Rational::ZERO,
+        ),
+        slack_ge,
+    );
+
+    // a - n*q <= |n| - 1
+    let slack_le = ctx.allocate_var(
+        &format!("!div_slack_le_{}", ctx.num_variables()),
+        VarType::Real,
+    );
+    ctx.push_relation(
+        Rel::mk_le(
+            vec![Mon::new(Rational::ONE, a_var), Mon::new(-n.clone(), q)],
+            &abs_n - Rational::ONE,
+        ),
+        slack_le,
+    );
 }

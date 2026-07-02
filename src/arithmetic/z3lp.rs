@@ -33,32 +33,38 @@ pub fn check_integer_constraints_satisfiable_z3(
     debug_println!(21, 4, "trying to solve with constraints: {:?}", constraints);
     debug_println!(21, 4, "and arithmetic literals {:?}", arithmetic_literals);
 
-    // Create Z3 solver;
+    // Create Z3 solver with fixed seed for determinism
     let solver = Solver::new();
+    let mut params = z3::Params::new();
+    params.set_u32("random_seed", 0);
+    solver.set_params(&params);
 
-    // Collect all unique variable names and create Z3 variables
-    let mut variables = std::collections::HashSet::new();
+    // Collect all unique variable IDs (egraph IDs) and create Z3 variables
+    let mut variable_ids = std::collections::BTreeSet::new();
     for constraint in &constraints {
-        for var_name in constraint.left_expr.keys() {
-            if var_name != &Coefficient::Constant {
-                variables.insert(*var_name);
-            }
-        }
-        for var_name in constraint.right_expr.keys() {
-            if var_name != &Coefficient::Constant {
-                variables.insert(*var_name);
+        for var_name in constraint
+            .left_expr
+            .keys()
+            .chain(constraint.right_expr.keys())
+        {
+            match var_name {
+                Coefficient::Term(id) => {
+                    variable_ids.insert(*id);
+                }
+                Coefficient::Div(a, b) | Coefficient::Mod(a, b) => {
+                    variable_ids.insert(*a);
+                    variable_ids.insert(*b);
+                }
+                Coefficient::Constant => {}
             }
         }
     }
 
-    let mut var_map = DeterministicHashMap::new();
-    for var in variables {
-        let var_name = match var {
-            Coefficient::Constant => "__constant__".to_string(),
-            Coefficient::Term(id) => format!("var_{}", id),
-        };
-        let z3_var = Int::new_const(var_name);
-        var_map.entry(var).or_insert(z3_var);
+    let mut var_map: DeterministicHashMap<u32, Int> = DeterministicHashMap::new();
+    for id in variable_ids {
+        var_map
+            .entry(id)
+            .or_insert_with(|| Int::new_const(format!("var_{}", id)));
     }
 
     // Create assumption-based constraints for proper unsat core extraction
@@ -76,22 +82,39 @@ pub fn check_integer_constraints_satisfiable_z3(
         let term_id = solver_state.arithmetic_terms[idx];
         let egraph_id = solver_state.to_egraph_id(term_id);
         if solver_state.egraph.find(egraph_id) == egraph_id {
-            let left_expr = Int::new_const(format!("var_{}", egraph_id));
+            let left_expr = var_map
+                .entry(egraph_id)
+                .or_insert_with(|| Int::new_const(format!("var_{}", egraph_id)))
+                .clone();
 
             roots.push((term_id, left_expr.clone()));
             let (right, literals) = extract_linear_expression(term_id, solver_state);
 
+            // Ensure any new variables from the expression are in var_map
+            for var_name in right.keys() {
+                match var_name {
+                    Coefficient::Term(id) => {
+                        var_map
+                            .entry(*id)
+                            .or_insert_with(|| Int::new_const(format!("var_{}", id)));
+                    }
+                    Coefficient::Div(a, b) | Coefficient::Mod(a, b) => {
+                        var_map
+                            .entry(*a)
+                            .or_insert_with(|| Int::new_const(format!("var_{}", a)));
+                        var_map
+                            .entry(*b)
+                            .or_insert_with(|| Int::new_const(format!("var_{}", b)));
+                    }
+                    Coefficient::Constant => {}
+                }
+            }
+
             // Build the right-hand side expression
             let mut right_expr = Int::from_i64(0);
             for (var_name, coeff) in right.iter() {
-                if var_name != &Coefficient::Constant {
-                    if let Some(var) = var_map.get(var_name) {
-                        let coeff_int = Int::from_big_int(&convert_dashu_to_bigint(coeff));
-                        right_expr += coeff_int * var;
-                    }
-                } else {
-                    let const_term = Int::from_big_int(&convert_dashu_to_bigint(coeff));
-                    right_expr += const_term;
+                if let Some(z3_term) = coeff_to_z3_expr(var_name, coeff, &var_map) {
+                    right_expr += z3_term;
                 }
             }
             let constraint = Int::eq(&left_expr, right_expr);
@@ -106,28 +129,16 @@ pub fn check_integer_constraints_satisfiable_z3(
 
         let mut left_expr = Int::from_i64(0);
         for (var_name, coeff) in &constraint.left_expr {
-            if var_name != &Coefficient::Constant {
-                if let Some(var) = var_map.get(var_name) {
-                    let coeff_int = Int::from_big_int(&convert_dashu_to_bigint(coeff));
-                    left_expr += coeff_int * var;
-                }
-            } else {
-                let const_term = Int::from_big_int(&convert_dashu_to_bigint(coeff));
-                left_expr += const_term;
+            if let Some(z3_term) = coeff_to_z3_expr(var_name, coeff, &var_map) {
+                left_expr += z3_term;
             }
         }
 
         // Build the right-hand side expression
         let mut right_expr = Int::from_i64(0);
         for (var_name, coeff) in &constraint.right_expr {
-            if var_name != &Coefficient::Constant {
-                if let Some(var) = var_map.get(var_name) {
-                    let coeff_int = Int::from_big_int(&convert_dashu_to_bigint(coeff));
-                    right_expr += coeff_int * var;
-                }
-            } else {
-                let const_term = Int::from_big_int(&convert_dashu_to_bigint(coeff));
-                right_expr += const_term;
+            if let Some(z3_term) = coeff_to_z3_expr(var_name, coeff, &var_map) {
+                right_expr += z3_term;
             }
         }
         let lit = arithmetic_literals[constraint_idx];
@@ -158,6 +169,12 @@ pub fn check_integer_constraints_satisfiable_z3(
     }
 
     // Check satisfiability with assumptions
+    if std::env::var("TRACE_Z3").is_ok() {
+        eprintln!("=== Z3 CALL ({} assumptions) ===", assumptions.len());
+        for (i, a) in assumptions.iter().enumerate() {
+            eprintln!("  [{}] {}", i, a);
+        }
+    }
     match solver.check_assumptions(&assumptions) {
         z3::SatResult::Sat => {
             // Satisfiable - return None to indicate no conflict
@@ -171,6 +188,9 @@ pub fn check_integer_constraints_satisfiable_z3(
                 let model_val_i64 = model_val.as_i64().unwrap_or(i64::MAX);
                 model_hashmap.entry(model_val_i64).or_default().insert(var);
             }
+            if std::env::var("TRACE_Z3").is_ok() {
+                eprintln!("  -> SAT model: {:?}", model_hashmap);
+            }
             ArithResult::Sat(model_hashmap, LiaStats::new())
         }
         z3::SatResult::Unsat => {
@@ -183,10 +203,30 @@ pub fn check_integer_constraints_satisfiable_z3(
                 arithmetic_literals
             );
             debug_println!(21, 4, "WE ARE IN ARITH CHECK: Unsat core: {:?}", unsat_core);
-            let unsat_core_literals = unsat_core
+
+            let unsat_core_literals: Vec<i32> = unsat_core
                 .iter()
                 .flat_map(|ast| constraint_to_literals.get(ast).unwrap().clone())
                 .collect();
+            if std::env::var("TRACE_Z3").is_ok() {
+                eprintln!(
+                    "  -> UNSAT core (Z3): {:?}",
+                    unsat_core.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+                );
+                eprintln!("  -> UNSAT clause (SAT lits): {:?}", unsat_core_literals);
+                eprintln!("  -> constraint_to_literals mapping:");
+                for ast in &unsat_core {
+                    eprintln!(
+                        "    {:50} -> {:?}",
+                        ast.to_string()
+                            .replace('\n', " ")
+                            .chars()
+                            .take(50)
+                            .collect::<String>(),
+                        constraint_to_literals.get(ast).unwrap()
+                    );
+                }
+            }
             ArithResult::Unsat(unsat_core_literals, LiaStats::new())
         }
         z3::SatResult::Unknown => {
@@ -201,4 +241,28 @@ fn convert_dashu_to_bigint(n: &IBig) -> num::BigInt {
     // Convert IBig to string and then parse as num::BigInt
     let n_str = n.to_string();
     num::BigInt::parse_bytes(n_str.as_bytes(), 10).unwrap()
+}
+
+/// Convert a (Coefficient, integer-coeff) pair into a Z3 Int expression.
+fn coeff_to_z3_expr(
+    coeff_key: &Coefficient,
+    coeff_val: &IBig,
+    var_map: &DeterministicHashMap<u32, Int>,
+) -> Option<Int> {
+    match coeff_key {
+        Coefficient::Constant => Some(Int::from_big_int(&convert_dashu_to_bigint(coeff_val))),
+        Coefficient::Term(id) => var_map
+            .get(id)
+            .map(|var| Int::from_big_int(&convert_dashu_to_bigint(coeff_val)) * var),
+        Coefficient::Div(a, b) => {
+            let a_var = var_map.get(a)?;
+            let b_var = var_map.get(b)?;
+            Some(Int::from_big_int(&convert_dashu_to_bigint(coeff_val)) * a_var.div(b_var))
+        }
+        Coefficient::Mod(a, b) => {
+            let a_var = var_map.get(a)?;
+            let b_var = var_map.get(b)?;
+            Some(Int::from_big_int(&convert_dashu_to_bigint(coeff_val)) * a_var.modulo(b_var))
+        }
+    }
 }

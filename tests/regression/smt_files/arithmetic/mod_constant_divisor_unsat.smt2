@@ -1,0 +1,6 @@
+(set-logic QF_LIA)
+; mod 17 5 = 2 (since 17 = 5*3 + 2)
+(declare-fun x () Int)
+(assert (= x (mod 17 5)))
+(assert (not (= x 2)))
+(check-sat)
