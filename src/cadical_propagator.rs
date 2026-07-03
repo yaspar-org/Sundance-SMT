@@ -2,8 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
-use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
-use crate::cnf::CNFConversion as _;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::log::is_important;
@@ -77,6 +75,7 @@ impl<'a> CustomExternalPropagator<'a> {
             (*self.solver).add_observed_var(abs_lit);
         }
     }
+
 }
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
@@ -118,81 +117,72 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.solver_state, self.decision_level);
 
-            if let Some(negated_model_or_datatype_constraints) =
-                negated_model_or_datatype_constraints_opt
-            {
-                for constraint in negated_model_or_datatype_constraints {
-                    // todo: deleting this ordering thing -> just for debugging
-                    let mut constraint_ordered = constraint.clone();
-                    constraint_ordered.sort();
-                    debug_println!(
-                        16,
-                        0,
-                        "[in notify_assignment] We have the following constraint: {:?}",
-                        constraint_ordered
-                    );
-                    if is_important(12) {
-                        for lit in constraint.clone() {
-                            debug_println!(12, 4, "{}", self.solver_state.get_term_from_lit(lit));
-                        }
+            if let Some(conflict_result) = negated_model_or_datatype_constraints_opt {
+                for constraint in conflict_result.clauses {
+
+                // todo: deleting this ordering thing -> just for debugging
+                let mut constraint_ordered = constraint.clone();
+                constraint_ordered.sort();
+                debug_println!(
+                    16,
+                    0,
+                    "[in notify_assignment] We have the following constraint: {:?}",
+                    constraint_ordered
+                );
+                if is_important(12) {
+                    for lit in constraint.clone() {
+                        debug_println!(12, 4, "{}", self.solver_state.get_term_from_lit(lit));
                     }
-                    let mut shrunk_constraint = vec![];
-                    let mut already_considered = DeterministicHashSet::default();
-                    for lit in constraint {
-                        if already_considered.contains(&lit) {
-                            // TODO: we are checking for repeats here, but we should fix this at the conflict clause level so that we never get repeats
-                            // the repeats are coming from (= x y) and true being merged and x and y being merged
-                            debug_println!(
-                                2,
-                                0,
-                                "Skipping literal {lit} from negated model because it is repeated"
-                            );
-                        } else {
-                            shrunk_constraint.push(lit);
-                            already_considered.insert(lit);
-                        }
-                    }
-                    // todo: deleting this ordering thing -> just for debugging
-                    let mut shrunk_constraint_ordered = shrunk_constraint.clone();
-                    shrunk_constraint_ordered.sort();
-                    debug_println!(
-                        16,
-                        1,
-                        "After shrinking [ in notify_assignment]: {:?}",
-                        shrunk_constraint_ordered
-                    );
-                    debug_println!(11, 1, "This corresponds to ");
-                    for lit in shrunk_constraint.iter() {
-                        self.add_lit_to_proof_tracer(*lit);
-                        self.add_observed_variable(*lit);
-                        debug_println!(11, 1, "  {}", self.solver_state.get_term_from_lit(*lit));
-                    }
-
-                    // Store the theory lemma with its proof steps
-                    // TODO: I am not doing proof step stuff right now, but I need to add it back in
-                    // let proof_steps = self.solver_state.egraph.get_proof_steps_for_lemma(&shrunk_constraint);
-
-                    debug_println!(
-                        14 - 3,
-                        0,
-                        "In case 1 currently disequalities: {:?}",
-                        self.disequalities.borrow()
-                    );
-
-                    // CC TODO: Are these congruence closure/EUF atoms? Comment just below this one suggests so.
-                    self.proof_tracer
-                        .borrow_mut()
-                        .add_theory_clause(&shrunk_constraint, Theory::Background);
-
-                    // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
-                    self.disequalities.borrow_mut().push(shrunk_constraint);
-                    debug_println!(
-                        14 - 3,
-                        0,
-                        "We have the following disequalities: {:?}",
-                        self.disequalities.borrow()
-                    );
                 }
+                let mut shrunk_constraint = vec![];
+                let mut already_considered = DeterministicHashSet::default();
+                for lit in constraint {
+                    if already_considered.contains(&lit) {
+                        debug_println!(
+                            2,
+                            0,
+                            "Skipping literal {lit} from negated model because it is repeated"
+                        );
+                    } else {
+                        shrunk_constraint.push(lit);
+                        already_considered.insert(lit);
+                    }
+                }
+                // todo: deleting this ordering thing -> just for debugging
+                let mut shrunk_constraint_ordered = shrunk_constraint.clone();
+                shrunk_constraint_ordered.sort();
+                debug_println!(
+                    16,
+                    1,
+                    "After shrinking [ in notify_assignment]: {:?}",
+                    shrunk_constraint_ordered
+                );
+                debug_println!(11, 1, "This corresponds to ");
+                for lit in shrunk_constraint.iter() {
+                    self.add_lit_to_proof_tracer(*lit);
+                    self.add_observed_variable(*lit);
+                    debug_println!(11, 1, "  {}", self.solver_state.get_term_from_lit(*lit));
+                }
+
+                debug_println!(
+                    14 - 3,
+                    0,
+                    "In case 1 currently disequalities: {:?}",
+                    self.disequalities.borrow()
+                );
+
+                self.proof_tracer
+                    .borrow_mut()
+                    .add_theory_clause(&shrunk_constraint, Theory::Background);
+
+                self.disequalities.borrow_mut().push(shrunk_constraint);
+                debug_println!(
+                    14 - 3,
+                    0,
+                    "We have the following disequalities: {:?}",
+                    self.disequalities.borrow()
+                );
+                } // end for constraint in conflict_result.clauses
             }
         }
     }
@@ -311,36 +301,65 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
             ArithResult::Sat(literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
-                for set in literals.values() {
+                eprintln!("[NO] ArithResult::Sat at level {}. Groups: {}", self.decision_level, literals.len());
+                for (val, set) in &literals {
+                    eprintln!("[NO]   model_val={}: {:?}", val, set);
+                }
+                // Model-based Nelson-Oppen: merge equal-model-value pairs in the
+                // egraph via Arithmetic edges instead of eagerly emitting trichotomies.
+                let mut conflict_from_arith = None;
+                'outer: for set in literals.values() {
                     let mut t = set.iter();
                     let first = t.next().unwrap();
 
                     for term in t {
-                        let pair = if first < term {
-                            (first, term)
+                        let (x, y) = if first < term {
+                            (*first, *term)
                         } else {
-                            (term, first)
+                            (*term, *first)
                         };
 
-                        if let Some(term) =
-                            nelson_oppen_clause_pair(*pair.0, *pair.1, self.solver_state)
+                        let x_e = self.solver_state.to_egraph_id(x);
+                        let y_e = self.solver_state.to_egraph_id(y);
+                        if self.solver_state.egraph.find(x_e)
+                            == self.solver_state.egraph.find(y_e)
                         {
-                            debug_println!(25, 0, "adding in the nelson oppen term {}", term);
-                            let term_nnf = term.nnf(self.solver_state);
-                            // println!("we have the term {:?}", term);
-                            self.solver_state
-                                .insert_predecessor(&term_nnf, None, None, true);
-                            let term_cnf = term.cnf_tseitin(self.solver_state);
-                            // assert!(term_cnf.0.len() == 1, "We have term_cnf {:?}", term_cnf);
-                            for clause in term_cnf {
-                                for lit in &clause.0 {
-                                    self.add_observed_variable(*lit);
-                                    self.add_lit_to_proof_tracer(*lit);
-                                }
-                                self.disequalities.borrow_mut().push(clause.0.clone());
-                            }
+                            eprintln!("[NO]   skip ({},{}) already equal", x_e, y_e);
+                            continue;
+                        }
+
+                        eprintln!("[NO]   merging egraph ({},{}) at level {}", x_e, y_e, self.decision_level);
+                        let result = self
+                            .solver_state
+                            .egraph
+                            .assert_equal_arithmetic(x_e, y_e, self.decision_level);
+                        if result.conflict.is_some() {
+                            eprintln!("[NO]   CONFLICT from merge!");
+                            conflict_from_arith = result.conflict;
+                            break 'outer;
                         }
                     }
+                }
+
+                if let Some(conflict) = conflict_from_arith {
+                    eprintln!("[NO]   conflict equalities: {:?}", conflict.equalities);
+                    eprintln!("[NO]   conflict arith_eq: {:?}", conflict.arithmetic_equalities);
+                    eprintln!("[NO]   conflict diseq: {:?}", conflict.disequality);
+                    let cr = crate::solver_state::build_conflict_with_trichotomies(
+                        self.solver_state,
+                        &conflict.equalities,
+                        conflict.arithmetic_equalities,
+                        conflict.diseq_lit,
+                    );
+                    for clause in cr.clauses {
+                        for lit in &clause {
+                            self.add_observed_variable(*lit);
+                            self.add_lit_to_proof_tracer(*lit);
+                        }
+                        self.disequalities.borrow_mut().push(clause);
+                    }
+                } else {
+                    eprintln!("[NO]   no conflict from merges");
                 }
             }
             ArithResult::None => {}

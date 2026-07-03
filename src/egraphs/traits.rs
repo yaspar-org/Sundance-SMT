@@ -21,6 +21,9 @@ pub type Lit = i32;
 pub struct Conflict<T> {
     /// Equalities forming the proof path that made the two disequal terms equal.
     pub equalities: Vec<(T, T)>,
+    /// Arithmetic equalities on the proof path (from model-based Nelson-Oppen merges).
+    /// The propagator must emit trichotomy clauses for these before calling `make_eq`.
+    pub arithmetic_equalities: Vec<(T, T)>,
     /// The disequality that was violated.
     pub disequality: (T, T),
     /// The SAT literal that asserted the disequality (if one exists).
@@ -103,6 +106,16 @@ pub trait EgraphTrait {
     /// Assert `t1 = t2` at the given decision level.
     /// Performs congruence closure. Returns a conflict if a disequality is violated.
     fn assert_equal(
+        &mut self,
+        t1: Self::TermId,
+        t2: Self::TermId,
+        level: usize,
+    ) -> EgraphResult<Self::TermId>;
+
+    /// Assert `t1 = t2` via an arithmetic theory merge (model-based Nelson-Oppen).
+    /// Behaves like `assert_equal` but tags the edge so that conflict explanations
+    /// report it in `arithmetic_equalities` rather than `equalities`.
+    fn assert_equal_arithmetic(
         &mut self,
         t1: Self::TermId,
         t2: Self::TermId,

@@ -41,6 +41,19 @@ pub(super) enum ProofForestEdge {
         hash: u32,
         children: DeterministicHashSet<u32>,
     },
+    /// Represents an arithmetic theory merge (model-based Nelson-Oppen).
+    /// The egraph treats this like an equality edge, but conflict explanation
+    /// knows to emit the trichotomy clause lazily.
+    Arithmetic {
+        term: (u32, u32),
+        size: u32,
+        parent: u32,
+        child: u32,
+        disequalities: DeterministicHashMap<u32, DisequalTerm>,
+        level: usize,
+        hash: u32,
+        children: DeterministicHashSet<u32>,
+    },
 }
 
 impl fmt::Display for ProofForestEdge {
@@ -106,6 +119,22 @@ impl fmt::Display for ProofForestEdge {
                     pairs, size, parent, child, disequalities, level, hash, children
                 )
             }
+            ProofForestEdge::Arithmetic {
+                term: (t1, t2),
+                size,
+                parent,
+                child,
+                disequalities,
+                level,
+                hash,
+                children,
+            } => {
+                write!(
+                    f,
+                    "Arithmetic({} = {}, size: {}, parent: {}, child: {:?}, disequalities: {:?}, level: {}, hash: {}, children: {:?})",
+                    t1, t2, size, parent, child, disequalities, level, hash, children
+                )
+            }
         }
     }
 }
@@ -144,6 +173,20 @@ impl PartialEq for ProofForestEdge {
                     ..
                 },
             ) => parent1 == parent2 && child1 == child2,
+            (
+                ProofForestEdge::Arithmetic {
+                    term: term1,
+                    parent: parent1,
+                    child: child1,
+                    ..
+                },
+                ProofForestEdge::Arithmetic {
+                    term: term2,
+                    parent: parent2,
+                    child: child2,
+                    ..
+                },
+            ) => term1 == term2 && parent1 == parent2 && child1 == child2,
             _ => false,
         }
     }
@@ -155,7 +198,8 @@ impl ProofForestEdge {
         match self {
             ProofForestEdge::Root { child, .. }
             | ProofForestEdge::Equality { child, .. }
-            | ProofForestEdge::Congruence { child, .. } => *child,
+            | ProofForestEdge::Congruence { child, .. }
+            | ProofForestEdge::Arithmetic { child, .. } => *child,
         }
     }
 
@@ -164,25 +208,28 @@ impl ProofForestEdge {
         match self {
             ProofForestEdge::Root { .. } => panic!("Root does not have a parent"),
             ProofForestEdge::Equality { parent, .. }
-            | ProofForestEdge::Congruence { parent, .. } => *parent,
+            | ProofForestEdge::Congruence { parent, .. }
+            | ProofForestEdge::Arithmetic { parent, .. } => *parent,
         }
     }
 
     /// Get a reference to the disequalities vector for any ProofForestEdge variant
     pub(super) fn disequalities(&self) -> &DeterministicHashMap<u32, DisequalTerm> {
         match self {
-            ProofForestEdge::Root { disequalities, .. } => disequalities,
-            ProofForestEdge::Equality { disequalities, .. } => disequalities,
-            ProofForestEdge::Congruence { disequalities, .. } => disequalities,
+            ProofForestEdge::Root { disequalities, .. }
+            | ProofForestEdge::Equality { disequalities, .. }
+            | ProofForestEdge::Congruence { disequalities, .. }
+            | ProofForestEdge::Arithmetic { disequalities, .. } => disequalities,
         }
     }
 
     /// Get a mutable reference to the disequalities vector for any ProofForestEdge variant
     pub(super) fn disequalities_mut(&mut self) -> &mut DeterministicHashMap<u32, DisequalTerm> {
         match self {
-            ProofForestEdge::Root { disequalities, .. } => disequalities,
-            ProofForestEdge::Equality { disequalities, .. } => disequalities,
-            ProofForestEdge::Congruence { disequalities, .. } => disequalities,
+            ProofForestEdge::Root { disequalities, .. }
+            | ProofForestEdge::Equality { disequalities, .. }
+            | ProofForestEdge::Congruence { disequalities, .. }
+            | ProofForestEdge::Arithmetic { disequalities, .. } => disequalities,
         }
     }
 
@@ -241,6 +288,25 @@ impl ProofForestEdge {
                 disequalities: diseq,
                 children,
             },
+            ProofForestEdge::Arithmetic {
+                term,
+                size,
+                parent,
+                child,
+                level,
+                hash,
+                children,
+                ..
+            } => ProofForestEdge::Arithmetic {
+                term,
+                size,
+                parent,
+                child,
+                level,
+                hash,
+                disequalities: diseq,
+                children,
+            },
         }
     }
 
@@ -288,15 +354,32 @@ impl ProofForestEdge {
                 hash,
                 children,
             },
+            ProofForestEdge::Arithmetic {
+                size,
+                term,
+                disequalities,
+                children,
+                ..
+            } => ProofForestEdge::Arithmetic {
+                size,
+                term,
+                parent,
+                child: new_child,
+                disequalities,
+                level,
+                hash,
+                children,
+            },
         }
     }
 
     /// Add a single disequality to a ProofForestEdge
     pub(super) fn add_disequality(&mut self, key: u32, t: DisequalTerm, hash_level_map: &[u32]) {
         let disequalities = match self {
-            ProofForestEdge::Root { disequalities, .. } => disequalities, // TODO: not sure if I want this clone here, but its kind've hard to do references for disequalities
-            ProofForestEdge::Equality { disequalities, .. } => disequalities,
-            ProofForestEdge::Congruence { disequalities, .. } => disequalities,
+            ProofForestEdge::Root { disequalities, .. }
+            | ProofForestEdge::Equality { disequalities, .. }
+            | ProofForestEdge::Congruence { disequalities, .. }
+            | ProofForestEdge::Arithmetic { disequalities, .. } => disequalities,
         };
         // will only insert a disequality if is not already in the map
         // or if the hash is outdated (i.e. we have already backtracked on this disequality)

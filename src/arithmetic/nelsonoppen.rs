@@ -87,6 +87,12 @@ pub fn nelson_oppen_clause_pair(x: u64, y: u64, solver_state: &mut SolverState) 
     }
     solver_state.nelson_oppen_ineq_literals.insert((x, y));
 
+    Some(nelson_oppen_trichotomy(x, y, solver_state))
+}
+
+/// Build the trichotomy term `x = y \/ x < y \/ x > y` without dedup checking.
+/// Caller is responsible for ensuring this isn't emitted redundantly.
+pub fn nelson_oppen_trichotomy(x: u64, y: u64, solver_state: &mut SolverState) -> Term {
     let bool_sort = solver_state.context.bool_sort();
 
     let lt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol("<"));
@@ -107,7 +113,5 @@ pub fn nelson_oppen_clause_pair(x: u64, y: u64, solver_state: &mut SolverState) 
         .context
         .eq(solver_state.get_term(x), solver_state.get_term(y));
 
-    let or = solver_state.context.or(vec![lt_term, gt_term, eq_term]);
-
-    Some(or)
+    solver_state.context.or(vec![lt_term, gt_term, eq_term])
 }

@@ -12,6 +12,15 @@ use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministic
 use std::default::Default;
 use std::fmt;
 
+/// Result of a proof-path extraction via least common ancestor.
+#[derive(Debug, Clone)]
+pub struct ProofPath {
+    /// Equalities from asserted `Equality` edges.
+    pub equalities: Vec<(u32, u32)>,
+    /// Equalities from `Arithmetic` edges (need trichotomy emission by caller).
+    pub arithmetic_equalities: Vec<(u32, u32)>,
+}
+
 /// Key for the signature table: (operator, canonical children).
 type SigKey = (CanonicalOp, Children);
 
@@ -137,6 +146,32 @@ impl fmt::Display for Egraph {
                                 .iter()
                                 .map(|(t1, t2)| (self.display_term(*t1), self.display_term(*t2)))
                                 .collect::<Vec<_>>(),
+                            size,
+                            self.display_term(*parent),
+                            self.display_term(*child),
+                            disequalities,
+                            level,
+                            hash,
+                            children
+                        )?;
+                    }
+                    ProofForestEdge::Arithmetic {
+                        term: (t1, t2),
+                        size,
+                        parent,
+                        child,
+                        disequalities,
+                        level,
+                        hash,
+                        children,
+                    } => {
+                        writeln!(
+                            f,
+                            "  {} -> {} [Arithmetic {} = {} (size: {}, parent: {}, child: {}, disequalities: {:?}, level: {}, hash: {}, children: {:?})]",
+                            self.display_term(term_id as u32),
+                            self.display_term(*parent),
+                            self.display_term(*t1),
+                            self.display_term(*t2),
                             size,
                             self.display_term(*parent),
                             self.display_term(*child),
@@ -433,7 +468,8 @@ impl Egraph {
         match p {
             ProofForestEdge::Root { .. } => x,
             ProofForestEdge::Congruence { parent: p, .. }
-            | ProofForestEdge::Equality { parent: p, .. } => self.find(*p),
+            | ProofForestEdge::Equality { parent: p, .. }
+            | ProofForestEdge::Arithmetic { parent: p, .. } => self.find(*p),
         }
     }
 
@@ -456,6 +492,12 @@ impl Egraph {
                 ..
             }
             | ProofForestEdge::Equality {
+                parent: p,
+                level,
+                hash,
+                ..
+            }
+            | ProofForestEdge::Arithmetic {
                 parent: p,
                 level,
                 hash,
@@ -700,7 +742,7 @@ impl Egraph {
         u: u32,
         v: u32,
         tracker: &mut ProofTracker,
-    ) -> Option<Vec<(u32, u32)>> {
+    ) -> Option<ProofPath> {
         debug_println!(
             11,
             1,
@@ -717,7 +759,7 @@ impl Egraph {
         v: u32,
         tracker: &mut ProofTracker,
         indent: usize,
-    ) -> Option<Vec<(u32, u32)>> {
+    ) -> Option<ProofPath> {
         debug_println!(
             20,
             indent,
@@ -786,6 +828,7 @@ impl Egraph {
         assert!(visited.contains(&curr));
 
         let mut final_proof = vec![];
+        let mut arithmetic_equalities = vec![];
         let mut proof_congruences = vec![];
 
         debug_println!(11, indent + 1, "We get the unprocessed proof {:?}", proof);
@@ -840,6 +883,20 @@ impl Egraph {
                         )
                     }
                 }
+                ProofForestEdge::Arithmetic { term: (t1, t2), .. } => {
+                    debug_println!(
+                        20,
+                        indent + 12,
+                        "Arithmetic {} [{}] = {} [{}]",
+                        self.display_term(t1),
+                        t1,
+                        self.display_term(t2),
+                        t2
+                    );
+                    if tracker.union(t1, t2) {
+                        arithmetic_equalities.push((t1, t2));
+                    }
+                }
             }
         }
 
@@ -848,11 +905,15 @@ impl Egraph {
                 if let Some(subproof) =
                     self.leastcommonancestor_helper(pair.0, pair.1, tracker, indent + 1)
                 {
-                    final_proof.extend(subproof);
+                    final_proof.extend(subproof.equalities);
+                    arithmetic_equalities.extend(subproof.arithmetic_equalities);
                 }
             }
         }
-        Some(final_proof)
+        Some(ProofPath {
+            equalities: final_proof,
+            arithmetic_equalities,
+        })
     }
 
     /// Ensure internal bookkeeping is ready for operations at the given level.
@@ -884,6 +945,21 @@ impl Egraph {
         self.cc_union(t1, t2, proof_parent, level)
     }
 
+    fn assert_equal_arithmetic(&mut self, t1: u32, t2: u32, level: usize) -> EgraphResult<u32> {
+        self.advance_to_level(level);
+        let proof_parent = ProofForestEdge::Arithmetic {
+            size: 0,
+            term: (t1, t2),
+            parent: 0,
+            child: 0,
+            disequalities: DeterministicHashMap::new(),
+            level,
+            hash: self.predecessor_hash,
+            children: DeterministicHashSet::new(),
+        };
+        self.cc_union(t1, t2, proof_parent, level)
+    }
+
     /// Assert t1 ≠ t2 at the current decision level.
     /// Returns a conflict if t1 and t2 are already in the same equivalence class.
     fn assert_disequal(
@@ -895,11 +971,10 @@ impl Egraph {
     ) -> EgraphResult<u32> {
         self.advance_to_level(level);
         let mut tracker = ProofTracker::new();
-        if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
-            // diseq_lit is None: the disequality being asserted is implicit in the
-            // conflict (the caller reconstructs it from the assertion context).
+        if let Some(proof_path) = self.leastcommonancestor(t1, t2, &mut tracker) {
             return EgraphResult::with_conflict(Conflict {
-                equalities,
+                equalities: proof_path.equalities,
+                arithmetic_equalities: proof_path.arithmetic_equalities,
                 disequality: (t1, t2),
                 diseq_lit: None,
             });
@@ -1147,11 +1222,13 @@ impl Egraph {
         if x_root_is_const && y_root_is_const {
             debug_assert!(self.display_term(x_root) != self.display_term(y_root));
             let mut equalities = Vec::new();
+            let mut arithmetic_equalities = Vec::new();
             let mut tracker = ProofTracker::new();
             if x != x_root
                 && let Some(path) = self.leastcommonancestor(x, x_root, &mut tracker)
             {
-                equalities.extend(path);
+                equalities.extend(path.equalities);
+                arithmetic_equalities.extend(path.arithmetic_equalities);
             }
             // Explain the current merge from the proof_parent edge
             match &proof_parent {
@@ -1161,11 +1238,15 @@ impl Egraph {
                 } => {
                     equalities.push((*t1, *t2));
                 }
+                ProofForestEdge::Arithmetic { term: (t1, t2), .. } => {
+                    arithmetic_equalities.push((*t1, *t2));
+                }
                 ProofForestEdge::Congruence { pairs, .. } => {
                     for (a, b) in pairs {
                         tracker = ProofTracker::new();
                         if let Some(path) = self.leastcommonancestor(*a, *b, &mut tracker) {
-                            equalities.extend(path);
+                            equalities.extend(path.equalities);
+                            arithmetic_equalities.extend(path.arithmetic_equalities);
                         }
                     }
                 }
@@ -1175,10 +1256,12 @@ impl Egraph {
             if y != y_root
                 && let Some(path) = self.leastcommonancestor(y, y_root, &mut tracker)
             {
-                equalities.extend(path);
+                equalities.extend(path.equalities);
+                arithmetic_equalities.extend(path.arithmetic_equalities);
             }
             return EgraphResult::with_conflict(Conflict {
                 equalities,
+                arithmetic_equalities,
                 disequality: (x_root, y_root),
                 diseq_lit: None,
             });
@@ -1230,13 +1313,14 @@ impl Egraph {
         // violated now that y's class has been merged in.
         if let Some(disequality) = self.check_self_disequality(x_root) {
             let mut tracker = ProofTracker::new();
-            if let Some(equalities) = self.leastcommonancestor(
+            if let Some(proof_path) = self.leastcommonancestor(
                 disequality.original_disequality.0,
                 disequality.original_disequality.1,
                 &mut tracker,
             ) {
                 return EgraphResult::with_conflict(Conflict {
-                    equalities,
+                    equalities: proof_path.equalities,
+                    arithmetic_equalities: proof_path.arithmetic_equalities,
                     disequality: disequality.original_disequality,
                     diseq_lit: Some(disequality.diseq_lit),
                 });
@@ -1421,6 +1505,32 @@ impl Egraph {
                 self.make_root(
                     parent,
                     ProofForestEdge::Equality {
+                        size: 0,
+                        term,
+                        parent: vertex,
+                        child: parent,
+                        disequalities: DeterministicHashMap::new(),
+                        level,
+                        hash,
+                        children,
+                    },
+                );
+                disequalities
+            }
+            ProofForestEdge::Arithmetic {
+                term,
+                parent,
+                child,
+                disequalities,
+                level,
+                hash,
+                children,
+                ..
+            } => {
+                assert_eq!(child, vertex);
+                self.make_root(
+                    parent,
+                    ProofForestEdge::Arithmetic {
                         size: 0,
                         term,
                         parent: vertex,
@@ -1701,6 +1811,15 @@ impl EgraphTrait for Egraph {
         self.assert_equal(t1, t2, level)
     }
 
+    fn assert_equal_arithmetic(
+        &mut self,
+        t1: Self::TermId,
+        t2: Self::TermId,
+        level: usize,
+    ) -> EgraphResult<Self::TermId> {
+        self.assert_equal_arithmetic(t1, t2, level)
+    }
+
     fn assert_disequal(
         &mut self,
         t1: Self::TermId,
@@ -1755,5 +1874,6 @@ impl EgraphTrait for Egraph {
     ) -> Option<Vec<(Self::TermId, Self::TermId)>> {
         let mut tracker = ProofTracker::new();
         self.leastcommonancestor(t1, t2, &mut tracker)
+            .map(|path| path.equalities)
     }
 }

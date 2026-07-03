@@ -567,6 +567,74 @@ where
 //     }
 // }
 
+/// Result of process_assignment: clauses to teach + arithmetic pairs needing trichotomy emission.
+pub struct ConflictResult {
+    /// Clauses to add (conflicts or auxiliary axiom clauses).
+    /// For conflicts involving arithmetic equalities, the clause is *partial* —
+    /// the propagator must add `-make_eq(a, b)` for each arithmetic pair after
+    /// emitting the trichotomy.
+    pub clauses: Vec<Vec<i32>>,
+    /// Arithmetic equality pairs (egraph IDs) from the proof path.
+    /// The propagator must emit trichotomy clauses for these, which registers the eq
+    /// literals, then add `-make_eq(a, b)` for each to the last clause in `clauses`.
+    pub arithmetic_equalities: Vec<(u32, u32)>,
+}
+
+/// Emit trichotomy clauses for arithmetic equalities and build the complete
+/// conflict clause. Returns a ConflictResult where:
+/// - `clauses[0]` is the complete conflict clause (including negated arithmetic equalities)
+/// - `clauses[1..]` are the Tseitin clauses for the trichotomies
+pub fn build_conflict_with_trichotomies(
+    solver_state: &mut SolverState,
+    equalities: &[(u32, u32)],
+    arithmetic_equalities: Vec<(u32, u32)>,
+    diseq_lit: Option<i32>,
+) -> ConflictResult {
+    use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy;
+    use crate::cnf::CNFConversion as _;
+
+    let mut trichotomy_clauses = Vec::new();
+
+    // Emit trichotomies for arithmetic equalities (registers eq literals)
+    for &(a, b) in &arithmetic_equalities {
+        let sa = solver_state.to_solver_uid(a);
+        let sb = solver_state.to_solver_uid(b);
+        let key = if sa < sb { (sa, sb) } else { (sb, sa) };
+        if solver_state.nelson_oppen_ineq_literals.contains(&key) {
+            continue;
+        }
+        solver_state.nelson_oppen_ineq_literals.insert(key);
+
+        let trichotomy = nelson_oppen_trichotomy(sa, sb, solver_state);
+        let term_nnf = trichotomy.nnf(solver_state);
+        solver_state.insert_predecessor(&term_nnf, None, None, true);
+        let term_cnf = trichotomy.cnf_tseitin(solver_state);
+        for clause in term_cnf {
+            trichotomy_clauses.push(clause.0);
+        }
+    }
+
+    // Build the complete conflict clause
+    let mut model_terms: Vec<i32> = equalities
+        .iter()
+        .map(|(a, b)| -solver_state.make_eq(*a, *b))
+        .collect();
+    for &(a, b) in &arithmetic_equalities {
+        model_terms.push(-solver_state.make_eq(a, b));
+    }
+    if let Some(lit) = diseq_lit {
+        model_terms.push(-lit);
+    }
+
+    let mut clauses = vec![model_terms];
+    clauses.extend(trichotomy_clauses);
+
+    ConflictResult {
+        clauses,
+        arithmetic_equalities,
+    }
+}
+
 /// Process a SAT literal assignment through the egraph.
 /// This is the solver-level entry point that classifies the literal and
 /// dispatches to the appropriate egraph operation (union, disequality, etc.).
@@ -574,7 +642,7 @@ pub fn process_assignment(
     lit: i32,
     solver_state: &mut SolverState,
     level: usize,
-) -> Option<Vec<Vec<i32>>> {
+) -> Option<ConflictResult> {
     use crate::egraphs::EgraphTrait;
     let lazy_dt = solver_state.lazy_dt;
     let ddsmt = solver_state.ddsmt;
@@ -602,15 +670,12 @@ pub fn process_assignment(
             .egraph
             .assert_equal(egraph_t, true_egraph_id, level);
         if let Some(conflict) = union_result.conflict {
-            let mut model_terms: Vec<i32> = conflict
-                .equalities
-                .iter()
-                .map(|(a, b)| -solver_state.make_eq(*a, *b))
-                .collect();
-            if let Some(lit) = conflict.diseq_lit {
-                model_terms.push(-lit);
-            }
-            return Some(vec![model_terms]);
+            return Some(build_conflict_with_trichotomies(
+                solver_state,
+                &conflict.equalities,
+                conflict.arithmetic_equalities,
+                conflict.diseq_lit,
+            ));
         }
     }
 
@@ -628,15 +693,12 @@ pub fn process_assignment(
             .egraph
             .assert_equal(egraph_t, false_egraph_id, level);
         if let Some(conflict) = union_result.conflict {
-            let mut model_terms: Vec<i32> = conflict
-                .equalities
-                .iter()
-                .map(|(a, b)| -solver_state.make_eq(*a, *b))
-                .collect();
-            if let Some(lit) = conflict.diseq_lit {
-                model_terms.push(-lit);
-            }
-            return Some(vec![model_terms]);
+            return Some(build_conflict_with_trichotomies(
+                solver_state,
+                &conflict.equalities,
+                conflict.arithmetic_equalities,
+                conflict.diseq_lit,
+            ));
         };
     }
 
@@ -680,7 +742,10 @@ pub fn process_assignment(
                             term.clone(),
                             true,
                         );
-                        Some(tester_cnf)
+                        Some(ConflictResult {
+                            clauses: tester_cnf,
+                            arithmetic_equalities: vec![],
+                        })
                     }
                 }
                 _ => {
@@ -722,7 +787,10 @@ pub fn process_assignment(
                             ddsmt,
                             lazy_dt,
                         );
-                        Some(ctor_selector_clauses)
+                        Some(ConflictResult {
+                            clauses: ctor_selector_clauses,
+                            arithmetic_equalities: vec![],
+                        })
                     } else {
                         None
                     }
@@ -742,15 +810,12 @@ pub fn process_assignment(
             let et2 = solver_state.to_egraph_id(t2);
             let union_result = solver_state.egraph.assert_equal(et1, et2, level);
             if let Some(conflict) = union_result.conflict {
-                let mut model_terms: Vec<i32> = conflict
-                    .equalities
-                    .iter()
-                    .map(|(a, b)| -solver_state.make_eq(*a, *b))
-                    .collect();
-                if let Some(lit) = conflict.diseq_lit {
-                    model_terms.push(-lit);
-                }
-                Some(vec![model_terms])
+                Some(build_conflict_with_trichotomies(
+                    solver_state,
+                    &conflict.equalities,
+                    conflict.arithmetic_equalities,
+                    conflict.diseq_lit,
+                ))
             } else {
                 None
             }
@@ -769,23 +834,27 @@ pub fn process_assignment(
             let et2 = solver_state.to_egraph_id(t2);
             let result = solver_state.egraph.assert_disequal(et1, et2, lit, level);
             if let Some(conflict) = result.conflict {
-                let mut model_terms: Vec<i32> = conflict
-                    .equalities
-                    .into_iter()
-                    .map(|(a, b)| -solver_state.make_eq(a, b))
-                    .collect();
-                model_terms.push(solver_state.make_eq(et1, et2));
+                // For disequality conflicts, the diseq pair (et1, et2) is the
+                // assertion itself — include it as a positive equality literal.
+                let mut cr = build_conflict_with_trichotomies(
+                    solver_state,
+                    &conflict.equalities,
+                    conflict.arithmetic_equalities,
+                    None,
+                );
+                // Add the positive equality for the violated disequality
+                cr.clauses[0].push(solver_state.make_eq(et1, et2));
                 debug_println!(
                     16,
                     1,
                     "Contradiction found [1]: {:?} [{:?}]",
-                    model_terms
+                    cr.clauses[0]
                         .iter()
                         .map(|x| solver_state.get_term_from_lit(*x))
                         .collect::<Vec<_>>(),
-                    model_terms
+                    cr.clauses[0]
                 );
-                return Some(vec![model_terms]);
+                return Some(cr);
             }
             None
         }
@@ -798,14 +867,17 @@ pub fn process_assignment(
                 .egraph
                 .assert_distinct(&egraph_terms, lit, level);
             if let Some(conflict) = result.conflict {
-                let mut model_terms: Vec<i32> = conflict
-                    .equalities
-                    .into_iter()
-                    .map(|(a, b)| -solver_state.make_eq(a, b))
-                    .collect();
-                model_terms.push(-lit);
-                debug_println!(16, 0, "Contradiction found in distinct: {:?}", model_terms);
-                return Some(vec![model_terms]);
+                let mut cr = build_conflict_with_trichotomies(
+                    solver_state,
+                    &conflict.equalities,
+                    conflict.arithmetic_equalities,
+                    Some(lit),
+                );
+                debug_println!(16, 0, "Contradiction found in distinct: {:?}", cr.clauses[0]);
+                return Some(ConflictResult {
+                    clauses: cr.clauses,
+                    arithmetic_equalities: cr.arithmetic_equalities,
+                });
             }
             None
         }
