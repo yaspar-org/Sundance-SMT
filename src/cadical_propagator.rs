@@ -301,10 +301,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
             ArithResult::Sat(literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
-                eprintln!("[NO] ArithResult::Sat at level {}. Groups: {}", self.decision_level, literals.len());
-                for (val, set) in &literals {
-                    eprintln!("[NO]   model_val={}: {:?}", val, set);
-                }
                 // Model-based Nelson-Oppen: merge equal-model-value pairs in the
                 // egraph via Arithmetic edges instead of eagerly emitting trichotomies.
                 let mut conflict_from_arith = None;
@@ -321,20 +317,28 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
                         let x_e = self.solver_state.to_egraph_id(x);
                         let y_e = self.solver_state.to_egraph_id(y);
-                        if self.solver_state.egraph.find(x_e)
-                            == self.solver_state.egraph.find(y_e)
+                        let x_root = self.solver_state.egraph.find(x_e);
+                        let y_root = self.solver_state.egraph.find(y_e);
+                        if x_root == y_root {
+                            continue;
+                        }
+                        // Two distinct constants can never be EUF-equal (implicit
+                        // disequality). Skip rather than merge — the conflict would
+                        // be trivial and produce no useful clause.
+                        let x_term = self.solver_state.get_term(self.solver_state.to_solver_uid(x_root));
+                        let y_term = self.solver_state.get_term(self.solver_state.to_solver_uid(y_root));
+                        use yaspar_ir::ast::Repr;
+                        if matches!(x_term.repr(), yaspar_ir::ast::ATerm::Constant(..))
+                            && matches!(y_term.repr(), yaspar_ir::ast::ATerm::Constant(..))
                         {
-                            eprintln!("[NO]   skip ({},{}) already equal", x_e, y_e);
                             continue;
                         }
 
-                        eprintln!("[NO]   merging egraph ({},{}) at level {}", x_e, y_e, self.decision_level);
                         let result = self
                             .solver_state
                             .egraph
                             .assert_equal_arithmetic(x_e, y_e, self.decision_level);
                         if result.conflict.is_some() {
-                            eprintln!("[NO]   CONFLICT from merge!");
                             conflict_from_arith = result.conflict;
                             break 'outer;
                         }
@@ -342,9 +346,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
 
                 if let Some(conflict) = conflict_from_arith {
-                    eprintln!("[NO]   conflict equalities: {:?}", conflict.equalities);
-                    eprintln!("[NO]   conflict arith_eq: {:?}", conflict.arithmetic_equalities);
-                    eprintln!("[NO]   conflict diseq: {:?}", conflict.disequality);
                     let cr = crate::solver_state::build_conflict_with_trichotomies(
                         self.solver_state,
                         &conflict.equalities,
@@ -358,8 +359,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         }
                         self.disequalities.borrow_mut().push(clause);
                     }
-                } else {
-                    eprintln!("[NO]   no conflict from merges");
                 }
             }
             ArithResult::None => {}
