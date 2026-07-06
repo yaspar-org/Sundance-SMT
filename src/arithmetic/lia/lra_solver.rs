@@ -353,6 +353,16 @@ impl LRASolver {
         }
     }
 
+    /// Return the current backtrack level.
+    ///
+    /// Unlike [`set_backtrack`](Self::set_backtrack)'s return value (which cannot reveal
+    /// whether a level bump actually happened — it is a no-op when the solver is already
+    /// UNSAT), this is the authoritative current level, so callers layering their own scope
+    /// markers on top can stay in sync.
+    pub fn backtrack_level(&self) -> usize {
+        self.backtrack_level
+    }
+
     /// Set a backtrack point and return the new backtrack level
     ///
     /// Calling `let level = self.backtrack(); ...; self.backtrack(level)` restores the

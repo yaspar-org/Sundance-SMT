@@ -183,8 +183,6 @@ pub struct IncrementalArithSolver {
     /// We latch the conflicting slack (with the scope level it was found at) here so that
     /// [`check`](Self::check) faithfully reports `Unsat` until the offending scope is popped.
     conflict: Option<(Var, usize)>,
-    /// Current scope level, mirroring the owned solver's backtrack level.
-    level: usize,
 }
 
 impl IncrementalArithSolver {
@@ -199,8 +197,14 @@ impl IncrementalArithSolver {
             next_atom: 0,
             asserted: Vec::new(),
             conflict: None,
-            level: 0,
         }
+    }
+
+    /// The current scope level, read live from the owned solver so it is always authoritative
+    /// (the solver's [`LRASolver::backtrack_level`] is a monotonically increasing timestamp,
+    /// unaffected by `backtrack`, and is *not* bumped by `set_backtrack` when already UNSAT).
+    fn current_level(&self) -> usize {
+        self.lra.backtrack_level()
     }
 
     /// Register a comparison atom `slack <constraint> threshold` without asserting it.
@@ -294,11 +298,12 @@ impl IncrementalArithSolver {
             outcome = outcome.combine(AssertOutcome::from_raw(raw));
         }
 
-        self.asserted.push((atom, self.level));
+        let level = self.current_level();
+        self.asserted.push((atom, level));
         // The LRA solver rejects a directly-contradictory bound without storing it, so latch
         // the conflict here (once) so `check` stays Unsat until this scope is popped.
         if outcome == AssertOutcome::Conflict && self.conflict.is_none() {
-            self.conflict = Some((bound.slack, self.level));
+            self.conflict = Some((bound.slack, level));
         }
         outcome
     }
@@ -325,17 +330,28 @@ impl IncrementalArithSolver {
 
     /// Open a new scope. Returns a [`Level`] to pass to [`pop`](Self::pop) to discard every
     /// bound asserted after this point.
+    ///
+    /// The returned [`Level`] is the **restore target** — the level the solver had *before*
+    /// this push. `set_backtrack` advances the solver's internal level (and returns the
+    /// pre-bump value), so bounds asserted after this call are tagged with a strictly greater
+    /// level and are discarded by the matching `pop`.
+    ///
+    /// Edge case (push-after-unsat): when the solver is already UNSAT, `set_backtrack` is a
+    /// no-op and does not advance the level, so this scope coincides with the current one.
+    /// That is sound — unsat is monotone under additional bounds, so no bound asserted in the
+    /// coincident scope can restore feasibility, and popping it is harmless.
     pub fn push(&mut self) -> Level {
-        let old = self.lra.set_backtrack();
-        // `set_backtrack` returns the pre-bump level and advances the solver's internal level
-        // by one; mirror that so `asserted` entries are tagged with the live scope.
-        self.level = old + 1;
-        Level(old)
+        Level(self.lra.set_backtrack())
     }
 
     /// Discard all bounds asserted since the matching [`push`](Self::push) that returned
-    /// `level`. Bound *values* are restored by the owned solver; the local asserted-atom trail
-    /// is truncated to match.
+    /// `level`. Bound *values* and the current assignment are restored by the owned solver;
+    /// the local asserted-atom trail is truncated to match, and a latched assert-time conflict
+    /// is cleared iff it was discovered in a scope being discarded.
+    ///
+    /// A `pop` to a level `>=` the current one (e.g. popping a coincident push-after-unsat
+    /// scope, or popping without a matching push) is a no-op in the solver and leaves the
+    /// trail untouched.
     pub fn pop(&mut self, level: Level) {
         self.lra.backtrack(level.0);
         self.asserted.retain(|(_, l)| *l <= level.0);
@@ -345,7 +361,6 @@ impl IncrementalArithSolver {
         {
             self.conflict = None;
         }
-        self.level = level.0;
     }
 
     /// Borrow the underlying solver (test/introspection aid; not part of the incremental API).
@@ -464,5 +479,91 @@ mod tests {
         let bounds = s.lra().get_bounds(&Var::real(1)).unwrap();
         assert_eq!(bounds.lower, Some(QDelta::from(rbig!(4))));
         assert_eq!(bounds.upper, Some(QDelta::from(rbig!(4))));
+    }
+
+    // ─── Stage 3: push/pop robustness ───────────────────────────────────────────
+
+    #[test]
+    fn nested_push_pop_restores_each_level() {
+        let mut s = single_var_solver();
+        // base scope: s >= 0, feasible
+        let base = s.register_atom(Var::real(1), Constraint::Ge, rbig!(0));
+        assert!(matches!(
+            s.assert_atom(base),
+            AssertOutcome::Sat | AssertOutcome::Unknown
+        ));
+        assert!(matches!(s.check(), CheckResult::Sat(..)));
+
+        // level 1: s <= 10, still feasible
+        let l1 = s.push();
+        let a1 = s.register_atom(Var::real(1), Constraint::Le, rbig!(10));
+        s.assert_atom(a1);
+        assert!(matches!(s.check(), CheckResult::Sat(..)));
+
+        // level 2: s <= -1, now infeasible (contradicts s >= 0)
+        let l2 = s.push();
+        let a2 = s.register_atom(Var::real(1), Constraint::Le, rbig!(-1));
+        assert_eq!(s.assert_atom(a2), AssertOutcome::Conflict);
+        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+
+        // pop level 2: back to {s >= 0, s <= 10}, feasible again
+        s.pop(l2);
+        assert!(matches!(s.check(), CheckResult::Sat(..)));
+
+        // pop level 1: back to just {s >= 0}, still feasible
+        s.pop(l1);
+        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        // only the base atom remains on the trail
+        assert_eq!(s.asserted.len(), 1);
+    }
+
+    #[test]
+    fn push_after_unsat_then_pop_recovers() {
+        let mut s = single_var_solver();
+        // make the base state unsat: s >= 5 and s <= 3
+        let lo = s.register_atom(Var::real(1), Constraint::Ge, rbig!(5));
+        let hi = s.register_atom(Var::real(1), Constraint::Le, rbig!(3));
+        s.assert_atom(lo);
+        assert_eq!(s.assert_atom(hi), AssertOutcome::Conflict);
+        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+
+        // push while unsat: set_backtrack is a no-op, so this scope coincides with the current
+        // one. Popping it must not panic and must leave the (still-unsat) state intact.
+        let level = s.push();
+        s.pop(level);
+        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+    }
+
+    #[test]
+    fn pop_without_push_is_noop() {
+        let mut s = single_var_solver();
+        let base = s.register_atom(Var::real(1), Constraint::Ge, rbig!(0));
+        s.assert_atom(base);
+        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        // Level(0) targets the base scope; backtrack early-returns (level >= current), so this
+        // is a no-op and must not panic on the absent old_assignment.
+        s.pop(Level(0));
+        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert_eq!(s.asserted.len(), 1);
+    }
+
+    #[test]
+    fn strict_inequality_atom_through_api() {
+        let mut s = single_var_solver();
+        // s > 3 and s < 4 over the reals: feasible (e.g. s = 3.5); the qdelta strict bounds
+        // must not collapse to an empty interval.
+        let gt = s.register_atom(Var::real(1), Constraint::Gt, rbig!(3));
+        let lt = s.register_atom(Var::real(1), Constraint::Lt, rbig!(4));
+        s.assert_atom(gt);
+        s.assert_atom(lt);
+        assert!(matches!(s.check(), CheckResult::Sat(..)));
+
+        // Tightening to s < 3 (with s > 3 still asserted in a nested scope) is infeasible.
+        let level = s.push();
+        let lt3 = s.register_atom(Var::real(1), Constraint::Lt, rbig!(3));
+        s.assert_atom(lt3);
+        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+        s.pop(level);
+        assert!(matches!(s.check(), CheckResult::Sat(..)));
     }
 }
