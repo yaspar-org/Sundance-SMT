@@ -1868,7 +1868,10 @@ impl EgraphTrait for Egraph {
         t2: Self::TermId,
     ) -> Option<Vec<(Self::TermId, Self::TermId)>> {
         let mut tracker = ProofTracker::new();
-        self.leastcommonancestor(t1, t2, &mut tracker)
-            .map(|path| path.equalities)
+        self.leastcommonancestor(t1, t2, &mut tracker).map(|path| {
+            let mut all = path.equalities;
+            all.extend(path.arithmetic_equalities);
+            all
+        })
     }
 }

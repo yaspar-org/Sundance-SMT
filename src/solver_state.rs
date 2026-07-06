@@ -245,6 +245,8 @@ impl SolverState {
     }
 
     /// Convert an equality between two egraph IDs to a SAT literal.
+    /// Allocates a fresh SAT variable if the `(= a b)` literal does not yet exist
+    /// (can happen when arithmetic edges create equalities lazily).
     pub fn make_eq(&mut self, x: u32, y: u32) -> i32 {
         let true_id = self.to_egraph_id(self.true_uid);
         let false_id = self.to_egraph_id(self.false_uid);
@@ -264,7 +266,7 @@ impl SolverState {
             let sx = self.to_solver_uid(x);
             let sy = self.to_solver_uid(y);
             let eq_term_class = self.context.eq(self.get_term(sx), self.get_term(sy));
-            self.get_lit_from_term(&eq_term_class)
+            self.get_or_allocate_lit_for_term(&eq_term_class)
         }
     }
 

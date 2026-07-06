@@ -57,11 +57,11 @@ impl fmt::Display for ArithSolverParseError {
 }
 
 pub enum ArithResult {
-    Unsat(Vec<i32>, LiaStats), // conflict clause
+    Unsat(Vec<i32>, Vec<(u32, u32)>, LiaStats),
     Sat(
         DeterministicHashMap<IBig, DeterministicHashSet<u64>>,
         LiaStats,
-    ), // literals that correspond to inequalities <= where the two terms are equal
+    ),
     None,
 }
 
@@ -116,7 +116,7 @@ pub struct LinearConstraint {
     pub left_expr: DeterministicHashMap<Coefficient, Integer>, // variable name -> coefficient for left side
     pub right_expr: DeterministicHashMap<Coefficient, Integer>, // variable name -> coefficient for right side
     pub function: FunctionType, // true if it's an equality constraint
-    pub additional_constraint: Option<Vec<i32>>, // potentially carries additional constraints created by replacing a literal with its root
+    pub additional_pairs: Option<Vec<(u32, u32)>>, // egraph ID pairs from explain_equality justifying term->root merges
 }
 
 impl LinearConstraint {
@@ -125,13 +125,13 @@ impl LinearConstraint {
         left_expr: DeterministicHashMap<Coefficient, Integer>,
         right_expr: DeterministicHashMap<Coefficient, Integer>,
         function: FunctionType,
-        additional_constraint: Vec<i32>,
+        additional_pairs: Vec<(u32, u32)>,
     ) -> Self {
         Self {
             left_expr,
             right_expr,
             function,
-            additional_constraint: Some(additional_constraint),
+            additional_pairs: Some(additional_pairs),
         }
     }
 }
@@ -315,12 +315,14 @@ fn extract_constraint_from_term(
 
 /// Extracts a linear expression from an SMT term
 /// Returns a DeterministicHashMap mapping variable names to coefficients,
-/// along with negated equality literals corresponding to term->representative merges.
+/// along with egraph ID pairs from explain_equality that justify term->representative merges.
+/// These pairs are returned raw (not converted to SAT literals) so that trichotomy
+/// emission can be deferred to the caller — only needed if the arithmetic solver finds UNSAT.
 /// TODO: simplify this, we might not need DeterministicHashMap representation for z3
 pub fn extract_linear_expression(
     term_id: u64,
     solver_state: &mut SolverState,
-) -> (DeterministicHashMap<Coefficient, Integer>, Vec<i32>) {
+) -> (DeterministicHashMap<Coefficient, Integer>, Vec<(u32, u32)>) {
     debug_println!(
         21,
         8,
@@ -426,15 +428,10 @@ pub fn extract_linear_expression(
                 _ => {
                     let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
 
-                    if let Some(negated_model) = solver_state
+                    if let Some(pairs) = solver_state
                         .egraph
                         .explain_equality(root_id, solver_state.to_egraph_id(term_id))
                     {
-                        let model_terms: Vec<i32> = negated_model
-                            .into_iter()
-                            .map(|x| -solver_state.make_eq(x.0, x.1))
-                            .collect();
-
                         debug_println!(
                             21,
                             10,
@@ -442,7 +439,7 @@ pub fn extract_linear_expression(
                             root_id,
                             term
                         );
-                        additional_constraints.extend(model_terms);
+                        additional_constraints.extend(pairs);
                         expr.insert(Coefficient::Term(root_id), IBig::from(1));
                     }
                 }
@@ -450,15 +447,10 @@ pub fn extract_linear_expression(
         }
         _ => {
             let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
-            if let Some(negated_model) = solver_state
+            if let Some(pairs) = solver_state
                 .egraph
                 .explain_equality(root_id, solver_state.to_egraph_id(term_id))
             {
-                let model_terms: Vec<i32> = negated_model
-                    .into_iter()
-                    .map(|x| -solver_state.make_eq(x.0, x.1))
-                    .collect();
-
                 debug_println!(
                     21,
                     10,
@@ -466,7 +458,7 @@ pub fn extract_linear_expression(
                     root_id,
                     term
                 );
-                additional_constraints.extend(model_terms);
+                additional_constraints.extend(pairs);
                 expr.insert(Coefficient::Term(root_id), IBig::from(1));
             }
         }

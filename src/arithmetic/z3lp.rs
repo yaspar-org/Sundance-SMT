@@ -63,7 +63,8 @@ pub fn check_integer_constraints_satisfiable_z3(
 
     // Create assumption-based constraints for proper unsat core extraction
     let mut assumptions: Vec<Bool> = Vec::new();
-    let mut constraint_to_literals = HashMap::new();
+    let mut constraint_to_pairs: HashMap<Bool, Vec<(u32, u32)>> = HashMap::new();
+    let mut constraint_to_arith_lit: HashMap<Bool, i32> = HashMap::new();
 
     // keep track of these -> will be relevant for Nelson-Oppen
     let mut non_strict_inequalities = vec![];
@@ -79,7 +80,7 @@ pub fn check_integer_constraints_satisfiable_z3(
             let left_expr = Int::new_const(format!("var_{}", egraph_id));
 
             roots.push((term_id, left_expr.clone()));
-            let (right, literals) = extract_linear_expression(term_id, solver_state);
+            let (right, pairs) = extract_linear_expression(term_id, solver_state);
 
             // Build the right-hand side expression
             let mut right_expr = Int::from_i64(0);
@@ -97,7 +98,7 @@ pub fn check_integer_constraints_satisfiable_z3(
             let constraint = Int::eq(&left_expr, right_expr);
 
             assumptions.push(constraint.clone());
-            constraint_to_literals.insert(constraint, literals);
+            constraint_to_pairs.insert(constraint, pairs);
         }
     }
 
@@ -152,9 +153,9 @@ pub fn check_integer_constraints_satisfiable_z3(
         // Convert to boolean assumption - constraint_ast is already a Bool AST
         assumptions.push(constraint_ast.clone());
 
-        let mut constraint = constraint.additional_constraint.clone().unwrap_or(vec![]);
-        constraint.push(lit);
-        constraint_to_literals.insert(constraint_ast, constraint);
+        let pairs = constraint.additional_pairs.clone().unwrap_or_default();
+        constraint_to_pairs.insert(constraint_ast.clone(), pairs);
+        constraint_to_arith_lit.insert(constraint_ast, lit);
     }
 
     // Check satisfiability with assumptions
@@ -174,16 +175,22 @@ pub fn check_integer_constraints_satisfiable_z3(
                 // z3 prints negatives as "(- N)", parse accordingly
                 let val: IBig = if model_val_str.starts_with("(- ") {
                     let inner = &model_val_str[3..model_val_str.len() - 1];
-                    -inner.parse::<IBig>().unwrap()
+                    -inner.parse::<IBig>().unwrap_or_else(|e| {
+                        panic!(
+                            "Failed to parse Z3 model value inner '{}' from '{}': {}",
+                            inner, model_val_str, e
+                        )
+                    })
                 } else {
-                    model_val_str.parse::<IBig>().unwrap()
+                    model_val_str.parse::<IBig>().unwrap_or_else(|e| {
+                        panic!("Failed to parse Z3 model value '{}': {}", model_val_str, e)
+                    })
                 };
                 model_hashmap.entry(val).or_default().insert(var);
             }
             ArithResult::Sat(model_hashmap, LiaStats::new())
         }
         z3::SatResult::Unsat => {
-            // Unsatisfiable - return the arithmetic literals that caused the conflict
             let unsat_core = solver.get_unsat_core();
             debug_println!(
                 4,
@@ -192,11 +199,17 @@ pub fn check_integer_constraints_satisfiable_z3(
                 arithmetic_literals
             );
             debug_println!(21, 4, "WE ARE IN ARITH CHECK: Unsat core: {:?}", unsat_core);
-            let unsat_core_literals = unsat_core
-                .iter()
-                .flat_map(|ast| constraint_to_literals.get(ast).unwrap().clone())
-                .collect();
-            ArithResult::Unsat(unsat_core_literals, LiaStats::new())
+            let mut unsat_core_lits: Vec<i32> = Vec::new();
+            let mut unsat_core_pairs: Vec<(u32, u32)> = Vec::new();
+            for ast in &unsat_core {
+                if let Some(pairs) = constraint_to_pairs.get(ast) {
+                    unsat_core_pairs.extend(pairs);
+                }
+                if let Some(&lit) = constraint_to_arith_lit.get(ast) {
+                    unsat_core_lits.push(lit);
+                }
+            }
+            ArithResult::Unsat(unsat_core_lits, unsat_core_pairs, LiaStats::new())
         }
         z3::SatResult::Unknown => {
             // Z3 couldn't determine satisfiability - treat as satisfiable for now

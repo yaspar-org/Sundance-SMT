@@ -39,15 +39,16 @@ pub fn check_integer_constraints_satisfiable_lia(
     // Create a context for the internal arithmetic solver then build it up
     let mut ctx = ConvContext::new();
     let mut roots = vec![];
-    // For each var we create in the arithmetic solver, track the literals that were used to justify
-    // it. This is used later for translating an "infeasible" outcome into an unsat core.
-    let mut slack_to_lits: HashMap<Var, Vec<i32>> = HashMap::new();
+    // For each var we create in the arithmetic solver, track the egraph equality pairs that
+    // justify it. Only converted to SAT literals in the INFEASIBLE branch (where trichotomies
+    // need to be emitted).
+    let mut slack_to_pairs: HashMap<Var, Vec<(u32, u32)>> = HashMap::new();
 
     for idx in 0..solver_state.arithmetic_terms.len() {
         let term_id = solver_state.arithmetic_terms[idx];
         let egraph_id = solver_state.to_egraph_id(term_id);
         if solver_state.egraph.find(egraph_id) == egraph_id {
-            let (expr, additional_constraints) = extract_linear_expression(term_id, solver_state);
+            let (expr, additional_pairs) = extract_linear_expression(term_id, solver_state);
             let root_var = *var_map.entry(egraph_id).or_insert_with(|| {
                 ctx.allocate_var(&format!("!ext_var_{}", egraph_id), VarType::Int)
             });
@@ -61,10 +62,11 @@ pub fn check_integer_constraints_satisfiable_lia(
             let slack =
                 ctx.allocate_var(&format!("!ext_slack_var_root_{}", term_id), VarType::Real);
             ctx.push_relation(Rel::mk_eq(monomials, constant), slack);
-            slack_to_lits.insert(slack, additional_constraints);
+            slack_to_pairs.insert(slack, additional_pairs);
         }
     }
 
+    let mut slack_to_arith_lit: HashMap<Var, i32> = HashMap::new();
     for (constraint_idx, constraint) in constraints.iter().enumerate() {
         debug_println!(4, 0, "WE ARE IN ARITH CHECK: Constraint: {:?}", constraint);
         // We have  "left_expr REL right_expr," make it into "(left_expr - right_expr) REL 0"
@@ -91,9 +93,9 @@ pub fn check_integer_constraints_satisfiable_lia(
         );
         ctx.push_relation(rel, slack);
 
-        let mut lits = constraint.additional_constraint.clone().unwrap_or_default();
-        lits.push(arithmetic_literals[constraint_idx]);
-        slack_to_lits.insert(slack, lits);
+        let pairs = constraint.additional_pairs.clone().unwrap_or_default();
+        slack_to_pairs.insert(slack, pairs);
+        slack_to_arith_lit.insert(slack, arithmetic_literals[constraint_idx]);
     }
 
     match frontend::solve_ctx_raw(&mut ctx, &SolverConfig::default()) {
@@ -115,12 +117,24 @@ pub fn check_integer_constraints_satisfiable_lia(
                     ArithResult::Sat(model_hashmap, stats)
                 }
                 SolverDecision::INFEASIBLE(conflict) => {
-                    let unsat_core_literals: Vec<i32> = conflict
-                        .iter()
-                        .flat_map(|var| slack_to_lits.get(var).into_iter().flatten().copied())
-                        .collect();
-                    debug_println!(21, 4, "LIA: Unsat core literals: {:?}", unsat_core_literals);
-                    ArithResult::Unsat(unsat_core_literals, stats)
+                    let mut unsat_core_lits: Vec<i32> = Vec::new();
+                    let mut unsat_core_pairs: Vec<(u32, u32)> = Vec::new();
+                    for var in conflict.iter() {
+                        if let Some(pairs) = slack_to_pairs.get(var) {
+                            unsat_core_pairs.extend(pairs);
+                        }
+                        if let Some(&lit) = slack_to_arith_lit.get(var) {
+                            unsat_core_lits.push(lit);
+                        }
+                    }
+                    debug_println!(
+                        21,
+                        4,
+                        "LIA: Unsat core lits: {:?}, pairs: {:?}",
+                        unsat_core_lits,
+                        unsat_core_pairs
+                    );
+                    ArithResult::Unsat(unsat_core_lits, unsat_core_pairs, stats)
                 }
                 SolverDecision::UNKNOWN => ArithResult::None,
             }

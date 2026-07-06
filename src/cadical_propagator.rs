@@ -282,20 +282,32 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.stats.arith_checks += 1;
 
         match check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state) {
-            ArithResult::Unsat(arithmetic_literals, arith_stats) => {
+            ArithResult::Unsat(arith_lits, equality_pairs, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
-                {
-                    debug_println!(
-                        21,
-                        0,
-                        "PROPAGATOR: Arithmetic inconsistency detected: {:?}",
-                        arithmetic_literals
-                    );
-                    // let negated_arithmetic_literals = arithmetic_literals.iter().map(|x| -x).collect();
-                    // todo: add proof logging
-                    self.disequalities.borrow_mut().push(arithmetic_literals);
-                    return false;
+                debug_println!(
+                    21,
+                    0,
+                    "PROPAGATOR: Arithmetic inconsistency detected: lits={:?}, pairs={:?}",
+                    arith_lits,
+                    equality_pairs
+                );
+                // Emit trichotomies for the equality pairs
+                let mut cr = crate::solver_state::build_conflict_with_trichotomies(
+                    self.solver_state,
+                    &[],
+                    equality_pairs,
+                    None,
+                );
+                // Merge arith constraint lits into clauses[0] (the conflict clause)
+                cr.clauses[0].extend(arith_lits);
+                for clause in cr.clauses {
+                    for lit in &clause {
+                        self.add_observed_variable(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
+                    }
+                    self.disequalities.borrow_mut().push(clause);
                 }
+                return false;
             }
             ArithResult::Sat(literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
