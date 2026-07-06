@@ -315,10 +315,25 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
                         let x_e = self.solver_state.to_egraph_id(x);
                         let y_e = self.solver_state.to_egraph_id(y);
-                        if self.solver_state.egraph.find(x_e) == self.solver_state.egraph.find(y_e)
-                        {
+                        let x_root = self.solver_state.egraph.find(x_e);
+                        let y_root = self.solver_state.egraph.find(y_e);
+                        if x_root == y_root {
                             continue;
                         }
+                        debug_assert!(
+                            {
+                                use yaspar_ir::ast::Repr;
+                                let x_term = self
+                                    .solver_state
+                                    .get_term(self.solver_state.to_solver_uid(x_root));
+                                let y_term = self
+                                    .solver_state
+                                    .get_term(self.solver_state.to_solver_uid(y_root));
+                                !(matches!(x_term.repr(), yaspar_ir::ast::ATerm::Constant(..))
+                                    && matches!(y_term.repr(), yaspar_ir::ast::ATerm::Constant(..)))
+                            },
+                            "Two distinct constants grouped by arithmetic model"
+                        );
 
                         let result = self.solver_state.egraph.assert_equal_arithmetic(
                             x_e,
