@@ -867,13 +867,18 @@ pub fn process_assignment(
                 .egraph
                 .assert_distinct(&egraph_terms, lit, level);
             if let Some(conflict) = result.conflict {
-                let mut cr = build_conflict_with_trichotomies(
+                let cr = build_conflict_with_trichotomies(
                     solver_state,
                     &conflict.equalities,
                     conflict.arithmetic_equalities,
                     Some(lit),
                 );
-                debug_println!(16, 0, "Contradiction found in distinct: {:?}", cr.clauses[0]);
+                debug_println!(
+                    16,
+                    0,
+                    "Contradiction found in distinct: {:?}",
+                    cr.clauses[0]
+                );
                 return Some(ConflictResult {
                     clauses: cr.clauses,
                     arithmetic_equalities: cr.arithmetic_equalities,

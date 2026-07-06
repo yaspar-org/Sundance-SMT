@@ -737,12 +737,7 @@ impl Egraph {
 
     /// Explain why u ≡ v by walking the proof forest to their least common ancestor.
     /// Returns None if u and v are not in the same equivalence class.
-    fn leastcommonancestor(
-        &self,
-        u: u32,
-        v: u32,
-        tracker: &mut ProofTracker,
-    ) -> Option<ProofPath> {
+    fn leastcommonancestor(&self, u: u32, v: u32, tracker: &mut ProofTracker) -> Option<ProofPath> {
         debug_println!(
             11,
             1,

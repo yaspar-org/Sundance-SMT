@@ -75,7 +75,6 @@ impl<'a> CustomExternalPropagator<'a> {
             (*self.solver).add_observed_var(abs_lit);
         }
     }
-
 }
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
@@ -119,69 +118,68 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             if let Some(conflict_result) = negated_model_or_datatype_constraints_opt {
                 for constraint in conflict_result.clauses {
-
-                // todo: deleting this ordering thing -> just for debugging
-                let mut constraint_ordered = constraint.clone();
-                constraint_ordered.sort();
-                debug_println!(
-                    16,
-                    0,
-                    "[in notify_assignment] We have the following constraint: {:?}",
-                    constraint_ordered
-                );
-                if is_important(12) {
-                    for lit in constraint.clone() {
-                        debug_println!(12, 4, "{}", self.solver_state.get_term_from_lit(lit));
+                    // todo: deleting this ordering thing -> just for debugging
+                    let mut constraint_ordered = constraint.clone();
+                    constraint_ordered.sort();
+                    debug_println!(
+                        16,
+                        0,
+                        "[in notify_assignment] We have the following constraint: {:?}",
+                        constraint_ordered
+                    );
+                    if is_important(12) {
+                        for lit in constraint.clone() {
+                            debug_println!(12, 4, "{}", self.solver_state.get_term_from_lit(lit));
+                        }
                     }
-                }
-                let mut shrunk_constraint = vec![];
-                let mut already_considered = DeterministicHashSet::default();
-                for lit in constraint {
-                    if already_considered.contains(&lit) {
-                        debug_println!(
-                            2,
-                            0,
-                            "Skipping literal {lit} from negated model because it is repeated"
-                        );
-                    } else {
-                        shrunk_constraint.push(lit);
-                        already_considered.insert(lit);
+                    let mut shrunk_constraint = vec![];
+                    let mut already_considered = DeterministicHashSet::default();
+                    for lit in constraint {
+                        if already_considered.contains(&lit) {
+                            debug_println!(
+                                2,
+                                0,
+                                "Skipping literal {lit} from negated model because it is repeated"
+                            );
+                        } else {
+                            shrunk_constraint.push(lit);
+                            already_considered.insert(lit);
+                        }
                     }
-                }
-                // todo: deleting this ordering thing -> just for debugging
-                let mut shrunk_constraint_ordered = shrunk_constraint.clone();
-                shrunk_constraint_ordered.sort();
-                debug_println!(
-                    16,
-                    1,
-                    "After shrinking [ in notify_assignment]: {:?}",
-                    shrunk_constraint_ordered
-                );
-                debug_println!(11, 1, "This corresponds to ");
-                for lit in shrunk_constraint.iter() {
-                    self.add_lit_to_proof_tracer(*lit);
-                    self.add_observed_variable(*lit);
-                    debug_println!(11, 1, "  {}", self.solver_state.get_term_from_lit(*lit));
-                }
+                    // todo: deleting this ordering thing -> just for debugging
+                    let mut shrunk_constraint_ordered = shrunk_constraint.clone();
+                    shrunk_constraint_ordered.sort();
+                    debug_println!(
+                        16,
+                        1,
+                        "After shrinking [ in notify_assignment]: {:?}",
+                        shrunk_constraint_ordered
+                    );
+                    debug_println!(11, 1, "This corresponds to ");
+                    for lit in shrunk_constraint.iter() {
+                        self.add_lit_to_proof_tracer(*lit);
+                        self.add_observed_variable(*lit);
+                        debug_println!(11, 1, "  {}", self.solver_state.get_term_from_lit(*lit));
+                    }
 
-                debug_println!(
-                    14 - 3,
-                    0,
-                    "In case 1 currently disequalities: {:?}",
-                    self.disequalities.borrow()
-                );
+                    debug_println!(
+                        14 - 3,
+                        0,
+                        "In case 1 currently disequalities: {:?}",
+                        self.disequalities.borrow()
+                    );
 
-                self.proof_tracer
-                    .borrow_mut()
-                    .add_theory_clause(&shrunk_constraint, Theory::Background);
+                    self.proof_tracer
+                        .borrow_mut()
+                        .add_theory_clause(&shrunk_constraint, Theory::Background);
 
-                self.disequalities.borrow_mut().push(shrunk_constraint);
-                debug_println!(
-                    14 - 3,
-                    0,
-                    "We have the following disequalities: {:?}",
-                    self.disequalities.borrow()
-                );
+                    self.disequalities.borrow_mut().push(shrunk_constraint);
+                    debug_println!(
+                        14 - 3,
+                        0,
+                        "We have the following disequalities: {:?}",
+                        self.disequalities.borrow()
+                    );
                 } // end for constraint in conflict_result.clauses
             }
         }
@@ -317,27 +315,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
                         let x_e = self.solver_state.to_egraph_id(x);
                         let y_e = self.solver_state.to_egraph_id(y);
-                        let x_root = self.solver_state.egraph.find(x_e);
-                        let y_root = self.solver_state.egraph.find(y_e);
-                        if x_root == y_root {
-                            continue;
-                        }
-                        // Two distinct constants can never be EUF-equal (implicit
-                        // disequality). Skip rather than merge — the conflict would
-                        // be trivial and produce no useful clause.
-                        let x_term = self.solver_state.get_term(self.solver_state.to_solver_uid(x_root));
-                        let y_term = self.solver_state.get_term(self.solver_state.to_solver_uid(y_root));
-                        use yaspar_ir::ast::Repr;
-                        if matches!(x_term.repr(), yaspar_ir::ast::ATerm::Constant(..))
-                            && matches!(y_term.repr(), yaspar_ir::ast::ATerm::Constant(..))
+                        if self.solver_state.egraph.find(x_e) == self.solver_state.egraph.find(y_e)
                         {
                             continue;
                         }
 
-                        let result = self
-                            .solver_state
-                            .egraph
-                            .assert_equal_arithmetic(x_e, y_e, self.decision_level);
+                        let result = self.solver_state.egraph.assert_equal_arithmetic(
+                            x_e,
+                            y_e,
+                            self.decision_level,
+                        );
                         if result.conflict.is_some() {
                             conflict_from_arith = result.conflict;
                             break 'outer;
