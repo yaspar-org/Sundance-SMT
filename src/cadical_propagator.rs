@@ -88,6 +88,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
         debug_println!(16, 0, "{}", self.solver_state.egraph);
         for lit in lits {
+            if lit.unsigned_abs() == 111 || lit.unsigned_abs() == 107 {
+                eprintln!("[notify_assignment] lit={} (level {})", lit, self.decision_level);
+            }
             debug_println!(
                 7,
                 0,
@@ -206,6 +209,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_backtrack(&mut self, level: usize) {
         self.stats.backtracks += 1;
+        eprintln!("[backtrack] from level {} to level {}", self.decision_level, level);
         debug_println!(
             23,
             0,
@@ -239,6 +243,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        eprintln!("[cb_check_found_model] decision_level={}", self.decision_level);
         debug_println!(
             24,
             0,
@@ -292,6 +297,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     equality_pairs
                 );
                 // Emit trichotomies for the equality pairs
+                eprintln!("[ARITH UNSAT] equality_pairs: {:?}, arith_lits: {:?}", equality_pairs, arith_lits);
+                eprintln!("[ARITH UNSAT] assignment[107]={}, assignment[111]={}",
+                    self.assignments.get(107).copied().unwrap_or(0),
+                    self.assignments.get(111).copied().unwrap_or(0));
                 let mut cr = crate::solver_state::build_conflict_with_trichotomies(
                     self.solver_state,
                     &[],
@@ -300,6 +309,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 );
                 // Merge arith constraint lits into clauses[0] (the conflict clause)
                 cr.clauses[0].extend(arith_lits);
+                eprintln!("[ARITH UNSAT] Emitting {} clauses to CaDiCaL:", cr.clauses.len());
+                for (i, clause) in cr.clauses.iter().enumerate() {
+                    eprintln!("  clause[{}]: {:?}", i, clause);
+                }
                 for clause in cr.clauses {
                     for lit in &clause {
                         self.add_observed_variable(*lit);
@@ -350,11 +363,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         let result = self.solver_state.egraph.assert_equal_arithmetic(
                             x_e,
                             y_e,
-                            self.decision_level,
+                            self.decision_level + 1,
                         );
                         if result.conflict.is_some() {
+                            eprintln!("[ARITH SAT] conflict from merging ({}, {}) at level {}", x_e, y_e, self.decision_level);
                             conflict_from_arith = result.conflict;
                             break 'outer;
+                        } else {
+                            eprintln!("[ARITH SAT] merged ({}, {}) at level {}", x_e, y_e, self.decision_level);
                         }
                     }
                 }
@@ -504,6 +520,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         } else {
             // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
+            eprintln!("[cb_has_external_clause] delivering clause: {:?}", self.disequalities.borrow()[self.disequalities.borrow().len()-1]);
             debug_println!(
                 4,
                 0,

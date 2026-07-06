@@ -23,6 +23,13 @@ fn regression_test() {
     // Check if a specific subfolder is requested via environment variable
     let target_subfolder = env::var("TEST_SUBFOLDER").ok();
 
+    // Additional solver args (e.g. "--arithmetic internal")
+    let extra_args: Vec<String> = env::var("SOLVER_ARGS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect();
+
     // Get all subdirectories in smt_files
     let subdirs = fs::read_dir(smt_files_dir)
         .expect("Failed to read smt_files directory")
@@ -91,8 +98,10 @@ fn regression_test() {
             io::stdout().flush().unwrap();
 
             // Run solver with timeout
+            let mut cmd_args = extra_args.clone();
+            cmd_args.push(path.to_str().unwrap().to_string());
             let child = Command::new("target/release/sundance-smt")
-                .args([path.to_str().unwrap()])
+                .args(&cmd_args)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
