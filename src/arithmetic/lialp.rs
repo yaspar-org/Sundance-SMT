@@ -167,7 +167,9 @@ pub fn build_incremental_solver(solver_state: &mut SolverState) -> IncrementalAr
     // 1. Definitional rows for arithmetic terms that are their own egraph root: root - expr = 0.
     //    Keyed on egraph id, which is stable before search begins (moving-root handling is
     //    Stage 6). Iterate a copy of the term list to avoid borrow conflicts with extraction.
+    //    Also collect (term_id, root_var) pairs to register as roots for NO model translation.
     let arithmetic_terms = solver_state.arithmetic_terms.clone();
+    let mut root_pairs: Vec<(u64, Var)> = Vec::new();
     for term_id in arithmetic_terms {
         let egraph_id = solver_state.to_egraph_id(term_id);
         if solver_state.egraph.find(egraph_id) != egraph_id {
@@ -177,6 +179,7 @@ pub fn build_incremental_solver(solver_state: &mut SolverState) -> IncrementalAr
         let root_var = *var_map
             .entry(egraph_id)
             .or_insert_with(|| ctx.allocate_var(&format!("!ext_var_{}", egraph_id), VarType::Int));
+        root_pairs.push((term_id, root_var));
 
         let (mut monomials, constant) =
             expr_to_monomials(&expr, -Rational::ONE, &mut var_map, &mut ctx);
@@ -239,6 +242,11 @@ pub fn build_incremental_solver(solver_state: &mut SolverState) -> IncrementalAr
         if let Some(neg_constraint) = pos_constraint.negate() {
             solver.register_literal_atom(-lit, slack, neg_constraint, threshold);
         }
+    }
+
+    // 5. Register root (term_id, root_var) pairs for NO model translation.
+    for (term_id, root_var) in root_pairs {
+        solver.register_root(term_id, root_var);
     }
 
     solver
@@ -377,7 +385,7 @@ mod tests {
             }
         }
         let incremental_unsat =
-            incremental_conflict || matches!(solver.check(), CheckResult::Unsat(..));
+            incremental_conflict || matches!(solver.check(), CheckResult::Unsat { .. });
 
         // One-shot path on the same literals. It negates literals internally, so pass them as-is.
         let one_shot = check_integer_constraints_satisfiable_lia(lits_to_assert, &mut ss);

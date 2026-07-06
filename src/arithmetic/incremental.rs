@@ -43,7 +43,7 @@ use crate::arithmetic::lia::solver_result::{Assignment, Conflict, SolverDecision
 use crate::arithmetic::lia::stats::Stats as LiaStats;
 use crate::arithmetic::lia::variables::Var;
 use crate::debug_println;
-use crate::utils::DeterministicHashMap;
+use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use dashu::Rational;
 
 /// Opaque handle for a registered arithmetic atom.
@@ -101,13 +101,28 @@ impl AssertOutcome {
 
 /// Result of a full feasibility [`IncrementalArithSolver::check`] at the current bound set.
 ///
-/// Still expressed in internal [`Var`] space; literal/term translation is Stage 4.
+/// Stage 4: results carry SAT-literal-level cores and Nelson-Oppen-ready model shapes that the
+/// propagator can consume directly.
 #[derive(Debug)]
 pub enum CheckResult {
-    /// Feasible: an assignment satisfying all asserted bounds.
-    Sat(Assignment<Var>, LiaStats),
-    /// Infeasible: a conflict set of slack [`Var`]s explaining the infeasibility.
-    Unsat(Conflict<Var>, LiaStats),
+    /// Feasible.
+    /// - `core_literals`: empty (no conflict).
+    /// - `model`: value→term-set map ready for the Nelson-Oppen splitting loop
+    ///   (term_ids grouped by their integer arithmetic value).
+    /// - `stats`: runtime statistics.
+    Sat {
+        model: DeterministicHashMap<i64, DeterministicHashSet<u64>>,
+        stats: LiaStats,
+    },
+    /// Infeasible.
+    /// - `core_literals`: the SAT-level conflict clause — union of negated atom literals and
+    ///   justification literals for each conflicting slack. This is the durable replacement of
+    ///   the one-shot path's `ArithResult::Unsat(Vec<i32>)`.
+    /// - `stats`: runtime statistics.
+    Unsat {
+        core_literals: Vec<i32>,
+        stats: LiaStats,
+    },
     /// The solver could not decide (e.g. incomplete integer reasoning).
     Unknown(LiaStats),
 }
@@ -147,6 +162,22 @@ impl LatentBound {
     }
 }
 
+/// A single entry on the assertion trail, recording everything needed to reconstruct unsat
+/// cores in terms of SAT literals (Stage 4).
+#[derive(Debug, Clone)]
+struct AssertedAtom {
+    /// The registered atom that was asserted.
+    atom: AtomId,
+    /// The scope level at the time of assertion.
+    level: usize,
+    /// The SAT literal that triggered this assertion (via [`IncrementalArithSolver::assert_literal`]).
+    /// `0` when asserted directly via [`IncrementalArithSolver::assert_atom`] without a literal.
+    lit: i32,
+    /// Extra justification literals (e.g. egraph-merge explanations / `additional_constraints`)
+    /// to include in the unsat core alongside the atom's own literal.
+    justification: Vec<i32>,
+}
+
 /// A long-lived incremental arithmetic solver over a fixed slack-variable set.
 ///
 /// Owns an [`LRASolver`] and an atom registry. Runtime incrementality is *purely bound
@@ -170,11 +201,20 @@ pub struct IncrementalArithSolver {
     literal_atoms: DeterministicHashMap<i32, AtomId>,
     /// Next fresh [`AtomId`].
     next_atom: usize,
-    /// Best-effort trail of asserted atoms and the scope level they were asserted at, used to
-    /// truncate on [`IncrementalArithSolver::pop`]. Bound *values* are restored by the
-    /// `LRASolver`'s own bound trail; this trail only tracks which atoms are logically live
-    /// (needed for Stage 4 core reconstruction).
-    asserted: Vec<(AtomId, usize)>,
+    /// Root registry: `(term_id, root_var)` pairs populated by the static builder. Used in the
+    /// Sat model translation: for each root, look up its value in the assignment and group
+    /// term_ids by integer value, producing the `DeterministicHashMap<i64, DeterministicHashSet<u64>>`
+    /// that the Nelson-Oppen splitting loop expects.
+    roots: Vec<(u64, Var)>,
+    /// Trail of asserted atoms with per-assertion metadata for core reconstruction (Stage 4).
+    ///
+    /// Each entry records:
+    /// - the atom that was asserted,
+    /// - the scope level it was asserted at (for truncation on pop),
+    /// - the SAT literal that triggered the assertion (if via `assert_literal`; 0 otherwise),
+    /// - extra justification literals (egraph-merge explanations from `additional_constraints`
+    ///   at the time of assertion — a caller obligation, empty in the pre-search builder).
+    asserted: Vec<AssertedAtom>,
     /// Sticky record of a conflict detected *at assert time*.
     ///
     /// [`LRASolver::assert_lower`]/[`LRASolver::assert_upper`] report an immediate
@@ -195,9 +235,16 @@ impl IncrementalArithSolver {
             atoms: DeterministicHashMap::new(),
             literal_atoms: DeterministicHashMap::new(),
             next_atom: 0,
+            roots: Vec::new(),
             asserted: Vec::new(),
             conflict: None,
         }
+    }
+
+    /// Add a root mapping. Called by the static builder to register each arithmetic term's
+    /// `(term_id, root_var)` pair for NO model translation.
+    pub fn register_root(&mut self, term_id: u64, root_var: Var) {
+        self.roots.push((term_id, root_var));
     }
 
     /// The current scope level, read live from the owned solver so it is always authoritative
@@ -236,14 +283,26 @@ impl IncrementalArithSolver {
         id
     }
 
-    /// Assert the atom associated with a SAT literal, if any.
+    /// Assert the atom associated with a SAT literal, with optional extra justification
+    /// literals to include in unsat cores (e.g. egraph-merge explanations).
     ///
     /// Returns `None` when `lit` is not a registered arithmetic atom (so callers can pass a
     /// whole SAT model and let non-arithmetic literals fall through). Otherwise behaves like
     /// [`assert_atom`](Self::assert_atom).
-    pub fn assert_literal(&mut self, lit: i32) -> Option<AssertOutcome> {
+    pub fn assert_literal_justified(
+        &mut self,
+        lit: i32,
+        justification: Vec<i32>,
+    ) -> Option<AssertOutcome> {
         let atom = *self.literal_atoms.get(&lit)?;
-        Some(self.assert_atom(atom))
+        Some(self.assert_atom_impl(atom, lit, justification))
+    }
+
+    /// Assert the atom associated with a SAT literal (no extra justification).
+    ///
+    /// Convenience wrapper over [`assert_literal_justified`](Self::assert_literal_justified).
+    pub fn assert_literal(&mut self, lit: i32) -> Option<AssertOutcome> {
+        self.assert_literal_justified(lit, Vec::new())
     }
 
     /// Look up the [`AtomId`] registered for a SAT literal, if any.
@@ -256,17 +315,24 @@ impl IncrementalArithSolver {
         self.atoms.len()
     }
 
-    /// Assert a previously-registered atom, tightening its slack's bound(s).
+    /// Assert a previously-registered atom without a SAT literal or justification.
     ///
-    /// Cheap: at most two [`LRASolver::assert_lower`]/[`LRASolver::assert_upper`] calls. May
-    /// detect an immediate bound-vs-bound conflict (returns [`AssertOutcome::Conflict`]) but
-    /// does not run simplex — call [`check`](Self::check) for that.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `atom` was not produced by this solver's [`register_atom`](Self::register_atom),
-    /// or if its slack does not exist in the owned solver.
+    /// Equivalent to [`assert_atom_impl`](Self::assert_atom_impl) with `lit=0` and empty
+    /// justification. Use [`assert_literal`](Self::assert_literal) or
+    /// [`assert_literal_justified`](Self::assert_literal_justified) when a literal is available.
     pub fn assert_atom(&mut self, atom: AtomId) -> AssertOutcome {
+        self.assert_atom_impl(atom, 0, Vec::new())
+    }
+
+    /// Core assertion implementation. Tightens the atom's slack bound(s), records the assertion
+    /// on the trail with the triggering literal and justification, and latches any immediate
+    /// bound-vs-bound conflict.
+    fn assert_atom_impl(
+        &mut self,
+        atom: AtomId,
+        lit: i32,
+        justification: Vec<i32>,
+    ) -> AssertOutcome {
         let bound = self
             .atoms
             .get(&atom)
@@ -299,7 +365,12 @@ impl IncrementalArithSolver {
         }
 
         let level = self.current_level();
-        self.asserted.push((atom, level));
+        self.asserted.push(AssertedAtom {
+            atom,
+            level,
+            lit,
+            justification,
+        });
         // The LRA solver rejects a directly-contradictory bound without storing it, so latch
         // the conflict here (once) so `check` stays Unsat until this scope is popped.
         if outcome == AssertOutcome::Conflict && self.conflict.is_none() {
@@ -308,22 +379,76 @@ impl IncrementalArithSolver {
         outcome
     }
 
+    /// Collect the unsat core literals for a set of conflicting slack variables.
+    ///
+    /// Walks the asserted trail, finds atoms whose slack appears in `conflict_slacks`, and
+    /// collects their negated atom literals + justification literals into a single clause.
+    fn collect_core(&self, conflict_slacks: &Conflict<Var>) -> Vec<i32> {
+        let mut core: Vec<i32> = Vec::new();
+        for entry in &self.asserted {
+            let slack = self.atoms[&entry.atom].slack;
+            if conflict_slacks.contains(&slack) {
+                // Include the negated atom literal (matching the one-shot convention: the
+                // conflict clause is the *negation* of the asserted set, so the atom literal
+                // appears negated).
+                if entry.lit != 0 {
+                    core.push(-entry.lit);
+                }
+                core.extend_from_slice(&entry.justification);
+            }
+        }
+        core
+    }
+
+    /// Build the value→term-set model map from a feasible assignment (the shape NO expects).
+    fn build_no_model(
+        &self,
+        assignment: &Assignment<Var>,
+    ) -> DeterministicHashMap<i64, DeterministicHashSet<u64>> {
+        let mut model: DeterministicHashMap<i64, DeterministicHashSet<u64>> =
+            DeterministicHashMap::new();
+        for &(term_id, root_var) in &self.roots {
+            if let Some(value) = assignment.get(&root_var) {
+                let val_i64: i64 = value.to_int().value().try_into().unwrap_or(i64::MAX);
+                model.entry(val_i64).or_default().insert(term_id);
+            }
+        }
+        model
+    }
+
     /// Run a full feasibility check at the current bound set.
     ///
-    /// Stage 1 delegates to the LRA (rational) [`LRASolver::solve`]; integer/LIRA reasoning
-    /// under push/pop is Stage 5.
+    /// On `Unsat`, translates the solver's `Conflict<Var>` into SAT-level core literals via the
+    /// assertion trail. On `Sat`, builds the value→term-set model map for Nelson-Oppen.
     pub fn check(&mut self) -> CheckResult {
         // A conflict latched at assert time is not visible to the tableau (the rejected bound
-        // was never stored), so report it directly.
+        // was never stored), so report it directly. The core is all trail entries touching that
+        // slack.
         if let Some((slack, _)) = self.conflict {
-            let mut conflict = Conflict::new();
-            conflict.insert(slack);
-            return CheckResult::Unsat(conflict, LiaStats::new());
+            let mut conflict_set = Conflict::new();
+            conflict_set.insert(slack);
+            let core_literals = self.collect_core(&conflict_set);
+            return CheckResult::Unsat {
+                core_literals,
+                stats: LiaStats::new(),
+            };
         }
         let ret = self.lra.solve().expect("check: LRASolver::solve failed");
         match ret.decision {
-            SolverDecision::FEASIBLE(model) => CheckResult::Sat(model, ret.stats),
-            SolverDecision::INFEASIBLE(conflict) => CheckResult::Unsat(conflict, ret.stats),
+            SolverDecision::FEASIBLE(assignment) => {
+                let model = self.build_no_model(&assignment);
+                CheckResult::Sat {
+                    model,
+                    stats: ret.stats,
+                }
+            }
+            SolverDecision::INFEASIBLE(conflict) => {
+                let core_literals = self.collect_core(&conflict);
+                CheckResult::Unsat {
+                    core_literals,
+                    stats: ret.stats,
+                }
+            }
             SolverDecision::UNKNOWN => CheckResult::Unknown(ret.stats),
         }
     }
@@ -354,7 +479,7 @@ impl IncrementalArithSolver {
     /// trail untouched.
     pub fn pop(&mut self, level: Level) {
         self.lra.backtrack(level.0);
-        self.asserted.retain(|(_, l)| *l <= level.0);
+        self.asserted.retain(|entry| entry.level <= level.0);
         // Clear a latched conflict if it was discovered in a scope we are discarding.
         if let Some((_, clvl)) = self.conflict
             && clvl > level.0
@@ -419,7 +544,7 @@ mod tests {
             s.assert_atom(hi),
             AssertOutcome::Sat | AssertOutcome::Unknown
         ));
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
     }
 
     #[test]
@@ -435,7 +560,7 @@ mod tests {
         ));
         // upper bound 3 < lower bound 5: immediate bound-vs-bound conflict
         assert_eq!(s.assert_atom(hi), AssertOutcome::Conflict);
-        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+        assert!(matches!(s.check(), CheckResult::Unsat { .. }));
     }
 
     #[test]
@@ -443,21 +568,21 @@ mod tests {
         let mut s = single_var_solver();
         let base = s.register_atom(Var::real(1), Constraint::Ge, rbig!(0));
         assert_eq!(s.assert_atom(base), AssertOutcome::Sat);
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
 
         // enter a scope, assert a contradictory upper bound
         let level = s.push();
         let bad = s.register_atom(Var::real(1), Constraint::Le, rbig!(-1));
         assert_eq!(s.assert_atom(bad), AssertOutcome::Conflict);
-        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+        assert!(matches!(s.check(), CheckResult::Unsat { .. }));
 
         // pop the scope: the s <= -1 bound is discarded, feasibility returns
         s.pop(level);
         assert!(
-            s.asserted.iter().all(|(_, l)| *l <= level.0),
+            s.asserted.iter().all(|e| e.level <= level.0),
             "asserted trail should be truncated after pop"
         );
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
     }
 
     #[test]
@@ -469,12 +594,8 @@ mod tests {
             s.assert_atom(eq),
             AssertOutcome::Sat | AssertOutcome::Unknown
         ));
-        match s.check() {
-            CheckResult::Sat(model, _) => {
-                assert_eq!(model.get(&Var::real(1)), Some(&rbig!(4)));
-            }
-            other => panic!("expected Sat, got {other:?}"),
-        }
+        // No roots registered, so model map is empty; just verify feasibility.
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
         // sanity: the bound really is registered on the slack in the owned solver
         let bounds = s.lra().get_bounds(&Var::real(1)).unwrap();
         assert_eq!(bounds.lower, Some(QDelta::from(rbig!(4))));
@@ -492,27 +613,27 @@ mod tests {
             s.assert_atom(base),
             AssertOutcome::Sat | AssertOutcome::Unknown
         ));
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
 
         // level 1: s <= 10, still feasible
         let l1 = s.push();
         let a1 = s.register_atom(Var::real(1), Constraint::Le, rbig!(10));
         s.assert_atom(a1);
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
 
         // level 2: s <= -1, now infeasible (contradicts s >= 0)
         let l2 = s.push();
         let a2 = s.register_atom(Var::real(1), Constraint::Le, rbig!(-1));
         assert_eq!(s.assert_atom(a2), AssertOutcome::Conflict);
-        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+        assert!(matches!(s.check(), CheckResult::Unsat { .. }));
 
         // pop level 2: back to {s >= 0, s <= 10}, feasible again
         s.pop(l2);
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
 
         // pop level 1: back to just {s >= 0}, still feasible
         s.pop(l1);
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
         // only the base atom remains on the trail
         assert_eq!(s.asserted.len(), 1);
     }
@@ -525,13 +646,13 @@ mod tests {
         let hi = s.register_atom(Var::real(1), Constraint::Le, rbig!(3));
         s.assert_atom(lo);
         assert_eq!(s.assert_atom(hi), AssertOutcome::Conflict);
-        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+        assert!(matches!(s.check(), CheckResult::Unsat { .. }));
 
         // push while unsat: set_backtrack is a no-op, so this scope coincides with the current
         // one. Popping it must not panic and must leave the (still-unsat) state intact.
         let level = s.push();
         s.pop(level);
-        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+        assert!(matches!(s.check(), CheckResult::Unsat { .. }));
     }
 
     #[test]
@@ -539,11 +660,11 @@ mod tests {
         let mut s = single_var_solver();
         let base = s.register_atom(Var::real(1), Constraint::Ge, rbig!(0));
         s.assert_atom(base);
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
         // Level(0) targets the base scope; backtrack early-returns (level >= current), so this
         // is a no-op and must not panic on the absent old_assignment.
         s.pop(Level(0));
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
         assert_eq!(s.asserted.len(), 1);
     }
 
@@ -556,14 +677,84 @@ mod tests {
         let lt = s.register_atom(Var::real(1), Constraint::Lt, rbig!(4));
         s.assert_atom(gt);
         s.assert_atom(lt);
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
 
         // Tightening to s < 3 (with s > 3 still asserted in a nested scope) is infeasible.
         let level = s.push();
         let lt3 = s.register_atom(Var::real(1), Constraint::Lt, rbig!(3));
         s.assert_atom(lt3);
-        assert!(matches!(s.check(), CheckResult::Unsat(..)));
+        assert!(matches!(s.check(), CheckResult::Unsat { .. }));
         s.pop(level);
-        assert!(matches!(s.check(), CheckResult::Sat(..)));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
+    }
+
+    // ─── Stage 4: core + NO model tests ─────────────────────────────────────────
+
+    #[test]
+    fn unsat_core_contains_negated_atom_literals() {
+        let mut s = single_var_solver();
+        // Use register_literal_atom so we can track the atom by literal.
+        let lit_lo = 100; // fake SAT literal for s >= 5
+        let lit_hi = 200; // fake SAT literal for s <= 3
+        s.register_literal_atom(lit_lo, Var::real(1), Constraint::Ge, rbig!(5));
+        s.register_literal_atom(lit_hi, Var::real(1), Constraint::Le, rbig!(3));
+        s.assert_literal(lit_lo);
+        s.assert_literal(lit_hi);
+        match s.check() {
+            CheckResult::Unsat { core_literals, .. } => {
+                // Core should contain negated literals: -(100) = -100 and -(200) = -200
+                assert!(
+                    core_literals.contains(&-lit_lo) || core_literals.contains(&-lit_hi),
+                    "core should contain at least one negated atom literal, got {core_literals:?}"
+                );
+            }
+            other => panic!("expected Unsat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsat_core_includes_justification_literals() {
+        let mut s = single_var_solver();
+        let lit_lo = 10;
+        let lit_hi = 20;
+        let justification = vec![42, -43]; // mock egraph-merge justifications
+        s.register_literal_atom(lit_lo, Var::real(1), Constraint::Ge, rbig!(5));
+        s.register_literal_atom(lit_hi, Var::real(1), Constraint::Le, rbig!(3));
+        s.assert_literal(lit_lo);
+        s.assert_literal_justified(lit_hi, justification.clone());
+        match s.check() {
+            CheckResult::Unsat { core_literals, .. } => {
+                // Justification literals should appear in the core
+                for j in &justification {
+                    assert!(
+                        core_literals.contains(j),
+                        "core should include justification literal {j}, got {core_literals:?}"
+                    );
+                }
+            }
+            other => panic!("expected Unsat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sat_model_groups_roots_by_value() {
+        let mut s = single_var_solver();
+        // Register roots: term_id 100 → root Var::int(0) (which is the non-basic variable x)
+        s.register_root(100, Var::int(0));
+        // Assert that x = 7 via the slack: s = x, so bound x >= 7 and x <= 7 (equality on x).
+        // x is non-basic (col 0) so we can assert bounds on it directly.
+        let eq_atom = s.register_atom(Var::int(0), Constraint::Eq, rbig!(7));
+        s.assert_atom(eq_atom);
+        match s.check() {
+            CheckResult::Sat { model, .. } => {
+                // The model should map 7 → {100}
+                let terms = model.get(&7);
+                assert!(
+                    terms.is_some() && terms.unwrap().contains(&100),
+                    "model should contain 7 → {{100}}, got {model:?}"
+                );
+            }
+            other => panic!("expected Sat, got {other:?}"),
+        }
     }
 }
