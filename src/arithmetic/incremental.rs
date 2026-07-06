@@ -163,6 +163,11 @@ pub struct IncrementalArithSolver {
     config: SolverConfig,
     /// Registry: atom → the latent bound it would assert. `AtomId(i)` indexes insertion order.
     atoms: DeterministicHashMap<AtomId, LatentBound>,
+    /// Registry: SAT literal → its registered atom. Populated by the static builder
+    /// (Stage 2); the durable replacement for the one-shot path's per-call `slack_to_lits`.
+    /// Both `+lit` and `-lit` for an atom map to distinct [`AtomId`]s asserting opposite
+    /// bound directions on the same slack.
+    literal_atoms: DeterministicHashMap<i32, AtomId>,
     /// Next fresh [`AtomId`].
     next_atom: usize,
     /// Best-effort trail of asserted atoms and the scope level they were asserted at, used to
@@ -190,6 +195,7 @@ impl IncrementalArithSolver {
             lra,
             config,
             atoms: DeterministicHashMap::new(),
+            literal_atoms: DeterministicHashMap::new(),
             next_atom: 0,
             asserted: Vec::new(),
             conflict: None,
@@ -207,6 +213,38 @@ impl IncrementalArithSolver {
         self.atoms
             .insert(id, LatentBound::new(slack, constraint, threshold));
         id
+    }
+
+    /// Register a comparison atom and associate it with a SAT literal.
+    ///
+    /// Like [`register_atom`](Self::register_atom), but also records `lit -> AtomId` so the
+    /// atom can be asserted from the SAT model via [`assert_literal`](Self::assert_literal).
+    /// Used by the static builder to register both polarities of each arithmetic atom.
+    pub fn register_literal_atom(
+        &mut self,
+        lit: i32,
+        slack: Var,
+        constraint: Constraint,
+        threshold: Rational,
+    ) -> AtomId {
+        let id = self.register_atom(slack, constraint, threshold);
+        self.literal_atoms.insert(lit, id);
+        id
+    }
+
+    /// Assert the atom associated with a SAT literal, if any.
+    ///
+    /// Returns `None` when `lit` is not a registered arithmetic atom (so callers can pass a
+    /// whole SAT model and let non-arithmetic literals fall through). Otherwise behaves like
+    /// [`assert_atom`](Self::assert_atom).
+    pub fn assert_literal(&mut self, lit: i32) -> Option<AssertOutcome> {
+        let atom = *self.literal_atoms.get(&lit)?;
+        Some(self.assert_atom(atom))
+    }
+
+    /// Look up the [`AtomId`] registered for a SAT literal, if any.
+    pub fn atom_for_literal(&self, lit: i32) -> Option<AtomId> {
+        self.literal_atoms.get(&lit).copied()
     }
 
     /// Number of registered atoms.

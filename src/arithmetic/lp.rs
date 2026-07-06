@@ -162,7 +162,7 @@ pub fn extract_linear_constraints(
 }
 
 /// Extracts a single linear constraint from an SMT term
-fn extract_constraint_from_term(
+pub(crate) fn extract_constraint_from_term(
     term_id: u64,
     polarity: bool,
     solver_state: &mut SolverState,
