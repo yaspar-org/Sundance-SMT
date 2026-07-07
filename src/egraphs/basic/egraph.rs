@@ -1268,13 +1268,7 @@ impl Egraph {
         // TODO: write helper functions to make copying over hased things easier
         for (key, value) in y_root_disequalities {
             // make sure we update the disequality level
-            if value.hash >= self.predecessor_level[value.level]
-                || value.hash == 0
-                || value.level == 0
-            {
-                // added value.level == 0 since I think all hashes should be valid at level 0
-                // TODO: borrowing issue so I can't use valid_hash function
-
+            if valid_hash(value.hash, value.level, &self.predecessor_level) {
                 // we can have that we introduce a new equality via eclass option after a quantifier instantiation
                 // this equality could be at level 0
                 // but then it's possible that there are disequalities that get copied over such that one of the disequalities are at a level higher than 0
@@ -1640,7 +1634,7 @@ fn valid_hash(hash: u32, level: usize, predecessor_level: &[u32]) -> bool {
         hash,
         level
     );
-    hash >= predecessor_level[level] || hash == 0 || level == 0 // todo: I added this level ==0 ~> I think this is correct but need to double check to be sure
+    hash >= predecessor_level[level] || level == 0
 }
 
 impl EgraphTrait for Egraph {
