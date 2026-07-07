@@ -101,6 +101,10 @@ pub fn instantiate_quantifiers(
         }
 
         let triggers = &quantifier.triggers;
+        // Skip quantifiers with no triggers — nothing to match against
+        if triggers.is_empty() {
+            continue;
+        }
         // note we consider patterns in a multipattern conjunctively and multipatterns in a trigger disjunctively
         for multipattern in triggers {
             let body = quantifier.body;
