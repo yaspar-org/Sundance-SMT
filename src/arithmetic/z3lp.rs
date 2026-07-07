@@ -33,11 +33,8 @@ pub fn check_integer_constraints_satisfiable_z3(
     debug_println!(21, 4, "trying to solve with constraints: {:?}", constraints);
     debug_println!(21, 4, "and arithmetic literals {:?}", arithmetic_literals);
 
-    // Create Z3 solver with fixed seed for determinism
+    // Create Z3 solver
     let solver = Solver::new();
-    let mut params = z3::Params::new();
-    params.set_u32("random_seed", 0);
-    solver.set_params(&params);
 
     // Collect all unique variable IDs (egraph IDs) and create Z3 variables
     let mut variable_ids = std::collections::BTreeSet::new();
@@ -169,12 +166,6 @@ pub fn check_integer_constraints_satisfiable_z3(
     }
 
     // Check satisfiability with assumptions
-    if std::env::var("TRACE_Z3").is_ok() {
-        eprintln!("=== Z3 CALL ({} assumptions) ===", assumptions.len());
-        for (i, a) in assumptions.iter().enumerate() {
-            eprintln!("  [{}] {}", i, a);
-        }
-    }
     match solver.check_assumptions(&assumptions) {
         z3::SatResult::Sat => {
             // Satisfiable - return None to indicate no conflict
@@ -187,9 +178,6 @@ pub fn check_integer_constraints_satisfiable_z3(
                 let model_val = model.eval(&value, true).unwrap();
                 let model_val_i64 = model_val.as_i64().unwrap_or(i64::MAX);
                 model_hashmap.entry(model_val_i64).or_default().insert(var);
-            }
-            if std::env::var("TRACE_Z3").is_ok() {
-                eprintln!("  -> SAT model: {:?}", model_hashmap);
             }
             ArithResult::Sat(model_hashmap, LiaStats::new())
         }
@@ -208,25 +196,6 @@ pub fn check_integer_constraints_satisfiable_z3(
                 .iter()
                 .flat_map(|ast| constraint_to_literals.get(ast).unwrap().clone())
                 .collect();
-            if std::env::var("TRACE_Z3").is_ok() {
-                eprintln!(
-                    "  -> UNSAT core (Z3): {:?}",
-                    unsat_core.iter().map(|a| a.to_string()).collect::<Vec<_>>()
-                );
-                eprintln!("  -> UNSAT clause (SAT lits): {:?}", unsat_core_literals);
-                eprintln!("  -> constraint_to_literals mapping:");
-                for ast in &unsat_core {
-                    eprintln!(
-                        "    {:50} -> {:?}",
-                        ast.to_string()
-                            .replace('\n', " ")
-                            .chars()
-                            .take(50)
-                            .collect::<String>(),
-                        constraint_to_literals.get(ast).unwrap()
-                    );
-                }
-            }
             ArithResult::Unsat(unsat_core_literals, LiaStats::new())
         }
         z3::SatResult::Unknown => {
