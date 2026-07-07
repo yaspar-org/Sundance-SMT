@@ -3,7 +3,7 @@
 
 //! Entry point for the LIA mixed integer arithmetic solver
 
-use crate::arithmetic::incremental::IncrementalArithSolver;
+use crate::arithmetic::incremental::{AssertOutcome, CheckResult, IncrementalArithSolver};
 use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::frontend;
@@ -127,6 +127,89 @@ pub fn check_integer_constraints_satisfiable_lia(
         }
         Err(e) => panic!("lialp: unexpected error: {e:?}"),
     }
+}
+
+/// Incremental entry point: check arithmetic satisfiability of `terms` against the persistent
+/// [`IncrementalArithSolver`] held on `solver_state` (Stage 7 of the incremental-arithmetic
+/// plan).
+///
+/// Semantics mirror [`check_integer_constraints_satisfiable_lia`]: `terms` is the SAT model
+/// slice CaDiCaL hands to `cb_check_found_model`, and the return value is an [`ArithResult`]
+/// suitable for the propagator's existing dispatch (`Unsat` → conflict clause pushed into
+/// `disequalities`, `Sat` → drives the Nelson-Oppen splitting loop, `None` → skip).
+///
+/// The protocol on each call is:
+/// 1. Open a fresh LP scope (`push`) — every bound asserted in this call is scoped to it.
+/// 2. For every literal in `terms`, `assert_literal` on the persistent solver. Non-arithmetic
+///    literals return `None` and are skipped; arithmetic ones tighten the pre-registered
+///    slack bound. An assert-time bound-vs-bound conflict latches on the solver so `check()`
+///    still reports it.
+/// 3. `check()` runs a full simplex + branch-and-bound at the current bound set.
+/// 4. `pop` the scope — bounds asserted this call are discarded so the *next* call starts
+///    clean.
+///
+/// Optimising away the pop-and-re-assert (an incremental *diff* against the previous model)
+/// is a Stage 8 optimisation; the prototype does the simplest correct thing.
+///
+/// Panics if `solver_state.incremental_arith` is `None` (the CLI dispatcher must only route
+/// this variant when the solver has been built by `main.rs`).
+pub fn check_integer_constraints_satisfiable_incremental(
+    terms: &[i32],
+    solver_state: &mut SolverState,
+) -> ArithResult {
+    // Move the incremental solver out temporarily to avoid tangled borrows against
+    // `solver_state` (assert_literal takes `&mut IncrementalArithSolver`, and nothing in the
+    // protocol needs `solver_state` after the model literals are copied out).
+    let mut solver = solver_state
+        .incremental_arith
+        .take()
+        .expect("check_integer_constraints_satisfiable_incremental: no incremental solver on SolverState");
+
+    debug_println!(
+        21,
+        4,
+        "incremental: check_integer_constraints_satisfiable_incremental with {} model literals",
+        terms.len()
+    );
+
+    let level = solver.push();
+
+    let mut early_conflict = false;
+    for &lit in terms {
+        // Keep asserting the rest even after a conflict so `collect_core` sees all
+        // justifying atoms; the latched conflict on the solver ensures `check()` still
+        // returns Unsat.
+        if let Some(AssertOutcome::Conflict) = solver.assert_literal(lit) {
+            early_conflict = true;
+        }
+    }
+
+    let result = solver.check();
+    let arith_result = match result {
+        CheckResult::Sat { model, stats } => ArithResult::Sat(model, stats),
+        CheckResult::Unsat {
+            core_literals,
+            stats,
+        } => {
+            debug_println!(
+                21,
+                4,
+                "incremental: Unsat core literals: {:?} (early_conflict={})",
+                core_literals,
+                early_conflict
+            );
+            ArithResult::Unsat(core_literals, stats)
+        }
+        CheckResult::Unknown(_stats) => ArithResult::None,
+    };
+
+    // Pop the scope so every bound asserted in this call is discarded; the next call starts
+    // from the base bound set (same as the one-shot path's fresh-rebuild semantics).
+    solver.pop(level);
+
+    // Put the solver back before returning.
+    solver_state.incremental_arith = Some(solver);
+    arith_result
 }
 
 /// Map the extraction-layer [`FunctionType`] to the linear-system [`Constraint`] used for a

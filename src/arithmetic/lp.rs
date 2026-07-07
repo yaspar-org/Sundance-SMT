@@ -4,7 +4,9 @@
 use dashu::integer::IBig;
 // use z3::{ast::{Ast, Bool, Int}, Context, Solver};
 use crate::arithmetic::lia::stats::Stats as LiaStats;
-use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
+use crate::arithmetic::lialp::{
+    check_integer_constraints_satisfiable_incremental, check_integer_constraints_satisfiable_lia,
+};
 #[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
 use crate::debug_println;
@@ -25,6 +27,12 @@ use yaspar_ir::ast::{
 #[derive(Debug, Clone, ValueEnum)]
 pub enum ArithSolver {
     Internal,
+    /// Persistent incremental LIA solver (Stage 7 of the incremental-arithmetic plan).
+    /// The tableau is built once from `SolverState.arithmetic_terms`; each
+    /// `cb_check_found_model` call asserts the model's arithmetic literals as bounds
+    /// on the pre-registered slacks and runs a full simplex/B&B check. The one-shot
+    /// `Internal` path remains available as the differential oracle / fallback.
+    Incremental,
     #[cfg(feature = "z3-solver")]
     Z3,
     None,
@@ -34,6 +42,7 @@ impl Display for ArithSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ArithSolver::Internal => "internal".fmt(f),
+            ArithSolver::Incremental => "incremental".fmt(f),
             #[cfg(feature = "z3-solver")]
             ArithSolver::Z3 => "z3".fmt(f),
             ArithSolver::None => "none".fmt(f),
@@ -50,7 +59,7 @@ impl fmt::Display for ArithSolverParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'z3', 'none'",
+            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'incremental', 'z3', 'none'",
             self.invalid_input
         )
     }
@@ -73,6 +82,7 @@ impl FromStr for ArithSolver {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "internal" => Ok(ArithSolver::Internal),
+            "incremental" => Ok(ArithSolver::Incremental),
             #[cfg(feature = "z3-solver")]
             "z3" => Ok(ArithSolver::Z3),
             "none" => Ok(ArithSolver::None),
@@ -91,6 +101,9 @@ pub fn check_integer_constraints_satisfiable(
 ) -> ArithResult {
     match arith_solver {
         ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, solver_state),
+        ArithSolver::Incremental => {
+            check_integer_constraints_satisfiable_incremental(terms, solver_state)
+        }
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, solver_state),
         ArithSolver::None => ArithResult::None,

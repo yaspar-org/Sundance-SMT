@@ -17,6 +17,7 @@ use yaspar_ir::ast::{
     TermAllocator,
 };
 
+use crate::arithmetic::incremental::IncrementalArithSolver;
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::datatypes::process::DatatypeInfo;
@@ -144,6 +145,15 @@ pub struct SolverState {
 
     /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
     pub base_case_tester_lits: Vec<i32>,
+
+    /// Persistent incremental arithmetic solver (Stage 7 of the incremental-arithmetic plan).
+    ///
+    /// `Some` iff the CLI selected `--arithmetic incremental`; the setup path
+    /// (`main.rs`) constructs this via `build_incremental_solver` after all assertions
+    /// have been registered in `arithmetic_terms` and the CNF `var_map`. The propagator
+    /// reaches this through `&mut solver_state` in `cb_check_found_model` /
+    /// `notify_*` callbacks to run the assert-diff + check + push/pop protocol.
+    pub incremental_arith: Option<IncrementalArithSolver>,
 }
 
 impl SolverState {
@@ -175,6 +185,7 @@ impl SolverState {
             eager_skolem,
             egraph,
             base_case_tester_lits: vec![],
+            incremental_arith: None,
         }
     }
 

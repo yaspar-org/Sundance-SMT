@@ -4,6 +4,8 @@
 use cadical_sys::Status;
 use clap::Parser;
 use std::fs;
+use sundance_smt::arithmetic::lialp::build_incremental_solver;
+use sundance_smt::arithmetic::lp::ArithSolver;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
@@ -169,6 +171,16 @@ fn main() -> Result<(), String> {
     );
 
     let quantifiers = !solver_state.quantifiers.is_empty();
+
+    // Build the persistent incremental arithmetic solver if the CLI selected it.
+    // Stage 7: `arithmetic_terms` and the CNF `var_map` are now populated, so
+    // `build_incremental_solver` can enumerate every arithmetic atom once and
+    // hand ownership of the resulting solver back to `SolverState` for the
+    // propagator to reach via `&mut solver_state` in its callbacks.
+    if matches!(args.arithmetic, ArithSolver::Incremental) {
+        let solver = build_incremental_solver(&mut solver_state);
+        solver_state.incremental_arith = Some(solver);
+    }
 
     let (return_value, stats) = cdcl_decision_procedure(
         &mut solver_state,
