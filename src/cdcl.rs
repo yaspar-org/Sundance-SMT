@@ -43,7 +43,10 @@ pub fn cdcl_decision_procedure(
     elevate: i32,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
-    solver.set("elevate".to_string(), elevate);
+    assert!(
+        solver.set("elevate".to_string(), elevate),
+        "CaDiCaL option 'elevate' is unavailable; Sundance requires the cadical-sys elevate fork for lazy quantifier instantiation"
+    );
 
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
     // todo: for right now always have hid_quantifiers to be true, need to change this

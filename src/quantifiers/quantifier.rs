@@ -4,6 +4,7 @@
 //! Instantiation of quantifiers
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
@@ -19,40 +20,44 @@ use crate::debug_println;
 use yaspar_ir::ast::{LetElim, Sort, Str, Substitute, Substitution, Term, TermAllocator};
 
 #[derive(Debug, Clone)]
-pub enum QuantifierInstance {
+pub(crate) enum QuantifierInstance {
     Instantiation { clauses: Vec<Vec<i32>> },
     Skolemization { clauses: Vec<Vec<i32>> },
 }
 
-pub struct DeferredInstantiation {
-    pub substituted_term: Term,
-    pub is_exists: bool,
-    pub literal: i32,
-    pub quantifier_id: u64,
+struct DeferredInstantiation {
+    substituted_term: Term,
+    is_exists: bool,
+    literal: i32,
+    quantifier_id: u64,
 }
 
-pub struct DeferredSkolemization {
-    pub skolem: Term,
-    pub skolem_vars: Vec<(Str, Sort)>,
-    pub is_exists: bool,
-    pub literal: i32,
+struct DeferredSkolemization {
+    skolem: Term,
+    skolem_vars: Vec<(Str, Sort)>,
+    is_exists: bool,
+    literal: i32,
 }
 
-pub struct PendingInstantiations {
-    pub deferred_instantiations: Vec<DeferredInstantiation>,
-    pub deferred_skolemizations: Vec<DeferredSkolemization>,
-    pub skolemized_quantifier_idxs: Vec<usize>,
+pub(crate) struct PendingInstantiations {
+    deferred_instantiations: VecDeque<DeferredInstantiation>,
+    deferred_skolemizations: VecDeque<DeferredSkolemization>,
+    skolemized_quantifier_idxs: Vec<usize>,
 }
 
 impl PendingInstantiations {
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.deferred_instantiations.is_empty() && self.deferred_skolemizations.is_empty()
+    }
+
+    pub(crate) fn skolemized_quantifier_idxs(&self) -> &[usize] {
+        &self.skolemized_quantifier_idxs
     }
 }
 
 /// Computes trigger matches and substitutions, returning deferred items
 /// that can be materialized one at a time.
-pub fn instantiate_quantifiers(
+pub(crate) fn instantiate_quantifiers(
     solver_state: &mut SolverState,
     assignments: &[i32],
 ) -> PendingInstantiations {
@@ -60,8 +65,8 @@ pub fn instantiate_quantifiers(
     debug_println!(24, 0, "Starting a matching round");
     let quantifiers = &solver_state.quantifiers.clone();
     let mut skolemized_quantifier_idxs = vec![];
-    let mut deferred_skolemizations: Vec<DeferredSkolemization> = vec![];
-    let mut deferred_instantiations: Vec<DeferredInstantiation> = vec![];
+    let mut deferred_skolemizations: VecDeque<DeferredSkolemization> = VecDeque::new();
+    let mut deferred_instantiations: VecDeque<DeferredInstantiation> = VecDeque::new();
 
     // We `enumerate()` so we can update quantifiers[i].skolemized after the loop
     for (i, quantifier) in quantifiers.iter().enumerate() {
@@ -96,7 +101,7 @@ pub fn instantiate_quantifiers(
             let (skolem, skolem_vars) =
                 skolemize(&term, &mut solver_state.context, quantifier_is_exists);
 
-            deferred_skolemizations.push(DeferredSkolemization {
+            deferred_skolemizations.push_back(DeferredSkolemization {
                 skolem,
                 skolem_vars,
                 is_exists: quantifier_is_exists,
@@ -151,7 +156,7 @@ pub fn instantiate_quantifiers(
                     &mut solver_state.context,
                 );
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
-                deferred_instantiations.push(DeferredInstantiation {
+                deferred_instantiations.push_back(DeferredInstantiation {
                     substituted_term,
                     is_exists: quantifier_is_exists,
                     literal: quantifier_literal,
@@ -171,7 +176,7 @@ pub fn instantiate_quantifiers(
 /// Materializes the next pending instantiation or skolemization.
 /// This does the expensive work: insert_predecessor, cnf_tseitin, proof steps.
 /// Returns None if there's nothing left to materialize.
-pub fn materialize_next(
+pub(crate) fn materialize_next(
     pending: &mut PendingInstantiations,
     solver_state: &mut SolverState,
     proof_tracer: &Rc<RefCell<SMTProofTracer>>,
@@ -180,7 +185,7 @@ pub fn materialize_next(
     let lazy_dt = solver_state.lazy_dt;
 
     // Skolemizations first
-    if let Some(deferred) = pending.deferred_skolemizations.pop() {
+    if let Some(deferred) = pending.deferred_skolemizations.pop_front() {
         let results = process_deferred_skolemizations(
             vec![deferred],
             solver_state,
@@ -192,7 +197,7 @@ pub fn materialize_next(
     }
 
     // Then instantiations
-    if let Some(deferred) = pending.deferred_instantiations.pop() {
+    if let Some(deferred) = pending.deferred_instantiations.pop_front() {
         let results = process_deferred_instantiations(
             vec![deferred],
             solver_state,

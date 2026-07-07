@@ -303,15 +303,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
-        // If we have pending instantiations from a previous round, serve one immediately
-        // without redoing arithmetic or datatype checks.
+        // If we have pending instantiations from a previous round, materialize one
+        // immediately without redoing arithmetic or datatype checks.
         if let Some(mut pending) = self.pending.take()
             && let Some(instances) =
                 materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
         {
             self.apply_instances(&instances);
             if pending.is_empty() {
-                for i in &pending.skolemized_quantifier_idxs {
+                for i in pending.skolemized_quantifier_idxs() {
                     self.solver_state.quantifiers[*i].skolemized = true;
                 }
             } else {
@@ -433,7 +433,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // If there's more to materialize later, store the pending state
         if pending.is_empty() {
-            for i in &pending.skolemized_quantifier_idxs {
+            for i in pending.skolemized_quantifier_idxs() {
                 self.solver_state.quantifiers[*i].skolemized = true;
             }
         } else {
