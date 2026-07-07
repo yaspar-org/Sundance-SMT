@@ -70,6 +70,8 @@ fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
                         }
                     }
                     (inner_term, patterns)
+                } else if let Forall(..) = term.repr() {
+                    panic!("Unannotated forall quantifier (no triggers): {term}")
                 } else {
                     (middle_term, vec![])
                 };
@@ -503,8 +505,10 @@ impl SolverState {
                     }
                 }
                 (inner_term, trigger_ids)
+            } else if let Forall(..) = term.repr() {
+                panic!("Unannotated forall quantifier (no triggers): {term}")
             } else {
-                // Unannotated quantifier (no triggers) — will be skolemized on assignment
+                // Unannotated existential (no triggers) — will be skolemized on assignment
                 (middle_term, vec![])
             };
 
