@@ -1,0 +1,6 @@
+(set-logic QF_LIA)
+; div 10 (- 3) = -3 (since 10 = (-3)*(-3) + 1, remainder 1 >= 0)
+(declare-fun x () Int)
+(assert (= x (div 10 (- 3))))
+(assert (= x (- 3)))
+(check-sat)

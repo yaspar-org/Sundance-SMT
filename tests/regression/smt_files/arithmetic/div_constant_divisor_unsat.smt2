@@ -1,0 +1,6 @@
+(set-logic QF_LIA)
+; div 17 5 = 3 (17 = 5*3 + 2)
+(declare-fun x () Int)
+(assert (= x (div 17 5)))
+(assert (not (= x 3)))
+(check-sat)
