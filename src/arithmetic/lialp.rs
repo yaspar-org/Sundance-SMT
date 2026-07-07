@@ -161,20 +161,31 @@ fn function_to_constraint(f: &FunctionType) -> Constraint {
 /// one-shot path as a differential check (Stage 8).
 pub fn build_incremental_solver(solver_state: &mut SolverState) -> IncrementalArithSolver {
     let mut ctx = ConvContext::new();
-    // egraph-var-id -> the Var allocated for that (root) term
+    // egraph-var-id -> the Var allocated for that arithmetic subterm.
+    //
+    // Keying: `to_egraph_id(term_id)` is a stable bimap (`solver_state.rs:291`), so this
+    // map's keys are *not* affected by egraph merges — same term_id always maps to the same
+    // `Var`. `extract_linear_expression` uses `egraph.find` internally for uninterpreted
+    // App / fallthrough cases (`lp.rs:427,452`), and the incremental solver relies on that
+    // finding being deterministic per (term, egraph-state-at-build-time). Since the builder
+    // runs against the pristine pre-search egraph, `find` is the identity here, so the
+    // returned `Coefficient::Term(id)` is effectively the same as `to_egraph_id(term_id)`
+    // for the roots we care about. Stage 6 wants this property: `Var`s never re-key across
+    // subsequent egraph merges, so egraph-implied equalities are conveyed via assertable
+    // bounds (`assert_equality`) instead of by rewriting the LP.
     let mut var_map: DeterministicHashMap<u32, Var> = DeterministicHashMap::new();
 
-    // 1. Definitional rows for arithmetic terms that are their own egraph root: root - expr = 0.
-    //    Keyed on egraph id, which is stable before search begins (moving-root handling is
-    //    Stage 6). Iterate a copy of the term list to avoid borrow conflicts with extraction.
-    //    Also collect (term_id, root_var) pairs to register as roots for NO model translation.
+    // 1. Definitional rows for every arithmetic term (Stage 6): `var_t - expr = 0`.
+    //    Pre-Stage-6 skipped terms `t` where `find(t) != t`, losing the definitional row for
+    //    the non-root member of any pre-search merge. That skip is gone: every arithmetic
+    //    term contributes its own row, and any equality between two terms is represented
+    //    downstream as a bound on a fresh slack (`IncrementalArithSolver::assert_equality`).
+    //    Iterate a copy of the term list to avoid borrow conflicts with extraction. Also
+    //    collect (term_id, root_var) pairs to register as roots for NO model translation.
     let arithmetic_terms = solver_state.arithmetic_terms.clone();
     let mut root_pairs: Vec<(u64, Var)> = Vec::new();
     for term_id in arithmetic_terms {
         let egraph_id = solver_state.to_egraph_id(term_id);
-        if solver_state.egraph.find(egraph_id) != egraph_id {
-            continue;
-        }
         let (expr, _additional) = extract_linear_expression(term_id, solver_state);
         let root_var = *var_map
             .entry(egraph_id)
@@ -438,5 +449,102 @@ mod tests {
         // Negate the first atom literal (x <= 3 -> x > 3); keep x <= 2. x > 3 & x <= 2 is unsat.
         let mixed: Vec<i32> = vec![-lits[0], lits[1]];
         assert_agrees(smt, &mixed);
+    }
+
+    /// Stage 6 identity invariant: `var_for_term` returns a stable `Var` for each
+    /// arithmetic term_id, independent of egraph merges performed after `build_incremental_solver`
+    /// runs. The point isn't that the LP *knows about* the merge (Stage 7 wires that up);
+    /// it's that the mapping between term_id and its arithmetic `Var` doesn't move under
+    /// the caller's feet — a precondition for representing merges as bounds later.
+    #[test]
+    fn var_for_term_stable_across_egraph_merge() {
+        // Two Int variables `x`, `y`, each with a comparison atom so both land in
+        // `arithmetic_terms`.
+        let smt = r#"
+(declare-const x Int)
+(declare-const y Int)
+(assert (<= x 5))
+(assert (<= y 3))
+"#;
+        let mut ss = setup_solver_state(smt);
+        // Snapshot the arithmetic term list so we can pick two we know are distinct.
+        let terms: Vec<u64> = ss.arithmetic_terms.clone();
+        assert!(
+            terms.len() >= 2,
+            "expected at least two arithmetic terms, got {}",
+            terms.len()
+        );
+
+        let solver = build_incremental_solver(&mut ss);
+
+        // Pick the first two distinct arithmetic terms and confirm they map to
+        // distinct `Var`s pre-merge.
+        let t_a = terms[0];
+        let t_b = terms[1];
+        let v_a_pre = solver
+            .var_for_term(t_a)
+            .expect("var_for_term should be Some for arithmetic term");
+        let v_b_pre = solver
+            .var_for_term(t_b)
+            .expect("var_for_term should be Some for arithmetic term");
+        assert_ne!(
+            v_a_pre, v_b_pre,
+            "distinct terms should map to distinct Vars pre-merge"
+        );
+
+        // Merge the two terms in the egraph, at some arbitrary decision level.
+        let e_a = ss.to_egraph_id(t_a);
+        let e_b = ss.to_egraph_id(t_b);
+        use crate::egraphs::EgraphTrait as _;
+        let merge = ss.egraph.assert_equal(e_a, e_b, 1);
+        assert!(
+            merge.conflict.is_none(),
+            "egraph assert_equal reported a conflict"
+        );
+        assert_eq!(
+            ss.egraph.find(e_a),
+            ss.egraph.find(e_b),
+            "merge should have unified the two terms"
+        );
+
+        // Post-merge, the incremental solver's per-term mapping is unchanged.
+        assert_eq!(solver.var_for_term(t_a), Some(v_a_pre));
+        assert_eq!(solver.var_for_term(t_b), Some(v_b_pre));
+        assert_ne!(
+            solver.var_for_term(t_a),
+            solver.var_for_term(t_b),
+            "identity must survive merge — Stage 7 will convey the merge as a bound"
+        );
+    }
+
+    /// Stage 6 regression: pre-Stage-6, `build_incremental_solver` skipped terms where
+    /// `find(t) != t`. On a formula whose `arithmetic_terms` includes both a compound
+    /// term `(x + y)` and its subterm `x`, the pristine pre-search egraph has each term
+    /// as its own root, so the skip was inert — but the same code path had to survive
+    /// dropping the skip without breaking the differential oracle. This test locks in
+    /// that behaviour: multiple atoms sharing subterms still produce a solver whose
+    /// verdict matches the one-shot path.
+    #[test]
+    fn differential_multi_term_sharing_subterms() {
+        let smt = r#"
+(declare-const x Int)
+(declare-const y Int)
+(assert (<= (+ x y) 5))
+(assert (<= x 3))
+"#;
+        let mut ss = setup_solver_state(smt);
+        let lits = arithmetic_atom_lits(&mut ss);
+        assert_agrees(smt, &lits);
+
+        // And a contradictory combination via a negated literal.
+        let smt_bad = r#"
+(declare-const x Int)
+(declare-const y Int)
+(assert (<= (+ x y) 5))
+(assert (>= x 10))
+"#;
+        let mut ss = setup_solver_state(smt_bad);
+        let lits = arithmetic_atom_lits(&mut ss);
+        assert_agrees(smt_bad, &lits);
     }
 }

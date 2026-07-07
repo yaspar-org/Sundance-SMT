@@ -225,6 +225,13 @@ pub struct IncrementalArithSolver {
     /// We latch the conflicting slack (with the scope level it was found at) here so that
     /// [`check`](Self::check) faithfully reports `Unsat` until the offending scope is popped.
     conflict: Option<(Var, usize)>,
+    /// Registry: sorted variable pair → the equality slack and its two atoms (Le, Ge)
+    /// (Stage 6). Introduced lazily by [`register_var_equality`](Self::register_var_equality) —
+    /// when the propagator learns that two arithmetic terms are egraph-equal, calling
+    /// `assert_equality(v_a, v_b, justification)` looks up (or creates) the slack `s = v_a - v_b`
+    /// and asserts both bounds `s ≤ 0 ∧ s ≥ 0`. Keyed on the sorted pair so `(v_a, v_b)` and
+    /// `(v_b, v_a)` share the same entry.
+    equality_atoms: DeterministicHashMap<(Var, Var), (Var, AtomId, AtomId)>,
 }
 
 impl IncrementalArithSolver {
@@ -242,6 +249,7 @@ impl IncrementalArithSolver {
             roots: Vec::new(),
             asserted: Vec::new(),
             conflict: None,
+            equality_atoms: DeterministicHashMap::new(),
         }
     }
 
@@ -326,6 +334,66 @@ impl IncrementalArithSolver {
     /// [`assert_literal_justified`](Self::assert_literal_justified) when a literal is available.
     pub fn assert_atom(&mut self, atom: AtomId) -> AssertOutcome {
         self.assert_atom_impl(atom, 0, Vec::new())
+    }
+
+    /// Sort a `(Var, Var)` pair so `(a, b)` and `(b, a)` hash to the same key.
+    fn equality_key(v_a: Var, v_b: Var) -> (Var, Var) {
+        if v_a <= v_b { (v_a, v_b) } else { (v_b, v_a) }
+    }
+
+    /// Register (or look up) the equality slack `s = v_a - v_b` and its two atoms
+    /// `s ≤ 0` and `s ≥ 0` (Stage 6). Returns `(Le AtomId, Ge AtomId)`.
+    ///
+    /// First call for a given `{v_a, v_b}` allocates a fresh basic slack via
+    /// [`LRASolver::add_slack_row`] and registers both atoms. Subsequent calls with either
+    /// order of the same pair return the same atoms (idempotent). This is the primitive
+    /// [`assert_equality`](Self::assert_equality) uses to convey an egraph-implied merge
+    /// `t_a ≡ t_b` to the LP as an ordinary bound assertion.
+    ///
+    /// `v_a` and `v_b` must be `Var`s already in the LRA (typically root vars returned by
+    /// [`var_for_term`](Self::var_for_term) or slack vars from the atom registry).
+    pub fn register_var_equality(&mut self, v_a: Var, v_b: Var) -> (AtomId, AtomId) {
+        let key = Self::equality_key(v_a, v_b);
+        if let Some(&(_slack, le, ge)) = self.equality_atoms.get(&key) {
+            return (le, ge);
+        }
+        let (v_lo, v_hi) = key;
+        let name = format!("!ext_slack_eq_{v_lo:?}_{v_hi:?}");
+        let slack = self
+            .lira
+            .lra_solver_mut()
+            .add_slack_row(
+                &name,
+                &[
+                    (v_lo, Rational::ONE),
+                    (v_hi, -Rational::ONE),
+                ],
+            )
+            .expect("register_var_equality: add_slack_row failed");
+        // s ≤ 0 and s ≥ 0 together pin s = 0, i.e. v_lo = v_hi.
+        let le = self.register_atom(slack, Constraint::Le, Rational::ZERO);
+        let ge = self.register_atom(slack, Constraint::Ge, Rational::ZERO);
+        self.equality_atoms.insert(key, (slack, le, ge));
+        (le, ge)
+    }
+
+    /// Assert the LP equality `v_a = v_b` with an accompanying justification (typically
+    /// the egraph-merge explanation from `explain_equality`).
+    ///
+    /// Registers the equality slack on first use, then asserts both bounds. The
+    /// justification is threaded through both atom assertions so it appears in the unsat
+    /// core if the equality contributes to a conflict. Returns the combined outcome
+    /// (worst of the two bound-assertion outcomes).
+    pub fn assert_equality(
+        &mut self,
+        v_a: Var,
+        v_b: Var,
+        justification: Vec<i32>,
+    ) -> AssertOutcome {
+        let (le, ge) = self.register_var_equality(v_a, v_b);
+        let out_le = self.assert_atom_impl(le, 0, justification.clone());
+        let out_ge = self.assert_atom_impl(ge, 0, justification);
+        out_le.combine(out_ge)
     }
 
     /// Core assertion implementation. Tightens the atom's slack bound(s), records the assertion
@@ -462,11 +530,19 @@ impl IncrementalArithSolver {
         }
 
         let pre_solve_level = self.lira.lra_solver().backtrack_level();
+        // Snapshot the tableau structure (basis/owner layout, coefficients) so we can
+        // restore it after solve(). `backtrack` only pops bounds/assignment — it never
+        // undoes pivots (Stage 3 finding: basis-left-pivoted is sound). But leaving the
+        // pivoted basis around corrupts a subsequent check() that iterates basic vars by
+        // index: the wrong variables appear basic, with wrong bounds relative to the
+        // pre-pivot layout. try_unit_cube_test already does this save/restore pattern.
+        let saved_tableau = self.lira.lra_solver().snapshot_tableau();
         self.lira.reset_state();
         let ret = self.lira.solve().expect("check: LIRASolver::solve failed");
-        // Contain any speculative B&B bounds inside this check() call: unconditionally
-        // rewind the LRA bound trail to what it was before we called `solve`.
+        // Contain any speculative B&B bounds inside this check() call.
         self.lira.lra_solver_mut().backtrack(pre_solve_level);
+        self.lira.lra_solver_mut().restore_tableau_from_snapshot(saved_tableau);
+        self.lira.lra_solver_mut().reset_to_unknown();
 
         match ret.decision {
             SolverDecision::FEASIBLE(assignment) => {
@@ -526,6 +602,22 @@ impl IncrementalArithSolver {
     #[cfg(test)]
     pub(crate) fn lra(&self) -> &LRASolver {
         self.lira.lra_solver()
+    }
+
+    /// Look up the arithmetic `Var` (root variable) associated with an SMT term_id, if any.
+    ///
+    /// Populated by the static builder for every term in `arithmetic_terms`. Used by
+    /// Stage 6 tests and by the propagator (Stage 7) to translate an egraph-implied
+    /// term equality `t_a ≡ t_b` into an LP equality bound on `(var_of(t_a), var_of(t_b))`.
+    ///
+    /// This lookup is **stable across egraph merges** — `var_map` in the builder is keyed
+    /// on `to_egraph_id(term_id)` which is a fixed bimap, not on the *current* egraph
+    /// class root. That's exactly the Stage 6 invariant: `Var`s never re-key, so merges
+    /// are handled as bounds rather than by rewriting the LP.
+    pub fn var_for_term(&self, term_id: u64) -> Option<Var> {
+        self.roots
+            .iter()
+            .find_map(|(t, v)| if *t == term_id { Some(*v) } else { None })
     }
 }
 
@@ -920,5 +1012,98 @@ mod tests {
         u.assert_atom(hi);
         assert!(matches!(u.check(), CheckResult::Unsat { .. }));
         assert!(matches!(u.check(), CheckResult::Unsat { .. }));
+    }
+
+    // ─── Stage 6: egraph-implied equality as retractable bound ──────────────────
+
+    /// Two-Int-variable solver: non-basic `x` and `y` (cols 0, 1), no relations. Callers
+    /// register atoms directly on `x`/`y` and use `register_var_equality(x, y)` to add an
+    /// equality slack post-hoc via [`LRASolver::add_slack_row`].
+    fn two_int_solver() -> IncrementalArithSolver {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0)),
+            VarInfo::new(Var::int(1), Owner::NonBasic(1)),
+        ];
+        // At least one basic variable is required by from_eqs; add a dummy row `s = 0`
+        // that references no non-basic vars.
+        let basic = vec![
+            VarInfo::new(Var::real(2), Owner::Basic(0)).with_bounds(Bounds::unbounded()),
+        ];
+        let equations = vec![vec![rbig!(0), rbig!(0)]];
+        let lra = LRASolver::from_eqs(
+            basic,
+            non_basic,
+            equations,
+            ConvContext::default(),
+            TableauKind::Dense,
+        )
+        .expect("failed to build LRASolver");
+        IncrementalArithSolver::new(lra, SolverConfig::default())
+    }
+
+    #[test]
+    fn equality_bound_forces_infeasibility() {
+        // x >= 5 ∧ y <= 3, feasible with x=5, y=3. Adding x = y is unsat.
+        let mut s = two_int_solver();
+        let x_lo = s.register_atom(Var::int(0), Constraint::Ge, rbig!(5));
+        let y_hi = s.register_atom(Var::int(1), Constraint::Le, rbig!(3));
+        s.assert_atom(x_lo);
+        s.assert_atom(y_hi);
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
+
+        // Assert x = y with a fake justification literal `999` (mock egraph-merge explanation).
+        let outcome = s.assert_equality(Var::int(0), Var::int(1), vec![999]);
+        // Either the assert-time or the check-time path must report infeasibility.
+        let unsat_after_check = matches!(s.check(), CheckResult::Unsat { .. });
+        assert!(
+            outcome == AssertOutcome::Conflict || unsat_after_check,
+            "expected equality assertion to yield unsat (outcome={outcome:?}, unsat_after_check={unsat_after_check})"
+        );
+
+        // And the justification literal 999 should appear in the core.
+        match s.check() {
+            CheckResult::Unsat { core_literals, .. } => {
+                assert!(
+                    core_literals.contains(&999),
+                    "expected justification lit 999 in unsat core, got {core_literals:?}"
+                );
+            }
+            other => panic!("expected Unsat, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn equality_bound_retracts_on_pop() {
+        let mut s = two_int_solver();
+        let x_lo = s.register_atom(Var::int(0), Constraint::Ge, rbig!(5));
+        let y_hi = s.register_atom(Var::int(1), Constraint::Le, rbig!(3));
+        s.assert_atom(x_lo);
+        s.assert_atom(y_hi);
+
+        // Wrap the equality in a scope so it can be popped.
+        let level = s.push();
+        s.assert_equality(Var::int(0), Var::int(1), vec![]);
+        assert!(matches!(s.check(), CheckResult::Unsat { .. }));
+
+        // Pop discards the equality bound; feasibility must return.
+        s.pop(level);
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
+    }
+
+    #[test]
+    fn register_var_equality_is_idempotent() {
+        let mut s = two_int_solver();
+        let ncols_before = s.lra().tableau_ncols_for_test();
+        let (le1, ge1) = s.register_var_equality(Var::int(0), Var::int(1));
+        let nrows_after_first = s.lra().tableau_nrows_for_test();
+
+        // Second call in either order returns the same atom IDs and doesn't grow the
+        // tableau. Also confirms the sorted-pair key handles (a, b) and (b, a) the same.
+        let (le2, ge2) = s.register_var_equality(Var::int(1), Var::int(0));
+        assert_eq!(le1, le2);
+        assert_eq!(ge1, ge2);
+        assert_eq!(s.lra().tableau_nrows_for_test(), nrows_after_first);
+        // Columns never change under add_slack_row.
+        assert_eq!(s.lra().tableau_ncols_for_test(), ncols_before);
     }
 }

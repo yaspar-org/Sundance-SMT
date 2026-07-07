@@ -40,8 +40,11 @@ pub enum TableauKind {
 /// Tableau represents a low level tableau.
 ///
 /// Tableau logically provides a 2d array of rationals that can be pivoted on selected
-/// rows/columns and inspected. It doesn't support arbitrary modification. The
-/// underlying array implementation is private.
+/// rows/columns and inspected. Beyond pivoting, `add_row` allows appending a new row
+/// (a new basic variable's equation over the existing non-basic columns) — used by the
+/// incremental arithmetic path to introduce equality slacks post-construction (Stage 6).
+/// Columns are still fixed after construction. The underlying array implementation is
+/// private.
 pub trait Tableau
 where
     Self: fmt::Debug + Sized,
@@ -62,6 +65,17 @@ where
     /// Returns Ok(()) if the pivot was successful (i.e. when `tableau[row][col] != 0`) and an
     /// error otherwise.
     fn pivot(&mut self, row: usize, col: usize) -> TableauResult<()>;
+
+    /// Append a new row to the tableau.
+    ///
+    /// `coefficients` has length `ncols` (one entry per non-basic variable column). The
+    /// appended row represents a fresh basic variable's equation over the existing columns.
+    /// Column count is unchanged; row count grows by 1. Returns the new row's index
+    /// (`nrows() - 1` after the call).
+    ///
+    /// Added in Stage 6 to support introducing equality slacks (`s = v_a - v_b`) at
+    /// post-construction time when an egraph merge implies two arithmetic terms are equal.
+    fn add_row(&mut self, coefficients: Vec<Rational>) -> TableauResult<usize>;
 
     /// Get an element of the tableau
     fn get(&self, row: usize, col: usize) -> TableauResult<&Rational>;
@@ -121,6 +135,13 @@ impl Tableau for TableauImpl {
         match self {
             TableauImpl::Dense(t) => t.pivot(row, col),
             TableauImpl::Sparse(t) => t.pivot(row, col),
+        }
+    }
+
+    fn add_row(&mut self, coefficients: Vec<Rational>) -> TableauResult<usize> {
+        match self {
+            TableauImpl::Dense(t) => t.add_row(coefficients),
+            TableauImpl::Sparse(t) => t.add_row(coefficients),
         }
     }
 

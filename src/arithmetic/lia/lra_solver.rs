@@ -381,6 +381,36 @@ impl LRASolver {
         old_level
     }
 
+    /// Snapshot the current tableau structure for later [`restore_tableau_from_snapshot`].
+    pub fn snapshot_tableau(&self) -> (TableauImpl, Vec<usize>, Vec<usize>, Vec<Owner>) {
+        (
+            self.tableau.clone(),
+            self.basic.clone(),
+            self.non_basic.clone(),
+            self.variables.iter().map(|v| v.owner.clone()).collect(),
+        )
+    }
+
+    /// Restore a previously-snapshotted tableau structure. Paired with [`snapshot_tableau`].
+    pub fn restore_tableau_from_snapshot(
+        &mut self,
+        snapshot: (TableauImpl, Vec<usize>, Vec<usize>, Vec<Owner>),
+    ) {
+        let (tableau, basic, non_basic, owners) = snapshot;
+        self.restore_tableau(&tableau, &basic, &non_basic, &owners);
+    }
+
+    /// Reset the solver decision state to Unknown.
+    ///
+    /// Used by the incremental path after [`backtrack`](Self::backtrack): `backtrack`
+    /// restores bounds/assignment but leaves `state` as-is (Sat or Unsat), which can
+    /// poison the next `set_backtrack` (returns early on Unsat). Resetting to Unknown
+    /// ensures the next `solve()` / `try_unit_cube_test` runs a fresh decision procedure
+    /// instead of inheriting an outdated conclusion.
+    pub fn reset_to_unknown(&mut self) {
+        self.state = LRASolverState::Unknown;
+    }
+
     /// Backtrack asserted upper/lower bounds to a previous level
     pub fn backtrack(&mut self, level: usize) {
         if level >= self.backtrack_level {
@@ -1065,6 +1095,98 @@ impl LRASolver {
         self.var_to_idx
             .get(var)
             .map(|i| self.variables[*i].bounds.clone())
+    }
+
+    /// Test-only introspection of the tableau shape. Used by Stage 6 tests to verify
+    /// `add_slack_row` grew nrows by 1 and left ncols unchanged.
+    #[cfg(test)]
+    pub(crate) fn tableau_nrows_for_test(&self) -> usize {
+        self.tableau.nrows()
+    }
+    /// Test-only introspection of the tableau shape.
+    #[cfg(test)]
+    pub(crate) fn tableau_ncols_for_test(&self) -> usize {
+        self.tableau.ncols()
+    }
+
+    /// Append a new basic slack variable defined by the equation
+    /// `slack = Σ coeffs_by_var[v] * v` over the referenced variables.
+    ///
+    /// Added in Stage 6 to support introducing equality slacks at post-construction time
+    /// (e.g. representing an egraph-implied equality `t_a ≡ t_b` as `s = v_a - v_b` with a
+    /// bound `s = 0` asserted incrementally).
+    ///
+    /// Each referenced variable is looked up in the current variable table. If a variable
+    /// is **basic**, its row equation is substituted so the appended row references only
+    /// non-basic columns (the tableau's invariant). Constant variables among the operands
+    /// are not supported here — pass only bound-carrying variables (root_vars, other
+    /// slacks). The new slack is created via `ctx.allocate_var(name, VarType::Real)`,
+    /// registered as basic with unbounded bounds, and its assignment is initialized to
+    /// satisfy the row equation from the current non-basic values.
+    ///
+    /// Returns the new slack `Var`.
+    pub fn add_slack_row(
+        &mut self,
+        name: &str,
+        coeffs_by_var: &[(Var, Rational)],
+    ) -> SolverResult<Var> {
+        // Materialize the row over non-basic column indices, substituting basic vars via
+        // their row equations. A basic `v_b` with row `r_b` satisfies
+        //   v_b = Σ_j tableau[r_b][j] * non_basic[j]
+        // so a coefficient `c * v_b` contributes `c * tableau[r_b][j]` to column `j`.
+        let ncols = self.non_basic.len();
+        let mut row = vec![Rational::ZERO; ncols];
+        for (v, coeff) in coeffs_by_var {
+            let idx = self.var_to_idx.get(v).ok_or_else(|| {
+                SolverError(format!("add_slack_row: unknown variable {v:?}"))
+            })?;
+            match self.variables[*idx].owner {
+                Owner::NonBasic(col) => {
+                    row[col] += coeff.clone();
+                }
+                Owner::Basic(r) => {
+                    #[allow(clippy::needless_range_loop)]
+                    for j in 0..ncols {
+                        let a = self.tableau.get(r, j).map_err(|e| SolverError(e.0))?;
+                        if !a.is_zero() {
+                            row[j] += coeff.clone() * a;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Append the row to the tableau and allocate the slack variable.
+        let new_row_idx = self
+            .tableau
+            .add_row(row.clone())
+            .map_err(|e| SolverError(e.0))?;
+        let slack_var = self.ctx.allocate_var(name, VarType::Real);
+        let slack_var_idx = self.variables.len();
+
+        // Compute the initial slack assignment consistent with the tableau equation.
+        // We use QDelta arithmetic to match how `variables[*].val` is stored.
+        let mut assg = QDelta::ZERO;
+        for (j, coeff) in row.iter().enumerate() {
+            if !coeff.is_zero() {
+                assg += &self.variables[self.non_basic[j]].val * coeff;
+            }
+        }
+        let mut var_info = VarInfo::new(slack_var, Owner::Basic(new_row_idx))
+            .with_bounds(Bounds::unbounded());
+        var_info.update_assignment(assg);
+
+        // Register the new slack in all bookkeeping vectors.
+        self.variables.push(var_info);
+        self.basic.push(slack_var_idx);
+        self.var_to_idx.insert(slack_var, slack_var_idx);
+
+        // The old_assignment snapshot (used for backtrack restoration) may not know about
+        // this new variable. It's saved as a `BTreeMap<Var, QDelta>` and `restore_assignment`
+        // only iterates the keys it holds, so extra `Var`s in `self.variables` are harmless
+        // — they just don't get their assignments overwritten on backtrack, which is the
+        // correct behaviour for a freshly-added slack.
+        Ok(slack_var)
     }
 
     /// Return the [Var]iable associated with a given name

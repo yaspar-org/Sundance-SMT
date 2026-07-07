@@ -129,6 +129,25 @@ impl Tableau for TableauDense {
         Ok(())
     }
 
+    fn add_row(&mut self, coefficients: Vec<Rational>) -> TableauResult<usize> {
+        if coefficients.len() != self.ncols {
+            return Err(TableauError(format!(
+                "add_row: expected {} coefficients (ncols), got {}",
+                self.ncols,
+                coefficients.len()
+            )));
+        }
+        // Array2D is fixed-size; rebuild from the existing rows plus the new one.
+        // Stage 6 uses this rarely (once per new egraph-implied equality), so the
+        // per-call rebuild cost is acceptable for the Dense backend — the Sparse
+        // backend does it in place.
+        let mut rows: Vec<Vec<Rational>> = self.data.as_rows();
+        rows.push(coefficients);
+        *self.data = Array2D::from_rows(&rows)?;
+        self.nrows += 1;
+        Ok(self.nrows - 1)
+    }
+
     fn get(&self, row: usize, col: usize) -> TableauResult<&Rational> {
         self.data
             .get(row, col)

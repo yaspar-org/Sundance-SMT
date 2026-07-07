@@ -81,6 +81,12 @@ impl Tableau for TableauSparse {
         self.matrix.pivot(row, col).map_err(|e| TableauError(e.0))
     }
 
+    fn add_row(&mut self, coefficients: Vec<Rational>) -> TableauResult<usize> {
+        self.matrix
+            .add_row(coefficients)
+            .map_err(|e| TableauError(e.0))
+    }
+
     fn get(&self, row: usize, col: usize) -> TableauResult<&Rational> {
         self.matrix
             .get(row, col)

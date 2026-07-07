@@ -131,6 +131,32 @@ impl<V: Zero + Clone + fmt::Debug> Matrix<V> {
         self.cols.get(col).map_or(0, |c| c.len())
     }
 
+    /// Append a new row to the matrix. `coefficients` has length `ncols()`; zeros are
+    /// skipped from the sparse representation. Returns the new row's index. Column count
+    /// is unchanged.
+    ///
+    /// O(nnz(new_row)) with respect to the row payload — the mirrored column index is
+    /// updated in place for each nonzero.
+    pub fn add_row(&mut self, coefficients: Vec<V>) -> SparseResult<usize> {
+        let expected = self.ncols();
+        if coefficients.len() != expected {
+            return Err(SparseError(format!(
+                "add_row: expected {expected} coefficients (ncols), got {}",
+                coefficients.len()
+            )));
+        }
+        let new_row_idx = self.rows.len();
+        let mut new_row: FxHashMap<usize, V> = FxHashMap::default();
+        for (col, val) in coefficients.into_iter().enumerate() {
+            if !val.is_zero() {
+                new_row.insert(col, val.clone());
+                self.cols[col].insert(new_row_idx, val);
+            }
+        }
+        self.rows.push(new_row);
+        Ok(new_row_idx)
+    }
+
     /// Perform a pivot operation on the NxM matrix at the specified row and column.
     ///
     /// The pivot transforms matrix elements according to:
