@@ -492,21 +492,21 @@ impl SolverState {
 
         // Quantifier registration
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
-            let (inner_term, trigger_ids) =
-                if let Annotated(inner_term, attrs) = middle_term.repr() {
-                    let mut trigger_ids = vec![];
-                    for attr in attrs.iter() {
-                        if let Attribute::Pattern(s_exprs) = attr {
-                            let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
-                                s_exprs.iter().map(|p| self.build_pattern(p)).collect();
-                            trigger_ids.push(pattern_ids);
-                        }
+            let (inner_term, trigger_ids) = if let Annotated(inner_term, attrs) = middle_term.repr()
+            {
+                let mut trigger_ids = vec![];
+                for attr in attrs.iter() {
+                    if let Attribute::Pattern(s_exprs) = attr {
+                        let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
+                            s_exprs.iter().map(|p| self.build_pattern(p)).collect();
+                        trigger_ids.push(pattern_ids);
                     }
-                    (inner_term, trigger_ids)
-                } else {
-                    // Unannotated quantifier (no triggers) — will be skolemized on assignment
-                    (middle_term, vec![])
-                };
+                }
+                (inner_term, trigger_ids)
+            } else {
+                // Unannotated quantifier (no triggers) — will be skolemized on assignment
+                (middle_term, vec![])
+            };
 
             // Store quantifier body in terms_list (needed for substitution during instantiation)
             let body_uid = inner_term.uid();
