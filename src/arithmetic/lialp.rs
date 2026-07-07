@@ -54,13 +54,18 @@ pub fn check_integer_constraints_satisfiable_lia(
             roots.push((term_id, root_var));
 
             // We have "root_var = expr," make it into "root_var - expr = 0"
-            let (mut monomials, constant) =
+            let (mut monomials, constant, euclidean_slacks) =
                 expr_to_monomials(&expr, -Rational::ONE, &mut var_map, &mut ctx, solver_state);
             monomials.insert(0, Mon::new(Rational::ONE, root_var));
 
             let slack =
                 ctx.allocate_var(&format!("!ext_slack_var_root_{}", term_id), VarType::Real);
             ctx.push_relation(Rel::mk_eq(monomials, constant), slack);
+            // Euclidean rows exist only because this root expression was extracted; if they
+            // appear in a conflict, the same justification literals apply.
+            for eucl_slack in euclidean_slacks {
+                slack_to_lits.insert(eucl_slack, additional_constraints.clone());
+            }
             slack_to_lits.insert(slack, additional_constraints);
         }
     }
@@ -68,14 +73,14 @@ pub fn check_integer_constraints_satisfiable_lia(
     for (constraint_idx, constraint) in constraints.iter().enumerate() {
         debug_println!(4, 0, "WE ARE IN ARITH CHECK: Constraint: {:?}", constraint);
         // We have  "left_expr REL right_expr," make it into "(left_expr - right_expr) REL 0"
-        let (mut constr_monomials, mut constant) = expr_to_monomials(
+        let (mut constr_monomials, mut constant, mut euclidean_slacks) = expr_to_monomials(
             &constraint.left_expr,
             Rational::ONE,
             &mut var_map,
             &mut ctx,
             solver_state,
         );
-        let (rhs_monomials, rhs_constant) = expr_to_monomials(
+        let (rhs_monomials, rhs_constant, rhs_euclidean_slacks) = expr_to_monomials(
             &constraint.right_expr,
             -Rational::ONE,
             &mut var_map,
@@ -84,6 +89,7 @@ pub fn check_integer_constraints_satisfiable_lia(
         );
         constr_monomials.extend(rhs_monomials);
         constant += rhs_constant;
+        euclidean_slacks.extend(rhs_euclidean_slacks);
 
         let rel = match &constraint.function {
             Leq => Rel::mk_le(constr_monomials, constant),
@@ -99,6 +105,11 @@ pub fn check_integer_constraints_satisfiable_lia(
 
         let mut lits = constraint.additional_constraint.clone().unwrap_or_default();
         lits.push(arithmetic_literals[constraint_idx]);
+        // Euclidean rows exist only because this constraint's expressions were extracted;
+        // if they appear in a conflict, the same justification literals apply.
+        for eucl_slack in euclidean_slacks {
+            slack_to_lits.insert(eucl_slack, lits.clone());
+        }
         slack_to_lits.insert(slack, lits);
     }
 
@@ -140,9 +151,10 @@ fn expr_to_monomials(
     var_map: &mut DeterministicHashMap<u32, Var>,
     ctx: &mut ConvContext,
     solver_state: &mut SolverState,
-) -> (Vec<Mon<Rational>>, Rational) {
+) -> (Vec<Mon<Rational>>, Rational, Vec<Var>) {
     let mut monomials: Vec<Mon<Rational>> = Vec::new();
     let mut constant = Rational::ZERO;
+    let mut euclidean_slacks: Vec<Var> = Vec::new();
     for (term_part, int_coeff) in expr {
         let rational_coeff = Rational::from(int_coeff.clone());
         match term_part {
@@ -159,7 +171,9 @@ fn expr_to_monomials(
                     ctx.allocate_var(&format!("!ext_var_{}", a_id), VarType::Int)
                 });
                 let q = ctx.allocate_var(&format!("!div_q_{}_{}", a_id, b_id), VarType::Int);
-                add_euclidean_constraints(a_var, q, &n, ctx);
+                let (slack_ge, slack_le) = add_euclidean_constraints(a_var, q, &n, ctx);
+                euclidean_slacks.push(slack_ge);
+                euclidean_slacks.push(slack_le);
                 monomials.push(Mon::new(&sign * &rational_coeff, q));
             }
             Coefficient::Mod(a_id, b_id) => {
@@ -168,14 +182,16 @@ fn expr_to_monomials(
                     ctx.allocate_var(&format!("!ext_var_{}", a_id), VarType::Int)
                 });
                 let q = ctx.allocate_var(&format!("!mod_q_{}_{}", a_id, b_id), VarType::Int);
-                add_euclidean_constraints(a_var, q, &n, ctx);
+                let (slack_ge, slack_le) = add_euclidean_constraints(a_var, q, &n, ctx);
+                euclidean_slacks.push(slack_ge);
+                euclidean_slacks.push(slack_le);
                 // mod(a, n) = a - n*q
                 monomials.push(Mon::new(&sign * &rational_coeff, a_var));
                 monomials.push(Mon::new(&sign * &rational_coeff * (-n), q));
             }
         }
     }
-    (monomials, constant)
+    (monomials, constant, euclidean_slacks)
 }
 
 /// Resolve an egraph ID to its constant integer value by evaluating its linear expression.
@@ -197,7 +213,14 @@ fn resolve_constant_from_egraph_id(egraph_id: u32, solver_state: &mut SolverStat
 /// Add Euclidean division constraints for quotient q = div(a, n):
 ///   a - n*q >= 0  (remainder is non-negative)
 ///   a - n*q <= |n| - 1  (remainder < |n|)
-fn add_euclidean_constraints(a_var: Var, q: Var, n: &Rational, ctx: &mut ConvContext) {
+/// Returns the (>=, <=) slack vars owning the two rows so the caller can register
+/// them in slack_to_lits under the same justification as the enclosing expression.
+fn add_euclidean_constraints(
+    a_var: Var,
+    q: Var,
+    n: &Rational,
+    ctx: &mut ConvContext,
+) -> (Var, Var) {
     let abs_n = if *n < Rational::ZERO {
         -n.clone()
     } else {
@@ -229,4 +252,6 @@ fn add_euclidean_constraints(a_var: Var, q: Var, n: &Rational, ctx: &mut ConvCon
         ),
         slack_le,
     );
+
+    (slack_ge, slack_le)
 }
