@@ -529,6 +529,30 @@ impl LIRASolver {
         &mut self.lra_solver
     }
 
+    /// Reset the branch-and-bound explorer to a fresh `Active(NoOp)` root and clear the
+    /// LIRA-local statistics so [`solve`](Self::solve) can be called again against a
+    /// long-lived `LRASolver`.
+    ///
+    /// The underlying `LRASolver` (bounds, assignment, tableau) and `config` are left
+    /// untouched — only LIRA-owned state is reset. This is the primitive
+    /// [`crate::arithmetic::incremental::IncrementalArithSolver::check`] uses to route
+    /// each incremental feasibility check through B&B without inheriting a half-explored
+    /// tree from the previous call.
+    ///
+    /// The new root's `level` is anchored to the LRA's current `backtrack_level` so
+    /// UNSAT-resolution's `backtrack(root.level)` cannot pop any bounds asserted *before*
+    /// B&B started — critical when the incremental caller has already pushed external
+    /// scope levels and asserted atom bounds against them.
+    pub fn reset_state(&mut self) {
+        let root = BrtNode {
+            level: Some(self.lra_solver.backtrack_level()),
+            state: BrtNodeState::Active(BrtAction::NoOp),
+            parent: None,
+        };
+        self.explorer = BrtExplorer::new(root);
+        self.stats = Stats::new();
+    }
+
     /// Find the first integer variable whose currently assigned value is
     /// not integral and return it along with its current assignment.
     fn find_next_int_var(&self) -> Option<(Var, Rational)> {

@@ -37,6 +37,7 @@
 
 use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::linear_system::Constraint;
+use crate::arithmetic::lia::lira_solver::LIRASolver;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::solver_result::{Assignment, Conflict, SolverDecision};
@@ -185,11 +186,12 @@ struct AssertedAtom {
 /// construction (that static-tableau construction is Stage 2).
 #[derive(Debug)]
 pub struct IncrementalArithSolver {
-    /// The persistent real-arithmetic solver. All slacks referenced by registered atoms must
-    /// already exist here.
-    lra: LRASolver,
-    /// Solver configuration (currently unused at Stage 1; retained for the LIRA wrap-up in
-    /// Stage 5).
+    /// The persistent mixed integer/real arithmetic solver. Owns the [`LRASolver`] that all
+    /// slacks referenced by registered atoms live in. [`check`](Self::check) drives B&B via
+    /// this solver; bounds are asserted/backtracked on `lira.lra_solver_mut()`.
+    lira: LIRASolver,
+    /// Solver configuration (retained for later LIRA re-configuration; currently just the
+    /// same config the wrapped LIRA was built with).
     #[allow(dead_code)]
     config: SolverConfig,
     /// Registry: atom → the latent bound it would assert. `AtomId(i)` indexes insertion order.
@@ -227,10 +229,12 @@ pub struct IncrementalArithSolver {
 
 impl IncrementalArithSolver {
     /// Wrap an already-constructed [`LRASolver`] (e.g. from `LinearSystem::to_lra_solver` or
-    /// `LRASolver::from_eqs`).
+    /// `LRASolver::from_eqs`). The LRA is wrapped in an [`LIRASolver`] internally so
+    /// [`check`](Self::check) can drive branch-and-bound over integer variables.
     pub fn new(lra: LRASolver, config: SolverConfig) -> Self {
+        let lira = LIRASolver::new(lra, config.clone());
         IncrementalArithSolver {
-            lra,
+            lira,
             config,
             atoms: DeterministicHashMap::new(),
             literal_atoms: DeterministicHashMap::new(),
@@ -251,7 +255,7 @@ impl IncrementalArithSolver {
     /// (the solver's [`LRASolver::backtrack_level`] is a monotonically increasing timestamp,
     /// unaffected by `backtrack`, and is *not* bumped by `set_backtrack` when already UNSAT).
     fn current_level(&self) -> usize {
-        self.lra.backtrack_level()
+        self.lira.lra_solver().backtrack_level()
     }
 
     /// Register a comparison atom `slack <constraint> threshold` without asserting it.
@@ -351,14 +355,16 @@ impl IncrementalArithSolver {
         let mut outcome = AssertOutcome::Sat;
         if let Some(l) = &bound.lower {
             let raw = self
-                .lra
+                .lira
+                .lra_solver_mut()
                 .assert_lower(&bound.slack, l)
                 .expect("assert_atom: assert_lower failed");
             outcome = outcome.combine(AssertOutcome::from_raw(raw));
         }
         if let Some(u) = &bound.upper {
             let raw = self
-                .lra
+                .lira
+                .lra_solver_mut()
                 .assert_upper(&bound.slack, u)
                 .expect("assert_atom: assert_upper failed");
             outcome = outcome.combine(AssertOutcome::from_raw(raw));
@@ -418,8 +424,29 @@ impl IncrementalArithSolver {
 
     /// Run a full feasibility check at the current bound set.
     ///
-    /// On `Unsat`, translates the solver's `Conflict<Var>` into SAT-level core literals via the
-    /// assertion trail. On `Sat`, builds the value→term-set model map for Nelson-Oppen.
+    /// Routes through [`LIRASolver`] so `Int`-typed variables get branch-and-bound-driven
+    /// integer assignments (Stage 5). To guarantee no B&B bounds leak past the boundary:
+    ///
+    /// 1. The pre-solve LRA `backtrack_level` is snapshotted.
+    /// 2. The LIRA explorer + LIRA-local stats are reset so B&B starts from a fresh tree
+    ///    (a persistent LIRA cannot be re-solved otherwise — after one solve its root is
+    ///    in a terminal state and `solve` would hit `unreachable!`).
+    /// 3. After solve returns — regardless of outcome — we unconditionally
+    ///    `lra_solver_mut().backtrack(pre_solve_level)`. `branch_and_bound` returns early
+    ///    on the *first* integer-feasible node, so on `Sat` its speculative branch
+    ///    bounds are still asserted; unconditional backtrack pops them. On unsat/unknown
+    ///    LIRA's own resolution usually returns to level 0 but this removes any
+    ///    dependence on that invariant.
+    ///
+    /// Caveat: [`LRASolver::backtrack_level`] is a monotonically increasing timestamp
+    /// (`backtrack` does not decrement it, see [Stage 3 findings]). So the counter after
+    /// this call is `>= pre_solve_level`; what's *restored* is the bound trail — every
+    /// bound tagged `level > pre_solve_level` is popped. That's the semantic containment
+    /// callers care about: `push`/`pop`/`assert_atom` all key on the counter's current
+    /// value at the time they run, so counter drift is harmless.
+    ///
+    /// On `Unsat`, the `Conflict<Var>` is translated to SAT-level core literals via the
+    /// assertion trail; on `Sat`, the value→term-set map is built for Nelson-Oppen.
     pub fn check(&mut self) -> CheckResult {
         // A conflict latched at assert time is not visible to the tableau (the rejected bound
         // was never stored), so report it directly. The core is all trail entries touching that
@@ -433,7 +460,14 @@ impl IncrementalArithSolver {
                 stats: LiaStats::new(),
             };
         }
-        let ret = self.lra.solve().expect("check: LRASolver::solve failed");
+
+        let pre_solve_level = self.lira.lra_solver().backtrack_level();
+        self.lira.reset_state();
+        let ret = self.lira.solve().expect("check: LIRASolver::solve failed");
+        // Contain any speculative B&B bounds inside this check() call: unconditionally
+        // rewind the LRA bound trail to what it was before we called `solve`.
+        self.lira.lra_solver_mut().backtrack(pre_solve_level);
+
         match ret.decision {
             SolverDecision::FEASIBLE(assignment) => {
                 let model = self.build_no_model(&assignment);
@@ -466,7 +500,7 @@ impl IncrementalArithSolver {
     /// That is sound — unsat is monotone under additional bounds, so no bound asserted in the
     /// coincident scope can restore feasibility, and popping it is harmless.
     pub fn push(&mut self) -> Level {
-        Level(self.lra.set_backtrack())
+        Level(self.lira.lra_solver_mut().set_backtrack())
     }
 
     /// Discard all bounds asserted since the matching [`push`](Self::push) that returned
@@ -478,7 +512,7 @@ impl IncrementalArithSolver {
     /// scope, or popping without a matching push) is a no-op in the solver and leaves the
     /// trail untouched.
     pub fn pop(&mut self, level: Level) {
-        self.lra.backtrack(level.0);
+        self.lira.lra_solver_mut().backtrack(level.0);
         self.asserted.retain(|entry| entry.level <= level.0);
         // Clear a latched conflict if it was discovered in a scope we are discarding.
         if let Some((_, clvl)) = self.conflict
@@ -488,10 +522,10 @@ impl IncrementalArithSolver {
         }
     }
 
-    /// Borrow the underlying solver (test/introspection aid; not part of the incremental API).
+    /// Borrow the underlying LRA solver (test/introspection aid; not part of the incremental API).
     #[cfg(test)]
     pub(crate) fn lra(&self) -> &LRASolver {
-        &self.lra
+        self.lira.lra_solver()
     }
 }
 
@@ -510,6 +544,25 @@ mod tests {
     fn single_var_solver() -> IncrementalArithSolver {
         // non-basic x (col 0), basic s (row 0), equation s = 1*x
         let non_basic = vec![VarInfo::new(Var::int(0), Owner::NonBasic(0))];
+        let basic = vec![VarInfo::new(Var::real(1), Owner::Basic(0)).with_bounds(Bounds::unbounded())];
+        let equations = vec![vec![rbig!(1)]];
+        let lra = LRASolver::from_eqs(
+            basic,
+            non_basic,
+            equations,
+            ConvContext::default(),
+            TableauKind::Dense,
+        )
+        .expect("failed to build LRASolver");
+        IncrementalArithSolver::new(lra, SolverConfig::default())
+    }
+
+    /// Real-typed variant of [`single_var_solver`]: `s = x` with `x` a non-basic *Real*.
+    /// Used by tests that assert strict inequalities meant to be interpreted over the
+    /// reals — under [`single_var_solver`] the same bounds are LIA-unsat via B&B once
+    /// `check()` routes through [`LIRASolver`].
+    fn single_real_var_solver() -> IncrementalArithSolver {
+        let non_basic = vec![VarInfo::new(Var::real(0), Owner::NonBasic(0))];
         let basic = vec![VarInfo::new(Var::real(1), Owner::Basic(0)).with_bounds(Bounds::unbounded())];
         let equations = vec![vec![rbig!(1)]];
         let lra = LRASolver::from_eqs(
@@ -670,7 +723,10 @@ mod tests {
 
     #[test]
     fn strict_inequality_atom_through_api() {
-        let mut s = single_var_solver();
+        // Real-typed variant: s > 3 and s < 4 has real witness 3.5 but no integer witness,
+        // so with an Int-typed `x` LIRA would (correctly) return UNSAT via B&B. This test's
+        // intent is the qdelta strict-bound plumbing, so use the Real setup.
+        let mut s = single_real_var_solver();
         // s > 3 and s < 4 over the reals: feasible (e.g. s = 3.5); the qdelta strict bounds
         // must not collapse to an empty interval.
         let gt = s.register_atom(Var::real(1), Constraint::Gt, rbig!(3));
@@ -756,5 +812,113 @@ mod tests {
             }
             other => panic!("expected Sat, got {other:?}"),
         }
+    }
+
+    // ─── Stage 5: LIRA integer reasoning + level containment ────────────────────
+
+    #[test]
+    fn integer_sat_needs_branch_and_bound() {
+        // Over the rationals, `x >= 1/2 ∧ x <= 3` is trivially satisfied by x = 1/2, but the
+        // LRA-only `check()` from Stages 1-4 would return that fractional value even though
+        // `x` is typed `Int`. Routing through LIRA must branch-and-bound to an integer
+        // assignment (any integer in [1, 3]).
+        let mut s = single_var_solver();
+        s.register_root(100, Var::int(0));
+        let lo = s.register_atom(Var::int(0), Constraint::Ge, rbig!(1 / 2));
+        let hi = s.register_atom(Var::int(0), Constraint::Le, rbig!(3));
+        s.assert_atom(lo);
+        s.assert_atom(hi);
+        match s.check() {
+            CheckResult::Sat { model, .. } => {
+                assert!(
+                    !model.is_empty(),
+                    "expected an integer model, got empty {model:?}"
+                );
+                for value in model.keys() {
+                    assert!(
+                        (1..=3).contains(value),
+                        "B&B assigned x = {value}, expected an integer in [1, 3]"
+                    );
+                }
+            }
+            other => panic!("expected Sat (integer via B&B), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn integer_unsat_via_branch_and_bound() {
+        // `x >= 1/3 ∧ x <= 2/3` is LRA-sat (x = 1/2) but LIA-unsat (no integer in [1/3, 2/3]).
+        // B&B must prune both branches (x <= 0 and x >= 1) to conclude infeasibility.
+        let mut s = single_var_solver();
+        let lo = s.register_atom(Var::int(0), Constraint::Ge, rbig!(1 / 3));
+        let hi = s.register_atom(Var::int(0), Constraint::Le, rbig!(2 / 3));
+        s.assert_atom(lo);
+        s.assert_atom(hi);
+        assert!(
+            matches!(s.check(), CheckResult::Unsat { .. }),
+            "expected LIA-unsat via B&B"
+        );
+    }
+
+    #[test]
+    fn check_does_not_leak_branch_and_bound_levels() {
+        // Regression: `LIRASolver::branch_and_bound` returns FEASIBLE the moment it finds an
+        // integer-feasible node, leaving speculative branch bounds asserted on the LRA. The
+        // incremental `check()` must contain those bounds so subsequent asserts see only
+        // the externally-asserted state.
+        //
+        // Behavior probe (counter is a monotonic timestamp, so a value check is meaningless):
+        // after `check()` returns, the pre-check bounds must still be enforced, and a fresh
+        // assert that would only conflict with a *branch* bound (e.g. x = 2 when B&B picked
+        // x=1) must succeed.
+        let mut s = single_var_solver();
+        s.register_root(100, Var::int(0));
+
+        let level = s.push();
+        let lo = s.register_atom(Var::int(0), Constraint::Ge, rbig!(1 / 2));
+        let hi = s.register_atom(Var::int(0), Constraint::Le, rbig!(5));
+        s.assert_atom(lo);
+        s.assert_atom(hi);
+
+        let pre_bounds = s.lra().get_bounds(&Var::int(0)).unwrap();
+        // Force B&B: fractional LRA solution (1/2) → branch(es) → integer node → early exit.
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
+        let post_bounds = s.lra().get_bounds(&Var::int(0)).unwrap();
+        assert_eq!(
+            (pre_bounds.lower, pre_bounds.upper),
+            (post_bounds.lower, post_bounds.upper),
+            "check() leaked branch-and-bound bounds past the check boundary"
+        );
+
+        // Previously-asserted external bound x <= 5 still in effect: asserting a
+        // contradictory upper (x <= 0) is still a bound-vs-bound conflict.
+        let bad = s.register_atom(Var::int(0), Constraint::Le, rbig!(0));
+        assert_eq!(s.assert_atom(bad), AssertOutcome::Conflict);
+        s.pop(level);
+    }
+
+    #[test]
+    fn check_is_idempotent() {
+        // Calling `check()` twice back-to-back on the same asserted set must return
+        // consistent verdicts. The persistent LIRASolver's explorer would otherwise be
+        // left in a terminal state after the first call and the second would either hit
+        // an `unreachable!` inside `branch_and_bound` or produce a stale result.
+        let mut s = single_var_solver();
+        s.register_root(100, Var::int(0));
+        let lo = s.register_atom(Var::int(0), Constraint::Ge, rbig!(1 / 2));
+        let hi = s.register_atom(Var::int(0), Constraint::Le, rbig!(3));
+        s.assert_atom(lo);
+        s.assert_atom(hi);
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
+        assert!(matches!(s.check(), CheckResult::Sat { .. }));
+
+        // Same story on the unsat side.
+        let mut u = single_var_solver();
+        let lo = u.register_atom(Var::int(0), Constraint::Ge, rbig!(1 / 3));
+        let hi = u.register_atom(Var::int(0), Constraint::Le, rbig!(2 / 3));
+        u.assert_atom(lo);
+        u.assert_atom(hi);
+        assert!(matches!(u.check(), CheckResult::Unsat { .. }));
+        assert!(matches!(u.check(), CheckResult::Unsat { .. }));
     }
 }
