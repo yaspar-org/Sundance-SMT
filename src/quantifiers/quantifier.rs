@@ -4,6 +4,7 @@
 //! Instantiation of quantifiers
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
@@ -19,9 +20,9 @@ use crate::debug_println;
 use yaspar_ir::ast::{LetElim, Sort, Str, Substitute, Substitution, Term, TermAllocator};
 
 #[derive(Debug, Clone)]
-pub enum QuantifierInstance {
-    Instantiation { clause: Vec<i32> },
-    Skolemization { clause: Vec<i32> },
+pub(crate) enum QuantifierInstance {
+    Instantiation { clauses: Vec<Vec<i32>> },
+    Skolemization { clauses: Vec<Vec<i32>> },
 }
 
 struct DeferredInstantiation {
@@ -38,21 +39,34 @@ struct DeferredSkolemization {
     literal: i32,
 }
 
-/// Returns a list of quantifier instantiation given the assignment and current state of the egraph
-pub fn instantiate_quantifiers(
+pub(crate) struct PendingInstantiations {
+    deferred_instantiations: VecDeque<DeferredInstantiation>,
+    deferred_skolemizations: VecDeque<DeferredSkolemization>,
+    skolemized_quantifier_idxs: Vec<usize>,
+}
+
+impl PendingInstantiations {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.deferred_instantiations.is_empty() && self.deferred_skolemizations.is_empty()
+    }
+
+    pub(crate) fn skolemized_quantifier_idxs(&self) -> &[usize] {
+        &self.skolemized_quantifier_idxs
+    }
+}
+
+/// Computes trigger matches and substitutions, returning deferred items
+/// that can be materialized one at a time.
+pub(crate) fn instantiate_quantifiers(
     solver_state: &mut SolverState,
-    proof_tracer: &Rc<RefCell<SMTProofTracer>>,
     assignments: &[i32],
-) -> Vec<QuantifierInstance> {
+) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
-    let ddsmt = solver_state.ddsmt;
-    let lazy_dt = solver_state.lazy_dt;
     debug_println!(24, 0, "Starting a matching round");
     let quantifiers = &solver_state.quantifiers.clone();
-    let mut instantiations = vec![];
     let mut skolemized_quantifier_idxs = vec![];
-    let mut deferred_skolemizations: Vec<DeferredSkolemization> = vec![];
-    let mut deferred_instantiations: Vec<DeferredInstantiation> = vec![];
+    let mut deferred_skolemizations: VecDeque<DeferredSkolemization> = VecDeque::new();
+    let mut deferred_instantiations: VecDeque<DeferredInstantiation> = VecDeque::new();
 
     // We `enumerate()` so we can update quantifiers[i].skolemized after the loop
     for (i, quantifier) in quantifiers.iter().enumerate() {
@@ -87,7 +101,7 @@ pub fn instantiate_quantifiers(
             let (skolem, skolem_vars) =
                 skolemize(&term, &mut solver_state.context, quantifier_is_exists);
 
-            deferred_skolemizations.push(DeferredSkolemization {
+            deferred_skolemizations.push_back(DeferredSkolemization {
                 skolem,
                 skolem_vars,
                 is_exists: quantifier_is_exists,
@@ -142,7 +156,7 @@ pub fn instantiate_quantifiers(
                     &mut solver_state.context,
                 );
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
-                deferred_instantiations.push(DeferredInstantiation {
+                deferred_instantiations.push_back(DeferredInstantiation {
                     substituted_term,
                     is_exists: quantifier_is_exists,
                     literal: quantifier_literal,
@@ -152,28 +166,49 @@ pub fn instantiate_quantifiers(
         }
     }
 
-    instantiations.extend(process_deferred_skolemizations(
-        deferred_skolemizations,
-        solver_state,
-        proof_tracer,
-        ddsmt,
-        lazy_dt,
-    ));
-
-    instantiations.extend(process_deferred_instantiations(
+    PendingInstantiations {
         deferred_instantiations,
-        solver_state,
-        proof_tracer,
-        ddsmt,
-        lazy_dt,
-    ));
+        deferred_skolemizations,
+        skolemized_quantifier_idxs,
+    }
+}
 
-    // Now mark the quantifier indices as skolemized
-    for i in skolemized_quantifier_idxs {
-        solver_state.quantifiers[i].skolemized = true;
+/// Materializes the next pending instantiation or skolemization.
+/// This does the expensive work: insert_predecessor, cnf_tseitin, proof steps.
+/// Returns None if there's nothing left to materialize.
+pub(crate) fn materialize_next(
+    pending: &mut PendingInstantiations,
+    solver_state: &mut SolverState,
+    proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+) -> Option<Vec<QuantifierInstance>> {
+    let ddsmt = solver_state.ddsmt;
+    let lazy_dt = solver_state.lazy_dt;
+
+    // Skolemizations first
+    if let Some(deferred) = pending.deferred_skolemizations.pop_front() {
+        let results = process_deferred_skolemizations(
+            vec![deferred],
+            solver_state,
+            proof_tracer,
+            ddsmt,
+            lazy_dt,
+        );
+        return Some(results);
     }
 
-    instantiations
+    // Then instantiations
+    if let Some(deferred) = pending.deferred_instantiations.pop_front() {
+        let results = process_deferred_instantiations(
+            vec![deferred],
+            solver_state,
+            proof_tracer,
+            ddsmt,
+            lazy_dt,
+        );
+        return Some(results);
+    }
+
+    None
 }
 
 fn process_deferred_skolemizations(
@@ -227,22 +262,31 @@ fn process_deferred_skolemizations(
             );
 
         let skolem_imp = vec![-quantifier_dimacs_literal, reduced_skolem_literal];
-        results.push(QuantifierInstance::Skolemization { clause: skolem_imp });
-
-        let mut add_clause = |mut clause: Vec<i32>, theory: Theory| {
-            if push_literal_if_not_tautology(&mut clause, -reduced_skolem_literal) {
-                proof_tracer.borrow_mut().add_theory_clause(&clause, theory);
-                results.push(QuantifierInstance::Skolemization { clause })
-            }
-        };
+        let mut skolem_clauses = vec![skolem_imp];
 
         for clause in clauses {
-            add_clause(clause.0, Theory::Boolean);
+            let mut c = clause.0;
+            if push_literal_if_not_tautology(&mut c, -reduced_skolem_literal) {
+                proof_tracer
+                    .borrow_mut()
+                    .add_theory_clause(&c, Theory::Boolean);
+                skolem_clauses.push(c);
+            }
         }
 
         for clause in additional_constraints {
-            add_clause(clause, Theory::Boolean);
+            let mut c = clause;
+            if push_literal_if_not_tautology(&mut c, -reduced_skolem_literal) {
+                proof_tracer
+                    .borrow_mut()
+                    .add_theory_clause(&c, Theory::Boolean);
+                skolem_clauses.push(c);
+            }
         }
+
+        results.push(QuantifierInstance::Skolemization {
+            clauses: skolem_clauses,
+        });
     }
     results
 }
@@ -286,9 +330,9 @@ fn process_deferred_instantiations(
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
 
-        let mut clauses: Vec<Vec<i32>> = cnf_term
+        let mut clauses: Vec<_> = cnf_term
             .into_iter()
-            .map(|x| x.into_iter().collect::<Vec<i32>>())
+            .map(|x| x.into_iter().collect::<Vec<_>>())
             .collect();
 
         let quantifier_dimacs_literal = if is_exists { -literal } else { literal };
@@ -323,9 +367,7 @@ fn process_deferred_instantiations(
         );
         clauses.extend(additional_constraints);
 
-        for clause in clauses {
-            results.push(QuantifierInstance::Instantiation { clause });
-        }
+        results.push(QuantifierInstance::Instantiation { clauses });
     }
     results
 }

@@ -179,6 +179,7 @@ fn main() -> Result<(), String> {
         symbol_table,
         args.arithmetic,
         args.timeout,
+        args.elevate,
     );
 
     match return_value {

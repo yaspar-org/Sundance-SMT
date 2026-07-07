@@ -20,7 +20,8 @@ local-z3 = ["z3-solver"]
 [dependencies]
 yaspar-ir = "=2.7.2"
 sat-interface = "0.1.1"
-cadical-sys = { version = "0.7.0" }
+# Pin the elevate fork until upstream cadical-sys exposes CaDiCaL's elevate option.
+cadical-sys = { git = "https://github.com/amarshah1/cadical-sys.git", rev = "2f234ec95dd36ca74057691cf2fd4e8766a3c40f" }
 
 array2d = "^0.3"
 clap = { version = "4.5.40", features = ["derive"] }
