@@ -1,0 +1,6 @@
+(set-logic ALL)
+(declare-sort T 0)
+(declare-fun f (T) Bool)
+(assert (exists ((x T)) (f x)))
+(assert (forall ((y T)) (! (not (f y)) :pattern ((f y)))))
+(check-sat)

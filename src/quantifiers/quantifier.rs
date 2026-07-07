@@ -115,6 +115,13 @@ pub(crate) fn instantiate_quantifiers(
         }
 
         let triggers = &quantifier.triggers;
+        if triggers.is_empty() {
+            debug_println!(
+                "Warning: quantifier {} reached instantiation with no triggers",
+                quantifier.id
+            );
+            continue;
+        }
         // note we consider patterns in a multipattern conjunctively and multipatterns in a trigger disjunctively
         for multipattern in triggers {
             let body = quantifier.body;

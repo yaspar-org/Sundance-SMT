@@ -61,22 +61,28 @@ fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
         Let(_, _) => panic!("We should have inlined all Let bindings"),
         Matching(..) => todo!(),
         Forall(_, middle_term) | Exists(_, middle_term) => {
-            if let Annotated(inner_term, attrs) = middle_term.repr() {
-                let mut subterms = vec![inner_term];
-                for attr in attrs.iter() {
-                    if let Attribute::Pattern(s_exprs) = &attr {
-                        subterms.extend(s_exprs.iter());
+            let (inner_term, pattern_subterms) =
+                if let Annotated(inner_term, attrs) = middle_term.repr() {
+                    let mut patterns = vec![];
+                    for attr in attrs.iter() {
+                        if let Attribute::Pattern(s_exprs) = &attr {
+                            patterns.extend(s_exprs.iter());
+                        }
                     }
-                }
-                let name = if let Forall(..) = term.repr() {
-                    "forall".to_string()
+                    (inner_term, patterns)
+                } else if let Forall(..) = term.repr() {
+                    panic!("Unannotated forall quantifier (no triggers): {term}")
                 } else {
-                    "exists".to_string()
+                    (middle_term, vec![])
                 };
-                (name, subterms)
+            let mut subterms = vec![inner_term];
+            subterms.extend(pattern_subterms);
+            let name = if let Forall(..) = term.repr() {
+                "forall".to_string()
             } else {
-                panic!("We have a forall/exists case that is not annotated");
-            }
+                "exists".to_string()
+            };
+            (name, subterms)
         }
         Constant(..) | Global(..) | Local(..) => ("".to_string(), vec![]),
     }
@@ -488,20 +494,9 @@ impl SolverState {
 
         // Quantifier registration
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
-            if let Annotated(inner_term, attrs) = middle_term.repr() {
-                // Store quantifier body in terms_list (needed for substitution during instantiation)
-                let body_uid = inner_term.uid();
-                while self.terms_list.len() <= body_uid as usize {
-                    self.terms_list
-                        .resize(self.terms_list.len() * 2, TermOption::None);
-                }
-                if self.terms_list[body_uid as usize].is_none() {
-                    self.terms_list[body_uid as usize] =
-                        TermOption::Uninitialized(inner_term.clone());
-                }
-
+            let (inner_term, trigger_ids) = if let Annotated(inner_term, attrs) = middle_term.repr()
+            {
                 let mut trigger_ids = vec![];
-
                 for attr in attrs.iter() {
                     if let Attribute::Pattern(s_exprs) = attr {
                         let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
@@ -509,27 +504,41 @@ impl SolverState {
                         trigger_ids.push(pattern_ids);
                     }
                 }
-
-                let variables: Vec<String> = sorted_vars.iter().map(|x| x.0.to_string()).collect();
-
-                let polarity = if let Forall(..) = term.repr() {
-                    Polarity::Universal
-                } else {
-                    Polarity::Existential
-                };
-
-                self.quantifiers.push(Quantifier {
-                    triggers: trigger_ids,
-                    variables,
-                    body: inner_term.uid(),
-                    id: term.uid(),
-                    guard,
-                    polarity,
-                    skolemized: false,
-                });
+                (inner_term, trigger_ids)
+            } else if let Forall(..) = term.repr() {
+                panic!("Unannotated forall quantifier (no triggers): {term}")
             } else {
-                panic!("Quantifier {} does not have an annotation", term);
+                // Unannotated existential (no triggers) — will be skolemized on assignment
+                (middle_term, vec![])
+            };
+
+            // Store quantifier body in terms_list (needed for substitution during instantiation)
+            let body_uid = inner_term.uid();
+            while self.terms_list.len() <= body_uid as usize {
+                self.terms_list
+                    .resize(self.terms_list.len() * 2, TermOption::None);
             }
+            if self.terms_list[body_uid as usize].is_none() {
+                self.terms_list[body_uid as usize] = TermOption::Uninitialized(inner_term.clone());
+            }
+
+            let variables: Vec<String> = sorted_vars.iter().map(|x| x.0.to_string()).collect();
+
+            let polarity = if let Forall(..) = term.repr() {
+                Polarity::Universal
+            } else {
+                Polarity::Existential
+            };
+
+            self.quantifiers.push(Quantifier {
+                triggers: trigger_ids,
+                variables,
+                body: inner_term.uid(),
+                id: term.uid(),
+                guard,
+                polarity,
+                skolemized: false,
+            });
         }
     }
 }

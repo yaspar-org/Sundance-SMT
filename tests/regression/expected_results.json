@@ -197,6 +197,7 @@
     "skolemization/skolem-unioneclass5.smt2": "unsat",
     "skolemization/existsexists.smt2": "unsat",
     "skolemization/existsforall.smt2": "unsat",
+    "skolemization/skolem-unannotated-exists.smt2": "unsat",
     "TypeSafe/z3.1184131.smt2": "unsat",
     "TypeSafe/z3.1184147.smt2": "unsat",
     "TypeSafe/z3.1184163.smt2": "unsat",
