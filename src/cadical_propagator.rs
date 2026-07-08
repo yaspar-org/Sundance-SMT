@@ -5,6 +5,7 @@ use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
+use crate::egraphs::traits::Conflict;
 use crate::log::is_important;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
@@ -86,6 +87,12 @@ impl<'a> CustomExternalPropagator<'a> {
     /// Emit trichotomy clause (x<y ∨ x>y ∨ x=y) for a pair of solver-uid terms
     /// as a raw 3-literal disjunction (no Tseitin OR-gate). Registers the fresh
     /// lt/gt/eq literals as observed. No-op if the pair was already emitted.
+    ///
+    /// The `from_quantifier: true` flag on `insert_predecessor` (which becomes
+    /// `dynamic: true` on `register_term`) is *not* about quantifiers here — it
+    /// tells the egraph to find and merge with existing congruent terms, which
+    /// is what we want since these lt/gt/eq atoms may already exist in the
+    /// egraph from other sources.
     fn emit_trichotomy_for_pair(&mut self, x: u64, y: u64) {
         if let Some((lt_term, gt_term, eq_term)) =
             nelson_oppen_trichotomy_terms(x, y, self.solver_state)
@@ -381,6 +388,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
             ArithResult::Sat(literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
+                assert!(
+                    self.max_arith_conflicts_per_round > 0,
+                    "max_arith_conflicts_per_round must be > 0"
+                );
                 // Model-based Nelson-Oppen probe: try to merge every pair of
                 // equal-model-value terms. Each merge gets its own fake decision
                 // level so a conflicting merge can be undone individually while
@@ -388,8 +399,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 // found this round, then backtrack the entire probe stack.
                 let base_level = self.decision_level;
                 let mut next_probe_level = base_level + 1;
-                let mut conflicts: Vec<crate::egraphs::traits::Conflict<u32>> = Vec::new();
-                // Canonical (egraph_id, egraph_id) pair -> (solver_uid, solver_uid).
+                let mut conflicts: Vec<Conflict<u32>> = Vec::new();
+                // Canonical (egraph_root, egraph_root) pair -> (solver_uid, solver_uid).
                 // Presence of a key = "we probe-merged this pair this round".
                 let mut probe_pair_uids: DeterministicHashMap<(u32, u32), (u64, u64)> =
                     DeterministicHashMap::default();
@@ -403,20 +414,25 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         } else {
                             (*term, *first)
                         };
-                        let x_e = self.solver_state.to_egraph_id(x);
-                        let y_e = self.solver_state.to_egraph_id(y);
-                        if self.solver_state.egraph.find(x_e) == self.solver_state.egraph.find(y_e)
+                        let x_root = self.solver_state.to_egraph_id(x);
+                        let y_root = self.solver_state.to_egraph_id(y);
+                        if self.solver_state.egraph.find(x_root)
+                            == self.solver_state.egraph.find(y_root)
                         {
                             continue;
                         }
-                        let (lo_e, hi_e) = if x_e < y_e { (x_e, y_e) } else { (y_e, x_e) };
-                        probe_pair_uids.insert((lo_e, hi_e), (x, y));
+                        let (lo_root, hi_root) = if x_root < y_root {
+                            (x_root, y_root)
+                        } else {
+                            (y_root, x_root)
+                        };
+                        probe_pair_uids.insert((lo_root, hi_root), (x, y));
                         let attempt_level = next_probe_level;
                         next_probe_level += 1;
-                        let result = self
-                            .solver_state
-                            .egraph
-                            .assert_equal(x_e, y_e, attempt_level);
+                        let result =
+                            self.solver_state
+                                .egraph
+                                .assert_equal(x_root, y_root, attempt_level);
                         if let Some(c) = result.conflict {
                             // Undo just this conflicting merge; keep earlier merges.
                             self.solver_state.egraph.backtrack_to(attempt_level - 1);
@@ -435,8 +451,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     // trichotomy has NOT already been emitted. Other probe-merge pairs
                     // fall back on make_eq allocating a bare eq literal.
                     let fresh_probe_pair = conflict.equalities.iter().rev().find_map(|&(a, b)| {
-                        let (lo_e, hi_e) = if a < b { (a, b) } else { (b, a) };
-                        let (x_uid, y_uid) = *probe_pair_uids.get(&(lo_e, hi_e))?;
+                        let (lo_root, hi_root) = if a < b { (a, b) } else { (b, a) };
+                        let (x_uid, y_uid) = *probe_pair_uids.get(&(lo_root, hi_root))?;
                         if self
                             .solver_state
                             .nelson_oppen_ineq_literals

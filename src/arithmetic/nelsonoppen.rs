@@ -2,83 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::solver_state::SolverState;
-use yaspar_ir::ast::ATerm::*;
-use yaspar_ir::ast::FetchSort;
 use yaspar_ir::ast::{
-    ObjectAllocatorExt as _, Repr, StrAllocator, Term, TermAllocator, alg::QualifiedIdentifier,
+    ObjectAllocatorExt as _, StrAllocator, Term, TermAllocator, alg::QualifiedIdentifier,
 };
-
-pub fn nelson_oppen_clause(literal: i32, solver_state: &mut SolverState) -> Option<Term> {
-    let term = solver_state.get_term_from_lit(-literal);
-    match term.repr() {
-        Eq(x, y) => {
-            if x.get_sort(&mut solver_state.context).to_string() == "Int"
-                && y.get_sort(&mut solver_state.context).to_string() == "Int"
-            {
-                let bool_sort = solver_state.context.bool_sort();
-
-                let lt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol("<"));
-                let lt_term = solver_state.context.app(
-                    lt,
-                    vec![x.clone(), y.clone()],
-                    Some(bool_sort.clone()),
-                );
-
-                let gt = QualifiedIdentifier::simple(solver_state.context.allocate_symbol(">"));
-                let gt_term =
-                    solver_state
-                        .context
-                        .app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
-
-                let or = solver_state.context.or(vec![lt_term, gt_term, term]);
-
-                Some(or)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-// pub fn nelson_oppen_clause_ineq(literal: i32, egraph: &mut Egraph) -> Option<Term> {
-//     let term = egraph.get_term_from_lit(-literal);
-//     // todo: sometimes literal can be in wrong polarity not sure why, but need to fix this
-//     let term_positive = if let Not(t) = term.repr() {t.clone()} else {term};
-//     match term_positive.repr() {
-//         App(f, terms, _) => {
-//             let f = f.to_string();
-//             assert!(f == "<" || f == ">" || f == ">=" || f == "<=");
-//             assert!(terms.len() == 2);
-//             let (x, y) = (&terms[0], &terms[1]);
-
-//             if egraph.nelson_oppen_ineq_literals.contains(&(x.uid(), y.uid())) {
-//                 return None
-//             }
-//             egraph.nelson_oppen_ineq_literals.insert((x.uid(), y.uid()));
-
-//             let bool_sort = egraph.context.bool_sort();
-
-//             let lt = QualifiedIdentifier::simple(egraph.context.allocate_symbol("<"));
-//             let lt_term = egraph.context.app(lt, vec![x.clone(), y.clone()], Some(bool_sort.clone()));
-
-//             let gt = QualifiedIdentifier::simple(egraph.context.allocate_symbol(">"));
-//             let gt_term = egraph.context.app(gt, vec![x.clone(), y.clone()], Some(bool_sort));
-
-//             let eq_term = egraph.context.eq(x.clone(), y.clone());
-
-//             let or = egraph.context.or(vec![lt_term, gt_term, eq_term]);
-
-//             // println!("(assert {or}) with lit {literal} and term {term_positive}");
-
-//             Some(or)
-
-//         },
-//         _ => {
-//             panic!("{} should be an inequality", term_positive);
-//         }
-//     }
-// }
 
 /// Build the three sub-terms (lt, gt, eq) for the trichotomy on (x, y).
 /// Returns None if the trichotomy has already been emitted for this pair.
