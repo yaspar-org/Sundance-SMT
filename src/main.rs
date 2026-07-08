@@ -180,6 +180,7 @@ fn main() -> Result<(), String> {
         args.arithmetic,
         args.timeout,
         args.elevate,
+        args.trichotomies_per_round,
     );
 
     match return_value {

@@ -31,6 +31,7 @@ pub struct CustomExternalPropagator<'a> {
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
+    pub trichotomies_per_round: usize,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -78,6 +79,25 @@ impl<'a> CustomExternalPropagator<'a> {
         );
         unsafe {
             (*self.solver).add_observed_var(abs_lit);
+        }
+    }
+
+    /// Emit trichotomy clauses (x=y ∨ x<y ∨ x>y) for a pair of solver-uid terms.
+    /// Registers the fresh eq/lt/gt literals as observed variables.
+    fn emit_trichotomy_for_pair(&mut self, x: u64, y: u64) {
+        if let Some(term) = nelson_oppen_clause_pair(x, y, self.solver_state) {
+            let term_nnf = term.nnf(self.solver_state);
+            self.solver_state
+                .insert_predecessor(&term_nnf, None, None, true);
+            let term_cnf = term.cnf_tseitin(self.solver_state);
+            for clause in term_cnf {
+                eprintln!("[TRICH] clause: {:?}", clause.0);
+                for lit in &clause.0 {
+                    self.add_observed_variable(*lit);
+                    self.add_lit_to_proof_tracer(*lit);
+                }
+                self.disequalities.borrow_mut().push(clause.0.clone());
+            }
         }
     }
 
@@ -338,6 +358,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
+        eprintln!("[cb_check_found_model] model contains 313? {} 314? {} 315? {}",
+            model.contains(&313) || model.contains(&-313),
+            model.contains(&314) || model.contains(&-314),
+            model.contains(&315) || model.contains(&-315));
         match check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state) {
             ArithResult::Unsat(arithmetic_literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
@@ -354,35 +378,86 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
             ArithResult::Sat(literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
-                for set in literals.values() {
+                // Model-based Nelson-Oppen probe: hypothetically merge equal-model-value
+                // pairs in the egraph at a fake decision level. If an EUF conflict fires,
+                // emit trichotomy + conflict clauses for the involved pairs so CaDiCaL
+                // can force different eq/lt/gt choices. Always backtrack the probe merges
+                // so the egraph state stays consistent with the SAT trail.
+                let probe_level = self.decision_level + 1;
+                let mut conflict_from_arith: Option<
+                    crate::egraphs::traits::Conflict<u32>,
+                > = None;
+
+                'outer: for set in literals.values() {
                     let mut t = set.iter();
                     let first = t.next().unwrap();
 
                     for term in t {
-                        let pair = if first < term {
-                            (first, term)
+                        let (x, y) = if first < term {
+                            (*first, *term)
                         } else {
-                            (term, first)
+                            (*term, *first)
                         };
-
-                        if let Some(term) =
-                            nelson_oppen_clause_pair(*pair.0, *pair.1, self.solver_state)
+                        let x_e = self.solver_state.to_egraph_id(x);
+                        let y_e = self.solver_state.to_egraph_id(y);
+                        if self.solver_state.egraph.find(x_e)
+                            == self.solver_state.egraph.find(y_e)
                         {
-                            debug_println!(25, 0, "adding in the nelson oppen term {}", term);
-                            let term_nnf = term.nnf(self.solver_state);
-                            self.solver_state
-                                .insert_predecessor(&term_nnf, None, None, true);
-                            let term_cnf = term.cnf_tseitin(self.solver_state);
-                            for clause in term_cnf {
-                                for lit in &clause.0 {
-                                    self.add_observed_variable(*lit);
-                                    self.add_lit_to_proof_tracer(*lit);
-                                }
-                                self.disequalities.borrow_mut().push(clause.0.clone());
-                            }
+                            continue;
+                        }
+                        let result = self.solver_state.egraph.assert_equal(
+                            x_e,
+                            y_e,
+                            probe_level,
+                        );
+                        if let Some(c) = result.conflict {
+                            conflict_from_arith = Some(c);
+                            break 'outer;
                         }
                     }
                 }
+
+                if let Some(conflict) = conflict_from_arith {
+                    eprintln!("[ARITH PROBE] conflict.equalities={:?}, diseq_lit={:?}, disequality={:?}",
+                        conflict.equalities, conflict.diseq_lit, conflict.disequality);
+                    // Emit trichotomies for pairs in the conflict path (bounded by budget)
+                    let mut emitted = 0;
+                    for &(a, b) in &conflict.equalities {
+                        if emitted >= self.trichotomies_per_round {
+                            break;
+                        }
+                        let sa = self.solver_state.to_solver_uid(a);
+                        let sb = self.solver_state.to_solver_uid(b);
+                        let (lo, hi) = if sa < sb { (sa, sb) } else { (sb, sa) };
+                        self.emit_trichotomy_for_pair(lo, hi);
+                        emitted += 1;
+                    }
+
+                    // Build the blocking conflict clause: negation of the equalities
+                    // that formed the proof path + negated diseq_lit.
+                    let mut conflict_clause: Vec<i32> = conflict
+                        .equalities
+                        .iter()
+                        .map(|(a, b)| -self.solver_state.make_eq(*a, *b))
+                        .collect();
+                    if let Some(lit) = conflict.diseq_lit {
+                        conflict_clause.push(-lit);
+                    }
+                    eprintln!("[ARITH PROBE CONFLICT] clause={:?}, a[312]={} a[313]={} a[314]={} a[315]={}",
+                        conflict_clause,
+                        self.assignments.get(312).copied().unwrap_or(0),
+                        self.assignments.get(313).copied().unwrap_or(0),
+                        self.assignments.get(314).copied().unwrap_or(0),
+                        self.assignments.get(315).copied().unwrap_or(0));
+                    for lit in &conflict_clause {
+                        self.add_observed_variable(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
+                    }
+                    self.disequalities.borrow_mut().push(conflict_clause);
+                }
+
+                // Always undo probe merges — they only live inside this call.
+                self.solver_state.egraph.backtrack_to(self.decision_level);
             }
             ArithResult::None => {}
         }

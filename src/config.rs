@@ -47,4 +47,7 @@ pub struct Args {
     /// Print solver statistics after solving
     #[arg(long, default_value_t = false)]
     pub stats: bool,
+    /// Maximum trichotomy clauses to emit per arithmetic SAT round
+    #[arg(long, default_value_t = 20)]
+    pub trichotomies_per_round: usize,
 }
