@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
-use crate::arithmetic::nelsonoppen::nelson_oppen_clause_pair;
-use crate::cnf::CNFConversion as _;
+use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::log::is_important;
@@ -31,8 +30,8 @@ pub struct CustomExternalPropagator<'a> {
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
-    // TODO(nelson-oppen): used when we implement multi-conflict-per-round with budget
-    #[allow(dead_code)]
+    /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
+    /// Once reached, stop probing further pairs even if unprobed pairs remain.
     pub trichotomies_per_round: usize,
 }
 
@@ -87,18 +86,39 @@ impl<'a> CustomExternalPropagator<'a> {
     /// Emit trichotomy clauses (x=y ∨ x<y ∨ x>y) for a pair of solver-uid terms.
     /// Registers the fresh eq/lt/gt literals as observed variables.
     fn emit_trichotomy_for_pair(&mut self, x: u64, y: u64) {
-        if let Some(term) = nelson_oppen_clause_pair(x, y, self.solver_state) {
-            let term_nnf = term.nnf(self.solver_state);
-            self.solver_state
-                .insert_predecessor(&term_nnf, None, None, true);
-            let term_cnf = term.cnf_tseitin(self.solver_state);
-            for clause in term_cnf {
-                for lit in &clause.0 {
-                    self.add_observed_variable(*lit);
-                    self.add_lit_to_proof_tracer(*lit);
-                }
-                self.disequalities.borrow_mut().push(clause.0.clone());
+        if let Some((lt_term, gt_term, eq_term)) =
+            nelson_oppen_trichotomy_terms(x, y, self.solver_state)
+        {
+            // eprintln!(
+            //     "[TRICHOTOMY] for pair ({}, {}) i.e. ({}, {})",
+            //     x,
+            //     y,
+            //     self.solver_state.get_term(x),
+            //     self.solver_state.get_term(y)
+            // );
+            self.solver_state.insert_predecessor(&lt_term, None, None, true);
+            self.solver_state.insert_predecessor(&gt_term, None, None, true);
+            self.solver_state.insert_predecessor(&eq_term, None, None, true);
+            let lt_lit = self.solver_state.get_or_allocate_lit_for_term(&lt_term);
+            let gt_lit = self.solver_state.get_or_allocate_lit_for_term(&gt_term);
+            let eq_lit = self.solver_state.get_or_allocate_lit_for_term(&eq_term);
+            let clause = vec![lt_lit, gt_lit, eq_lit];
+            // eprintln!("  clause: [");
+            // for &lit in &clause {
+            //     eprintln!(
+            //         "    {}[{}],",
+            //         lit,
+            //         self.solver_state.get_term_from_lit(lit)
+            //     );
+            // }
+            // eprintln!("  ]");
+            for lit in &clause {
+                self.add_observed_variable(*lit);
+                self.add_lit_to_proof_tracer(*lit);
             }
+            self.disequalities.borrow_mut().push(clause);
+        } else {
+            // eprintln!("[TRICHOTOMY] SKIPPED (already emitted) for pair ({}, {})", x, y);
         }
     }
 
@@ -375,19 +395,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
             ArithResult::Sat(literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
-                // Model-based Nelson-Oppen probe: hypothetically merge equal-model-value
-                // pairs in the egraph at a fake decision level. If an EUF conflict fires,
-                // emit trichotomy + conflict clauses for the involved pairs so CaDiCaL
-                // can force different eq/lt/gt choices. Always backtrack the probe merges
-                // so the egraph state stays consistent with the SAT trail.
-                // TODO(nelson-oppen): stop-at-first-conflict is simple but leaves
-                // information on the table. Consider collecting multiple conflicts per
-                // round and applying a trichotomies_per_round budget to bound work.
-                let probe_level = self.decision_level + 1;
-                let mut conflict_from_arith: Option<crate::egraphs::traits::Conflict<u32>> = None;
+                // Model-based Nelson-Oppen probe: try to merge every pair of
+                // equal-model-value terms. Each merge gets its own fake decision
+                // level so a conflicting merge can be undone individually while
+                // successful earlier merges stay in place. Collect all conflicts
+                // found this round, then backtrack the entire probe stack.
+                let base_level = self.decision_level;
+                let mut next_probe_level = base_level + 1;
+                let mut conflicts: Vec<crate::egraphs::traits::Conflict<u32>> = Vec::new();
                 // Map from canonical (egraph_id, egraph_id) pair -> (solver_uid, solver_uid)
-                // so we can look up probe pairs by egraph representation while emitting
-                // trichotomies with solver UIDs.
                 let mut probe_merged_pairs: DeterministicHashSet<(u32, u32)> =
                     DeterministicHashSet::default();
                 let mut probe_pair_uids: std::collections::HashMap<(u32, u32), (u64, u64)> =
@@ -396,7 +412,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 'outer: for set in literals.values() {
                     let mut t = set.iter();
                     let first = t.next().unwrap();
-
                     for term in t {
                         let (x, y) = if first < term {
                             (*first, *term)
@@ -412,28 +427,82 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         let (lo_e, hi_e) = if x_e < y_e { (x_e, y_e) } else { (y_e, x_e) };
                         probe_merged_pairs.insert((lo_e, hi_e));
                         probe_pair_uids.insert((lo_e, hi_e), (x, y));
-                        let result = self.solver_state.egraph.assert_equal(x_e, y_e, probe_level);
+                        let attempt_level = next_probe_level;
+                        next_probe_level += 1;
+                        let result =
+                            self.solver_state.egraph.assert_equal(x_e, y_e, attempt_level);
                         if let Some(c) = result.conflict {
-                            conflict_from_arith = Some(c);
-                            break 'outer;
+                            // Undo just this conflicting merge; keep earlier merges.
+                            self.solver_state.egraph.backtrack_to(attempt_level - 1);
+                            next_probe_level = attempt_level;
+                            conflicts.push(c);
+                            if conflicts.len() >= self.trichotomies_per_round {
+                                break 'outer;
+                            }
                         }
                     }
                 }
 
-                if let Some(conflict) = conflict_from_arith {
-                    // Emit trichotomies for probe-merged pairs that appear in the
-                    // conflict proof path. This registers the eq/lt/gt SAT literals
-                    // so make_eq below can find eq(x,y) for each pair.
-                    for &(a, b) in &conflict.equalities {
-                        let (lo_e, hi_e) = if a < b { (a, b) } else { (b, a) };
-                        if probe_merged_pairs.contains(&(lo_e, hi_e)) {
-                            let (x_uid, y_uid) = probe_pair_uids[&(lo_e, hi_e)];
-                            self.emit_trichotomy_for_pair(x_uid, y_uid);
+                // eprintln!(
+                //     "[ARITH PROBE] found {} conflict(s) this round",
+                //     conflicts.len()
+                // );
+
+                for (_i, conflict) in conflicts.iter().enumerate() {
+                    // let (d0, d1) = conflict.disequality;
+                    // let sd0 = self.solver_state.to_solver_uid(d0);
+                    // let sd1 = self.solver_state.to_solver_uid(d1);
+                    // eprintln!(
+                    //     "[CONFLICT #{}] disequality {}!={} i.e. {}!={} (diseq_lit={:?})",
+                    //     _i,
+                    //     d0,
+                    //     d1,
+                    //     self.solver_state.get_term(sd0),
+                    //     self.solver_state.get_term(sd1),
+                    //     conflict.diseq_lit,
+                    // );
+                    // eprintln!("  proof path equalities: [");
+                    // for (a, b) in &conflict.equalities {
+                    //     let sa = self.solver_state.to_solver_uid(*a);
+                    //     let sb = self.solver_state.to_solver_uid(*b);
+                    //     eprintln!(
+                    //         "    ({}={}) i.e. ({} = {}),",
+                    //         a,
+                    //         b,
+                    //         self.solver_state.get_term(sa),
+                    //         self.solver_state.get_term(sb),
+                    //     );
+                    // }
+                    // eprintln!("  ]");
+
+                    // Emit up to two trichotomies per conflict — walking backward
+                    // through the proof path, pick the last two probe-merged pairs
+                    // whose trichotomies have NOT already been emitted. Other
+                    // probe-merge pairs fall back on make_eq allocating a bare eq lit.
+                    const TRICHOTOMIES_PER_CONFLICT: usize = 2;
+                    let mut fresh_probe_pairs: Vec<(u64, u64)> = Vec::new();
+                    for &(a, b) in conflict.equalities.iter().rev() {
+                        if fresh_probe_pairs.len() >= TRICHOTOMIES_PER_CONFLICT {
+                            break;
                         }
+                        let (lo_e, hi_e) = if a < b { (a, b) } else { (b, a) };
+                        if !probe_merged_pairs.contains(&(lo_e, hi_e)) {
+                            continue;
+                        }
+                        let (x_uid, y_uid) = probe_pair_uids[&(lo_e, hi_e)];
+                        if self
+                            .solver_state
+                            .nelson_oppen_ineq_literals
+                            .contains(&(x_uid, y_uid))
+                        {
+                            continue;
+                        }
+                        fresh_probe_pairs.push((x_uid, y_uid));
+                    }
+                    for (x_uid, y_uid) in fresh_probe_pairs {
+                        self.emit_trichotomy_for_pair(x_uid, y_uid);
                     }
 
-                    // Build the blocking conflict clause: negation of the equalities
-                    // that formed the proof path + negated diseq_lit.
                     let mut conflict_clause: Vec<i32> = conflict
                         .equalities
                         .iter()
@@ -442,6 +511,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     if let Some(lit) = conflict.diseq_lit {
                         conflict_clause.push(-lit);
                     }
+
+                    // eprintln!("  conflict clause: [");
+                    // for &lit in &conflict_clause {
+                    //     eprintln!(
+                    //         "    {}[{}],",
+                    //         lit,
+                    //         self.solver_state.get_term_from_lit(lit)
+                    //     );
+                    // }
+                    // eprintln!("  ]");
+
                     for lit in &conflict_clause {
                         self.add_observed_variable(*lit);
                         self.add_lit_to_proof_tracer(*lit);
@@ -449,8 +529,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     self.disequalities.borrow_mut().push(conflict_clause);
                 }
 
-                // Always undo probe merges — they only live inside this call.
-                self.solver_state.egraph.backtrack_to(self.decision_level);
+                // Undo all remaining successful probe merges.
+                self.solver_state.egraph.backtrack_to(base_level);
             }
             ArithResult::None => {}
         }

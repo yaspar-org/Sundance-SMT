@@ -47,7 +47,8 @@ pub struct Args {
     /// Print solver statistics after solving
     #[arg(long, default_value_t = false)]
     pub stats: bool,
-    /// Maximum trichotomy clauses to emit per arithmetic SAT round
-    #[arg(long, default_value_t = 20)]
+    /// Maximum arithmetic-model conflicts to collect per cb_check_found_model call.
+    /// usize::MAX = no cap; keep collecting until every probe pair has been tried.
+    #[arg(long, default_value_t = usize::MAX)]
     pub trichotomies_per_round: usize,
 }
