@@ -83,42 +83,28 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
-    /// Emit trichotomy clauses (x=y ∨ x<y ∨ x>y) for a pair of solver-uid terms.
-    /// Registers the fresh eq/lt/gt literals as observed variables.
+    /// Emit trichotomy clause (x<y ∨ x>y ∨ x=y) for a pair of solver-uid terms
+    /// as a raw 3-literal disjunction (no Tseitin OR-gate). Registers the fresh
+    /// lt/gt/eq literals as observed. No-op if the pair was already emitted.
     fn emit_trichotomy_for_pair(&mut self, x: u64, y: u64) {
         if let Some((lt_term, gt_term, eq_term)) =
             nelson_oppen_trichotomy_terms(x, y, self.solver_state)
         {
-            // eprintln!(
-            //     "[TRICHOTOMY] for pair ({}, {}) i.e. ({}, {})",
-            //     x,
-            //     y,
-            //     self.solver_state.get_term(x),
-            //     self.solver_state.get_term(y)
-            // );
-            self.solver_state.insert_predecessor(&lt_term, None, None, true);
-            self.solver_state.insert_predecessor(&gt_term, None, None, true);
-            self.solver_state.insert_predecessor(&eq_term, None, None, true);
+            self.solver_state
+                .insert_predecessor(&lt_term, None, None, true);
+            self.solver_state
+                .insert_predecessor(&gt_term, None, None, true);
+            self.solver_state
+                .insert_predecessor(&eq_term, None, None, true);
             let lt_lit = self.solver_state.get_or_allocate_lit_for_term(&lt_term);
             let gt_lit = self.solver_state.get_or_allocate_lit_for_term(&gt_term);
             let eq_lit = self.solver_state.get_or_allocate_lit_for_term(&eq_term);
             let clause = vec![lt_lit, gt_lit, eq_lit];
-            // eprintln!("  clause: [");
-            // for &lit in &clause {
-            //     eprintln!(
-            //         "    {}[{}],",
-            //         lit,
-            //         self.solver_state.get_term_from_lit(lit)
-            //     );
-            // }
-            // eprintln!("  ]");
             for lit in &clause {
                 self.add_observed_variable(*lit);
                 self.add_lit_to_proof_tracer(*lit);
             }
             self.disequalities.borrow_mut().push(clause);
-        } else {
-            // eprintln!("[TRICHOTOMY] SKIPPED (already emitted) for pair ({}, {})", x, y);
         }
     }
 
@@ -429,8 +415,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         probe_pair_uids.insert((lo_e, hi_e), (x, y));
                         let attempt_level = next_probe_level;
                         next_probe_level += 1;
-                        let result =
-                            self.solver_state.egraph.assert_equal(x_e, y_e, attempt_level);
+                        let result = self
+                            .solver_state
+                            .egraph
+                            .assert_equal(x_e, y_e, attempt_level);
                         if let Some(c) = result.conflict {
                             // Undo just this conflicting merge; keep earlier merges.
                             self.solver_state.egraph.backtrack_to(attempt_level - 1);
@@ -443,51 +431,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     }
                 }
 
-                // eprintln!(
-                //     "[ARITH PROBE] found {} conflict(s) this round",
-                //     conflicts.len()
-                // );
-
-                for (_i, conflict) in conflicts.iter().enumerate() {
-                    // let (d0, d1) = conflict.disequality;
-                    // let sd0 = self.solver_state.to_solver_uid(d0);
-                    // let sd1 = self.solver_state.to_solver_uid(d1);
-                    // eprintln!(
-                    //     "[CONFLICT #{}] disequality {}!={} i.e. {}!={} (diseq_lit={:?})",
-                    //     _i,
-                    //     d0,
-                    //     d1,
-                    //     self.solver_state.get_term(sd0),
-                    //     self.solver_state.get_term(sd1),
-                    //     conflict.diseq_lit,
-                    // );
-                    // eprintln!("  proof path equalities: [");
-                    // for (a, b) in &conflict.equalities {
-                    //     let sa = self.solver_state.to_solver_uid(*a);
-                    //     let sb = self.solver_state.to_solver_uid(*b);
-                    //     eprintln!(
-                    //         "    ({}={}) i.e. ({} = {}),",
-                    //         a,
-                    //         b,
-                    //         self.solver_state.get_term(sa),
-                    //         self.solver_state.get_term(sb),
-                    //     );
-                    // }
-                    // eprintln!("  ]");
-
-                    // Emit up to two trichotomies per conflict — walking backward
-                    // through the proof path, pick the last two probe-merged pairs
-                    // whose trichotomies have NOT already been emitted. Other
-                    // probe-merge pairs fall back on make_eq allocating a bare eq lit.
-                    const TRICHOTOMIES_PER_CONFLICT: usize = 2;
-                    let mut fresh_probe_pairs: Vec<(u64, u64)> = Vec::new();
-                    for &(a, b) in conflict.equalities.iter().rev() {
-                        if fresh_probe_pairs.len() >= TRICHOTOMIES_PER_CONFLICT {
-                            break;
-                        }
+                for conflict in &conflicts {
+                    // Emit at most one trichotomy per conflict — walking backward
+                    // through the proof path, pick the last probe-merged pair whose
+                    // trichotomy has NOT already been emitted. Other probe-merge pairs
+                    // fall back on make_eq allocating a bare eq literal.
+                    let fresh_probe_pair = conflict.equalities.iter().rev().find_map(|&(a, b)| {
                         let (lo_e, hi_e) = if a < b { (a, b) } else { (b, a) };
                         if !probe_merged_pairs.contains(&(lo_e, hi_e)) {
-                            continue;
+                            return None;
                         }
                         let (x_uid, y_uid) = probe_pair_uids[&(lo_e, hi_e)];
                         if self
@@ -495,11 +447,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             .nelson_oppen_ineq_literals
                             .contains(&(x_uid, y_uid))
                         {
-                            continue;
+                            None
+                        } else {
+                            Some((x_uid, y_uid))
                         }
-                        fresh_probe_pairs.push((x_uid, y_uid));
-                    }
-                    for (x_uid, y_uid) in fresh_probe_pairs {
+                    });
+                    if let Some((x_uid, y_uid)) = fresh_probe_pair {
                         self.emit_trichotomy_for_pair(x_uid, y_uid);
                     }
 
@@ -511,16 +464,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     if let Some(lit) = conflict.diseq_lit {
                         conflict_clause.push(-lit);
                     }
-
-                    // eprintln!("  conflict clause: [");
-                    // for &lit in &conflict_clause {
-                    //     eprintln!(
-                    //         "    {}[{}],",
-                    //         lit,
-                    //         self.solver_state.get_term_from_lit(lit)
-                    //     );
-                    // }
-                    // eprintln!("  ]");
 
                     for lit in &conflict_clause {
                         self.add_observed_variable(*lit);
