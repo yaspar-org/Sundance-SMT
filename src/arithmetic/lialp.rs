@@ -174,6 +174,89 @@ pub fn check_integer_constraints_satisfiable_incremental(
 
     let level = solver.push();
 
+    // Lazily register any arithmetic atoms that weren't in the static builder's atom set.
+    // These are typically Nelson-Oppen splitting clauses (`(< a b) ∨ (> a b) ∨ (= a b)`)
+    // whose disjuncts didn't exist in `cnf_cache.var_map` when `build_incremental_solver`
+    // ran — they were added at runtime by the propagator after the LP model produced them.
+    //
+    // We always canonicalize on the *positive* SAT literal (the one that appears in
+    // `cnf_cache.var_map`). Both `+pos_lit` and `-pos_lit` are registered together via
+    // `register_atom_dynamic`, matching the static builder's convention.
+    for &lit in terms {
+        if solver.atom_for_literal(lit).is_some() || solver.atom_for_literal(-lit).is_some() {
+            continue;
+        }
+        let (uid, _polarity) = solver_state.get_u64_from_lit_with_polarity(lit);
+        // Extract with polarity=true to get the atom's own (positive) constraint.
+        let Some(constraint) = extract_constraint_from_term(uid, true, solver_state) else {
+            continue; // not an arithmetic atom (bool literal, quantifier, etc.)
+        };
+        let pos_lit = solver_state.get_lit_from_u64(uid);
+        // Translate the LinearConstraint's monomials into LRA-level `Mon<Rational>` using
+        // the solver's persistent term_var_map. If any referenced term isn't in the LP,
+        // skip — that would mean the atom mentions a term the static builder never saw,
+        // which shouldn't happen for NO clauses but might for e.g. quantifier bodies
+        // touching new Int terms; deferring those is safer than fabricating fresh Vars.
+        let mut monomials: Vec<crate::arithmetic::lia::linear_system::Mon<Rational>> = Vec::new();
+        let mut constant = Rational::ZERO;
+        let mut skip = false;
+        for (coeff_kind, int_coeff) in constraint.left_expr.iter() {
+            let rc = Rational::from(int_coeff.clone());
+            match coeff_kind {
+                Coefficient::Term(id) => match solver.var_for_egraph_id(*id) {
+                    Some(v) => {
+                        monomials.push(crate::arithmetic::lia::linear_system::Mon::new(rc, v));
+                    }
+                    None => {
+                        skip = true;
+                        break;
+                    }
+                },
+                Coefficient::Constant => constant += -&rc,
+            }
+        }
+        if skip {
+            continue;
+        }
+        for (coeff_kind, int_coeff) in constraint.right_expr.iter() {
+            let rc = Rational::from(int_coeff.clone());
+            match coeff_kind {
+                Coefficient::Term(id) => match solver.var_for_egraph_id(*id) {
+                    Some(v) => {
+                        monomials.push(crate::arithmetic::lia::linear_system::Mon::new(-rc, v));
+                    }
+                    None => {
+                        skip = true;
+                        break;
+                    }
+                },
+                Coefficient::Constant => constant += rc,
+            }
+        }
+        if skip {
+            continue;
+        }
+        // Combine duplicate-var monomials before pushing so the add_slack_row path
+        // never sees a repeated variable (same reason we call combine_terms in the
+        // builder — repeat vars corrupt the tableau row).
+        let combined = crate::arithmetic::lia::linear_system::combine_terms_helper(&monomials);
+        let pos_constraint = match constraint.function {
+            FunctionType::Leq => Constraint::Le,
+            FunctionType::Lt => Constraint::Lt,
+            FunctionType::Eq => Constraint::Eq,
+        };
+        debug_println!(
+            21,
+            4,
+            "incremental: lazy-registering atom pos_lit={} constraint={:?} monomials={:?} constant={}",
+            pos_lit,
+            pos_constraint,
+            combined,
+            constant
+        );
+        solver.register_atom_dynamic(pos_lit, combined, constant, pos_constraint);
+    }
+
     let mut early_conflict = false;
     for &lit in terms {
         // Keep asserting the rest even after a conflict so `collect_core` sees all
@@ -181,6 +264,72 @@ pub fn check_integer_constraints_satisfiable_incremental(
         // returns Unsat.
         if let Some(AssertOutcome::Conflict) = solver.assert_literal(lit) {
             early_conflict = true;
+        }
+    }
+
+    // Convey egraph-implied equalities among arithmetic terms into the LP as bounds on
+    // fresh equality slacks (Stage 6 / Stage 7 gap). The one-shot path handles this
+    // implicitly because `extract_linear_expression` calls `egraph.find` *at every
+    // check*, folding congruent terms like `f(x)` and `f(y)` (once `x ≡ y` is asserted)
+    // to a single LP `Var`. The incremental path allocates one `Var` per arithmetic
+    // term at build time and never re-keys, so without this loop the LP would treat
+    // `f(x)` and `f(y)` as independent variables and miss the derived constraint.
+    //
+    // Approach: group `arithmetic_terms` by their current egraph root; for each
+    // multi-term group, `assert_equality` the pairwise equalities into the incremental
+    // solver, with the egraph's `explain_equality` translated to SAT literals as
+    // justification so any unsat core conveys the responsible atom-level equalities.
+    let mut root_groups: DeterministicHashMap<u32, Vec<u64>> = DeterministicHashMap::new();
+    for &term_id in &solver_state.arithmetic_terms {
+        let egraph_id = solver_state.to_egraph_id(term_id);
+        let root = solver_state.egraph.find(egraph_id);
+        root_groups.entry(root).or_default().push(term_id);
+    }
+    for (_root, group) in root_groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let anchor = group[0];
+        let anchor_egraph = solver_state.to_egraph_id(anchor);
+        let anchor_var = match solver.var_for_term(anchor) {
+            Some(v) => v,
+            None => continue, // anchor isn't in the LP; nothing to bind
+        };
+        for &other in &group[1..] {
+            let other_var = match solver.var_for_term(other) {
+                Some(v) => v,
+                None => continue,
+            };
+            let other_egraph = solver_state.to_egraph_id(other);
+            // `explain_equality` returns a list of egraph-level assertions whose
+            // conjunction implies `anchor ≡ other`; each translated `-make_eq(a, b)`
+            // literal is the "negation of an assertion that made these two terms
+            // egraph-equal" — the same convention the one-shot path uses when it
+            // folds `additional_constraint` into the unsat core.
+            let justification: Vec<i32> = solver_state
+                .egraph
+                .explain_equality(anchor_egraph, other_egraph)
+                .map(|eqs| {
+                    eqs.into_iter()
+                        .map(|(a, b)| -solver_state.make_eq(a, b))
+                        .collect()
+                })
+                .unwrap_or_default();
+            debug_println!(
+                21,
+                4,
+                "incremental: egraph-implied equality {:?}({}) ≡ {:?}({}) justification={:?}",
+                anchor_var,
+                anchor,
+                other_var,
+                other,
+                justification
+            );
+            if let AssertOutcome::Conflict =
+                solver.assert_equality(anchor_var, other_var, justification)
+            {
+                early_conflict = true;
+            }
         }
     }
 
@@ -267,6 +416,15 @@ pub fn build_incremental_solver(solver_state: &mut SolverState) -> IncrementalAr
     //    collect (term_id, root_var) pairs to register as roots for NO model translation.
     let arithmetic_terms = solver_state.arithmetic_terms.clone();
     let mut root_pairs: Vec<(u64, Var)> = Vec::new();
+    // Definitional-slack bookkeeping. The definitional rows encode
+    // `root_var + Σ(-expr_terms) = constant`, but we pass `relation_bounds=false`
+    // to `to_lra_solver` below (atoms need unbounded slacks so `assert_atom` can
+    // choose their direction). Passing `false` drops the RHS `constant` on the
+    // floor for *every* row — atom rows want that behaviour, but the definitional
+    // rows must keep it or a term like the numeral `1` is left free to take any
+    // value. So we collect `(slack, constant)` here and assert `slack = constant`
+    // permanently on the LRA after it's built.
+    let mut definitional_bounds: Vec<(Var, Rational)> = Vec::new();
     for term_id in arithmetic_terms {
         let egraph_id = solver_state.to_egraph_id(term_id);
         let (expr, _additional) = extract_linear_expression(term_id, solver_state);
@@ -279,7 +437,20 @@ pub fn build_incremental_solver(solver_state: &mut SolverState) -> IncrementalAr
             expr_to_monomials(&expr, -Rational::ONE, &mut var_map, &mut ctx);
         monomials.insert(0, Mon::new(Rational::ONE, root_var));
         let slack = ctx.allocate_var(&format!("!ext_slack_var_root_{}", term_id), VarType::Real);
-        ctx.push_relation(Rel::mk_eq(monomials, constant), slack);
+        // Normalize the row before pushing. `expr_to_monomials` can emit multiple
+        // `Mon`s on the same `Var` (e.g. a definitional row for a trivially-cyclic
+        // expression like `V_v - V_v = 0`, which produces `[+V_v, -V_v]`). The
+        // `to_lra_solver` path assigns row coefficients with `row[col] = coeff`
+        // instead of accumulating, so a repeated variable would overwrite an earlier
+        // coefficient — corrupting the row's meaning (e.g. `slack = 0` becomes
+        // `slack = -V_v` in the tableau). `combine_terms` merges duplicates. The
+        // one-shot path is safe because `preprocess::preprocess` normalizes every
+        // relation; the incremental build path skips preprocess (by design — Stage 6
+        // decision to disable eq-elimination) and must therefore normalize here.
+        let mut rel = Rel::mk_eq(monomials, constant.clone());
+        rel.combine_terms();
+        ctx.push_relation(rel, slack);
+        definitional_bounds.push((slack, constant));
     }
 
     // 2. Enumerate all arithmetic comparison atoms once. `var_map` in the CNF cache holds every
@@ -310,13 +481,18 @@ pub fn build_incremental_solver(solver_state: &mut SolverState) -> IncrementalAr
         constant += rhs_constant;
 
         let pos_constraint = function_to_constraint(&constraint.function);
-        let rel = match pos_constraint {
+        let mut rel = match pos_constraint {
             Constraint::Le => Rel::mk_le(monomials, constant.clone()),
             Constraint::Lt => Rel::mk_lt(monomials, constant.clone()),
             Constraint::Eq => Rel::mk_eq(monomials, constant.clone()),
             // function_to_constraint only yields Le/Lt/Eq
             _ => unreachable!("unexpected positive constraint from function_to_constraint"),
         };
+        // Merge duplicate-variable monomials before pushing (see note above the
+        // definitional row's `combine_terms` — the atom row `left_expr - right_expr
+        // REL 0` can put the same var on both sides, e.g. `(= v v)` yields
+        // `[+V_v, -V_v]`).
+        rel.combine_terms();
         let slack = ctx.allocate_var(&format!("!ext_slack_atom_{}", idx), VarType::Real);
         ctx.push_relation(rel, slack);
 
@@ -324,10 +500,63 @@ pub fn build_incremental_solver(solver_state: &mut SolverState) -> IncrementalAr
         incremental_pending.push((lit, slack, pos_constraint, constant));
     }
 
+    // 2b. Ensure every Var in `var_map` appears as a non-basic variable in the LRA.
+    //     `to_lra_solver` only creates non-basic columns for Vars that appear in at least
+    //     one relation's monomials (via `var_id_set`). A Var allocated for a bare Global
+    //     like `x` whose definitional row `[+V_x, -V_x]` combine_terms to `[]` would
+    //     otherwise be absent from the LRA — making later `register_var_equality(V_x, ...)`
+    //     panic on "unknown variable". Fix: for each Var in var_map not yet referenced in
+    //     any relation, push a trivial identity relation `V = 0` (an unbounded slack with a
+    //     single-monomial row referencing the Var). The `0` constant is discarded (we pass
+    //     `relation_bounds=false`), and the row `slack = V` just establishes the variable as
+    //     a non-basic column with an assignment. The slack is unbounded so it doesn't
+    //     constrain anything.
+    {
+        let referenced: std::collections::HashSet<Var> = ctx
+            .get_relations()
+            .flat_map(|(rel, _)| rel.terms_ref().iter().map(|m| m.var()))
+            .collect();
+        for v in var_map.values() {
+            if !referenced.contains(v) {
+                let slack = ctx.allocate_var(
+                    &format!("!ext_slack_anchor_{:?}", v),
+                    VarType::Real,
+                );
+                let rel = Rel::mk_eq(
+                    vec![Mon::new(Rational::ONE, *v)],
+                    Rational::ZERO,
+                );
+                ctx.push_relation(rel, slack);
+                // Pin the anchor slack to 0 permanently. The row is `slack = V`, so
+                // `slack = 0` forces `V = 0`. But we DON'T want to force V to 0 — we
+                // just want V to exist as a non-basic column! So we leave the slack
+                // unbounded (no entry in `definitional_bounds`). The variable starts at 0
+                // and will be moved by subsequent atom assertions.
+            }
+        }
+    }
+
     // 3. Build the LRA solver with unbounded slacks (bounds are asserted incrementally).
-    let lra = LinearSystem::new(ctx)
+    //
+    // `to_lra_solver(false, ...)` intentionally leaves every basic slack unbounded so
+    // atom slacks can have their bound direction chosen at assert time. But that also
+    // strips the RHS constant from *definitional* rows (their constant is not baked
+    // into the tableau — it's supposed to live in the slack's bound). Immediately
+    // after LRA construction we pin each definitional slack to `slack = constant`
+    // permanently. These bounds are asserted at the base scope (level 0) and never
+    // retracted, so subsequent push/pop cycles don't disturb them.
+    let mut lra = LinearSystem::new(ctx)
         .to_lra_solver(false, &SolverConfig::default())
         .expect("build_incremental_solver: failed to build LRA solver");
+    for (slack, constant) in &definitional_bounds {
+        let bound = crate::arithmetic::lia::qdelta::QDelta::from(constant.clone());
+        // Pin `slack = constant` by asserting both bounds. Slack was created
+        // unbounded, so neither assertion can widen an existing bound.
+        lra.assert_lower(slack, &bound)
+            .expect("build_incremental_solver: assert_lower on definitional slack failed");
+        lra.assert_upper(slack, &bound)
+            .expect("build_incremental_solver: assert_upper on definitional slack failed");
+    }
     let mut solver = IncrementalArithSolver::new(lra, SolverConfig::default());
 
     // 4. Register both polarities of each atom against its slack.
@@ -341,6 +570,12 @@ pub fn build_incremental_solver(solver_state: &mut SolverState) -> IncrementalAr
     // 5. Register root (term_id, root_var) pairs for NO model translation.
     for (term_id, root_var) in root_pairs {
         solver.register_root(term_id, root_var);
+    }
+
+    // 6. Populate the persistent term_var_map so `register_atom_dynamic` can translate
+    //    monomials for atoms introduced at check time (e.g. NO splitting clauses).
+    for (egraph_id, v) in var_map.iter() {
+        solver.register_term_var(*egraph_id, *v);
     }
 
     solver

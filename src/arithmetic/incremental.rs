@@ -232,6 +232,16 @@ pub struct IncrementalArithSolver {
     /// and asserts both bounds `s ≤ 0 ∧ s ≥ 0`. Keyed on the sorted pair so `(v_a, v_b)` and
     /// `(v_b, v_a)` share the same entry.
     equality_atoms: DeterministicHashMap<(Var, Var), (Var, AtomId, AtomId)>,
+    /// Persistent egraph-id → `Var` map, populated by the static builder and consulted by
+    /// [`Self::register_atom_dynamic`](Self::register_atom_dynamic) to translate an atom's
+    /// term-level monomials back into the LP `Var`s that already live in the LRA.
+    ///
+    /// This is required for Stage 7 to handle atoms introduced at runtime — e.g. the
+    /// Nelson-Oppen splitting clauses `(< a b) ∨ (> a b) ∨ (= a b)` whose disjuncts
+    /// don't exist in `cnf_cache.var_map` when the static builder walks it. When such a
+    /// literal is later asserted from a SAT model, we extract its `LinearConstraint`
+    /// against this map and register a fresh atom slack on the fly.
+    term_var_map: DeterministicHashMap<u32, Var>,
 }
 
 impl IncrementalArithSolver {
@@ -250,7 +260,53 @@ impl IncrementalArithSolver {
             asserted: Vec::new(),
             conflict: None,
             equality_atoms: DeterministicHashMap::new(),
+            term_var_map: DeterministicHashMap::new(),
         }
+    }
+
+    /// Populate the persistent `term_var_map` from the builder. Called once per
+    /// (egraph_id, Var) pair after `to_lra_solver` finishes. See the field-level docstring
+    /// on [`term_var_map`](Self::term_var_map) for the Stage 7 rationale.
+    pub fn register_term_var(&mut self, egraph_id: u32, var: Var) {
+        self.term_var_map.insert(egraph_id, var);
+    }
+
+    /// Look up the `Var` associated with an egraph_id, if any.
+    pub fn var_for_egraph_id(&self, egraph_id: u32) -> Option<Var> {
+        self.term_var_map.get(&egraph_id).copied()
+    }
+
+    /// Register a new atom encountered at check time (e.g. from a Nelson-Oppen
+    /// splitting clause the static builder didn't see). Allocates a fresh slack row
+    /// `slack = Σ monomials` via [`LRASolver::add_slack_row`], registers both polarities
+    /// of `lit` against that slack (using the atom's `Constraint::negate` for the
+    /// negative-polarity direction; `Eq`'s negation is left to Nelson-Oppen and only
+    /// the positive polarity is registered in that case), and returns the positive
+    /// polarity's [`AtomId`].
+    ///
+    /// Panics if `monomials` references a `Var` unknown to the LRA — that would mean
+    /// the caller referenced a term outside the LP, which is a bug.
+    pub fn register_atom_dynamic(
+        &mut self,
+        lit: i32,
+        monomials: Vec<crate::arithmetic::lia::linear_system::Mon<Rational>>,
+        constant: Rational,
+        constraint: Constraint,
+    ) -> AtomId {
+        let coeffs: Vec<(Var, Rational)> = monomials
+            .iter()
+            .map(|m| (m.var(), m.coeff_ref().clone()))
+            .collect();
+        let slack = self
+            .lira
+            .lra_solver_mut()
+            .add_slack_row(&format!("!ext_slack_dyn_atom_{lit}"), &coeffs)
+            .expect("register_atom_dynamic: add_slack_row failed");
+        let pos = self.register_literal_atom(lit, slack, constraint, constant.clone());
+        if let Some(neg_constraint) = constraint.negate() {
+            self.register_literal_atom(-lit, slack, neg_constraint, constant);
+        }
+        pos
     }
 
     /// Add a root mapping. Called by the static builder to register each arithmetic term's
@@ -484,7 +540,24 @@ impl IncrementalArithSolver {
         for &(term_id, root_var) in &self.roots {
             if let Some(value) = assignment.get(&root_var) {
                 let val_i64: i64 = value.to_int().value().try_into().unwrap_or(i64::MAX);
+                debug_println!(
+                    21,
+                    6,
+                    "incremental::build_no_model: term_id={} root_var={:?} value={} -> {}",
+                    term_id,
+                    root_var,
+                    value,
+                    val_i64
+                );
                 model.entry(val_i64).or_default().insert(term_id);
+            } else {
+                debug_println!(
+                    21,
+                    6,
+                    "incremental::build_no_model: term_id={} root_var={:?} NOT IN ASSIGNMENT",
+                    term_id,
+                    root_var
+                );
             }
         }
         model
