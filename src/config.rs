@@ -50,5 +50,5 @@ pub struct Args {
     /// Maximum arithmetic-model conflicts to collect per cb_check_found_model call.
     /// usize::MAX = no cap; keep collecting until every probe pair has been tried.
     #[arg(long, default_value_t = usize::MAX)]
-    pub trichotomies_per_round: usize,
+    pub max_arith_conflicts_per_round: usize,
 }

@@ -41,7 +41,7 @@ pub fn cdcl_decision_procedure(
     arithmetic: ArithSolver,
     timeout: u64,
     elevate: i32,
-    trichotomies_per_round: usize,
+    max_arith_conflicts_per_round: usize,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -78,7 +78,7 @@ pub fn cdcl_decision_procedure(
         arithmetic,
         stats: SolverStats::new(),
         pending: None,
-        trichotomies_per_round,
+        max_arith_conflicts_per_round,
     };
 
     solver.connect_external_propagator(&mut propagator);

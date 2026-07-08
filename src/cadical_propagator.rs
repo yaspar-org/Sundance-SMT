@@ -13,7 +13,7 @@ use crate::quantifiers::quantifier::{
 };
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
-use crate::utils::DeterministicHashSet;
+use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -32,7 +32,7 @@ pub struct CustomExternalPropagator<'a> {
     pub pending: Option<PendingInstantiations>,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
     /// Once reached, stop probing further pairs even if unprobed pairs remain.
-    pub trichotomies_per_round: usize,
+    pub max_arith_conflicts_per_round: usize,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -389,11 +389,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 let base_level = self.decision_level;
                 let mut next_probe_level = base_level + 1;
                 let mut conflicts: Vec<crate::egraphs::traits::Conflict<u32>> = Vec::new();
-                // Map from canonical (egraph_id, egraph_id) pair -> (solver_uid, solver_uid)
-                let mut probe_merged_pairs: DeterministicHashSet<(u32, u32)> =
-                    DeterministicHashSet::default();
-                let mut probe_pair_uids: std::collections::HashMap<(u32, u32), (u64, u64)> =
-                    std::collections::HashMap::new();
+                // Canonical (egraph_id, egraph_id) pair -> (solver_uid, solver_uid).
+                // Presence of a key = "we probe-merged this pair this round".
+                let mut probe_pair_uids: DeterministicHashMap<(u32, u32), (u64, u64)> =
+                    DeterministicHashMap::default();
 
                 'outer: for set in literals.values() {
                     let mut t = set.iter();
@@ -411,7 +410,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             continue;
                         }
                         let (lo_e, hi_e) = if x_e < y_e { (x_e, y_e) } else { (y_e, x_e) };
-                        probe_merged_pairs.insert((lo_e, hi_e));
                         probe_pair_uids.insert((lo_e, hi_e), (x, y));
                         let attempt_level = next_probe_level;
                         next_probe_level += 1;
@@ -424,7 +422,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             self.solver_state.egraph.backtrack_to(attempt_level - 1);
                             next_probe_level = attempt_level;
                             conflicts.push(c);
-                            if conflicts.len() >= self.trichotomies_per_round {
+                            if conflicts.len() >= self.max_arith_conflicts_per_round {
                                 break 'outer;
                             }
                         }
@@ -438,10 +436,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     // fall back on make_eq allocating a bare eq literal.
                     let fresh_probe_pair = conflict.equalities.iter().rev().find_map(|&(a, b)| {
                         let (lo_e, hi_e) = if a < b { (a, b) } else { (b, a) };
-                        if !probe_merged_pairs.contains(&(lo_e, hi_e)) {
-                            return None;
-                        }
-                        let (x_uid, y_uid) = probe_pair_uids[&(lo_e, hi_e)];
+                        let (x_uid, y_uid) = *probe_pair_uids.get(&(lo_e, hi_e))?;
                         if self
                             .solver_state
                             .nelson_oppen_ineq_literals
