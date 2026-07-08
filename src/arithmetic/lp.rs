@@ -59,7 +59,7 @@ impl fmt::Display for ArithSolverParseError {
 pub enum ArithResult {
     Unsat(Vec<i32>, LiaStats), // conflict clause
     Sat(
-        DeterministicHashMap<i64, DeterministicHashSet<u64>>,
+        DeterministicHashMap<IBig, DeterministicHashSet<u64>>,
         LiaStats,
     ), // literals that correspond to inequalities <= where the two terms are equal
     None,

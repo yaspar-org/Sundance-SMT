@@ -31,6 +31,8 @@ pub struct CustomExternalPropagator<'a> {
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
+    // TODO(nelson-oppen): used when we implement multi-conflict-per-round with budget
+    #[allow(dead_code)]
     pub trichotomies_per_round: usize,
 }
 
@@ -91,7 +93,6 @@ impl<'a> CustomExternalPropagator<'a> {
                 .insert_predecessor(&term_nnf, None, None, true);
             let term_cnf = term.cnf_tseitin(self.solver_state);
             for clause in term_cnf {
-                eprintln!("[TRICH] clause: {:?}", clause.0);
                 for lit in &clause.0 {
                     self.add_observed_variable(*lit);
                     self.add_lit_to_proof_tracer(*lit);
@@ -358,10 +359,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
-        eprintln!("[cb_check_found_model] model contains 313? {} 314? {} 315? {}",
-            model.contains(&313) || model.contains(&-313),
-            model.contains(&314) || model.contains(&-314),
-            model.contains(&315) || model.contains(&-315));
         match check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state) {
             ArithResult::Unsat(arithmetic_literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
@@ -383,10 +380,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 // emit trichotomy + conflict clauses for the involved pairs so CaDiCaL
                 // can force different eq/lt/gt choices. Always backtrack the probe merges
                 // so the egraph state stays consistent with the SAT trail.
+                // TODO(nelson-oppen): stop-at-first-conflict is simple but leaves
+                // information on the table. Consider collecting multiple conflicts per
+                // round and applying a trichotomies_per_round budget to bound work.
                 let probe_level = self.decision_level + 1;
-                let mut conflict_from_arith: Option<
-                    crate::egraphs::traits::Conflict<u32>,
-                > = None;
+                let mut conflict_from_arith: Option<crate::egraphs::traits::Conflict<u32>> = None;
+                // Map from canonical (egraph_id, egraph_id) pair -> (solver_uid, solver_uid)
+                // so we can look up probe pairs by egraph representation while emitting
+                // trichotomies with solver UIDs.
+                let mut probe_merged_pairs: DeterministicHashSet<(u32, u32)> =
+                    DeterministicHashSet::default();
+                let mut probe_pair_uids: std::collections::HashMap<(u32, u32), (u64, u64)> =
+                    std::collections::HashMap::new();
 
                 'outer: for set in literals.values() {
                     let mut t = set.iter();
@@ -400,16 +405,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         };
                         let x_e = self.solver_state.to_egraph_id(x);
                         let y_e = self.solver_state.to_egraph_id(y);
-                        if self.solver_state.egraph.find(x_e)
-                            == self.solver_state.egraph.find(y_e)
+                        if self.solver_state.egraph.find(x_e) == self.solver_state.egraph.find(y_e)
                         {
                             continue;
                         }
-                        let result = self.solver_state.egraph.assert_equal(
-                            x_e,
-                            y_e,
-                            probe_level,
-                        );
+                        let (lo_e, hi_e) = if x_e < y_e { (x_e, y_e) } else { (y_e, x_e) };
+                        probe_merged_pairs.insert((lo_e, hi_e));
+                        probe_pair_uids.insert((lo_e, hi_e), (x, y));
+                        let result = self.solver_state.egraph.assert_equal(x_e, y_e, probe_level);
                         if let Some(c) = result.conflict {
                             conflict_from_arith = Some(c);
                             break 'outer;
@@ -418,19 +421,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
 
                 if let Some(conflict) = conflict_from_arith {
-                    eprintln!("[ARITH PROBE] conflict.equalities={:?}, diseq_lit={:?}, disequality={:?}",
-                        conflict.equalities, conflict.diseq_lit, conflict.disequality);
-                    // Emit trichotomies for pairs in the conflict path (bounded by budget)
-                    let mut emitted = 0;
+                    // Emit trichotomies for probe-merged pairs that appear in the
+                    // conflict proof path. This registers the eq/lt/gt SAT literals
+                    // so make_eq below can find eq(x,y) for each pair.
                     for &(a, b) in &conflict.equalities {
-                        if emitted >= self.trichotomies_per_round {
-                            break;
+                        let (lo_e, hi_e) = if a < b { (a, b) } else { (b, a) };
+                        if probe_merged_pairs.contains(&(lo_e, hi_e)) {
+                            let (x_uid, y_uid) = probe_pair_uids[&(lo_e, hi_e)];
+                            self.emit_trichotomy_for_pair(x_uid, y_uid);
                         }
-                        let sa = self.solver_state.to_solver_uid(a);
-                        let sb = self.solver_state.to_solver_uid(b);
-                        let (lo, hi) = if sa < sb { (sa, sb) } else { (sb, sa) };
-                        self.emit_trichotomy_for_pair(lo, hi);
-                        emitted += 1;
                     }
 
                     // Build the blocking conflict clause: negation of the equalities
@@ -443,12 +442,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     if let Some(lit) = conflict.diseq_lit {
                         conflict_clause.push(-lit);
                     }
-                    eprintln!("[ARITH PROBE CONFLICT] clause={:?}, a[312]={} a[313]={} a[314]={} a[315]={}",
-                        conflict_clause,
-                        self.assignments.get(312).copied().unwrap_or(0),
-                        self.assignments.get(313).copied().unwrap_or(0),
-                        self.assignments.get(314).copied().unwrap_or(0),
-                        self.assignments.get(315).copied().unwrap_or(0));
                     for lit in &conflict_clause {
                         self.add_observed_variable(*lit);
                         self.add_lit_to_proof_tracer(*lit);

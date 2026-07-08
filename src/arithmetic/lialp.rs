@@ -17,7 +17,7 @@ use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
-use dashu::{Integer, Rational};
+use dashu::{Integer, Rational, integer::IBig};
 use std::collections::HashMap;
 
 pub fn check_integer_constraints_satisfiable_lia(
@@ -119,13 +119,12 @@ pub fn check_integer_constraints_satisfiable_lia(
             let stats = ret.stats;
             match ret.decision {
                 SolverDecision::FEASIBLE(assignment) => {
-                    let mut model_hashmap: DeterministicHashMap<i64, DeterministicHashSet<u64>> =
+                    let mut model_hashmap: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
                         DeterministicHashMap::new();
                     for (term_id, root_var) in &roots {
                         if let Some(value) = assignment.get(root_var) {
-                            let val_i64: i64 =
-                                value.to_int().value().try_into().unwrap_or(i64::MAX);
-                            model_hashmap.entry(val_i64).or_default().insert(*term_id);
+                            let val: IBig = value.to_int().value().clone();
+                            model_hashmap.entry(val).or_default().insert(*term_id);
                         }
                     }
                     ArithResult::Sat(model_hashmap, stats)
