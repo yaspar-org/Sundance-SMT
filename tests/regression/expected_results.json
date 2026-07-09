@@ -234,7 +234,7 @@
     "datatypes/tester_duplication_unknown3.smt2": "unknown",
     "datatypes/tester_duplication_unknown4.smt2": "unknown",
     "datatypes/tester_duplication_unknown5.smt2": "unknown",
-    "datatypes/tester_duplication_unknown6.smt2": "unknown",
+    "datatypes/tester_duplication_unknown6.smt2": "unsat",
     "datatypes/tester-constructor.smt2": "unsat",
     "datatypes/tester-constructor2.smt2": "unsat",
     "datatypes/tester-constructor3.smt2": "unsat",
