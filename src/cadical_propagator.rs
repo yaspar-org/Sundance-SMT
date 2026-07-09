@@ -327,17 +327,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         self.decision_level = level;
 
-        // Delegate to egraph for all egraph-internal backtracking
+        // Delegate to egraph for all egraph-internal backtracking. Note:
+        // `backtrack_to` internally clears the arithmetic_merge_queue and
+        // then re-fires any congruence merges triggered by the `union_to_eclass`
+        // replay, so on return the queue contains exactly the merges that hold
+        // at the post-backtrack level and need to be conveyed to Z3.
         self.solver_state.egraph.backtrack_to(level);
-
-        // The queue is drained after every `process_assignment`, so on a real
-        // CaDiCaL backtrack it should already be empty. If anything is left,
-        // it corresponds to merges above `level` that no longer hold — clear.
-        self.solver_state.egraph.arithmetic_merge_queue.clear();
 
         #[cfg(feature = "z3-solver")]
         if let Some(z3) = self.z3_lazy.as_mut() {
             z3.notify_backtrack(level);
+            z3.drain_merge_queue(self.solver_state, None);
         }
 
         debug_println!(16, 0, "Ending backtracking at level {}", level);

@@ -980,6 +980,12 @@ impl Egraph {
             }
         }
 
+        // Any merges left in the arithmetic queue from before this backtrack
+        // are stale — they refer to unions at levels we've just undone. Clear
+        // them so that only re-fired congruence merges (added by the loop
+        // below) survive.
+        self.arithmetic_merge_queue.clear();
+
         // Re-do union_to_eclass via sig table probe. Entries added at or below
         // `level` were already reconciled with the sig_table at that level and
         // their signatures are stable under this backtrack.

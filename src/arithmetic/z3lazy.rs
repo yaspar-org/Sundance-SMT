@@ -134,67 +134,55 @@ impl Z3LazyState {
         }
     }
 
-    /// Get or create the Z3 Int variable for an egraph id.
-    fn var_for(&mut self, egraph_id: u32) -> Int {
-        self.var_map
-            .entry(egraph_id)
-            .or_insert_with(|| Int::new_const(format!("var_{egraph_id}")))
-            .clone()
-    }
-
-    /// Ensure the Z3 var for `egraph_id` exists AND that, on first sight, we
-    /// pushed a **definitional** equality tying it to its term structure
-    /// (`var_{id} == <constant>` for numeric constants, `var_{id} == <linear
-    /// combination in child vars>` for arithmetic applications like `+ - *`).
-    /// This makes egraph-derived merges informative without a normalization
-    /// pass: e.g. once `x==y` is asserted, Z3 sees `var_{f(x)} == var_{f(y)}`
-    /// via the egraph merge callback AND both `var_{f(x)} == def(f, x)` and
-    /// `var_{f(y)} == def(f, y)` pinned at load time, giving the theory
-    /// combination its usual power.
+    /// Get or create the Z3 `Int` variable for an egraph id, and on first
+    /// creation pin it to its term structure (`var_{id} == <constant>` for
+    /// numeric constants, `var_{id} == <linear combination in child vars>`
+    /// for arithmetic applications like `+ - *`). Uninterpreted apps and
+    /// Globals get no pinning — they're left as free Ints.
     ///
-    /// Uses `extract_lazy_expression` (no `find()`) so the pinning is stable
+    /// Uses `extract_lazy_expression` (no `find()`) so pinnings are stable
     /// across egraph backtracks — merges are conveyed separately via
     /// `drain_merge_queue`.
     ///
-    /// Pins live in `pinned_defs` and get replayed as assumptions on every
-    /// `check_assumptions` — the `Solver::assert` route would land them in
-    /// the top scope and get popped on backtrack.
-    fn var_for_with_pinning(
-        &mut self,
-        egraph_id: u32,
-        solver_state: &mut SolverState,
-    ) -> Int {
-        let is_new = !self.var_map.contains_key(&egraph_id);
-        let v = self.var_for(egraph_id);
-        if is_new {
-            let solver_uid = solver_state.to_solver_uid(egraph_id);
-            if let Some(expr) = extract_lazy_expression(solver_uid, solver_state) {
-                // If the expression is exactly `var_{egraph_id}` (a plain
-                // Global or an uninterpreted-function App), skip pinning.
-                let is_self_reference = expr.len() == 2
-                    && expr.get(&Coefficient::Constant) == Some(&IBig::from(0))
-                    && expr.get(&Coefficient::Term(egraph_id)) == Some(&IBig::from(1));
-                if !is_self_reference {
-                    let mut rhs = Int::from_i64(0);
-                    let entries: Vec<(Coefficient, IBig)> =
-                        expr.iter().map(|(k, v)| (*k, v.clone())).collect();
-                    for (k, c) in &entries {
-                        if let Some(e) = self.coeff_to_z3(k, c, solver_state) {
-                            rhs += e;
-                        }
+    /// Pins are stored in `pinned_defs` and replayed as assumptions on every
+    /// `check_assumptions` call, since `Solver::assert`ing them would land
+    /// them in the current push scope and get erased on the next `pop`.
+    ///
+    /// This is the ONLY var-materialization entry point. Every caller that
+    /// touches a Z3 var goes through here, so the invariant "any var Z3
+    /// sees is already pinned" holds by construction.
+    fn var_for(&mut self, egraph_id: u32, solver_state: &mut SolverState) -> Int {
+        if let Some(v) = self.var_map.get(&egraph_id) {
+            return v.clone();
+        }
+        let v = Int::new_const(format!("var_{egraph_id}"));
+        self.var_map.insert(egraph_id, v.clone());
+
+        let solver_uid = solver_state.to_solver_uid(egraph_id);
+        if let Some(expr) = extract_lazy_expression(solver_uid, solver_state) {
+            // If the expression is exactly `var_{egraph_id}` (a plain Global
+            // or an uninterpreted-function App), skip pinning.
+            let is_self_reference = expr.len() == 2
+                && expr.get(&Coefficient::Constant) == Some(&IBig::from(0))
+                && expr.get(&Coefficient::Term(egraph_id)) == Some(&IBig::from(1));
+            if !is_self_reference {
+                let mut rhs = Int::from_i64(0);
+                let entries: Vec<(Coefficient, IBig)> =
+                    expr.iter().map(|(k, v)| (*k, v.clone())).collect();
+                for (k, c) in &entries {
+                    if let Some(e) = self.coeff_to_z3(k, c, solver_state) {
+                        rhs += e;
                     }
-                    let v_final = self.var_map[&egraph_id].clone();
-                    let def = Int::eq(&v_final, rhs);
-                    self.pinned_defs.push(def);
-                    debug_println!(
-                        21,
-                        0,
-                        "[z3lazy] def var_{}=={:?}",
-                        egraph_id,
-                        entries
-                    );
-                    return v_final;
                 }
+                let def = Int::eq(&v, rhs);
+                self.pinned_defs.push(def);
+                debug_println!(
+                    21,
+                    0,
+                    "[z3lazy] def var_{}=={:?}",
+                    egraph_id,
+                    entries
+                );
             }
         }
         v
@@ -211,17 +199,17 @@ impl Z3LazyState {
         match key {
             Coefficient::Constant => Some(Int::from_big_int(&ibig_to_bigint(coeff))),
             Coefficient::Term(id) => {
-                let v = self.var_for_with_pinning(*id, solver_state);
+                let v = self.var_for(*id, solver_state);
                 Some(Int::from_big_int(&ibig_to_bigint(coeff)) * v)
             }
             Coefficient::Div(a, b) => {
-                let av = self.var_for_with_pinning(*a, solver_state);
-                let bv = self.var_for_with_pinning(*b, solver_state);
+                let av = self.var_for(*a, solver_state);
+                let bv = self.var_for(*b, solver_state);
                 Some(Int::from_big_int(&ibig_to_bigint(coeff)) * av.div(bv))
             }
             Coefficient::Mod(a, b) => {
-                let av = self.var_for_with_pinning(*a, solver_state);
-                let bv = self.var_for_with_pinning(*b, solver_state);
+                let av = self.var_for(*a, solver_state);
+                let bv = self.var_for(*b, solver_state);
                 Some(Int::from_big_int(&ibig_to_bigint(coeff)) * av.modulo(bv))
             }
         }
@@ -304,6 +292,8 @@ impl Z3LazyState {
                 let re = extract_lazy_expression(b.uid(), solver_state)?;
                 Some(LinearConstraint::new(le, re, FunctionType::Eq, vec![]))
             }
+            // Negated Int equality (a != b): handled in on_literal_assignment
+            // via a direct Z3 encoding — LinearConstraint has no Neq variant.
             _ => None,
         }
     }
@@ -402,8 +392,8 @@ impl Z3LazyState {
             self.merge_provokers_by_level[self.current_level].push(lit);
         }
         for (a, b) in merges {
-            let va = self.var_for_with_pinning(a, solver_state);
-            let vb = self.var_for_with_pinning(b, solver_state);
+            let va = self.var_for(a, solver_state);
+            let vb = self.var_for(b, solver_state);
             let eq = Int::eq(&va, vb);
             self.solver.push();
             self.push_counts[self.current_level] += 1;
@@ -433,32 +423,11 @@ impl Z3LazyState {
         // with its definitional equality pinned. If we defer this until the
         // model-evaluation loop below, Z3 has already produced a model
         // without seeing the definitions and the buckets are meaningless.
-        //
-        // Additionally: sync egraph equalities to Z3. The `arithmetic_merge_queue`
-        // captures merges as they happen, but merges that happened before an
-        // arithmetic term was first introduced to Z3 (e.g. it appeared later
-        // via quantifier instantiation) never get onto that queue for those
-        // specific pairs. We fill the gap here by asserting `var_id ==
-        // var_root` for any arithmetic term whose find() root differs from
-        // its own egraph id. These are equalities the egraph has already
-        // established (so this is sound), scoped to the current push level
-        // so they get popped on backtrack.
         let n_arith = solver_state.arithmetic_terms.len();
         for idx in 0..n_arith {
             let term_id = solver_state.arithmetic_terms[idx];
             let egraph_id = solver_state.to_egraph_id(term_id);
-            let _ = self.var_for_with_pinning(egraph_id, solver_state);
-            let root = solver_state.egraph.find(egraph_id);
-            if root != egraph_id {
-                let _ = self.var_for_with_pinning(root, solver_state);
-                let va = self.var_map[&egraph_id].clone();
-                let vb = self.var_map[&root].clone();
-                let eq = Int::eq(&va, vb);
-                self.ensure_level_slot();
-                self.solver.push();
-                self.push_counts[self.current_level] += 1;
-                self.solver.assert(&eq);
-            }
+            let _ = self.var_for(egraph_id, solver_state);
         }
         // Every arithmetic literal was pushed via `assert_and_track(constraint,
         // tracker)`, which encodes `tracker => constraint`. Z3 would happily
@@ -486,7 +455,7 @@ impl Z3LazyState {
                     if solver_state.egraph.find(egraph_id) != egraph_id {
                         continue;
                     }
-                    let v = self.var_for_with_pinning(egraph_id, solver_state);
+                    let v = self.var_for(egraph_id, solver_state);
                     if let Some(val) = model.eval(&v, true) {
                         let ibig = parse_z3_model_int(&val.to_string());
                         buckets.entry(ibig).or_default().insert(term_id);
