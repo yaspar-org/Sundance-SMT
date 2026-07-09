@@ -31,7 +31,7 @@ use dashu::Integer;
 use dashu::integer::IBig;
 use yaspar_ir::ast::{
     ATerm::{self, App, Eq, Global, Not},
-    Repr,
+    FetchSort, HasArena, Repr,
     alg::Constant as AlgConstant,
 };
 use z3::{
@@ -291,6 +291,15 @@ impl Z3LazyState {
                 Some(LinearConstraint::new(le, re, func, vec![]))
             }
             Eq(a, b) if polarity => {
+                // Only encode into Z3 if both sides are Int-sorted. Poly /
+                // datatype equalities collapse to fresh Int variables under
+                // our encoding, which is unsound (it forces theories that
+                // don't intersect on integers to behave as if they did).
+                let a_sort = a.get_sort(solver_state.context.arena()).to_string();
+                let b_sort = b.get_sort(solver_state.context.arena()).to_string();
+                if a_sort != "Int" || b_sort != "Int" {
+                    return None;
+                }
                 let le = extract_lazy_expression(a.uid(), solver_state)?;
                 let re = extract_lazy_expression(b.uid(), solver_state)?;
                 Some(LinearConstraint::new(le, re, FunctionType::Eq, vec![]))
@@ -424,37 +433,11 @@ impl Z3LazyState {
         // with its definitional equality pinned. If we defer this until the
         // model-evaluation loop below, Z3 has already produced a model
         // without seeing the definitions and the buckets are meaningless.
-        //
-        // Also: for any term whose egraph_id != its find() root, assert
-        // `var_{id} == var_{root}` as a snapshot equality. This catches the
-        // case where an egraph-internal congruence merge somehow didn't get
-        // onto the arithmetic_merge_queue at the time it happened (e.g.
-        // recursion depth, or a Poly parent path that changes flags mid-way).
-        // The snapshot equalities are asserted at the current push level and
-        // get popped on the next backtrack, so they're safe to over-approximate.
         let n_arith = solver_state.arithmetic_terms.len();
         for idx in 0..n_arith {
             let term_id = solver_state.arithmetic_terms[idx];
             let egraph_id = solver_state.to_egraph_id(term_id);
             let _ = self.var_for_with_pinning(egraph_id, solver_state);
-            let root = solver_state.egraph.find(egraph_id);
-            if root != egraph_id {
-                let _ = self.var_for_with_pinning(root, solver_state);
-                let va = self.var_map[&egraph_id].clone();
-                let vb = self.var_map[&root].clone();
-                let eq = Int::eq(&va, vb);
-                self.ensure_level_slot();
-                self.solver.push();
-                self.push_counts[self.current_level] += 1;
-                self.solver.assert(&eq);
-                debug_println!(
-                    21,
-                    0,
-                    "[z3lazy] check-time snapshot var_{}==var_{}",
-                    egraph_id,
-                    root
-                );
-            }
         }
         // Every arithmetic literal was pushed via `assert_and_track(constraint,
         // tracker)`, which encodes `tracker => constraint`. Z3 would happily
