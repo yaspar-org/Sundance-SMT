@@ -433,11 +433,32 @@ impl Z3LazyState {
         // with its definitional equality pinned. If we defer this until the
         // model-evaluation loop below, Z3 has already produced a model
         // without seeing the definitions and the buckets are meaningless.
+        //
+        // Additionally: sync egraph equalities to Z3. The `arithmetic_merge_queue`
+        // captures merges as they happen, but merges that happened before an
+        // arithmetic term was first introduced to Z3 (e.g. it appeared later
+        // via quantifier instantiation) never get onto that queue for those
+        // specific pairs. We fill the gap here by asserting `var_id ==
+        // var_root` for any arithmetic term whose find() root differs from
+        // its own egraph id. These are equalities the egraph has already
+        // established (so this is sound), scoped to the current push level
+        // so they get popped on backtrack.
         let n_arith = solver_state.arithmetic_terms.len();
         for idx in 0..n_arith {
             let term_id = solver_state.arithmetic_terms[idx];
             let egraph_id = solver_state.to_egraph_id(term_id);
             let _ = self.var_for_with_pinning(egraph_id, solver_state);
+            let root = solver_state.egraph.find(egraph_id);
+            if root != egraph_id {
+                let _ = self.var_for_with_pinning(root, solver_state);
+                let va = self.var_map[&egraph_id].clone();
+                let vb = self.var_map[&root].clone();
+                let eq = Int::eq(&va, vb);
+                self.ensure_level_slot();
+                self.solver.push();
+                self.push_counts[self.current_level] += 1;
+                self.solver.assert(&eq);
+            }
         }
         // Every arithmetic literal was pushed via `assert_and_track(constraint,
         // tracker)`, which encodes `tracker => constraint`. Z3 would happily
