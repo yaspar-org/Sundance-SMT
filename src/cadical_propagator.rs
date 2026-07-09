@@ -193,7 +193,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             // then push the literal's own constraint if it's arithmetic.
             #[cfg(feature = "z3-solver")]
             if let Some(z3) = self.z3_lazy.as_mut() {
-                z3.drain_merge_queue(self.solver_state);
+                z3.drain_merge_queue(self.solver_state, Some(*lit));
                 z3.on_literal_assignment(*lit, self.solver_state);
             }
 
@@ -408,8 +408,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         let arith_result = if let Some(z3) = self.z3_lazy.as_mut() {
             // Merges from post-notify_assignment egraph work may still be
             // queued (e.g. from lazy quantifier instantiations); flush before
-            // checking.
-            z3.drain_merge_queue(self.solver_state);
+            // checking. No specific provoker here — attribute to all active
+            // lits in the fallback conflict clause.
+            z3.drain_merge_queue(self.solver_state, None);
             z3.check(self.solver_state)
         } else {
             check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state)

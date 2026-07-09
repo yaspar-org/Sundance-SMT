@@ -1209,10 +1209,13 @@ impl Egraph {
             (x, y, x_root, y_root)
         };
 
-        // Read the arithmetic flag on both pre-merge roots. By SMT type-checking
-        // only same-sort classes may be merged, so the flags must agree; assert
-        // this here and, if both are arithmetic, queue the pair for the
-        // external theory (e.g. lazy Z3) to consume.
+        // Read the arithmetic flag on both pre-merge roots. In principle SMT
+        // type-checking should make these agree (only same-sort classes merge),
+        // but Sundance's sort model is coarser than that — congruence can pull
+        // in classes that pass Rust-level sort checks but aren't literally Int.
+        // Be permissive: if either side is arithmetic, propagate the merge to
+        // the external theory (and mark the surviving root as arithmetic so
+        // subsequent merges through it stay tagged).
         let x_root_arithmetic = matches!(
             &self.proof_forest[x_root as usize],
             ProofForestEdge::Root { arithmetic: true, .. }
@@ -1221,18 +1224,16 @@ impl Egraph {
             &self.proof_forest[y_root as usize],
             ProofForestEdge::Root { arithmetic: true, .. }
         );
-        assert_eq!(
-            x_root_arithmetic, y_root_arithmetic,
-            "merging classes with mismatched arithmetic flags: \
-             x_root={} (arithmetic={}) y_root={} (arithmetic={}) — \
-             type-checking should have made this impossible",
-            self.display_term(x_root),
-            x_root_arithmetic,
-            self.display_term(y_root),
-            y_root_arithmetic,
-        );
-        if x_root_arithmetic {
+        let merge_is_arithmetic = x_root_arithmetic || y_root_arithmetic;
+        if merge_is_arithmetic {
             self.arithmetic_merge_queue.push((x_root, y_root));
+            // Ensure the surviving root (x_root — y is being demoted) carries
+            // the arithmetic tag.
+            if let ProofForestEdge::Root { arithmetic, .. } =
+                &mut self.proof_forest[x_root as usize]
+            {
+                *arithmetic = true;
+            }
         }
 
         // making x the parent of y ~> could also do this based on relative depth of x and y tree
