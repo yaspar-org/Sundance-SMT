@@ -56,16 +56,18 @@ impl fmt::Display for Egraph {
                         child,
                         disequalities,
                         children,
+                        arithmetic,
                     } => {
                         // we use get_term_safe here for child, because it could be that there actually is no child
                         writeln!(
                             f,
-                            "  {} -> root [Root (size: {}, child: {:?}, disequalities: {:?}, children: {:?}])",
+                            "  {} -> root [Root (size: {}, child: {:?}, disequalities: {:?}, children: {:?}, arithmetic: {}])",
                             self.display_term(term_id as u32),
                             size,
                             self.display_term(*child),
                             disequalities,
-                            children
+                            children,
+                            arithmetic,
                         )?;
                     }
                     ProofForestEdge::Equality {
@@ -230,6 +232,12 @@ pub struct Egraph {
     sig_table: FastDeterministicHashMap<SigKey, u32>,
     /// Trail for backtracking the sig_table.
     sig_trail: Vec<SigTrailEntry>,
+    /// Queue of arithmetic-relevant merges (pre-merge roots). Every merge
+    /// (direct or congruence-derived) where BOTH pre-merge roots were tagged
+    /// arithmetic (see the `arithmetic` flag on `ProofForestEdge::Root`) is
+    /// appended here. The arithmetic solver drains this queue to propagate
+    /// equalities lazily into its external state (e.g. a persistent Z3 solver).
+    pub arithmetic_merge_queue: Vec<(u32, u32)>,
 }
 
 impl Default for Egraph {
@@ -249,6 +257,7 @@ impl Egraph {
                 child: 0,
                 disequalities: DeterministicHashMap::new(),
                 children: DeterministicHashSet::new(),
+                arithmetic: false,
             }],
             proof_forest_backtrack_stack: Vec::new(),
             predecessors: vec![FastDeterministicHashMap::default()],
@@ -260,6 +269,7 @@ impl Egraph {
             union_to_eclass: DeterministicHashMap::new(),
             sig_table: FastDeterministicHashMap::default(),
             sig_trail: Vec::new(),
+            arithmetic_merge_queue: Vec::new(),
         }
     }
 
@@ -317,6 +327,7 @@ impl Egraph {
             disequalities: DeterministicHashMap::new(),
             child: 0,
             children: DeterministicHashSet::new(),
+            arithmetic: false,
         };
 
         // Add to function_maps using the op's string key
@@ -392,6 +403,7 @@ impl Egraph {
                     child: 0,
                     disequalities: DeterministicHashMap::new(),
                     children: DeterministicHashSet::new(),
+                    arithmetic: false,
                 },
             );
             self.predecessors.resize(
@@ -414,6 +426,7 @@ impl Egraph {
             disequalities: DeterministicHashMap::new(),
             child: 0,
             children: DeterministicHashSet::new(),
+            arithmetic: false,
         };
         id
     }
@@ -738,13 +751,7 @@ impl Egraph {
         loop {
             let parent = self.proof_forest[curr as usize].clone();
             visited.insert(curr);
-            if let ProofForestEdge::Root {
-                size: _,
-                child: _,
-                disequalities: _,
-                children: _,
-            } = parent
-            {
+            if let ProofForestEdge::Root { .. } = parent {
                 visited.insert(curr);
                 break;
             }
@@ -760,13 +767,7 @@ impl Egraph {
             if visited.contains(&curr) {
                 break;
             }
-            if let ProofForestEdge::Root {
-                size: _,
-                child: _,
-                disequalities: _,
-                children: _,
-            } = parent
-            {
+            if let ProofForestEdge::Root { .. } = parent {
                 return None;
             }
             curr = parent.get_parent();
@@ -792,12 +793,7 @@ impl Egraph {
         debug_println!(16, indent + 1, "We have the proof:");
         for proof_term in proof {
             match proof_term {
-                ProofForestEdge::Root {
-                    size: _,
-                    child: _,
-                    disequalities: _,
-                    children: _,
-                } => {
+                ProofForestEdge::Root { .. } => {
                     eprintln!("ERROR: Root should not be processed");
                     std::process::exit(1);
                 }
@@ -1089,11 +1085,21 @@ impl Egraph {
             }
         }
 
+        // We are about to undo the merge that unified `child` with its parent.
+        // Before mutating, look up whether the still-merged class is arithmetic;
+        // splitting an arithmetic class yields two arithmetic classes (only
+        // same-sort merges are legal), so both new roots inherit the flag.
+        let merged_root_arithmetic = matches!(
+            &self.proof_forest[self.find(*child) as usize],
+            ProofForestEdge::Root { arithmetic: true, .. }
+        );
+
         let child_root = ProofForestEdge::Root {
             size: 0,
             child: childs_child,
             disequalities: new_disequalities,
             children: DeterministicHashSet::new(),
+            arithmetic: merged_root_arithmetic,
         };
 
         self.proof_forest[*child as usize] = child_root;
@@ -1202,6 +1208,32 @@ impl Egraph {
         } else {
             (x, y, x_root, y_root)
         };
+
+        // Read the arithmetic flag on both pre-merge roots. By SMT type-checking
+        // only same-sort classes may be merged, so the flags must agree; assert
+        // this here and, if both are arithmetic, queue the pair for the
+        // external theory (e.g. lazy Z3) to consume.
+        let x_root_arithmetic = matches!(
+            &self.proof_forest[x_root as usize],
+            ProofForestEdge::Root { arithmetic: true, .. }
+        );
+        let y_root_arithmetic = matches!(
+            &self.proof_forest[y_root as usize],
+            ProofForestEdge::Root { arithmetic: true, .. }
+        );
+        assert_eq!(
+            x_root_arithmetic, y_root_arithmetic,
+            "merging classes with mismatched arithmetic flags: \
+             x_root={} (arithmetic={}) y_root={} (arithmetic={}) — \
+             type-checking should have made this impossible",
+            self.display_term(x_root),
+            x_root_arithmetic,
+            self.display_term(y_root),
+            y_root_arithmetic,
+        );
+        if x_root_arithmetic {
+            self.arithmetic_merge_queue.push((x_root, y_root));
+        }
 
         // making x the parent of y ~> could also do this based on relative depth of x and y tree
         let proof_parent: ProofForestEdge =
@@ -1695,6 +1727,19 @@ impl EgraphTrait for Egraph {
         _lit: Lit,
     ) -> Self::TermId {
         self.register_term(op, children, false)
+    }
+
+    fn mark_arithmetic(&mut self, term: Self::TermId) {
+        let root = self.find(term);
+        match &mut self.proof_forest[root as usize] {
+            ProofForestEdge::Root { arithmetic, .. } => {
+                *arithmetic = true;
+            }
+            _ => panic!(
+                "mark_arithmetic: find({}) returned a non-root node",
+                self.display_term(term)
+            ),
+        }
     }
 
     fn assert_equal(

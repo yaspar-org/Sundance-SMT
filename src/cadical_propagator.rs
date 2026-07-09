@@ -3,6 +3,8 @@
 
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
+#[cfg(feature = "z3-solver")]
+use crate::arithmetic::z3lazy::Z3LazyState;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
@@ -34,6 +36,9 @@ pub struct CustomExternalPropagator<'a> {
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
     /// Once reached, stop probing further pairs even if unprobed pairs remain.
     pub max_arith_conflicts_per_round: usize,
+    /// Lazy Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Lazy`.
+    #[cfg(feature = "z3-solver")]
+    pub z3_lazy: Option<Z3LazyState>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -184,6 +189,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.solver_state, self.decision_level);
 
+            // Lazy Z3: propagate egraph merges triggered by this assignment,
+            // then push the literal's own constraint if it's arithmetic.
+            #[cfg(feature = "z3-solver")]
+            if let Some(z3) = self.z3_lazy.as_mut() {
+                z3.drain_merge_queue(self.solver_state);
+                z3.on_literal_assignment(*lit, self.solver_state);
+            }
+
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
             {
@@ -280,6 +293,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .resize(self.solver_state.hash_at_level.len() * 2, 0);
         }
         self.solver_state.hash_at_level[self.decision_level] = self.solver_state.current_hash;
+
+        #[cfg(feature = "z3-solver")]
+        if let Some(z3) = self.z3_lazy.as_mut() {
+            z3.notify_new_decision_level();
+        }
     }
 
     fn notify_backtrack(&mut self, level: usize) {
@@ -311,6 +329,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // Delegate to egraph for all egraph-internal backtracking
         self.solver_state.egraph.backtrack_to(level);
+
+        // The queue is drained after every `process_assignment`, so on a real
+        // CaDiCaL backtrack it should already be empty. If anything is left,
+        // it corresponds to merges above `level` that no longer hold — clear.
+        self.solver_state.egraph.arithmetic_merge_queue.clear();
+
+        #[cfg(feature = "z3-solver")]
+        if let Some(z3) = self.z3_lazy.as_mut() {
+            z3.notify_backtrack(level);
+        }
 
         debug_println!(16, 0, "Ending backtracking at level {}", level);
         debug_println!(11, 0, "{}", self.solver_state.egraph);
@@ -372,7 +400,25 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
-        match check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state) {
+        // Route through the persistent Z3LazyState when configured; every atom
+        // in `model` has already been pushed into it via `notify_assignment`,
+        // so we can just call `check` directly. Otherwise fall through to the
+        // eager entry point.
+        #[cfg(feature = "z3-solver")]
+        let arith_result = if let Some(z3) = self.z3_lazy.as_mut() {
+            // Merges from post-notify_assignment egraph work may still be
+            // queued (e.g. from lazy quantifier instantiations); flush before
+            // checking.
+            z3.drain_merge_queue(self.solver_state);
+            z3.check(self.solver_state)
+        } else {
+            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state)
+        };
+        #[cfg(not(feature = "z3-solver"))]
+        let arith_result =
+            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state);
+
+        match arith_result {
             ArithResult::Unsat(arithmetic_literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
                 {
@@ -404,6 +450,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 // Presence of a key = "we probe-merged this pair this round".
                 let mut probe_pair_uids: DeterministicHashMap<(u32, u32), (u64, u64)> =
                     DeterministicHashMap::default();
+
+                // Snapshot the arithmetic merge queue length so we can discard
+                // any entries added during the probe. Every merge performed by
+                // the probe is speculative and will be backtracked below; if
+                // we let them leak into Z3LazyState, subsequent checks would
+                // see phantom equalities.
+                #[cfg(feature = "z3-solver")]
+                let arith_queue_baseline =
+                    self.solver_state.egraph.arithmetic_merge_queue.len();
 
                 'outer: for set in literals.values() {
                     let mut t = set.iter();
@@ -485,6 +540,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
                 // Undo all remaining successful probe merges.
                 self.solver_state.egraph.backtrack_to(base_level);
+
+                // Drop any queue entries produced by the (now-backtracked) probe.
+                #[cfg(feature = "z3-solver")]
+                self.solver_state
+                    .egraph
+                    .arithmetic_merge_queue
+                    .truncate(arith_queue_baseline);
             }
             ArithResult::None => {}
         }

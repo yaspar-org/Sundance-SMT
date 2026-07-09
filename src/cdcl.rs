@@ -67,6 +67,10 @@ pub fn cdcl_decision_procedure(
         solver.connect_terminator(t);
     }
 
+    #[cfg(feature = "z3-solver")]
+    let z3_lazy = matches!(arithmetic, ArithSolver::Z3Lazy)
+        .then(crate::arithmetic::z3lazy::Z3LazyState::new);
+
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
         solver_state,
@@ -79,6 +83,8 @@ pub fn cdcl_decision_procedure(
         stats: SolverStats::new(),
         pending: None,
         max_arith_conflicts_per_round,
+        #[cfg(feature = "z3-solver")]
+        z3_lazy,
     };
 
     solver.connect_external_propagator(&mut propagator);

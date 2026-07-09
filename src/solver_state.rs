@@ -487,10 +487,15 @@ impl SolverState {
         let num = term.uid();
 
         // Arithmetic term tracking
-        if term.get_sort(self.context.arena()).to_string() == "Int"
-            && !self.arithmetic_terms.contains(&num)
-        {
-            self.arithmetic_terms.push(num);
+        if term.get_sort(self.context.arena()).to_string() == "Int" {
+            if !self.arithmetic_terms.contains(&num) {
+                self.arithmetic_terms.push(num);
+            }
+            // Tag the egraph class as arithmetic so any future merge involving
+            // it (direct or congruence-derived) fires the arithmetic merge
+            // queue for the lazy Z3 backend.
+            let egraph_id = self.to_egraph_id(num);
+            self.egraph.mark_arithmetic(egraph_id);
         }
 
         // Quantifier registration

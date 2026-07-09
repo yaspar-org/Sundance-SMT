@@ -98,6 +98,12 @@ pub trait EgraphTrait {
         lit: Lit,
     ) -> Self::TermId;
 
+    /// Tag `term` as belonging to the arithmetic theory. Any merge (direct or
+    /// congruence-derived) that unifies two classes both containing an
+    /// arithmetic-tagged term will surface as `arithmetic_merges` on the
+    /// `EgraphResult` returned by the enclosing `assert_equal` call.
+    fn mark_arithmetic(&mut self, term: Self::TermId);
+
     // --- Assertions ---
 
     /// Assert `t1 = t2` at the given decision level.

@@ -6,4 +6,6 @@ pub mod lialp;
 pub mod lp;
 pub mod nelsonoppen;
 #[cfg(feature = "z3-solver")]
+pub mod z3lazy;
+#[cfg(feature = "z3-solver")]
 pub mod z3lp;
