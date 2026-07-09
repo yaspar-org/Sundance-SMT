@@ -108,6 +108,10 @@ pub enum FunctionType {
 pub enum Coefficient {
     Term(u32),
     Constant,
+    /// Integer division (div a b) — stores egraph IDs of numerator and denominator
+    Div(u32, u32),
+    /// Integer modulo (mod a b) — stores egraph IDs of numerator and denominator
+    Mod(u32, u32),
 }
 
 /// Represents a linear constraint in the form: left_expr ≤ right_expr or left_expr = right_expr
@@ -395,7 +399,8 @@ pub fn extract_linear_expression(
                     }
                 }
                 "-" => {
-                    // Subtraction: handle unary and binary cases
+                    // Subtraction: (- a) = -a, (- a b c ...) = a - b - c - ...
+                    debug_assert!(!args.is_empty(), "expected subtraction to have arguments");
                     if args.len() == 1 {
                         // Unary minus: -expr
                         let (arg_expr, additional_const) =
@@ -404,24 +409,63 @@ pub fn extract_linear_expression(
                         for (var, coeff) in arg_expr {
                             expr.insert(var, -coeff);
                         }
-                    } else if args.len() == 2 {
-                        // Binary minus: left - right
-                        let (left_expr, additional_const_l) =
+                    } else {
+                        // Left-associative: (- a b c ...) = a - b - c - ...
+                        let (first_expr, additional_const_first) =
                             extract_linear_expression(args[0].uid(), solver_state);
-                        let (right_expr, additional_const_r) =
-                            extract_linear_expression(args[1].uid(), solver_state);
-                        additional_constraints.extend(additional_const_l);
-                        additional_constraints.extend(additional_const_r);
-                        // Add left expression
-                        for (var, coeff) in left_expr {
-                            expr.insert(var, coeff);
+                        additional_constraints.extend(additional_const_first);
+                        for (var, coeff) in first_expr {
+                            *expr.entry(var).or_insert(IBig::from(0)) += coeff;
                         }
-
-                        // Subtract right expression
-                        for (var, coeff) in right_expr {
-                            *expr.entry(var).or_insert(IBig::from(0)) -= coeff;
+                        for arg in args.iter().skip(1) {
+                            let (arg_expr, additional_const) =
+                                extract_linear_expression(arg.uid(), solver_state);
+                            additional_constraints.extend(additional_const);
+                            for (var, coeff) in arg_expr {
+                                *expr.entry(var).or_insert(IBig::from(0)) -= coeff;
+                            }
                         }
                     }
+                }
+                "div" => {
+                    debug_assert!(args.len() == 2, "div requires exactly 2 arguments");
+                    let raw_numerator_id = solver_state.to_egraph_id(args[0].uid());
+                    let numerator_id = solver_state.egraph.find(raw_numerator_id);
+                    if let Some(negated_model) = solver_state
+                        .egraph
+                        .explain_equality(numerator_id, raw_numerator_id)
+                    {
+                        let model_terms: Vec<i32> = negated_model
+                            .into_iter()
+                            .map(|x| -solver_state.make_eq(x.0, x.1))
+                            .collect();
+                        additional_constraints.extend(model_terms);
+                    }
+                    let denominator_id = solver_state.to_egraph_id(args[1].uid());
+                    expr.insert(
+                        Coefficient::Div(numerator_id, denominator_id),
+                        IBig::from(1),
+                    );
+                }
+                "mod" => {
+                    debug_assert!(args.len() == 2, "mod requires exactly 2 arguments");
+                    let raw_numerator_id = solver_state.to_egraph_id(args[0].uid());
+                    let numerator_id = solver_state.egraph.find(raw_numerator_id);
+                    if let Some(negated_model) = solver_state
+                        .egraph
+                        .explain_equality(numerator_id, raw_numerator_id)
+                    {
+                        let model_terms: Vec<i32> = negated_model
+                            .into_iter()
+                            .map(|x| -solver_state.make_eq(x.0, x.1))
+                            .collect();
+                        additional_constraints.extend(model_terms);
+                    }
+                    let denominator_id = solver_state.to_egraph_id(args[1].uid());
+                    expr.insert(
+                        Coefficient::Mod(numerator_id, denominator_id),
+                        IBig::from(1),
+                    );
                 }
                 _ => {
                     let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));

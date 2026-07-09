@@ -1,0 +1,7 @@
+(set-logic QF_LIA)
+; Nested div/mod: (mod (mod (div (- 18) 7) 8) (- 7))
+(declare-fun x0 () Int)
+(assert (<= (- (- 17) (- (- 9) (- (- (- 3) x0) (- 3)))) 9))
+(assert (>= x0 (+ (- (mod (+ x0 (- 7)) 7) (* (- 5) (+ (- 5) x0))) (mod (mod (div (- 18) 7) 8) (- 7)))))
+(assert (< (- (+ (- 6 (- x0 (- 15))) (- 10)) (- (mod x0 4) 20)) (+ 4 (* 3 x0))))
+(check-sat)
