@@ -480,19 +480,113 @@ impl Z3LazyState {
                         );
                     }
                 }
-                // The unsat core can be empty when the inconsistency lives
-                // entirely in unconditionally-asserted merges/defs. That's
-                // unsound to report as `Unsat([])` (CaDiCaL would treat it as
-                // a global contradiction). Fall back to blaming EVERY active
-                // arithmetic literal AND every "merge-provoker" (a SAT lit
-                // whose assignment triggered an egraph merge we pushed).
+                // Merge equalities are asserted unconditionally (not tracked),
+                // so Z3's unsat core won't blame the SAT lits that caused
+                // those merges. We must always include the merge_provoker_lits
+                // in the conflict clause to ensure soundness — CaDiCaL needs
+                // to know the clause depends on those SAT decisions.
+                lits.extend(self.merge_provoker_lits.iter().map(|l| -l));
                 if lits.is_empty() {
+                    // Should never happen: if no tracked lits and no merge
+                    // provokers fired, the problem's definitions alone are
+                    // contradictory, which can't be right. Fall back to
+                    // blaming all active lits rather than asserting unsound [].
                     lits.extend(self.active_lits.iter().map(|l| -l));
-                    lits.extend(self.merge_provoker_lits.iter().map(|l| -l));
                 }
-                ArithResult::Unsat(lits.into_iter().collect(), LiaStats::new())
+                let conflict: Vec<i32> = lits.into_iter().collect();
+                self.print_and_validate_conflict(&conflict, solver_state);
+                ArithResult::Unsat(conflict, LiaStats::new())
             }
             SatResult::Unknown => panic!("z3lazy: Z3 returned unknown"),
+        }
+    }
+
+    /// Print a conflict clause with human-readable term forms, and validate
+    /// it by asking a fresh Z3 solver whether the negated clause is unsat.
+    /// A conflict clause `[l1, l2, ...]` means `l1 ∨ l2 ∨ ...` — it's a
+    /// valid theory conflict iff `¬l1 ∧ ¬l2 ∧ ...` is unsat.
+    ///
+    /// To check the negation: for each `l` in the clause, take the term
+    /// corresponding to `l` with polarity flipped, encode it as a Z3
+    /// constraint using the SAME encoding path we used for the on-trail
+    /// asserts, and check-sat.
+    fn print_and_validate_conflict(
+        &mut self,
+        clause: &[i32],
+        solver_state: &mut SolverState,
+    ) {
+        eprintln!("[z3lazy CONFLICT] clause of {} lits:", clause.len());
+        for &lit in clause {
+            if let Some(term) = solver_state.get_term_from_lit_safe(lit) {
+                eprintln!("  {:5}  =  {}", lit, term);
+            } else {
+                eprintln!("  {:5}  =  <no term>", lit);
+            }
+        }
+
+        // Build the negation of the clause in a fresh Z3 context: for each
+        // `l` in clause, encode `-l`'s underlying atom, assert it. Also
+        // replay pinned_defs so numeric constants and arithmetic apps have
+        // their definitions available.
+        let check_solver = Solver::new();
+        // Include the pinned definitions so `Numeral(5)==5` etc. are in scope.
+        for def in &self.pinned_defs {
+            check_solver.assert(def);
+        }
+        // Also include all merge equalities currently active in the persistent
+        // solver's push stack. Easiest way: assert `var_a == var_b` for every
+        // egraph equality that holds at the current level. We approximate by
+        // walking arithmetic_terms and asserting var_id == var_root when they
+        // differ.
+        for idx in 0..solver_state.arithmetic_terms.len() {
+            let term_id = solver_state.arithmetic_terms[idx];
+            let egraph_id = solver_state.to_egraph_id(term_id);
+            let root = solver_state.egraph.find(egraph_id);
+            if root != egraph_id {
+                let va = self.var_for(egraph_id, solver_state);
+                let vb = self.var_for(root, solver_state);
+                check_solver.assert(&Int::eq(&va, vb));
+            }
+        }
+
+        let mut encoded_any = false;
+        let mut skipped: Vec<i32> = Vec::new();
+        for &lit in clause {
+            // The clause contains the LITERAL to entail. Its NEGATION is what
+            // was known to be true at conflict time. So we assert `-lit`.
+            let neg_lit = -lit;
+            if let Some(constraint) = Self::extract_lazy_constraint(neg_lit, solver_state) {
+                let ast = self.constraint_to_z3(&constraint, solver_state);
+                check_solver.assert(&ast);
+                encoded_any = true;
+            } else {
+                skipped.push(lit);
+            }
+        }
+        if !skipped.is_empty() {
+            eprintln!(
+                "  [validate] skipped {} lit(s) not encodable as Int atoms: {:?}",
+                skipped.len(),
+                skipped
+            );
+        }
+        if !encoded_any {
+            eprintln!("  [validate] no encodable lits — cannot validate");
+            return;
+        }
+        match check_solver.check() {
+            SatResult::Unsat => {
+                eprintln!("  [validate] VALID (fresh Z3 says UNSAT)");
+            }
+            SatResult::Sat => {
+                eprintln!("  [validate] *** INVALID *** (fresh Z3 says SAT!)");
+                if let Some(m) = check_solver.get_model() {
+                    eprintln!("  [validate] counter-model: {}", m);
+                }
+            }
+            SatResult::Unknown => {
+                eprintln!("  [validate] UNKNOWN from fresh Z3");
+            }
         }
     }
 }
