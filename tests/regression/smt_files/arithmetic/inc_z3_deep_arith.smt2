@@ -1,4 +1,4 @@
-; Stress test for lazy Z3 with deeply nested arithmetic and late-arriving merges.
+; Stress test for incremental Z3 with deeply nested arithmetic and late-arriving merges.
 ; Two nested chains that only become contradictory once the merge x = y is
 ; asserted. Each `+`-app has a definitional pinning in Z3 (var == var_child+1),
 ; so the merge must propagate through several levels to expose the conflict.

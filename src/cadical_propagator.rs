@@ -4,7 +4,7 @@
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 #[cfg(feature = "z3-solver")]
-use crate::arithmetic::z3lazy::Z3LazyState;
+use crate::arithmetic::z3incremental::Z3IncrementalState;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
@@ -36,9 +36,9 @@ pub struct CustomExternalPropagator<'a> {
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
     /// Once reached, stop probing further pairs even if unprobed pairs remain.
     pub max_arith_conflicts_per_round: usize,
-    /// Lazy Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Lazy`.
+    /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
     #[cfg(feature = "z3-solver")]
-    pub z3_lazy: Option<Z3LazyState>,
+    pub z3_incremental: Option<Z3IncrementalState>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -189,11 +189,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.solver_state, self.decision_level);
 
-            // Lazy Z3: propagate egraph merges triggered by this assignment,
+            // Incremental Z3: propagate egraph merges triggered by this assignment,
             // then push the literal's own constraint if it's arithmetic.
             #[cfg(feature = "z3-solver")]
             {
-                let new_merge_lits = if let Some(z3) = self.z3_lazy.as_mut() {
+                let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
                     let lits = z3.drain_merge_queue(self.solver_state);
                     z3.on_literal_assignment(*lit, self.solver_state);
                     lits
@@ -306,7 +306,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.solver_state.egraph.notify_new_decision_level();
 
         #[cfg(feature = "z3-solver")]
-        if let Some(z3) = self.z3_lazy.as_mut() {
+        if let Some(z3) = self.z3_incremental.as_mut() {
             z3.notify_new_decision_level();
         }
     }
@@ -347,7 +347,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         #[cfg(feature = "z3-solver")]
         {
-            let new_merge_lits = if let Some(z3) = self.z3_lazy.as_mut() {
+            let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
                 z3.notify_backtrack(level);
                 z3.drain_merge_queue(self.solver_state)
             } else {
@@ -419,12 +419,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
-        // Route through the persistent Z3LazyState when configured; every atom
+        // Route through the persistent Z3IncrementalState when configured; every atom
         // in `model` has already been pushed into it via `notify_assignment`,
         // so we can just call `check` directly. Otherwise fall through to the
         // eager entry point.
         #[cfg(feature = "z3-solver")]
-        let (arith_result, drained_new_lits) = if let Some(z3) = self.z3_lazy.as_mut() {
+        let (arith_result, drained_new_lits) = if let Some(z3) = self.z3_incremental.as_mut() {
             // Merges from post-notify_assignment egraph work may still be
             // queued (e.g. from lazy quantifier instantiations); flush before
             // checking.
@@ -508,7 +508,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         let result = self.solver_state.egraph.assert_equal(x_root, y_root);
                         // Every merge performed by the probe is speculative and
                         // will be backtracked below; drop any queue entries so
-                        // they don't leak into Z3LazyState.
+                        // they don't leak into Z3IncrementalState.
                         let _ = self.solver_state.egraph.drain_arithmetic_equalities();
                         if let Some(c) = result.conflict {
                             // Undo just this conflicting merge; keep earlier merges.
@@ -561,9 +561,28 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
 
                 // Undo all remaining successful probe merges. backtrack_to
-                // clears the arithmetic queue as part of its work, so no
-                // speculative merges leak into the next Z3 check.
+                // clears the arithmetic queue at its start and may repopulate
+                // it via union_to_eclass re-firing (e.g. trichotomy terms just
+                // registered above); route those into Z3 so subsequent checks
+                // see the congruence-derived equalities.
                 self.solver_state.egraph.backtrack_to(base_level);
+                #[cfg(feature = "z3-solver")]
+                {
+                    let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
+                        z3.drain_merge_queue(self.solver_state)
+                    } else {
+                        self.solver_state.egraph.drain_arithmetic_equalities();
+                        Vec::new()
+                    };
+                    for new_lit in new_merge_lits {
+                        self.add_observed_variable(new_lit);
+                        self.add_lit_to_proof_tracer(new_lit);
+                    }
+                }
+                #[cfg(not(feature = "z3-solver"))]
+                {
+                    self.solver_state.egraph.drain_arithmetic_equalities();
+                }
             }
             ArithResult::None => {}
         }

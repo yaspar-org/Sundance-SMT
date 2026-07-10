@@ -509,7 +509,7 @@ impl SolverState {
             }
             // Tag the egraph class as arithmetic so any future merge involving
             // it (direct or congruence-derived) fires the arithmetic merge
-            // queue for the lazy Z3 backend.
+            // queue for the incremental Z3 backend.
             let egraph_id = self.to_egraph_id(num);
             self.egraph.mark_arithmetic(egraph_id);
         }

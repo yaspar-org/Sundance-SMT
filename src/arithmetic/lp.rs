@@ -27,12 +27,12 @@ pub enum ArithSolver {
     Internal,
     #[cfg(feature = "z3-solver")]
     Z3,
-    /// Lazy Z3: keep a persistent z3::Solver across cb_check_found_model calls,
+    /// Incremental Z3: keep a persistent z3::Solver across cb_check_found_model calls,
     /// pushing/popping constraints in sync with CaDiCaL's decision trail and
     /// propagating egraph merges into Z3 as they happen.
     #[cfg(feature = "z3-solver")]
-    #[value(name = "z3lazy", alias = "z3-lazy")]
-    Z3Lazy,
+    #[value(name = "z3incremental", alias = "z3-incremental")]
+    Z3Incremental,
     None,
 }
 
@@ -43,7 +43,7 @@ impl Display for ArithSolver {
             #[cfg(feature = "z3-solver")]
             ArithSolver::Z3 => "z3".fmt(f),
             #[cfg(feature = "z3-solver")]
-            ArithSolver::Z3Lazy => "z3lazy".fmt(f),
+            ArithSolver::Z3Incremental => "z3incremental".fmt(f),
             ArithSolver::None => "none".fmt(f),
         }
     }
@@ -58,7 +58,7 @@ impl fmt::Display for ArithSolverParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'z3', 'z3lazy', 'none'",
+            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'z3', 'z3incremental', 'none'",
             self.invalid_input
         )
     }
@@ -84,7 +84,7 @@ impl FromStr for ArithSolver {
             #[cfg(feature = "z3-solver")]
             "z3" => Ok(ArithSolver::Z3),
             #[cfg(feature = "z3-solver")]
-            "z3lazy" => Ok(ArithSolver::Z3Lazy),
+            "z3incremental" => Ok(ArithSolver::Z3Incremental),
             "none" => Ok(ArithSolver::None),
             _ => Err(ArithSolverParseError {
                 invalid_input: s.to_string(),
@@ -103,15 +103,15 @@ pub fn check_integer_constraints_satisfiable(
         ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, solver_state),
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, solver_state),
-        // Z3Lazy is not driven through this eager entry point — the propagator
-        // maintains a persistent z3::Solver and calls into Z3LazyState directly
+        // Z3Incremental is not driven through this eager entry point — the propagator
+        // maintains a persistent z3::Solver and calls into Z3IncrementalState directly
         // from cb_check_found_model. Reaching this arm would mean the wiring
         // in cadical_propagator was bypassed.
         #[cfg(feature = "z3-solver")]
-        ArithSolver::Z3Lazy => panic!(
-            "check_integer_constraints_satisfiable called with Z3Lazy — the \
-             lazy backend must be driven via the propagator's persistent \
-             Z3LazyState, not this eager entry point"
+        ArithSolver::Z3Incremental => panic!(
+            "check_integer_constraints_satisfiable called with Z3Incremental — the \
+             incremental backend must be driven via the propagator's persistent \
+             Z3IncrementalState, not this eager entry point"
         ),
         ArithSolver::None => ArithResult::None,
     }

@@ -69,13 +69,16 @@ pub fn cdcl_decision_procedure(
     }
 
     #[cfg(feature = "z3-solver")]
-    let using_z3_lazy = matches!(arithmetic, ArithSolver::Z3Lazy);
+    let using_z3_incremental = matches!(arithmetic, ArithSolver::Z3Incremental);
     #[cfg(not(feature = "z3-solver"))]
-    let using_z3_lazy = false;
-    solver_state.egraph.incremental_arithmetic(using_z3_lazy);
+    let using_z3_incremental = false;
+    solver_state
+        .egraph
+        .incremental_arithmetic(using_z3_incremental);
 
     #[cfg(feature = "z3-solver")]
-    let z3_lazy = using_z3_lazy.then(crate::arithmetic::z3lazy::Z3LazyState::new);
+    let z3_incremental =
+        using_z3_incremental.then(crate::arithmetic::z3incremental::Z3IncrementalState::new);
 
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
@@ -90,7 +93,7 @@ pub fn cdcl_decision_procedure(
         pending: None,
         max_arith_conflicts_per_round,
         #[cfg(feature = "z3-solver")]
-        z3_lazy,
+        z3_incremental,
     };
 
     solver.connect_external_propagator(&mut propagator);

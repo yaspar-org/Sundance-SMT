@@ -50,9 +50,15 @@ jobs:
       matrix:
         os: [ ubuntu-latest, macos-latest ]
         rust: [ stable ]
-        features:
-          - 'local-z3'
-          - ''
+        include:
+          # No z3-solver feature: only the internal arithmetic backend is compiled in.
+          - features: ''
+            arithmetic: 'internal'
+          # z3-solver enabled: exercise the two z3 backends.
+          - features: 'local-z3'
+            arithmetic: 'z3'
+          - features: 'local-z3'
+            arithmetic: 'z3incremental'
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -82,6 +88,8 @@ jobs:
         uses: ./.github/actions/setup-z3
 
       - name: Run tests
+        env:
+          SUNDANCE_ARITHMETIC: ${{ matrix.arithmetic }}
         run: cargo test --release --no-default-features --features "${{ matrix.features }}" -- --nocapture
 
   lints:

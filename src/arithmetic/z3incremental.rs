@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lazy Z3 arithmetic backend.
+//! Incremental Z3 arithmetic backend.
 //!
 //! Design:
 //! * Persistent `z3::Solver` lives for the whole search.
@@ -60,8 +60,8 @@ fn parse_z3_model_int(s: &str) -> IBig {
     }
 }
 
-/// State for the lazy Z3 arithmetic backend.
-pub struct Z3LazyState {
+/// State for the incremental Z3 arithmetic backend.
+pub struct Z3IncrementalState {
     /// The persistent Z3 solver.
     solver: Solver,
     /// egraph_id -> its Z3 Int variable. Populated on demand.
@@ -98,7 +98,7 @@ pub struct Z3LazyState {
     current_level: usize,
 }
 
-impl Z3LazyState {
+impl Z3IncrementalState {
     pub fn new() -> Self {
         Self {
             solver: Solver::new(),
@@ -166,7 +166,7 @@ impl Z3LazyState {
                 }
                 let def = Int::eq(&v, rhs);
                 self.pinned_defs.push(def);
-                debug_println!(21, 0, "[z3lazy] def var_{}=={:?}", egraph_id, entries);
+                debug_println!(21, 0, "[z3inc] def var_{}=={:?}", egraph_id, entries);
             }
         }
         v
@@ -262,7 +262,7 @@ impl Z3LazyState {
             // the egraph — positive assertions produce merges that flow through
             // `drain_merge_queue`; negative assertions become egraph
             // disequalities. We intentionally do NOT encode them directly here,
-            // so lazy Z3 sees exactly one source of truth per equality.
+            // so incremental Z3 sees exactly one source of truth per equality.
             _ => None,
         }
     }
@@ -324,7 +324,7 @@ impl Z3LazyState {
         debug_println!(
             21,
             0,
-            "[z3lazy] pushed atom lit={} at level {}",
+            "[z3inc] pushed atom lit={} at level {}",
             lit,
             self.current_level
         );
@@ -380,7 +380,7 @@ impl Z3LazyState {
             debug_println!(
                 21,
                 0,
-                "[z3lazy] pushed egraph merge var_{}==var_{} as lit {} at level {}",
+                "[z3inc] pushed egraph merge var_{}==var_{} as lit {} at level {}",
                 a,
                 b,
                 lit,
@@ -394,7 +394,7 @@ impl Z3LazyState {
     /// model value so the caller's model-based Nelson-Oppen probe can run.
     /// On UNSAT, translate the unsat core back into SAT literals.
     pub fn check(&mut self, solver_state: &mut SolverState) -> ArithResult {
-        debug_println!(21, 0, "[z3lazy] check() at level {}", self.current_level);
+        debug_println!(21, 0, "[z3inc] check() at level {}", self.current_level);
         // Ensure every arithmetic term has been introduced to Z3 with its
         // definitional equality pinned. If we defer this until the
         // model-evaluation loop below, Z3 has already produced a model
@@ -435,7 +435,7 @@ impl Z3LazyState {
                         buckets.entry(ibig).or_default().insert(*term_id);
                     }
                 }
-                debug_println!(21, 0, "[z3lazy] SAT buckets={:?}", buckets);
+                debug_println!(21, 0, "[z3inc] SAT buckets={:?}", buckets);
                 ArithResult::Sat(buckets, LiaStats::new())
             }
             SatResult::Unsat => {
@@ -472,12 +472,12 @@ impl Z3LazyState {
                 let conflict: Vec<i32> = lits.into_iter().collect();
                 ArithResult::Unsat(conflict, LiaStats::new())
             }
-            SatResult::Unknown => panic!("z3lazy: Z3 returned unknown"),
+            SatResult::Unknown => panic!("z3incremental: Z3 returned unknown"),
         }
     }
 }
 
-impl Default for Z3LazyState {
+impl Default for Z3IncrementalState {
     fn default() -> Self {
         Self::new()
     }

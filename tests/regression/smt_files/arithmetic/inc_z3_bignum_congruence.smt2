@@ -1,4 +1,4 @@
-; Stress test for lazy Z3 with big-integer constants (2^64-scale) combined with
+; Stress test for incremental Z3 with big-integer constants (2^64-scale) combined with
 ; egraph congruence. Analog of the atmosphere_reduced pattern:
 ; uHi(SZ) via SZ==64 congruence, uHi(64)==2^64 constraint, x==uHi(SZ)-1,
 ; and a contradictory x==0.

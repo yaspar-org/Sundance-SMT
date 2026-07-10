@@ -90,9 +90,17 @@ fn regression_test() {
             print!("Testing file: {} ... ", relative_path);
             io::stdout().flush().unwrap();
 
+            // Optional arithmetic override (CI matrix passes SUNDANCE_ARITHMETIC to
+            // exercise every backend against the same test corpus).
+            let arithmetic = env::var("SUNDANCE_ARITHMETIC").ok();
+
             // Run solver with timeout
-            let child = Command::new("target/release/sundance-smt")
-                .args([path.to_str().unwrap()])
+            let mut cmd = Command::new("target/release/sundance-smt");
+            cmd.arg(path.to_str().unwrap());
+            if let Some(ref a) = arithmetic {
+                cmd.arg("--arithmetic").arg(a);
+            }
+            let child = cmd
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
