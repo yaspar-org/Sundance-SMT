@@ -518,6 +518,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         debug_println!(11, 0, "Starting quantifier instantiations");
+        self.stats.instantiation_rounds += 1;
         let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
 
         if pending.is_empty() {
