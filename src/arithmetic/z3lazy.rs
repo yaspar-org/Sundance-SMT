@@ -66,14 +66,14 @@ pub struct Z3LazyState {
     solver: Solver,
     /// egraph_id -> its Z3 Int variable. Populated on demand.
     var_map: DeterministicHashMap<u32, Int>,
-    /// SAT literal (unsigned, positive) -> its tracker Bool used by
-    /// `assert_and_track`, so that an unsat core recovers the literal.
-    /// Present iff the literal has been encoded into the solver at least once.
-    tracker_by_lit: DeterministicHashMap<i32, Bool>,
-    /// tracker string name -> signed SAT literal that produced it. Populated
-    /// alongside `tracker_by_lit`; we use `to_string()` to look up in the
-    /// unsat core because z3-rs `Bool` doesn't hash by identity.
-    lit_by_tracker_name: DeterministicHashMap<String, i32>,
+    /// abs(SAT literal) -> its tracker Bool used by `assert_and_track`, so
+    /// that an unsat core recovers the underlying variable. CaDiCaL's trail
+    /// guarantees at most one polarity of a given variable is asserted at any
+    /// time, so a single tracker per abs-lit is sufficient: the constraint
+    /// asserted under it is `constraint` when `+lit` is pushed and
+    /// `¬constraint` when `-lit` is pushed. Present iff the abs-lit has been
+    /// encoded into the solver at least once.
+    tracker_by_abs_lit: DeterministicHashMap<i32, Bool>,
     /// Absolute value of literals for which we've already decided
     /// "not arithmetic" — skip re-parsing on every re-assignment.
     non_arithmetic_lits: DeterministicHashSet<i32>,
@@ -103,8 +103,7 @@ impl Z3LazyState {
         Self {
             solver: Solver::new(),
             var_map: DeterministicHashMap::new(),
-            tracker_by_lit: DeterministicHashMap::new(),
-            lit_by_tracker_name: DeterministicHashMap::new(),
+            tracker_by_abs_lit: DeterministicHashMap::new(),
             non_arithmetic_lits: DeterministicHashSet::default(),
             active_lits: DeterministicHashSet::default(),
             lits_by_level: vec![Vec::new()],
@@ -311,10 +310,11 @@ impl Z3LazyState {
             return;
         };
         let ast = self.constraint_to_z3(&constraint, solver_state);
-        let tracker_name = format!("lit_{lit}");
-        let tracker = Bool::new_const(tracker_name.clone());
-        self.tracker_by_lit.insert(lit, tracker.clone());
-        self.lit_by_tracker_name.insert(tracker_name, lit);
+        let tracker = self
+            .tracker_by_abs_lit
+            .entry(abs_lit)
+            .or_insert_with(|| Bool::new_const(format!("lit_{abs_lit}")))
+            .clone();
         self.ensure_level_slot();
         self.solver.push();
         self.push_counts[self.current_level] += 1;
@@ -352,7 +352,8 @@ impl Z3LazyState {
             // before, otherwise allocates a fresh one. Fresh lits get returned
             // to the caller so CaDiCaL can observe them.
             let lit = solver_state.make_eq(a, b);
-            if !self.tracker_by_lit.contains_key(&lit) && !self.tracker_by_lit.contains_key(&-lit) {
+            let abs_lit = lit.abs();
+            if !self.tracker_by_abs_lit.contains_key(&abs_lit) {
                 new_lits.push(lit);
             }
             // Skip if already asserted at some level — duplicate merge
@@ -366,10 +367,11 @@ impl Z3LazyState {
             let va = self.var_for(a, solver_state);
             let vb = self.var_for(b, solver_state);
             let ast = Int::eq(&va, vb);
-            let tracker_name = format!("lit_{lit}");
-            let tracker = Bool::new_const(tracker_name.clone());
-            self.tracker_by_lit.insert(lit, tracker.clone());
-            self.lit_by_tracker_name.insert(tracker_name, lit);
+            let tracker = self
+                .tracker_by_abs_lit
+                .entry(abs_lit)
+                .or_insert_with(|| Bool::new_const(format!("lit_{abs_lit}")))
+                .clone();
             self.solver.push();
             self.push_counts[self.current_level] += 1;
             self.active_lits.insert(lit);
@@ -393,14 +395,13 @@ impl Z3LazyState {
     /// On UNSAT, translate the unsat core back into SAT literals.
     pub fn check(&mut self, solver_state: &mut SolverState) -> ArithResult {
         debug_println!(21, 0, "[z3lazy] check() at level {}", self.current_level);
-        // Ensure every arithmetic-term class root has been introduced to Z3
-        // with its definitional equality pinned. If we defer this until the
+        // Ensure every arithmetic term has been introduced to Z3 with its
+        // definitional equality pinned. If we defer this until the
         // model-evaluation loop below, Z3 has already produced a model
         // without seeing the definitions and the buckets are meaningless.
-        let n_arith = solver_state.arithmetic_terms.len();
-        for idx in 0..n_arith {
-            let term_id = solver_state.arithmetic_terms[idx];
-            let egraph_id = solver_state.to_egraph_id(term_id);
+        let arithmetic_terms = solver_state.arithmetic_terms.clone();
+        for term_id in &arithmetic_terms {
+            let egraph_id = solver_state.to_egraph_id(*term_id);
             let _ = self.var_for(egraph_id, solver_state);
         }
         // Every arithmetic literal was pushed via `assert_and_track(constraint,
@@ -412,7 +413,7 @@ impl Z3LazyState {
         let mut assumptions: Vec<Bool> = self
             .active_lits
             .iter()
-            .filter_map(|lit| self.tracker_by_lit.get(lit).cloned())
+            .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()).cloned())
             .collect();
         assumptions.extend(self.pinned_defs.iter().cloned());
         match self.solver.check_assumptions(&assumptions) {
@@ -420,9 +421,8 @@ impl Z3LazyState {
                 let model = self.solver.get_model().unwrap();
                 let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
                     DeterministicHashMap::new();
-                for idx in 0..solver_state.arithmetic_terms.len() {
-                    let term_id = solver_state.arithmetic_terms[idx];
-                    let egraph_id = solver_state.to_egraph_id(term_id);
+                for term_id in &arithmetic_terms {
+                    let egraph_id = solver_state.to_egraph_id(*term_id);
                     // Only report one representative per union-find class —
                     // otherwise the model-based probe wastes work merging
                     // pairs that are already equal.
@@ -432,7 +432,7 @@ impl Z3LazyState {
                     let v = self.var_for(egraph_id, solver_state);
                     if let Some(val) = model.eval(&v, true) {
                         let ibig = parse_z3_model_int(&val.to_string());
-                        buckets.entry(ibig).or_default().insert(term_id);
+                        buckets.entry(ibig).or_default().insert(*term_id);
                     }
                 }
                 debug_println!(21, 0, "[z3lazy] SAT buckets={:?}", buckets);
@@ -440,20 +440,24 @@ impl Z3LazyState {
             }
             SatResult::Unsat => {
                 let core = self.solver.get_unsat_core();
-                let mut lits: DeterministicHashSet<i32> = DeterministicHashSet::default();
-                for ast in &core {
-                    let name = ast.to_string();
-                    if let Some(&lit) = self.lit_by_tracker_name.get(&name) {
-                        lits.insert(-lit);
-                    } else {
-                        debug_println!(
-                            21,
-                            0,
-                            "[z3lazy] unsat core contained unknown tracker: {}",
-                            name
-                        );
-                    }
-                }
+                // Trackers were named `lit_{abs_lit}`; the core may also
+                // contain pinned-def assumptions (raw equalities), which we
+                // skip. For each real tracker, `active_lits` holds exactly
+                // one polarity of the variable — that's the signed lit.
+                let mut lits: DeterministicHashSet<i32> = core
+                    .iter()
+                    .filter_map(|ast| {
+                        let raw = ast.to_string();
+                        let name = raw.trim_matches('|');
+                        let abs_lit: i32 = name.strip_prefix("lit_")?.parse().ok()?;
+                        let signed = if self.active_lits.contains(&abs_lit) {
+                            abs_lit
+                        } else {
+                            -abs_lit
+                        };
+                        Some(-signed)
+                    })
+                    .collect();
                 // Merges are now tracked via `assert_and_track` (see
                 // `drain_merge_queue`), so Z3's unsat core cites exactly the
                 // merge lits (via `make_eq`-allocated SAT lits) that were

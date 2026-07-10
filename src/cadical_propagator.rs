@@ -460,7 +460,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
             ArithResult::Sat(literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
-                assert!(
+                debug_assert!(
                     self.max_arith_conflicts_per_round > 0,
                     "max_arith_conflicts_per_round must be > 0"
                 );
