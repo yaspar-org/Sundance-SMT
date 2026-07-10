@@ -1097,7 +1097,10 @@ impl Egraph {
         // same-sort merges are legal), so both new roots inherit the flag.
         let merged_root_arithmetic = matches!(
             &self.proof_forest[self.find(*child) as usize],
-            ProofForestEdge::Root { arithmetic: true, .. }
+            ProofForestEdge::Root {
+                arithmetic: true,
+                ..
+            }
         );
 
         let child_root = ProofForestEdge::Root {
@@ -1224,11 +1227,17 @@ impl Egraph {
         // subsequent merges through it stay tagged).
         let x_root_arithmetic = matches!(
             &self.proof_forest[x_root as usize],
-            ProofForestEdge::Root { arithmetic: true, .. }
+            ProofForestEdge::Root {
+                arithmetic: true,
+                ..
+            }
         );
         let y_root_arithmetic = matches!(
             &self.proof_forest[y_root as usize],
-            ProofForestEdge::Root { arithmetic: true, .. }
+            ProofForestEdge::Root {
+                arithmetic: true,
+                ..
+            }
         );
         let merge_is_arithmetic = x_root_arithmetic || y_root_arithmetic;
         if merge_is_arithmetic {

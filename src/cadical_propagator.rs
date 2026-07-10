@@ -192,9 +192,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             // Lazy Z3: propagate egraph merges triggered by this assignment,
             // then push the literal's own constraint if it's arithmetic.
             #[cfg(feature = "z3-solver")]
-            if let Some(z3) = self.z3_lazy.as_mut() {
-                z3.drain_merge_queue(self.solver_state, Some(*lit));
-                z3.on_literal_assignment(*lit, self.solver_state);
+            {
+                let new_merge_lits = if let Some(z3) = self.z3_lazy.as_mut() {
+                    let lits = z3.drain_merge_queue(self.solver_state);
+                    z3.on_literal_assignment(*lit, self.solver_state);
+                    lits
+                } else {
+                    Vec::new()
+                };
+                for new_lit in new_merge_lits {
+                    self.add_observed_variable(new_lit);
+                    self.add_lit_to_proof_tracer(new_lit);
+                }
             }
 
             if let Some(negated_model_or_datatype_constraints) =
@@ -335,9 +344,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.solver_state.egraph.backtrack_to(level);
 
         #[cfg(feature = "z3-solver")]
-        if let Some(z3) = self.z3_lazy.as_mut() {
-            z3.notify_backtrack(level);
-            z3.drain_merge_queue(self.solver_state, None);
+        {
+            let new_merge_lits = if let Some(z3) = self.z3_lazy.as_mut() {
+                z3.notify_backtrack(level);
+                z3.drain_merge_queue(self.solver_state)
+            } else {
+                Vec::new()
+            };
+            for new_lit in new_merge_lits {
+                self.add_observed_variable(new_lit);
+                self.add_lit_to_proof_tracer(new_lit);
+            }
         }
 
         debug_println!(16, 0, "Ending backtracking at level {}", level);
@@ -405,16 +422,24 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // so we can just call `check` directly. Otherwise fall through to the
         // eager entry point.
         #[cfg(feature = "z3-solver")]
-        let arith_result = if let Some(z3) = self.z3_lazy.as_mut() {
+        let (arith_result, drained_new_lits) = if let Some(z3) = self.z3_lazy.as_mut() {
             // Merges from post-notify_assignment egraph work may still be
             // queued (e.g. from lazy quantifier instantiations); flush before
-            // checking. No specific provoker here — attribute to all active
-            // lits in the fallback conflict clause.
-            z3.drain_merge_queue(self.solver_state, None);
-            z3.check(self.solver_state)
+            // checking.
+            let new_lits = z3.drain_merge_queue(self.solver_state);
+            let r = z3.check(self.solver_state);
+            (r, new_lits)
         } else {
-            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state)
+            (
+                check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state),
+                Vec::<i32>::new(),
+            )
         };
+        #[cfg(feature = "z3-solver")]
+        for new_lit in drained_new_lits {
+            self.add_observed_variable(new_lit);
+            self.add_lit_to_proof_tracer(new_lit);
+        }
         #[cfg(not(feature = "z3-solver"))]
         let arith_result =
             check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state);
@@ -458,8 +483,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 // we let them leak into Z3LazyState, subsequent checks would
                 // see phantom equalities.
                 #[cfg(feature = "z3-solver")]
-                let arith_queue_baseline =
-                    self.solver_state.egraph.arithmetic_merge_queue.len();
+                let arith_queue_baseline = self.solver_state.egraph.arithmetic_merge_queue.len();
 
                 'outer: for set in literals.values() {
                     let mut t = set.iter();

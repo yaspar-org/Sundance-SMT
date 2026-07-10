@@ -267,11 +267,27 @@ impl SolverState {
         } else if y == false_id {
             -self.get_lit_from_u64(self.to_solver_uid(x))
         } else {
+            // Try both argument orders: some equality atoms may have been
+            // registered under the user's original ordering (a, b) while a
+            // congruence-derived merge produces (b, a) or vice versa. To keep
+            // conflict clauses tight and avoid `(= a b)` and `(= b a)` as
+            // distinct lits, reuse an existing lit when either orientation is
+            // already known.
             let sx = self.to_solver_uid(x);
             let sy = self.to_solver_uid(y);
-            let eq_term_class = self.context.eq(self.get_term(sx), self.get_term(sy));
-            self.insert_predecessor(&eq_term_class, None, None, true);
-            self.get_or_allocate_lit_for_term(&eq_term_class)
+            let tx = self.get_term(sx);
+            let ty = self.get_term(sy);
+            let eq_xy = self.context.eq(tx.clone(), ty.clone());
+            if let Some(lit) = self.cnf_cache.var_map.get(&eq_xy.uid()).copied() {
+                return lit;
+            }
+            let eq_yx = self.context.eq(ty, tx);
+            if let Some(lit) = self.cnf_cache.var_map.get(&eq_yx.uid()).copied() {
+                return lit;
+            }
+            // Neither orientation exists yet — allocate for (x, y).
+            self.insert_predecessor(&eq_xy, None, None, true);
+            self.get_or_allocate_lit_for_term(&eq_xy)
         }
     }
 
