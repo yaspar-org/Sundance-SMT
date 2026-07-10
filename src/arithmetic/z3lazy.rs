@@ -14,7 +14,7 @@
 //! * Arithmetic literals from CaDiCaL's trail (`notify_assignment`) are
 //!   translated once, cached by literal, and pushed with `assert_and_track`
 //!   so that an unsat core maps back to SAT literals.
-//! * Egraph merges from `Egraph::arithmetic_merge_queue` are drained by the
+//! * Egraph merges from `EgraphTrait::drain_arithmetic_equalities` are drained by the
 //!   propagator: each merge is turned into `make_eq(a, b)` (allocating a SAT
 //!   lit for the equality if one didn't exist) and asserted via
 //!   `assert_and_track` under that lit — so the unsat core blames merges
@@ -340,7 +340,7 @@ impl Z3LazyState {
     /// Returns the list of freshly-allocated SAT lits so the caller can
     /// register them as observed with CaDiCaL and the proof tracer.
     pub fn drain_merge_queue(&mut self, solver_state: &mut SolverState) -> Vec<i32> {
-        let merges = std::mem::take(&mut solver_state.egraph.arithmetic_merge_queue);
+        let merges = solver_state.egraph.drain_arithmetic_equalities();
         if merges.is_empty() {
             return Vec::new();
         }

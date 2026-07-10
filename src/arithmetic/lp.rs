@@ -31,6 +31,7 @@ pub enum ArithSolver {
     /// pushing/popping constraints in sync with CaDiCaL's decision trail and
     /// propagating egraph merges into Z3 as they happen.
     #[cfg(feature = "z3-solver")]
+    #[value(name = "z3lazy", alias = "z3-lazy")]
     Z3Lazy,
     None,
 }
@@ -57,7 +58,7 @@ impl fmt::Display for ArithSolverParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'z3', 'none'",
+            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'z3', 'z3lazy', 'none'",
             self.invalid_input
         )
     }

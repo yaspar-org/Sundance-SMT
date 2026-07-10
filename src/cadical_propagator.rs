@@ -303,6 +303,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         self.solver_state.hash_at_level[self.decision_level] = self.solver_state.current_hash;
 
+        self.solver_state.egraph.notify_new_decision_level();
+
         #[cfg(feature = "z3-solver")]
         if let Some(z3) = self.z3_lazy.as_mut() {
             z3.notify_new_decision_level();
@@ -337,7 +339,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.decision_level = level;
 
         // Delegate to egraph for all egraph-internal backtracking. Note:
-        // `backtrack_to` internally clears the arithmetic_merge_queue and
+        // `backtrack_to` internally clears pending arithmetic equalities and
         // then re-fires any congruence merges triggered by the `union_to_eclass`
         // replay, so on return the queue contains exactly the merges that hold
         // at the post-backtrack level and need to be conveyed to Z3.
@@ -470,20 +472,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 // successful earlier merges stay in place. Collect all conflicts
                 // found this round, then backtrack the entire probe stack.
                 let base_level = self.decision_level;
-                let mut next_probe_level = base_level + 1;
+                let mut probe_level = base_level;
                 let mut conflicts: Vec<Conflict<u32>> = Vec::new();
                 // Canonical (egraph_root, egraph_root) pair -> (solver_uid, solver_uid).
                 // Presence of a key = "we probe-merged this pair this round".
                 let mut probe_pair_uids: DeterministicHashMap<(u32, u32), (u64, u64)> =
                     DeterministicHashMap::default();
-
-                // Snapshot the arithmetic merge queue length so we can discard
-                // any entries added during the probe. Every merge performed by
-                // the probe is speculative and will be backtracked below; if
-                // we let them leak into Z3LazyState, subsequent checks would
-                // see phantom equalities.
-                #[cfg(feature = "z3-solver")]
-                let arith_queue_baseline = self.solver_state.egraph.arithmetic_merge_queue.len();
 
                 'outer: for set in literals.values() {
                     let mut t = set.iter();
@@ -507,16 +501,19 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             (y_root, x_root)
                         };
                         probe_pair_uids.insert((lo_root, hi_root), (x, y));
-                        let attempt_level = next_probe_level;
-                        next_probe_level += 1;
-                        let result =
-                            self.solver_state
-                                .egraph
-                                .assert_equal(x_root, y_root, attempt_level);
+                        // Bump the egraph's decision level so this speculative
+                        // merge can be undone individually if it conflicts.
+                        self.solver_state.egraph.notify_new_decision_level();
+                        probe_level += 1;
+                        let result = self.solver_state.egraph.assert_equal(x_root, y_root);
+                        // Every merge performed by the probe is speculative and
+                        // will be backtracked below; drop any queue entries so
+                        // they don't leak into Z3LazyState.
+                        let _ = self.solver_state.egraph.drain_arithmetic_equalities();
                         if let Some(c) = result.conflict {
                             // Undo just this conflicting merge; keep earlier merges.
-                            self.solver_state.egraph.backtrack_to(attempt_level - 1);
-                            next_probe_level = attempt_level;
+                            self.solver_state.egraph.backtrack_to(probe_level - 1);
+                            probe_level -= 1;
                             conflicts.push(c);
                             if conflicts.len() >= self.max_arith_conflicts_per_round {
                                 break 'outer;
@@ -563,15 +560,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     self.disequalities.borrow_mut().push(conflict_clause);
                 }
 
-                // Undo all remaining successful probe merges.
+                // Undo all remaining successful probe merges. backtrack_to
+                // clears the arithmetic queue as part of its work, so no
+                // speculative merges leak into the next Z3 check.
                 self.solver_state.egraph.backtrack_to(base_level);
-
-                // Drop any queue entries produced by the (now-backtracked) probe.
-                #[cfg(feature = "z3-solver")]
-                self.solver_state
-                    .egraph
-                    .arithmetic_merge_queue
-                    .truncate(arith_queue_baseline);
             }
             ArithResult::None => {}
         }

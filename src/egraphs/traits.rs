@@ -98,24 +98,34 @@ pub trait EgraphTrait {
         lit: Lit,
     ) -> Self::TermId;
 
-    /// Tag `term` as belonging to the arithmetic theory. Any merge (direct or
-    /// congruence-derived) that unifies two classes both containing an
-    /// arithmetic-tagged term will surface as `arithmetic_merges` on the
-    /// `EgraphResult` returned by the enclosing `assert_equal` call.
+    /// Tag `term` as belonging to the arithmetic theory. When incremental
+    /// arithmetic is enabled, any merge (direct or congruence-derived) that
+    /// unifies two arithmetic-tagged classes is appended to the arithmetic
+    /// equalities queue, drainable via `drain_arithmetic_equalities`.
     fn mark_arithmetic(&mut self, term: Self::TermId);
+
+    /// Enable or disable arithmetic equality collection. When disabled, merges
+    /// are not queued at all (no per-merge cost).
+    fn incremental_arithmetic(&mut self, enabled: bool);
+
+    /// Drain pending arithmetic equalities produced by egraph merges since the
+    /// last drain. Consumers must drain before advancing the decision level:
+    /// `notify_new_decision_level` requires the queue to be empty.
+    fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
+
+    // --- Decision level ---
+
+    /// Advance the egraph's internal decision level by one. The arithmetic
+    /// equalities queue must be empty when this is called (debug-asserted).
+    fn notify_new_decision_level(&mut self);
 
     // --- Assertions ---
 
-    /// Assert `t1 = t2` at the given decision level.
+    /// Assert `t1 = t2` at the current decision level.
     /// Performs congruence closure. Returns a conflict if a disequality is violated.
-    fn assert_equal(
-        &mut self,
-        t1: Self::TermId,
-        t2: Self::TermId,
-        level: usize,
-    ) -> EgraphResult<Self::TermId>;
+    fn assert_equal(&mut self, t1: Self::TermId, t2: Self::TermId) -> EgraphResult<Self::TermId>;
 
-    /// Assert `t1 ≠ t2` at the given decision level.
+    /// Assert `t1 ≠ t2` at the current decision level.
     /// `lit` is the SAT literal that caused this disequality (for conflict reporting).
     /// Returns a conflict if `t1` and `t2` are already in the same equivalence class.
     fn assert_disequal(
@@ -123,17 +133,11 @@ pub trait EgraphTrait {
         t1: Self::TermId,
         t2: Self::TermId,
         lit: Lit,
-        level: usize,
     ) -> EgraphResult<Self::TermId>;
 
-    /// Assert all terms in `terms` are pairwise distinct at the given decision level.
+    /// Assert all terms in `terms` are pairwise distinct at the current decision level.
     /// `lit` is the SAT literal for the distinct assertion.
-    fn assert_distinct(
-        &mut self,
-        terms: &[Self::TermId],
-        lit: Lit,
-        level: usize,
-    ) -> EgraphResult<Self::TermId>;
+    fn assert_distinct(&mut self, terms: &[Self::TermId], lit: Lit) -> EgraphResult<Self::TermId>;
 
     // --- Queries ---
 

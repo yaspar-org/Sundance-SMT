@@ -629,9 +629,7 @@ pub fn process_assignment(
             t,
             true_egraph_id
         );
-        let union_result = solver_state
-            .egraph
-            .assert_equal(egraph_t, true_egraph_id, level);
+        let union_result = solver_state.egraph.assert_equal(egraph_t, true_egraph_id);
         if let Some(conflict) = union_result.conflict {
             let mut model_terms: Vec<i32> = conflict
                 .equalities
@@ -655,9 +653,7 @@ pub fn process_assignment(
             t,
             false_egraph_id
         );
-        let union_result = solver_state
-            .egraph
-            .assert_equal(egraph_t, false_egraph_id, level);
+        let union_result = solver_state.egraph.assert_equal(egraph_t, false_egraph_id);
         if let Some(conflict) = union_result.conflict {
             let mut model_terms: Vec<i32> = conflict
                 .equalities
@@ -760,7 +756,7 @@ pub fn process_assignment(
                 }
             }
         }
-        Assertion::Equality { t1, t2, level, .. } => {
+        Assertion::Equality { t1, t2, .. } => {
             debug_println!(
                 16,
                 0,
@@ -771,7 +767,7 @@ pub fn process_assignment(
 
             let et1 = solver_state.to_egraph_id(t1);
             let et2 = solver_state.to_egraph_id(t2);
-            let union_result = solver_state.egraph.assert_equal(et1, et2, level);
+            let union_result = solver_state.egraph.assert_equal(et1, et2);
             if let Some(conflict) = union_result.conflict {
                 let mut model_terms: Vec<i32> = conflict
                     .equalities
@@ -798,7 +794,7 @@ pub fn process_assignment(
 
             let et1 = solver_state.to_egraph_id(t1);
             let et2 = solver_state.to_egraph_id(t2);
-            let result = solver_state.egraph.assert_disequal(et1, et2, lit, level);
+            let result = solver_state.egraph.assert_disequal(et1, et2, lit);
             if let Some(conflict) = result.conflict {
                 let mut model_terms: Vec<i32> = conflict
                     .equalities
@@ -820,14 +816,12 @@ pub fn process_assignment(
             }
             None
         }
-        Assertion::Distinct { terms, level, .. } => {
+        Assertion::Distinct { terms, .. } => {
             let egraph_terms: Vec<u32> = terms
                 .iter()
                 .map(|t| solver_state.to_egraph_id(*t))
                 .collect();
-            let result = solver_state
-                .egraph
-                .assert_distinct(&egraph_terms, lit, level);
+            let result = solver_state.egraph.assert_distinct(&egraph_terms, lit);
             if let Some(conflict) = result.conflict {
                 let mut model_terms: Vec<i32> = conflict
                     .equalities

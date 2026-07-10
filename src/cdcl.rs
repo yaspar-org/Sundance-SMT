@@ -5,6 +5,7 @@
 use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::CustomExternalPropagator;
 use crate::debug_println;
+use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
@@ -68,8 +69,13 @@ pub fn cdcl_decision_procedure(
     }
 
     #[cfg(feature = "z3-solver")]
-    let z3_lazy =
-        matches!(arithmetic, ArithSolver::Z3Lazy).then(crate::arithmetic::z3lazy::Z3LazyState::new);
+    let using_z3_lazy = matches!(arithmetic, ArithSolver::Z3Lazy);
+    #[cfg(not(feature = "z3-solver"))]
+    let using_z3_lazy = false;
+    solver_state.egraph.incremental_arithmetic(using_z3_lazy);
+
+    #[cfg(feature = "z3-solver")]
+    let z3_lazy = using_z3_lazy.then(crate::arithmetic::z3lazy::Z3LazyState::new);
 
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,

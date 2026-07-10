@@ -232,12 +232,14 @@ pub struct Egraph {
     sig_table: FastDeterministicHashMap<SigKey, u32>,
     /// Trail for backtracking the sig_table.
     sig_trail: Vec<SigTrailEntry>,
-    /// Queue of arithmetic-relevant merges (pre-merge roots). Every merge
-    /// (direct or congruence-derived) where BOTH pre-merge roots were tagged
-    /// arithmetic (see the `arithmetic` flag on `ProofForestEdge::Root`) is
-    /// appended here. The arithmetic solver drains this queue to propagate
-    /// equalities lazily into its external state (e.g. a persistent Z3 solver).
-    pub arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Whether to collect arithmetic-relevant merges for an incremental
+    /// arithmetic backend.
+    incremental_arithmetic: bool,
+    /// Queue of arithmetic-relevant merges (pre-merge roots). When incremental
+    /// arithmetic is enabled, every merge where the surviving pre-merge root is
+    /// tagged arithmetic is appended here. By typing, the demoted root should be
+    /// arithmetic too; `cc_union` debug-asserts that invariant.
+    arithmetic_merge_queue: Vec<(u32, u32)>,
 }
 
 impl Default for Egraph {
@@ -269,6 +271,7 @@ impl Egraph {
             union_to_eclass: DeterministicHashMap::new(),
             sig_table: FastDeterministicHashMap::default(),
             sig_trail: Vec::new(),
+            incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
         }
     }
@@ -851,22 +854,10 @@ impl Egraph {
         Some(final_proof)
     }
 
-    /// Ensure internal bookkeeping is ready for operations at the given level.
-    fn advance_to_level(&mut self, level: usize) {
-        while level >= self.predecessor_level.len() {
-            self.predecessor_level
-                .resize(self.predecessor_level.len() * 2, 0);
-        }
-        if level > self.decision_level {
-            self.decision_level = level;
-            self.predecessor_level[level] = self.predecessor_hash;
-        }
-    }
-
-    /// Assert t1 = t2 at the given decision level.
+    /// Assert t1 = t2 at the current decision level.
     /// Performs congruence closure. Returns a conflict if a disequality is violated.
-    fn assert_equal(&mut self, t1: u32, t2: u32, level: usize) -> EgraphResult<u32> {
-        self.advance_to_level(level);
+    fn assert_equal(&mut self, t1: u32, t2: u32) -> EgraphResult<u32> {
+        let level = self.decision_level;
         let proof_parent = ProofForestEdge::Equality {
             size: 0,
             term: Some((t1, t2)),
@@ -882,14 +873,8 @@ impl Egraph {
 
     /// Assert t1 ≠ t2 at the current decision level.
     /// Returns a conflict if t1 and t2 are already in the same equivalence class.
-    fn assert_disequal(
-        &mut self,
-        t1: u32,
-        t2: u32,
-        diseq_lit: i32,
-        level: usize,
-    ) -> EgraphResult<u32> {
-        self.advance_to_level(level);
+    fn assert_disequal(&mut self, t1: u32, t2: u32, diseq_lit: i32) -> EgraphResult<u32> {
+        let level = self.decision_level;
         let mut tracker = ProofTracker::new();
         if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
             // diseq_lit is None: the disequality being asserted is implicit in the
@@ -906,15 +891,10 @@ impl Egraph {
     }
 
     /// Assert all terms are pairwise distinct at the current decision level.
-    fn assert_distinct(
-        &mut self,
-        terms: &[u32],
-        diseq_lit: i32,
-        level: usize,
-    ) -> EgraphResult<u32> {
+    fn assert_distinct(&mut self, terms: &[u32], diseq_lit: i32) -> EgraphResult<u32> {
         for i in 0..terms.len() {
             for j in i + 1..terms.len() {
-                let result = self.assert_disequal(terms[i], terms[j], diseq_lit, level);
+                let result = self.assert_disequal(terms[i], terms[j], diseq_lit);
                 if result.conflict.is_some() {
                     return result;
                 }
@@ -1218,13 +1198,9 @@ impl Egraph {
             (x, y, x_root, y_root)
         };
 
-        // Read the arithmetic flag on both pre-merge roots. In principle SMT
-        // type-checking should make these agree (only same-sort classes merge),
-        // but Sundance's sort model is coarser than that — congruence can pull
-        // in classes that pass Rust-level sort checks but aren't literally Int.
-        // Be permissive: if either side is arithmetic, propagate the merge to
-        // the external theory (and mark the surviving root as arithmetic so
-        // subsequent merges through it stay tagged).
+        // Read the arithmetic flag on both pre-merge roots. Equality is
+        // well-typed, so if the surviving root is arithmetic, the demoted root
+        // should be arithmetic too.
         let x_root_arithmetic = matches!(
             &self.proof_forest[x_root as usize],
             ProofForestEdge::Root {
@@ -1239,15 +1215,13 @@ impl Egraph {
                 ..
             }
         );
-        let merge_is_arithmetic = x_root_arithmetic || y_root_arithmetic;
-        if merge_is_arithmetic {
-            self.arithmetic_merge_queue.push((x_root, y_root));
-            // Ensure the surviving root (x_root — y is being demoted) carries
-            // the arithmetic tag.
-            if let ProofForestEdge::Root { arithmetic, .. } =
-                &mut self.proof_forest[x_root as usize]
-            {
-                *arithmetic = true;
+        if x_root_arithmetic {
+            debug_assert!(
+                y_root_arithmetic,
+                "arithmetic root merged with non-arithmetic root"
+            );
+            if self.incremental_arithmetic {
+                self.arithmetic_merge_queue.push((x_root, y_root));
             }
         }
 
@@ -1758,13 +1732,32 @@ impl EgraphTrait for Egraph {
         }
     }
 
-    fn assert_equal(
-        &mut self,
-        t1: Self::TermId,
-        t2: Self::TermId,
-        level: usize,
-    ) -> EgraphResult<Self::TermId> {
-        self.assert_equal(t1, t2, level)
+    fn incremental_arithmetic(&mut self, enabled: bool) {
+        self.incremental_arithmetic = enabled;
+        if !enabled {
+            self.arithmetic_merge_queue.clear();
+        }
+    }
+
+    fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)> {
+        std::mem::take(&mut self.arithmetic_merge_queue)
+    }
+
+    fn notify_new_decision_level(&mut self) {
+        assert!(
+            self.arithmetic_merge_queue.is_empty(),
+            "arithmetic queue must be drained before advancing decision level"
+        );
+        self.decision_level += 1;
+        while self.decision_level >= self.predecessor_level.len() {
+            self.predecessor_level
+                .resize(self.predecessor_level.len() * 2, 0);
+        }
+        self.predecessor_level[self.decision_level] = self.predecessor_hash;
+    }
+
+    fn assert_equal(&mut self, t1: Self::TermId, t2: Self::TermId) -> EgraphResult<Self::TermId> {
+        self.assert_equal(t1, t2)
     }
 
     fn assert_disequal(
@@ -1772,18 +1765,12 @@ impl EgraphTrait for Egraph {
         t1: Self::TermId,
         t2: Self::TermId,
         lit: Lit,
-        level: usize,
     ) -> EgraphResult<Self::TermId> {
-        self.assert_disequal(t1, t2, lit, level)
+        self.assert_disequal(t1, t2, lit)
     }
 
-    fn assert_distinct(
-        &mut self,
-        terms: &[Self::TermId],
-        lit: Lit,
-        level: usize,
-    ) -> EgraphResult<Self::TermId> {
-        self.assert_distinct(terms, lit, level)
+    fn assert_distinct(&mut self, terms: &[Self::TermId], lit: Lit) -> EgraphResult<Self::TermId> {
+        self.assert_distinct(terms, lit)
     }
 
     fn find(&self, term: Self::TermId) -> Self::TermId {
