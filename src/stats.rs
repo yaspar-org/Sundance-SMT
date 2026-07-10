@@ -35,6 +35,9 @@ pub struct SolverStats {
     pub arith_checks: u64,
     /// Number of quantifier instantiations added as clauses to CaDiCaL
     pub instantiations: u64,
+    /// Number of times the quantifier instantiation queue was refreshed
+    /// (i.e., number of calls to `instantiate_quantifiers` that produced work)
+    pub instantiation_rounds: u64,
     /// Accumulated arithmetic sub-solver statistics
     pub arith: ArithStats,
 }
@@ -47,6 +50,7 @@ impl SolverStats {
             backtracks: 0,
             arith_checks: 0,
             instantiations: 0,
+            instantiation_rounds: 0,
             arith: ArithStats::default(),
         }
     }
@@ -70,6 +74,11 @@ impl fmt::Display for SolverStats {
         writeln!(f, "  \"backtracks\": {},", self.backtracks)?;
         writeln!(f, "  \"arith_checks\": {},", self.arith_checks)?;
         writeln!(f, "  \"instantiations\": {},", self.instantiations)?;
+        writeln!(
+            f,
+            "  \"instantiation_rounds\": {},",
+            self.instantiation_rounds
+        )?;
         writeln!(f, "  \"arith\": {{")?;
         writeln!(
             f,
