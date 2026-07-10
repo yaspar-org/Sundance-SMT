@@ -180,6 +180,7 @@ fn main() -> Result<(), String> {
         args.arithmetic,
         args.timeout,
         args.elevate,
+        args.max_arith_conflicts_per_round,
     );
 
     match return_value {

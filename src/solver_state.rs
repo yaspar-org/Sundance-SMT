@@ -270,7 +270,8 @@ impl SolverState {
             let sx = self.to_solver_uid(x);
             let sy = self.to_solver_uid(y);
             let eq_term_class = self.context.eq(self.get_term(sx), self.get_term(sy));
-            self.get_lit_from_term(&eq_term_class)
+            self.insert_predecessor(&eq_term_class, None, None, true);
+            self.get_or_allocate_lit_for_term(&eq_term_class)
         }
     }
 

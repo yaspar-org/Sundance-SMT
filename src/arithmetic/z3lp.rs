@@ -171,13 +171,25 @@ pub fn check_integer_constraints_satisfiable_z3(
             // Satisfiable - return None to indicate no conflict
             let model = solver.get_model().unwrap();
 
-            let mut model_hashmap: DeterministicHashMap<i64, DeterministicHashSet<u64>> =
+            let mut model_hashmap: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
                 DeterministicHashMap::new();
             for (var, value) in roots {
-                // todo: I think I can do this just for the roots I saved earlier
                 let model_val = model.eval(&value, true).unwrap();
-                let model_val_i64 = model_val.as_i64().unwrap_or(i64::MAX);
-                model_hashmap.entry(model_val_i64).or_default().insert(var);
+                let model_val_str = model_val.to_string();
+                let val: IBig = if model_val_str.starts_with("(- ") {
+                    let inner = &model_val_str[3..model_val_str.len() - 1];
+                    -inner.parse::<IBig>().unwrap_or_else(|e| {
+                        panic!(
+                            "Failed to parse Z3 model value inner '{}' from '{}': {}",
+                            inner, model_val_str, e
+                        )
+                    })
+                } else {
+                    model_val_str.parse::<IBig>().unwrap_or_else(|e| {
+                        panic!("Failed to parse Z3 model value '{}': {}", model_val_str, e)
+                    })
+                };
+                model_hashmap.entry(val).or_default().insert(var);
             }
             ArithResult::Sat(model_hashmap, LiaStats::new())
         }

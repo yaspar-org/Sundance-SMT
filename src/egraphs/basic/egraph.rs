@@ -214,10 +214,17 @@ pub struct Egraph {
     function_maps: DeterministicHashMap<String, Vec<(u32, Vec<u32>)>>,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
     decision_level: usize,
-    /// keeps track of terms created by quantifier instantiation and their predecessors
-    predecessors_created_by_quantifiers: DeterministicHashMap<u32, DeterministicHashSet<u32>>,
-    /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()])
-    union_to_eclass: DeterministicHashSet<u32>,
+    /// keeps track of terms created by quantifier instantiation and their predecessors.
+    /// Inner map: parent term id -> decision level at which the (child, parent) pair
+    /// was registered. Used by `backtrack_to` to skip re-registering entries that
+    /// were added at or below the target level (their predecessors are already
+    /// valid at that level and don't need refreshing).
+    predecessors_created_by_quantifiers:
+        DeterministicHashMap<u32, DeterministicHashMap<u32, usize>>,
+    /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()]).
+    /// Value is the decision level at which the term was registered; entries added
+    /// at or below the backtrack target level are skipped during `backtrack_to`.
+    union_to_eclass: DeterministicHashMap<u32, usize>,
     /// Signature table: maps (op, [find(c1),...,find(cn)]) → term_id.
     /// Maintained in parallel with the existing congruence detection for now.
     sig_table: FastDeterministicHashMap<SigKey, u32>,
@@ -250,7 +257,7 @@ impl Egraph {
             function_maps: DeterministicHashMap::default(),
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
-            union_to_eclass: DeterministicHashSet::new(),
+            union_to_eclass: DeterministicHashMap::new(),
             sig_table: FastDeterministicHashMap::default(),
             sig_trail: Vec::new(),
         }
@@ -342,17 +349,10 @@ impl Egraph {
                     inner_term: child_uid,
                 };
 
-                match self.predecessors_created_by_quantifiers.get_mut(&child_uid) {
-                    Some(parents) => {
-                        parents.insert(id);
-                    }
-                    None => {
-                        let mut parents = DeterministicHashSet::new();
-                        parents.insert(id);
-                        self.predecessors_created_by_quantifiers
-                            .insert(child_uid, parents);
-                    }
-                };
+                self.predecessors_created_by_quantifiers
+                    .entry(child_uid)
+                    .or_default()
+                    .insert(id, self.decision_level);
 
                 self.predecessors[root as usize]
                     .entry(id)
@@ -373,7 +373,7 @@ impl Egraph {
         }
 
         if dynamic && !children.is_empty() {
-            self.union_to_eclass.insert(id);
+            self.union_to_eclass.insert(id, self.decision_level);
         }
 
         false
@@ -964,10 +964,16 @@ impl Egraph {
             }
         }
 
-        // Re-add predecessors created by quantifiers at their new roots
+        // Re-add predecessors created by quantifiers at their new roots.
+        // Skip entries added at or below `level`: their predecessor stamps are
+        // still valid (predecessor_level only got bumped for levels > `level`)
+        // and their roots didn't shift because of any pop above `level`.
         for (term, parents) in &self.predecessors_created_by_quantifiers.clone() {
             let current_ancestor = self.find(*term);
-            for parent in parents {
+            for (parent, added_at) in parents {
+                if *added_at <= level {
+                    continue;
+                }
                 let predecessor = Predecessor {
                     level,
                     hash: self.predecessor_hash,
@@ -978,9 +984,14 @@ impl Egraph {
             }
         }
 
-        // Re-do union_to_eclass via sig table probe
+        // Re-do union_to_eclass via sig table probe. Entries added at or below
+        // `level` were already reconciled with the sig_table at that level and
+        // their signatures are stable under this backtrack.
         let union_to_eclass_info = self.union_to_eclass.clone();
-        for term in union_to_eclass_info {
+        for (term, added_at) in union_to_eclass_info {
+            if added_at <= level {
+                continue;
+            }
             if let Some(sig) = self.compute_signature(term) {
                 if let Some(&existing) = self.sig_table.get(&sig) {
                     if self.find(existing) != self.find(term) {
@@ -995,7 +1006,7 @@ impl Egraph {
         // Clear at level 0
         if level == 0 {
             self.predecessors_created_by_quantifiers = DeterministicHashMap::new();
-            self.union_to_eclass = DeterministicHashSet::new();
+            self.union_to_eclass = DeterministicHashMap::new();
             self.proof_forest_backtrack_stack = vec![];
             self.sig_trail.clear();
         }
