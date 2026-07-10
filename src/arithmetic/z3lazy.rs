@@ -15,8 +15,12 @@
 //!   translated once, cached by literal, and pushed with `assert_and_track`
 //!   so that an unsat core maps back to SAT literals.
 //! * Egraph merges from `Egraph::arithmetic_merge_queue` are drained by the
-//!   propagator and pushed here as `Int::eq(var_a, var_b)`.
-//! * `check()` runs `solver.check()` and returns either `ArithResult::Unsat`
+//!   propagator: each merge is turned into `make_eq(a, b)` (allocating a SAT
+//!   lit for the equality if one didn't exist) and asserted via
+//!   `assert_and_track` under that lit — so the unsat core blames merges
+//!   the same way it blames on-trail atoms.
+//! * `check()` runs `check_assumptions` with the currently-active trackers
+//!   plus all pinned definitions, and returns either `ArithResult::Unsat`
 //!   (with the SAT literals from the unsat core) or `ArithResult::Sat` (with
 //!   the current arithmetic-term roots grouped by model value, for the
 //!   downstream Nelson-Oppen model-based probe).
@@ -31,7 +35,7 @@ use dashu::Integer;
 use dashu::integer::IBig;
 use yaspar_ir::ast::{
     ATerm::{self, App, Global, Not},
-    FetchSort, HasArena, Repr,
+    Repr,
     alg::Constant as AlgConstant,
 };
 use z3::{
@@ -92,9 +96,6 @@ pub struct Z3LazyState {
     pinned_defs: Vec<Bool>,
     /// Current SAT decision level, tracked internally to match the propagator.
     current_level: usize,
-    /// Counter used to give each conflict-dump file a unique name when the
-    /// `SUNDANCE_CONFLICT_DIR` env var is set.
-    conflict_dump_counter: usize,
 }
 
 impl Z3LazyState {
@@ -110,7 +111,6 @@ impl Z3LazyState {
             push_counts: vec![0],
             pinned_defs: Vec::new(),
             current_level: 0,
-            conflict_dump_counter: 0,
         }
     }
 
@@ -330,9 +330,6 @@ impl Z3LazyState {
         );
     }
 
-    /// Drain the egraph's arithmetic merge queue into the persistent Z3 solver.
-    /// Each merge becomes `var_a == var_b` asserted at the current level.
-    /// `provoker` is the SAT literal (if any) whose `notify_assignment` produced
     /// Drain the egraph's arithmetic merge queue. For each merge `(a, b)`,
     /// allocate the SAT literal for `(= t_a t_b)` via `make_eq`, then push
     /// `var_a == var_b` into Z3 via `assert_and_track` with a tracker keyed
@@ -351,24 +348,16 @@ impl Z3LazyState {
         let mut new_lits: Vec<i32> = Vec::new();
         for (a, b) in merges {
             // Allocate the SAT literal for the term-level equality (= t_a t_b).
-            // If a lit already exists, `make_eq` returns the existing one; if
-            // not, it allocates a fresh one. We remember which ones are fresh
-            // so the caller can register them with CaDiCaL.
-            let was_registered = solver_state.get_term_from_lit_safe(1).is_some(); // dummy — we track via cnf_cache
-            let _ = was_registered;
+            // `make_eq` returns an existing lit if we've seen this equality
+            // before, otherwise allocates a fresh one. Fresh lits get returned
+            // to the caller so CaDiCaL can observe them.
             let lit = solver_state.make_eq(a, b);
-            let _abs_lit = lit.abs();
-            // Cheap detection: if this abs_lit isn't in tracker_by_lit yet
-            // AND isn't in non_arithmetic_lits, it's a candidate new atom.
-            // Treat the merge as a positive assignment of that lit — push
-            // it via the same code path as any other arithmetic atom.
-            let is_new =
-                !self.tracker_by_lit.contains_key(&lit) && !self.tracker_by_lit.contains_key(&-lit);
-            if is_new {
+            if !self.tracker_by_lit.contains_key(&lit) && !self.tracker_by_lit.contains_key(&-lit) {
                 new_lits.push(lit);
             }
-            // Skip if already asserted (duplicate merge notifications happen
-            // when the same union is re-fired during backtrack replay).
+            // Skip if already asserted at some level — duplicate merge
+            // notifications happen when the same union is re-fired during
+            // backtrack replay.
             if self.active_lits.contains(&lit) {
                 continue;
             }
@@ -477,126 +466,9 @@ impl Z3LazyState {
                     lits.extend(self.active_lits.iter().map(|l| -l));
                 }
                 let conflict: Vec<i32> = lits.into_iter().collect();
-                self.print_and_validate_conflict(&conflict, solver_state);
                 ArithResult::Unsat(conflict, LiaStats::new())
             }
             SatResult::Unknown => panic!("z3lazy: Z3 returned unknown"),
-        }
-    }
-
-    /// Print a conflict clause with human-readable term forms. If the env
-    /// variable `SUNDANCE_CONFLICT_DIR` is set, dump the negated-clause SMT2
-    /// query to a file in that directory for later batch validation via z3.
-    ///
-    /// A conflict clause `[l1, l2, ...]` means `l1 ∨ l2 ∨ ...` — it's a
-    /// valid theory conflict iff `¬l1 ∧ ¬l2 ∧ ...` is unsat.
-    fn print_and_validate_conflict(&mut self, clause: &[i32], solver_state: &mut SolverState) {
-        // Gated on the `SUNDANCE_CONFLICT_DIR` env var: if unset (the default),
-        // this is a no-op. Set it to a directory path to have every arithmetic
-        // conflict printed to stderr AND dumped as an SMT2 file in that
-        // directory, ready for batch validation via z3.
-        let out_dir = match std::env::var("SUNDANCE_CONFLICT_DIR") {
-            Ok(d) if !d.is_empty() => d,
-            _ => return,
-        };
-
-        eprintln!("[z3lazy CONFLICT] clause of {} lits:", clause.len());
-        for &lit in clause {
-            if let Some(term) = solver_state.get_term_from_lit_safe(lit) {
-                eprintln!("  {:5}  =  {}", lit, term);
-            } else {
-                eprintln!("  {:5}  =  <no term>", lit);
-            }
-        }
-
-        // Build an SMT2 dump that mirrors the printed conflict — one
-        // `(assert ...)` per literal, using each literal's term shape
-        // directly, with declare-sort/declare-fun for every symbol used.
-        // We do NOT include the pinned defs or the ambient egraph state —
-        // the goal is a minimal, human-readable query whose unsat verifies
-        // that the conflict clause is a valid theory tautology.
-        use std::collections::BTreeSet;
-        let mut sorts: BTreeSet<String> = BTreeSet::new();
-        let mut funcs: DeterministicHashMap<String, (Vec<String>, String)> =
-            DeterministicHashMap::new();
-        let mut asserts: Vec<String> = Vec::new();
-        // Some conflicts reference datatype constructors/testers/selectors
-        // (e.g. `((_ is Foo) x)`, `(Foo/field x)`). Without emitting the full
-        // `declare-datatypes`, z3 rejects the dump. Skip validation for those.
-        let mut has_datatype_refs = false;
-
-        for &lit in clause {
-            let Some(term) = solver_state.get_term_from_lit_safe(-lit) else {
-                continue;
-            };
-            collect_symbols(&term, solver_state, &mut sorts, &mut funcs);
-            let s = term.to_string();
-            if s.contains("(_ is ") {
-                has_datatype_refs = true;
-            }
-            asserts.push(format!("(assert {})", s));
-        }
-        if asserts.is_empty() {
-            return;
-        }
-        if has_datatype_refs {
-            // Dump would need `declare-datatypes` to be checkable by z3.
-            // Skip writing so batch validation doesn't false-flag it.
-            return;
-        }
-
-        // Bump the global counter (per Z3LazyState) for a unique file name.
-        // Include the process PID so parallel Sundance instances don't clash
-        // when writing to a shared conflict directory.
-        self.conflict_dump_counter += 1;
-        let file = format!(
-            "{}/pid{}_conflict_{}.smt2",
-            out_dir,
-            std::process::id(),
-            self.conflict_dump_counter
-        );
-
-        let mut out = String::new();
-        out.push_str(&format!("; conflict clause ({} lits):\n", clause.len()));
-        for &lit in clause {
-            let term_str = solver_state
-                .get_term_from_lit_safe(lit)
-                .map(|t| t.to_string())
-                .unwrap_or_else(|| "<no term>".to_string());
-            out.push_str(&format!(";   {}  =  {}\n", lit, term_str));
-        }
-        out.push('\n');
-
-        // Sort declarations. Skip built-in sorts (Int, Bool, Real).
-        for s in &sorts {
-            if s != "Int" && s != "Bool" && s != "Real" {
-                out.push_str(&format!("(declare-sort {} 0)\n", s));
-            }
-        }
-        // Function/constant declarations, sorted for stability.
-        let mut func_entries: Vec<(&String, &(Vec<String>, String))> = funcs.iter().collect();
-        func_entries.sort_by(|a, b| a.0.cmp(b.0));
-        for (name, (arg_sorts, ret_sort)) in func_entries {
-            if arg_sorts.is_empty() {
-                out.push_str(&format!("(declare-const {} {})\n", name, ret_sort));
-            } else {
-                out.push_str(&format!(
-                    "(declare-fun {} ({}) {})\n",
-                    name,
-                    arg_sorts.join(" "),
-                    ret_sort
-                ));
-            }
-        }
-        out.push('\n');
-        for a in &asserts {
-            out.push_str(a);
-            out.push('\n');
-        }
-        out.push_str("(check-sat)\n");
-
-        if let Err(e) = std::fs::write(&file, &out) {
-            eprintln!("[z3lazy] failed to write conflict dump {file}: {e}");
         }
     }
 }
@@ -604,93 +476,6 @@ impl Z3LazyState {
 impl Default for Z3LazyState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Walk `term` and record every free symbol (Global constant or App head)
-/// into `funcs` and every non-built-in sort into `sorts`. Used by the
-/// conflict-dump code to emit `declare-sort`/`declare-fun` headers.
-fn collect_symbols(
-    term: &yaspar_ir::ast::Term,
-    solver_state: &mut SolverState,
-    sorts: &mut std::collections::BTreeSet<String>,
-    funcs: &mut DeterministicHashMap<String, (Vec<String>, String)>,
-) {
-    use yaspar_ir::ast::ATerm::{And, Distinct, Eq as EqT, Implies, Ite, Not as NotT, Or, Xor};
-    fn record_sort(s: &str, sorts: &mut std::collections::BTreeSet<String>) {
-        sorts.insert(s.to_string());
-    }
-    match term.repr() {
-        Global(qi, _) => {
-            let name = qi.0.symbol.to_string();
-            let ret_sort = term.get_sort(solver_state.context.arena()).to_string();
-            record_sort(&ret_sort, sorts);
-            funcs.entry(name).or_insert((Vec::new(), ret_sort));
-        }
-        App(qi, args, _) => {
-            let head = qi.0.symbol.to_string();
-            // Skip built-in operators — SMT-LIB knows +, -, *, div, mod,
-            // <, <=, >, >=, =, and, or, not, ite, etc.
-            let builtin = matches!(
-                head.as_str(),
-                "+" | "-"
-                    | "*"
-                    | "div"
-                    | "mod"
-                    | "<"
-                    | "<="
-                    | ">"
-                    | ">="
-                    | "="
-                    | "and"
-                    | "or"
-                    | "not"
-                    | "xor"
-                    | "=>"
-                    | "ite"
-                    | "distinct"
-                    | "true"
-                    | "false"
-            );
-            let ret_sort = term.get_sort(solver_state.context.arena()).to_string();
-            record_sort(&ret_sort, sorts);
-            let arg_sorts: Vec<String> = args
-                .iter()
-                .map(|a| {
-                    let s = a.get_sort(solver_state.context.arena()).to_string();
-                    record_sort(&s, sorts);
-                    s
-                })
-                .collect();
-            if !builtin && !funcs.contains_key(&head) {
-                funcs.insert(head, (arg_sorts, ret_sort));
-            }
-            for a in args {
-                collect_symbols(a, solver_state, sorts, funcs);
-            }
-        }
-        EqT(a, b) => {
-            collect_symbols(a, solver_state, sorts, funcs);
-            collect_symbols(b, solver_state, sorts, funcs);
-        }
-        NotT(t) => collect_symbols(t, solver_state, sorts, funcs),
-        And(items) | Or(items) | Xor(items) | Distinct(items) => {
-            for t in items {
-                collect_symbols(t, solver_state, sorts, funcs);
-            }
-        }
-        Implies(pre, post) => {
-            for t in pre {
-                collect_symbols(t, solver_state, sorts, funcs);
-            }
-            collect_symbols(post, solver_state, sorts, funcs);
-        }
-        Ite(c, t, e) => {
-            collect_symbols(c, solver_state, sorts, funcs);
-            collect_symbols(t, solver_state, sorts, funcs);
-            collect_symbols(e, solver_state, sorts, funcs);
-        }
-        _ => {}
     }
 }
 
