@@ -89,15 +89,10 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
-    /// Emit trichotomy clause (x<y ∨ x>y ∨ x=y) for a pair of solver-uid terms
-    /// as a raw 3-literal disjunction (no Tseitin OR-gate). Registers the fresh
-    /// lt/gt/eq literals as observed. No-op if the pair was already emitted.
-    ///
-    /// The `from_quantifier: true` flag on `insert_predecessor` (which becomes
-    /// `dynamic: true` on `register_term`) is *not* about quantifiers here — it
-    /// tells the egraph to find and merge with existing congruent terms, which
-    /// is what we want since these lt/gt/eq atoms may already exist in the
-    /// egraph from other sources.
+    /// Emit `(x<y ∨ x>y ∨ x=y)` as a raw 3-literal clause (no Tseitin gate).
+    /// No-op if this pair's trichotomy has already been emitted. The `true`
+    /// on `insert_predecessor` is the `dynamic: true` flag — these atoms may
+    /// exist elsewhere in the egraph and we want congruence to find them.
     fn emit_trichotomy_for_pair(&mut self, x: u64, y: u64) {
         if let Some((lt_term, gt_term, eq_term)) =
             nelson_oppen_trichotomy_terms(x, y, self.solver_state)
@@ -189,8 +184,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.solver_state, self.decision_level);
 
-            // Incremental Z3: propagate egraph merges triggered by this assignment,
-            // then push the literal's own constraint if it's arithmetic.
+            // Drain merges triggered by this assignment, then push the lit
+            // itself if it's arithmetic.
             #[cfg(feature = "z3-solver")]
             {
                 let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
@@ -338,11 +333,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         self.decision_level = level;
 
-        // Delegate to egraph for all egraph-internal backtracking. Note:
-        // `backtrack_to` internally clears pending arithmetic equalities and
-        // then re-fires any congruence merges triggered by the `union_to_eclass`
-        // replay, so on return the queue contains exactly the merges that hold
-        // at the post-backtrack level and need to be conveyed to Z3.
+        // `backtrack_to` clears the arithmetic queue at entry then re-fires
+        // any congruence merges from `union_to_eclass` replay, so the queue
+        // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
 
         #[cfg(feature = "z3-solver")]
@@ -419,15 +412,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
-        // Route through the persistent Z3IncrementalState when configured; every atom
-        // in `model` has already been pushed into it via `notify_assignment`,
-        // so we can just call `check` directly. Otherwise fall through to the
+        // The incremental backend already saw every atom via notify_assignment
+        // — just flush any post-hoc merges and call check(). Otherwise use the
         // eager entry point.
         #[cfg(feature = "z3-solver")]
         let (arith_result, drained_new_lits) = if let Some(z3) = self.z3_incremental.as_mut() {
-            // Merges from post-notify_assignment egraph work may still be
-            // queued (e.g. from lazy quantifier instantiations); flush before
-            // checking.
             let new_lits = z3.drain_merge_queue(self.solver_state);
             let r = z3.check(self.solver_state);
             (r, new_lits)
@@ -466,16 +455,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     self.max_arith_conflicts_per_round > 0,
                     "max_arith_conflicts_per_round must be > 0"
                 );
-                // Model-based Nelson-Oppen probe: try to merge every pair of
-                // equal-model-value terms. Each merge gets its own fake decision
-                // level so a conflicting merge can be undone individually while
-                // successful earlier merges stay in place. Collect all conflicts
-                // found this round, then backtrack the entire probe stack.
+                // Nelson-Oppen probe: try to merge every pair of terms Z3
+                // gave the same model value. Each merge gets its own probe
+                // level so a conflict can be undone without losing earlier
+                // successful merges. Collect all conflicts, then backtrack
+                // the whole probe stack.
                 let base_level = self.decision_level;
                 let mut probe_level = base_level;
                 let mut conflicts: Vec<Conflict<u32>> = Vec::new();
-                // Canonical (egraph_root, egraph_root) pair -> (solver_uid, solver_uid).
-                // Presence of a key = "we probe-merged this pair this round".
+                // Probed pairs, keyed by canonical (egraph_root, egraph_root).
                 let mut probe_pair_uids: DeterministicHashMap<(u32, u32), (u64, u64)> =
                     DeterministicHashMap::default();
 
@@ -506,12 +494,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         self.solver_state.egraph.notify_new_decision_level();
                         probe_level += 1;
                         let result = self.solver_state.egraph.assert_equal(x_root, y_root);
-                        // Every merge performed by the probe is speculative and
-                        // will be backtracked below; drop any queue entries so
-                        // they don't leak into Z3IncrementalState.
+                        // Probe merges are speculative — discard queue entries
+                        // so they don't leak into Z3IncrementalState.
                         let _ = self.solver_state.egraph.drain_arithmetic_equalities();
                         if let Some(c) = result.conflict {
-                            // Undo just this conflicting merge; keep earlier merges.
                             self.solver_state.egraph.backtrack_to(probe_level - 1);
                             probe_level -= 1;
                             conflicts.push(c);
@@ -523,10 +509,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
 
                 for conflict in &conflicts {
-                    // Emit at most one trichotomy per conflict — walking backward
-                    // through the proof path, pick the last probe-merged pair whose
-                    // trichotomy has NOT already been emitted. Other probe-merge pairs
-                    // fall back on make_eq allocating a bare eq literal.
+                    // Walk the proof path backward, pick the last probe-merged
+                    // pair whose trichotomy hasn't been emitted yet. Emit at
+                    // most one trichotomy per conflict; other probed pairs
+                    // fall back on `make_eq` allocating a bare eq lit.
                     let fresh_probe_pair = conflict.equalities.iter().rev().find_map(|&(a, b)| {
                         let (lo_root, hi_root) = if a < b { (a, b) } else { (b, a) };
                         let (x_uid, y_uid) = *probe_pair_uids.get(&(lo_root, hi_root))?;
@@ -560,11 +546,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     self.disequalities.borrow_mut().push(conflict_clause);
                 }
 
-                // Undo all remaining successful probe merges. backtrack_to
-                // clears the arithmetic queue at its start and may repopulate
-                // it via union_to_eclass re-firing (e.g. trichotomy terms just
-                // registered above); route those into Z3 so subsequent checks
-                // see the congruence-derived equalities.
+                // Undo remaining probe merges. `backtrack_to` may repopulate
+                // the queue via `union_to_eclass` re-firing (e.g. from the
+                // trichotomy terms just registered); drain those into Z3.
                 self.solver_state.egraph.backtrack_to(base_level);
                 #[cfg(feature = "z3-solver")]
                 {

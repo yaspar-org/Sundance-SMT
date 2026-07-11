@@ -3,27 +3,12 @@
 
 //! Incremental Z3 arithmetic backend.
 //!
-//! Design:
-//! * Persistent `z3::Solver` lives for the whole search.
-//! * Each egraph node with sort Int gets its own Z3 `Int` variable, keyed by
-//!   its raw egraph id (NOT its union-find root). We never canonicalise at
-//!   encoding time — merges are conveyed to Z3 as explicit `var_a == var_b`
-//!   assertions.
-//! * Every `z3::Solver::push` is recorded against the current SAT decision
-//!   level so that `notify_backtrack(level)` can `pop` the matching count.
-//! * Arithmetic literals from CaDiCaL's trail (`notify_assignment`) are
-//!   translated once, cached by literal, and pushed with `assert_and_track`
-//!   so that an unsat core maps back to SAT literals.
-//! * Egraph merges from `EgraphTrait::drain_arithmetic_equalities` are drained by the
-//!   propagator: each merge is turned into `make_eq(a, b)` (allocating a SAT
-//!   lit for the equality if one didn't exist) and asserted via
-//!   `assert_and_track` under that lit — so the unsat core blames merges
-//!   the same way it blames on-trail atoms.
-//! * `check()` runs `check_assumptions` with the currently-active trackers
-//!   plus all pinned definitions, and returns either `ArithResult::Unsat`
-//!   (with the SAT literals from the unsat core) or `ArithResult::Sat` (with
-//!   the current arithmetic-term roots grouped by model value, for the
-//!   downstream Nelson-Oppen model-based probe).
+//! Keeps a persistent `z3::Solver` in sync with CaDiCaL's trail: each
+//! arithmetic literal is pushed via `assert_and_track` so its abs-lit
+//! recovers from an unsat core, and each egraph merge is asserted as
+//! `var_a == var_b` under the SAT lit produced by `make_eq(a, b)`.
+//! Z3 `Int` vars are keyed by raw egraph id (not union-find root), so
+//! definitional pinnings are stable across backtracks.
 
 use crate::arithmetic::lia::stats::Stats as LiaStats;
 use crate::arithmetic::lp::{ArithResult, Coefficient, FunctionType, LinearConstraint};
@@ -43,7 +28,6 @@ use z3::{
     ast::{Bool, Int},
 };
 
-/// Convert a dashu IBig to num::BigInt (Z3 uses num::BigInt).
 fn ibig_to_bigint(n: &IBig) -> num::BigInt {
     num::BigInt::parse_bytes(n.to_string().as_bytes(), 10).unwrap()
 }
@@ -51,50 +35,32 @@ fn ibig_to_bigint(n: &IBig) -> num::BigInt {
 /// Parse a Z3 model value string like "3" or "(- 4)" into an IBig.
 fn parse_z3_model_int(s: &str) -> IBig {
     if let Some(inner) = s.strip_prefix("(- ").and_then(|t| t.strip_suffix(')')) {
-        -inner.parse::<IBig>().unwrap_or_else(|e| {
-            panic!("Failed to parse Z3 model value inner '{inner}' from '{s}': {e}")
-        })
+        -inner.parse::<IBig>().unwrap()
     } else {
-        s.parse::<IBig>()
-            .unwrap_or_else(|e| panic!("Failed to parse Z3 model value '{s}': {e}"))
+        s.parse::<IBig>().unwrap()
     }
 }
 
-/// State for the incremental Z3 arithmetic backend.
 pub struct Z3IncrementalState {
-    /// The persistent Z3 solver.
     solver: Solver,
-    /// egraph_id -> its Z3 Int variable. Populated on demand.
     var_map: DeterministicHashMap<u32, Int>,
-    /// abs(SAT literal) -> its tracker Bool used by `assert_and_track`, so
-    /// that an unsat core recovers the underlying variable. CaDiCaL's trail
-    /// guarantees at most one polarity of a given variable is asserted at any
-    /// time, so a single tracker per abs-lit is sufficient: the constraint
-    /// asserted under it is `constraint` when `+lit` is pushed and
-    /// `¬constraint` when `-lit` is pushed. Present iff the abs-lit has been
-    /// encoded into the solver at least once.
+    /// abs(lit) -> tracker Bool for `assert_and_track`. CaDiCaL's trail has
+    /// at most one polarity of each var on it at a time, so one tracker per
+    /// abs-lit is enough — the asserted body flips with the polarity.
     tracker_by_abs_lit: DeterministicHashMap<i32, Bool>,
-    /// Absolute value of literals for which we've already decided
-    /// "not arithmetic" — skip re-parsing on every re-assignment.
+    /// Abs-lits already known to be non-arithmetic; skip re-parsing.
     non_arithmetic_lits: DeterministicHashSet<i32>,
-    /// Signed literals currently pushed into the persistent Z3 solver.
-    /// Prevents duplicate pushes when CaDiCaL notifies the same literal
-    /// more than once at the same level (e.g. after simplification).
+    /// Signed lits currently in Z3's scope. Guards against duplicate pushes
+    /// when CaDiCaL re-notifies a literal at the same level.
     active_lits: DeterministicHashSet<i32>,
-    /// For each decision level, the signed lits that were pushed at that
-    /// level. Used by `notify_backtrack` to remove them from `active_lits`.
+    /// Per-level record of pushed lits, mirrored on backtrack.
     lits_by_level: Vec<Vec<i32>>,
-    /// Stack of push counts per decision level. Entry `i` is how many
-    /// `z3::push`es we've done at level `i`; on `notify_backtrack(level)`
-    /// we pop everything above `level`.
-    /// Indexed by decision level; grows as decision level grows.
+    /// Per-level `z3::push` count, popped on backtrack.
     push_counts: Vec<u32>,
-    /// Definitional pinnings (e.g. `var_5 == 5`, `var_{(+xy)} == var_x + var_y`).
-    /// These are theory facts that hold globally, so we replay them as
-    /// assumptions on every `check_assumptions` rather than asserting them into
-    /// a specific scope (where a later `pop` would erase them).
+    /// Definitional equalities (e.g. `var_5 == 5`, `var_{(+xy)} == var_x + var_y`).
+    /// Global theory facts — replayed as assumptions since asserting them
+    /// would tie them to a push scope that later gets popped.
     pinned_defs: Vec<Bool>,
-    /// Current SAT decision level, tracked internally to match the propagator.
     current_level: usize,
 }
 
@@ -124,23 +90,14 @@ impl Z3IncrementalState {
         }
     }
 
-    /// Get or create the Z3 `Int` variable for an egraph id, and on first
-    /// creation pin it to its term structure (`var_{id} == <constant>` for
-    /// numeric constants, `var_{id} == <linear combination in child vars>`
-    /// for arithmetic applications like `+ - *`). Uninterpreted apps and
-    /// Globals get no pinning — they're left as free Ints.
+    /// Get or create the Z3 `Int` variable for an egraph id, pinning its
+    /// structural definition on first creation (e.g. `var_5 == 5`,
+    /// `var_{(+xy)} == var_x + var_y`). Uninterpreted apps and Globals get
+    /// no pin. Pins are stored in `pinned_defs` and replayed as assumptions
+    /// on every `check_assumptions` — `Solver::assert` would tie them to
+    /// the current push scope and lose them on `pop`.
     ///
-    /// Uses `extract_lazy_expression` (no `find()`) so pinnings are stable
-    /// across egraph backtracks — merges are conveyed separately via
-    /// `drain_merge_queue`.
-    ///
-    /// Pins are stored in `pinned_defs` and replayed as assumptions on every
-    /// `check_assumptions` call, since `Solver::assert`ing them would land
-    /// them in the current push scope and get erased on the next `pop`.
-    ///
-    /// This is the ONLY var-materialization entry point. Every caller that
-    /// touches a Z3 var goes through here, so the invariant "any var Z3
-    /// sees is already pinned" holds by construction.
+    /// This is the only var-materialization entry point.
     fn var_for(&mut self, egraph_id: u32, solver_state: &mut SolverState) -> Int {
         if let Some(v) = self.var_map.get(&egraph_id) {
             return v.clone();
@@ -150,8 +107,7 @@ impl Z3IncrementalState {
 
         let solver_uid = solver_state.to_solver_uid(egraph_id);
         if let Some(expr) = extract_lazy_expression(solver_uid, solver_state) {
-            // If the expression is exactly `var_{egraph_id}` (a plain Global
-            // or an uninterpreted-function App), skip pinning.
+            // Skip pinning `var_i == 0 + 1*var_i` (plain Global or uninterp App).
             let is_self_reference = expr.len() == 2
                 && expr.get(&Coefficient::Constant) == Some(&IBig::from(0))
                 && expr.get(&Coefficient::Term(egraph_id)) == Some(&IBig::from(1));
@@ -164,16 +120,13 @@ impl Z3IncrementalState {
                         rhs += e;
                     }
                 }
-                let def = Int::eq(&v, rhs);
-                self.pinned_defs.push(def);
+                self.pinned_defs.push(Int::eq(&v, rhs));
                 debug_println!(21, 0, "[z3inc] def var_{}=={:?}", egraph_id, entries);
             }
         }
         v
     }
 
-    /// Translate a coefficient key to a Z3 Int expression scaled by `coeff`.
-    /// Uses raw egraph ids as variables — no `find()`. Pins numeric constants.
     fn coeff_to_z3(
         &mut self,
         key: &Coefficient,
@@ -199,7 +152,6 @@ impl Z3IncrementalState {
         }
     }
 
-    /// Encode a LinearConstraint as a Z3 Bool.
     fn constraint_to_z3(&mut self, c: &LinearConstraint, solver_state: &mut SolverState) -> Bool {
         let mut left = Int::from_i64(0);
         for (k, v) in &c.left_expr {
@@ -220,10 +172,11 @@ impl Z3IncrementalState {
         }
     }
 
-    /// Try to build a LinearConstraint for a signed SAT literal.
-    /// Returns None if the underlying term is not an arithmetic atom.
-    /// Uses raw egraph ids (no `find()`) — no additional_constraints are
-    /// generated, since egraph merges are conveyed as explicit equalities.
+    /// Build a LinearConstraint for a signed SAT literal, or None if the
+    /// underlying term isn't an arithmetic inequality. Equality atoms are
+    /// intentionally rejected — the egraph is the single source of truth for
+    /// equalities (positive → merges via `drain_merge_queue`; negative →
+    /// egraph disequalities).
     fn extract_lazy_constraint(
         lit: i32,
         solver_state: &mut SolverState,
@@ -234,46 +187,34 @@ impl Z3IncrementalState {
             Not(t) => (t.clone(), !polarity),
             _ => (term, polarity),
         };
-        match term.repr() {
-            App(identifier, args, _) => {
-                if args.len() != 2 {
-                    return None;
-                }
-                // Use the lazy extractor (no find()) so the encoding of a
-                // literal is stable — Z3 push/pop mirrors the assignment
-                // stack precisely, without depending on egraph state.
-                let left_expr = extract_lazy_expression(args[0].uid(), solver_state)?;
-                let right_expr = extract_lazy_expression(args[1].uid(), solver_state)?;
-                let sym = identifier.0.symbol.as_str();
-                let (le, re, func) = match (sym, polarity) {
-                    ("<=", true) => (left_expr, right_expr, FunctionType::Leq),
-                    ("<=", false) => (right_expr, left_expr, FunctionType::Lt),
-                    (">=", true) => (right_expr, left_expr, FunctionType::Leq),
-                    (">=", false) => (left_expr, right_expr, FunctionType::Lt),
-                    ("<", true) => (left_expr, right_expr, FunctionType::Lt),
-                    ("<", false) => (right_expr, left_expr, FunctionType::Leq),
-                    (">", true) => (right_expr, left_expr, FunctionType::Lt),
-                    (">", false) => (left_expr, right_expr, FunctionType::Leq),
-                    _ => return None,
-                };
-                Some(LinearConstraint::new(le, re, func, vec![]))
-            }
-            // Equality atoms (positive or negative polarity) are handled by
-            // the egraph — positive assertions produce merges that flow through
-            // `drain_merge_queue`; negative assertions become egraph
-            // disequalities. We intentionally do NOT encode them directly here,
-            // so incremental Z3 sees exactly one source of truth per equality.
-            _ => None,
+        let App(identifier, args, _) = term.repr() else {
+            return None;
+        };
+        if args.len() != 2 {
+            return None;
         }
+        let left_expr = extract_lazy_expression(args[0].uid(), solver_state)?;
+        let right_expr = extract_lazy_expression(args[1].uid(), solver_state)?;
+        let (le, re, func) = match (identifier.0.symbol.as_str(), polarity) {
+            ("<=", true) => (left_expr, right_expr, FunctionType::Leq),
+            ("<=", false) => (right_expr, left_expr, FunctionType::Lt),
+            (">=", true) => (right_expr, left_expr, FunctionType::Leq),
+            (">=", false) => (left_expr, right_expr, FunctionType::Lt),
+            ("<", true) => (left_expr, right_expr, FunctionType::Lt),
+            ("<", false) => (right_expr, left_expr, FunctionType::Leq),
+            (">", true) => (right_expr, left_expr, FunctionType::Lt),
+            (">", false) => (left_expr, right_expr, FunctionType::Leq),
+            _ => return None,
+        };
+        Some(LinearConstraint::new(le, re, func, vec![]))
     }
 
-    /// Called when the SAT solver enters a new decision level.
     pub fn notify_new_decision_level(&mut self) {
         self.current_level += 1;
         self.ensure_level_slot();
     }
 
-    /// Called on backtrack. Pops all `z3::push`es done at levels > `level`.
+    /// Pop everything pushed above `level`.
     pub fn notify_backtrack(&mut self, level: usize) {
         while self.current_level > level {
             let n = self.push_counts.pop().unwrap_or(0);
@@ -290,19 +231,11 @@ impl Z3IncrementalState {
         self.ensure_level_slot();
     }
 
-    /// Called for each SAT literal newly assigned by CaDiCaL. If the
-    /// literal corresponds to an arithmetic atom, push its constraint into
-    /// the persistent solver at the current level (tracked so the unsat
-    /// core recovers the literal).
+    /// Push a newly-assigned SAT literal's arithmetic constraint (if any),
+    /// tracked so the unsat core recovers it.
     pub fn on_literal_assignment(&mut self, lit: i32, solver_state: &mut SolverState) {
         let abs_lit = lit.abs();
-        if self.non_arithmetic_lits.contains(&abs_lit) {
-            return;
-        }
-        // CaDiCaL may re-notify the same literal (e.g. it appears both as an
-        // individual notify_assignment and again in the initial-trail batch).
-        // Guard against a duplicate push.
-        if self.active_lits.contains(&lit) {
+        if self.non_arithmetic_lits.contains(&abs_lit) || self.active_lits.contains(&lit) {
             return;
         }
         let Some(constraint) = Self::extract_lazy_constraint(lit, solver_state) else {
@@ -330,15 +263,9 @@ impl Z3IncrementalState {
         );
     }
 
-    /// Drain the egraph's arithmetic merge queue. For each merge `(a, b)`,
-    /// allocate the SAT literal for `(= t_a t_b)` via `make_eq`, then push
-    /// `var_a == var_b` into Z3 via `assert_and_track` with a tracker keyed
-    /// on that literal. Result: each merge is a normal tracked atom, and
-    /// Z3's unsat core will blame exactly the merge lits that were actually
-    /// used in the conflict — no over-approximation.
-    ///
-    /// Returns the list of freshly-allocated SAT lits so the caller can
-    /// register them as observed with CaDiCaL and the proof tracer.
+    /// Drain the egraph's arithmetic merge queue, pushing each merge as a
+    /// tracked `var_a == var_b` assertion. Returns SAT lits that
+    /// `make_eq` created here (so the caller can register them as observed).
     pub fn drain_merge_queue(&mut self, solver_state: &mut SolverState) -> Vec<i32> {
         let merges = solver_state.egraph.drain_arithmetic_equalities();
         if merges.is_empty() {
@@ -347,26 +274,16 @@ impl Z3IncrementalState {
         self.ensure_level_slot();
         let mut new_lits: Vec<i32> = Vec::new();
         for (a, b) in merges {
-            // Allocate the SAT literal for the term-level equality (= t_a t_b).
-            // `make_eq` returns an existing lit if we've seen this equality
-            // before, otherwise allocates a fresh one. Fresh lits get returned
-            // to the caller so CaDiCaL can observe them.
             let lit = solver_state.make_eq(a, b);
             let abs_lit = lit.abs();
             if !self.tracker_by_abs_lit.contains_key(&abs_lit) {
                 new_lits.push(lit);
             }
-            // Skip if already asserted at some level — duplicate merge
-            // notifications happen when the same union is re-fired during
-            // backtrack replay.
             if self.active_lits.contains(&lit) {
                 continue;
             }
-            // Encode as `var_a == var_b` (matches the atom encoding for
-            // `(= t_a t_b)` under our extractor).
             let va = self.var_for(a, solver_state);
             let vb = self.var_for(b, solver_state);
-            let ast = Int::eq(&va, vb);
             let tracker = self
                 .tracker_by_abs_lit
                 .entry(abs_lit)
@@ -376,7 +293,7 @@ impl Z3IncrementalState {
             self.push_counts[self.current_level] += 1;
             self.active_lits.insert(lit);
             self.lits_by_level[self.current_level].push(lit);
-            self.solver.assert_and_track(ast, &tracker);
+            self.solver.assert_and_track(Int::eq(&va, vb), &tracker);
             debug_println!(
                 21,
                 0,
@@ -390,26 +307,21 @@ impl Z3IncrementalState {
         new_lits
     }
 
-    /// Run `solver.check()`. On SAT, group current arithmetic-term roots by
-    /// model value so the caller's model-based Nelson-Oppen probe can run.
-    /// On UNSAT, translate the unsat core back into SAT literals.
+    /// Run `check_assumptions` under the currently-active trackers plus the
+    /// pinned defs. On SAT, bucket arithmetic-term roots by model value for
+    /// the caller's Nelson-Oppen probe. On UNSAT, recover the SAT lits from
+    /// the unsat core.
     pub fn check(&mut self, solver_state: &mut SolverState) -> ArithResult {
         debug_println!(21, 0, "[z3inc] check() at level {}", self.current_level);
-        // Ensure every arithmetic term has been introduced to Z3 with its
-        // definitional equality pinned. If we defer this until the
-        // model-evaluation loop below, Z3 has already produced a model
-        // without seeing the definitions and the buckets are meaningless.
+        // Materialize every arithmetic term's var + pin before checking, so
+        // `check_assumptions` sees all definitional equalities in the model.
         let arithmetic_terms = solver_state.arithmetic_terms.clone();
         for term_id in &arithmetic_terms {
             let egraph_id = solver_state.to_egraph_id(*term_id);
             let _ = self.var_for(egraph_id, solver_state);
         }
-        // Every arithmetic literal was pushed via `assert_and_track(constraint,
-        // tracker)`, which encodes `tracker => constraint`. Z3 would happily
-        // satisfy that by picking tracker=false unless we tell it the tracker
-        // is true — so we run `check_assumptions` with the currently-active
-        // trackers. Include the definitional pinnings too — those live outside
-        // any push scope so they'd otherwise be pop'd.
+        // `assert_and_track` asserts `tracker => constraint`, so we need to
+        // include each active tracker in the assumptions.
         let mut assumptions: Vec<Bool> = self
             .active_lits
             .iter()
@@ -423,9 +335,6 @@ impl Z3IncrementalState {
                     DeterministicHashMap::new();
                 for term_id in &arithmetic_terms {
                     let egraph_id = solver_state.to_egraph_id(*term_id);
-                    // Only report one representative per union-find class —
-                    // otherwise the model-based probe wastes work merging
-                    // pairs that are already equal.
                     if solver_state.egraph.find(egraph_id) != egraph_id {
                         continue;
                     }
@@ -440,16 +349,15 @@ impl Z3IncrementalState {
             }
             SatResult::Unsat => {
                 let core = self.solver.get_unsat_core();
-                // Trackers were named `lit_{abs_lit}`; the core may also
-                // contain pinned-def assumptions (raw equalities), which we
-                // skip. For each real tracker, `active_lits` holds exactly
-                // one polarity of the variable — that's the signed lit.
+                // Trackers are named `lit_{abs_lit}` (possibly `|...|`-quoted).
+                // Pinned-def asts also appear in the core; filter them out.
+                // Recover the signed lit via `active_lits`.
                 let mut lits: DeterministicHashSet<i32> = core
                     .iter()
                     .filter_map(|ast| {
                         let raw = ast.to_string();
-                        let name = raw.trim_matches('|');
-                        let abs_lit: i32 = name.strip_prefix("lit_")?.parse().ok()?;
+                        let abs_lit: i32 =
+                            raw.trim_matches('|').strip_prefix("lit_")?.parse().ok()?;
                         let signed = if self.active_lits.contains(&abs_lit) {
                             abs_lit
                         } else {
@@ -458,19 +366,13 @@ impl Z3IncrementalState {
                         Some(-signed)
                     })
                     .collect();
-                // Merges are now tracked via `assert_and_track` (see
-                // `drain_merge_queue`), so Z3's unsat core cites exactly the
-                // merge lits (via `make_eq`-allocated SAT lits) that were
-                // actually used in the conflict. No over-approximation needed.
+                // Empty core would mean the contradiction lies entirely in
+                // pinned defs — that's a bug. Fall back to blaming every
+                // active lit rather than reporting an unsound `Unsat([])`.
                 if lits.is_empty() {
-                    // Sanity guard: if no tracked lits appear in the core, the
-                    // contradiction lives entirely in pinned defs — a bug.
-                    // Fall back to blaming every active lit rather than
-                    // reporting unsound `Unsat([])`.
                     lits.extend(self.active_lits.iter().map(|l| -l));
                 }
-                let conflict: Vec<i32> = lits.into_iter().collect();
-                ArithResult::Unsat(conflict, LiaStats::new())
+                ArithResult::Unsat(lits.into_iter().collect(), LiaStats::new())
             }
             SatResult::Unknown => panic!("z3incremental: Z3 returned unknown"),
         }
@@ -483,10 +385,10 @@ impl Default for Z3IncrementalState {
     }
 }
 
-/// Version of `extract_linear_expression` that never calls `egraph.find()`.
-/// Returns None if the term is not an arithmetic term of a supported shape.
-/// Every `Coefficient::Term(id)` in the returned map refers to the term's
-/// own raw egraph id — merges are conveyed to Z3 separately.
+/// `find()`-free version of `extract_linear_expression`: every
+/// `Coefficient::Term(id)` refers to the term's own raw egraph id.
+/// Merges are conveyed to Z3 separately via `drain_merge_queue`.
+/// Returns None on unsupported shapes.
 fn extract_lazy_expression(
     term_id: u64,
     solver_state: &mut SolverState,
@@ -494,121 +396,104 @@ fn extract_lazy_expression(
     let term = solver_state.get_term(term_id);
     let mut expr: DeterministicHashMap<Coefficient, Integer> = DeterministicHashMap::new();
     expr.insert(Coefficient::Constant, IBig::from(0));
+
+    let opaque = |ss: &mut SolverState, expr: &mut DeterministicHashMap<Coefficient, Integer>| {
+        expr.insert(Coefficient::Term(ss.to_egraph_id(term_id)), IBig::from(1));
+    };
+    // Add `sub` to `expr`, optionally negating.
+    let accumulate = |expr: &mut DeterministicHashMap<Coefficient, Integer>,
+                      sub: DeterministicHashMap<Coefficient, Integer>,
+                      negate: bool| {
+        for (k, c) in sub {
+            let c = if negate { -c } else { c };
+            *expr.entry(k).or_insert(IBig::from(0)) += c;
+        }
+    };
+
     match term.repr() {
-        ATerm::Constant(c, _) => {
-            if let AlgConstant::Numeral(num) = c
-                && let Ok(value) = num.to_string().parse::<Integer>()
-            {
+        ATerm::Constant(AlgConstant::Numeral(num), _) => {
+            if let Ok(value) = num.to_string().parse::<Integer>() {
                 *expr.get_mut(&Coefficient::Constant).unwrap() = value;
             }
             Some(expr)
         }
+        ATerm::Constant(..) => Some(expr),
         Global(..) => {
-            expr.insert(
-                Coefficient::Term(solver_state.to_egraph_id(term_id)),
-                IBig::from(1),
-            );
+            opaque(solver_state, &mut expr);
             Some(expr)
         }
-        App(identifier, args, _) => match identifier.0.symbol.as_str() {
-            "+" => {
+        App(identifier, args, _) => match (identifier.0.symbol.as_str(), args.len()) {
+            ("+", _) => {
                 for arg in args.iter() {
-                    let sub = extract_lazy_expression(arg.uid(), solver_state)?;
-                    for (k, c) in sub {
-                        if k == Coefficient::Constant {
-                            *expr.get_mut(&Coefficient::Constant).unwrap() += c;
-                        } else {
-                            *expr.entry(k).or_insert(IBig::from(0)) += c;
-                        }
-                    }
+                    accumulate(
+                        &mut expr,
+                        extract_lazy_expression(arg.uid(), solver_state)?,
+                        false,
+                    );
                 }
                 Some(expr)
             }
-            "-" => {
-                if args.is_empty() {
-                    return None;
-                }
-                if args.len() == 1 {
-                    let sub = extract_lazy_expression(args[0].uid(), solver_state)?;
-                    for (k, c) in sub {
-                        expr.insert(k, -c);
-                    }
-                    Some(expr)
-                } else {
-                    let first = extract_lazy_expression(args[0].uid(), solver_state)?;
-                    for (k, c) in first {
-                        if k == Coefficient::Constant {
-                            *expr.get_mut(&Coefficient::Constant).unwrap() += c;
-                        } else {
-                            *expr.entry(k).or_insert(IBig::from(0)) += c;
-                        }
-                    }
-                    for arg in args.iter().skip(1) {
-                        let sub = extract_lazy_expression(arg.uid(), solver_state)?;
-                        for (k, c) in sub {
-                            if k == Coefficient::Constant {
-                                *expr.get_mut(&Coefficient::Constant).unwrap() -= c;
-                            } else {
-                                *expr.entry(k).or_insert(IBig::from(0)) -= c;
-                            }
-                        }
-                    }
-                    Some(expr)
-                }
+            ("-", 0) => None,
+            ("-", 1) => {
+                accumulate(
+                    &mut expr,
+                    extract_lazy_expression(args[0].uid(), solver_state)?,
+                    true,
+                );
+                Some(expr)
             }
-            "*" => {
-                if args.len() != 2 {
-                    return None;
+            ("-", _) => {
+                accumulate(
+                    &mut expr,
+                    extract_lazy_expression(args[0].uid(), solver_state)?,
+                    false,
+                );
+                for arg in args.iter().skip(1) {
+                    accumulate(
+                        &mut expr,
+                        extract_lazy_expression(arg.uid(), solver_state)?,
+                        true,
+                    );
                 }
+                Some(expr)
+            }
+            ("*", 2) => {
                 let left = extract_lazy_expression(args[0].uid(), solver_state)?;
                 let right = extract_lazy_expression(args[1].uid(), solver_state)?;
-                if left.len() == 1 && left.contains_key(&Coefficient::Constant) {
-                    let cst = left[&Coefficient::Constant].clone();
-                    for (k, c) in right {
-                        expr.insert(k, &cst * c);
-                    }
-                    Some(expr)
+                let (cst, other) = if left.len() == 1 && left.contains_key(&Coefficient::Constant) {
+                    (left[&Coefficient::Constant].clone(), right)
                 } else if right.len() == 1 && right.contains_key(&Coefficient::Constant) {
-                    let cst = right[&Coefficient::Constant].clone();
-                    for (k, c) in left {
-                        expr.insert(k, &cst * c);
-                    }
-                    Some(expr)
+                    (right[&Coefficient::Constant].clone(), left)
                 } else {
-                    // Nonlinear — treat the whole App as an opaque term.
-                    let id = solver_state.to_egraph_id(term_id);
-                    expr.insert(Coefficient::Term(id), IBig::from(1));
-                    Some(expr)
+                    // Nonlinear — opaque.
+                    opaque(solver_state, &mut expr);
+                    return Some(expr);
+                };
+                for (k, c) in other {
+                    expr.insert(k, &cst * c);
                 }
+                Some(expr)
             }
-            "div" => {
-                if args.len() != 2 {
-                    return None;
-                }
+            ("div", 2) => {
                 let a = solver_state.to_egraph_id(args[0].uid());
                 let b = solver_state.to_egraph_id(args[1].uid());
                 expr.insert(Coefficient::Div(a, b), IBig::from(1));
                 Some(expr)
             }
-            "mod" => {
-                if args.len() != 2 {
-                    return None;
-                }
+            ("mod", 2) => {
                 let a = solver_state.to_egraph_id(args[0].uid());
                 let b = solver_state.to_egraph_id(args[1].uid());
                 expr.insert(Coefficient::Mod(a, b), IBig::from(1));
                 Some(expr)
             }
+            ("*" | "div" | "mod", _) => None,
             _ => {
-                // Uninterpreted function application — treat as opaque.
-                let id = solver_state.to_egraph_id(term_id);
-                expr.insert(Coefficient::Term(id), IBig::from(1));
+                opaque(solver_state, &mut expr);
                 Some(expr)
             }
         },
         _ => {
-            let id = solver_state.to_egraph_id(term_id);
-            expr.insert(Coefficient::Term(id), IBig::from(1));
+            opaque(solver_state, &mut expr);
             Some(expr)
         }
     }

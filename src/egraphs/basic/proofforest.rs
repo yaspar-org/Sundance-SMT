@@ -18,10 +18,9 @@ pub(super) enum ProofForestEdge {
         child: u32, // TODO: I am not 100% sure if child actually does anything, I think it is useful for reversing edges in the proof forest, but not 100% sure
         disequalities: DeterministicHashMap<u32, DisequalTerm>, // TODO: this might lead to a lot of allocations
         children: DeterministicHashSet<u32>,
-        /// True iff every term in this equivalence class is an arithmetic
-        /// (Int-sorted) term. By SMT type-checking, only same-sort classes
-        /// can be merged, so this flag is preserved unchanged by union
-        /// (both roots must agree — asserted in `cc_union`).
+        /// True iff the class contains an Int-sorted term. `cc_union`
+        /// propagates the flag with OR: if either pre-merge root is tagged,
+        /// the surviving root becomes tagged.
         arithmetic: bool,
     },
     /// Represents a node with an equality relationship

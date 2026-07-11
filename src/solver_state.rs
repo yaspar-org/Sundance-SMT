@@ -267,12 +267,8 @@ impl SolverState {
         } else if y == false_id {
             -self.get_lit_from_u64(self.to_solver_uid(x))
         } else {
-            // Try both argument orders: some equality atoms may have been
-            // registered under the user's original ordering (a, b) while a
-            // congruence-derived merge produces (b, a) or vice versa. To keep
-            // conflict clauses tight and avoid `(= a b)` and `(= b a)` as
-            // distinct lits, reuse an existing lit when either orientation is
-            // already known.
+            // Reuse an existing lit under either orientation: user asserts
+            // may register `(= a b)` while congruence merges produce `(= b a)`.
             let sx = self.to_solver_uid(x);
             let sy = self.to_solver_uid(y);
             let tx = self.get_term(sx);
@@ -285,7 +281,6 @@ impl SolverState {
             if let Some(lit) = self.cnf_cache.var_map.get(&eq_yx.uid()).copied() {
                 return lit;
             }
-            // Neither orientation exists yet — allocate for (x, y).
             self.insert_predecessor(&eq_xy, None, None, true);
             self.get_or_allocate_lit_for_term(&eq_xy)
         }
@@ -507,9 +502,6 @@ impl SolverState {
             if !self.arithmetic_terms.contains(&num) {
                 self.arithmetic_terms.push(num);
             }
-            // Tag the egraph class as arithmetic so any future merge involving
-            // it (direct or congruence-derived) fires the arithmetic merge
-            // queue for the incremental Z3 backend.
             let egraph_id = self.to_egraph_id(num);
             self.egraph.mark_arithmetic(egraph_id);
         }

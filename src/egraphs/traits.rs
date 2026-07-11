@@ -98,25 +98,21 @@ pub trait EgraphTrait {
         lit: Lit,
     ) -> Self::TermId;
 
-    /// Tag `term` as belonging to the arithmetic theory. When incremental
-    /// arithmetic is enabled, any merge (direct or congruence-derived) that
-    /// unifies two arithmetic-tagged classes is appended to the arithmetic
-    /// equalities queue, drainable via `drain_arithmetic_equalities`.
+    /// Tag `term`'s class as arithmetic. When incremental arithmetic is on,
+    /// any merge (direct or congruence-derived) where either pre-merge root
+    /// is tagged appends the merge to the arithmetic equality queue.
     fn mark_arithmetic(&mut self, term: Self::TermId);
 
-    /// Enable or disable arithmetic equality collection. When disabled, merges
-    /// are not queued at all (no per-merge cost).
+    /// Enable/disable arithmetic equality collection.
     fn incremental_arithmetic(&mut self, enabled: bool);
 
-    /// Drain pending arithmetic equalities produced by egraph merges since the
-    /// last drain. Consumers must drain before advancing the decision level:
-    /// `notify_new_decision_level` requires the queue to be empty.
+    /// Drain arithmetic equalities produced by merges since the last drain.
+    /// Callers must drain before advancing the decision level.
     fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
 
     // --- Decision level ---
 
-    /// Advance the egraph's internal decision level by one. The arithmetic
-    /// equalities queue must be empty when this is called (debug-asserted).
+    /// Advance the internal decision level by one.
     fn notify_new_decision_level(&mut self);
 
     // --- Assertions ---

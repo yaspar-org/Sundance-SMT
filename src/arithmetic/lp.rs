@@ -27,9 +27,8 @@ pub enum ArithSolver {
     Internal,
     #[cfg(feature = "z3-solver")]
     Z3,
-    /// Incremental Z3: keep a persistent z3::Solver across cb_check_found_model calls,
-    /// pushing/popping constraints in sync with CaDiCaL's decision trail and
-    /// propagating egraph merges into Z3 as they happen.
+    /// Persistent `z3::Solver` kept in sync with CaDiCaL's trail and the
+    /// egraph's merge stream.
     #[cfg(feature = "z3-solver")]
     #[value(name = "z3incremental", alias = "z3-incremental")]
     Z3Incremental,
@@ -103,16 +102,12 @@ pub fn check_integer_constraints_satisfiable(
         ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, solver_state),
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, solver_state),
-        // Z3Incremental is not driven through this eager entry point — the propagator
-        // maintains a persistent z3::Solver and calls into Z3IncrementalState directly
-        // from cb_check_found_model. Reaching this arm would mean the wiring
-        // in cadical_propagator was bypassed.
+        // Z3Incremental is driven from the propagator's Z3IncrementalState;
+        // reaching this arm means the wiring was bypassed.
         #[cfg(feature = "z3-solver")]
-        ArithSolver::Z3Incremental => panic!(
-            "check_integer_constraints_satisfiable called with Z3Incremental — the \
-             incremental backend must be driven via the propagator's persistent \
-             Z3IncrementalState, not this eager entry point"
-        ),
+        ArithSolver::Z3Incremental => {
+            panic!("Z3Incremental must be driven via the propagator, not this entry point")
+        }
         ArithSolver::None => ArithResult::None,
     }
 }

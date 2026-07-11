@@ -47,8 +47,7 @@ pub struct Args {
     /// Print solver statistics after solving
     #[arg(long, default_value_t = false)]
     pub stats: bool,
-    /// Maximum arithmetic-model conflicts to collect per cb_check_found_model call.
-    /// usize::MAX = no cap; keep collecting until every probe pair has been tried.
+    /// Max arithmetic-model conflicts collected per model-check (usize::MAX = uncapped).
     #[arg(long, default_value_t = usize::MAX)]
     pub max_arith_conflicts_per_round: usize,
 }

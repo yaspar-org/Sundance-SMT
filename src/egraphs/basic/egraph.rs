@@ -235,10 +235,9 @@ pub struct Egraph {
     /// Whether to collect arithmetic-relevant merges for an incremental
     /// arithmetic backend.
     incremental_arithmetic: bool,
-    /// Queue of arithmetic-relevant merges (pre-merge roots). When incremental
-    /// arithmetic is enabled, every merge where the surviving pre-merge root is
-    /// tagged arithmetic is appended here. By typing, the demoted root should be
-    /// arithmetic too; `cc_union` debug-asserts that invariant.
+    /// Pre-merge (surviving_root, demoted_root) pairs from direct or
+    /// congruence-derived unions where either root was arithmetic-tagged.
+    /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
 }
 
@@ -1071,10 +1070,8 @@ impl Egraph {
             }
         }
 
-        // We are about to undo the merge that unified `child` with its parent.
-        // Before mutating, look up whether the still-merged class is arithmetic;
-        // splitting an arithmetic class yields two arithmetic classes (only
-        // same-sort merges are legal), so both new roots inherit the flag.
+        // Splitting an arithmetic class yields two arithmetic classes, so
+        // both new roots inherit the flag from the still-merged class.
         let merged_root_arithmetic = matches!(
             &self.proof_forest[self.find(*child) as usize],
             ProofForestEdge::Root {
@@ -1198,33 +1195,29 @@ impl Egraph {
             (x, y, x_root, y_root)
         };
 
-        // Read the arithmetic flag on both pre-merge roots. The tagging in
-        // `mark_arithmetic` runs *after* `register_term` inside
-        // `insert_predecessor`, so if the new term's `register_term` triggers
-        // a congruence merge with an existing arithmetic-tagged class, we can
-        // reach this point with only one side tagged. Be permissive: if
-        // either side is arithmetic, propagate the merge to the external
-        // theory (and upgrade the surviving root's flag so subsequent merges
-        // through it stay tagged).
-        let x_root_arithmetic = matches!(
+        // `mark_arithmetic` runs *after* `register_term` in
+        // `insert_predecessor`, so a congruence merge here can precede tagging
+        // on one side. If either root is tagged, queue the merge and upgrade
+        // the surviving root's flag so it stays tagged going forward.
+        let x_root_arith = matches!(
             &self.proof_forest[x_root as usize],
             ProofForestEdge::Root {
                 arithmetic: true,
                 ..
             }
         );
-        let y_root_arithmetic = matches!(
+        let y_root_arith = matches!(
             &self.proof_forest[y_root as usize],
             ProofForestEdge::Root {
                 arithmetic: true,
                 ..
             }
         );
-        if x_root_arithmetic || y_root_arithmetic {
+        if x_root_arith || y_root_arith {
             if self.incremental_arithmetic {
                 self.arithmetic_merge_queue.push((x_root, y_root));
             }
-            if !x_root_arithmetic
+            if !x_root_arith
                 && let ProofForestEdge::Root { arithmetic, .. } =
                     &mut self.proof_forest[x_root as usize]
             {
