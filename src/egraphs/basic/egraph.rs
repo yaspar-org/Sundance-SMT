@@ -1198,9 +1198,14 @@ impl Egraph {
             (x, y, x_root, y_root)
         };
 
-        // Read the arithmetic flag on both pre-merge roots. Equality is
-        // well-typed, so if the surviving root is arithmetic, the demoted root
-        // should be arithmetic too.
+        // Read the arithmetic flag on both pre-merge roots. The tagging in
+        // `mark_arithmetic` runs *after* `register_term` inside
+        // `insert_predecessor`, so if the new term's `register_term` triggers
+        // a congruence merge with an existing arithmetic-tagged class, we can
+        // reach this point with only one side tagged. Be permissive: if
+        // either side is arithmetic, propagate the merge to the external
+        // theory (and upgrade the surviving root's flag so subsequent merges
+        // through it stay tagged).
         let x_root_arithmetic = matches!(
             &self.proof_forest[x_root as usize],
             ProofForestEdge::Root {
@@ -1215,13 +1220,15 @@ impl Egraph {
                 ..
             }
         );
-        if x_root_arithmetic {
-            debug_assert!(
-                y_root_arithmetic,
-                "arithmetic root merged with non-arithmetic root"
-            );
+        if x_root_arithmetic || y_root_arithmetic {
             if self.incremental_arithmetic {
                 self.arithmetic_merge_queue.push((x_root, y_root));
+            }
+            if !x_root_arithmetic
+                && let ProofForestEdge::Root { arithmetic, .. } =
+                    &mut self.proof_forest[x_root as usize]
+            {
+                *arithmetic = true;
             }
         }
 
