@@ -308,9 +308,9 @@ impl Z3IncrementalState {
     }
 
     /// Run `check_assumptions` under the currently-active trackers plus the
-    /// pinned defs. On SAT, bucket arithmetic-term roots by model value for
-    /// the caller's Nelson-Oppen probe. On UNSAT, recover the SAT lits from
-    /// the unsat core.
+    /// pinned defs. On SAT, bucket each arithmetic term whose egraph id is
+    /// its own class root by model value for the caller's Nelson-Oppen
+    /// probe. On UNSAT, recover the SAT lits from the unsat core.
     pub fn check(&mut self, solver_state: &mut SolverState) -> ArithResult {
         debug_println!(21, 0, "[z3inc] check() at level {}", self.current_level);
         // Materialize every arithmetic term's var + pin before checking, so
