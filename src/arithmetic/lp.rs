@@ -380,21 +380,30 @@ pub fn extract_linear_expression(
 
                         additional_constraints.extend(additional_const_l);
                         additional_constraints.extend(additional_const_r);
-                        // Check if one is a constant and the other is a variable
-                        if left_expr.len() == 1 && left_expr.contains_key(&Coefficient::Constant) {
+
+                        let left_is_const =
+                            left_expr.len() == 1 && left_expr.contains_key(&Coefficient::Constant);
+                        let right_is_const =
+                            right_expr.len() == 1 && right_expr.contains_key(&Coefficient::Constant);
+
+                        if left_is_const {
                             // c * expr
                             let constant = &left_expr[&Coefficient::Constant];
                             for (var, coeff) in right_expr {
                                 expr.insert(var, constant * coeff);
                             }
-                        } else if right_expr.len() == 1
-                            && right_expr.contains_key(&Coefficient::Constant)
-                        {
+                        } else if right_is_const {
                             // expr * c
                             let constant = &right_expr[&Coefficient::Constant];
                             for (var, coeff) in left_expr {
                                 expr.insert(var, constant * coeff);
                             }
+                        } else {
+                            panic!(
+                                "non-linear multiplication is not supported: (* {} {})",
+                                solver_state.get_term(args[0].uid()),
+                                solver_state.get_term(args[1].uid()),
+                            );
                         }
                     }
                 }
