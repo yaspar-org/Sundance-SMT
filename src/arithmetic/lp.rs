@@ -19,7 +19,7 @@ use std::str::FromStr;
 use yaspar_ir::ast::alg::Constant;
 use yaspar_ir::ast::{
     ATerm::{self, App, Eq, Global, Not},
-    FetchSort, ObjectAllocatorExt as _, Repr,
+    Repr,
 };
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -297,10 +297,6 @@ fn extract_constraint_from_term(
             }
         }
         Eq(a, b) if polarity => {
-            let int_sort = solver_state.context.int_sort();
-            if a.get_sort(solver_state) != int_sort {
-                return None;
-            }
             debug_println!(
                 2,
                 0,
