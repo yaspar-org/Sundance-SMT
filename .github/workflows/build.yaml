@@ -45,20 +45,11 @@ jobs:
           ./.github/copyright-check.sh benches
 
   test:
-    name: Test Suite
+    name: Test Suite (${{ matrix.arithmetic }}, ${{ matrix.os }})
     strategy:
       matrix:
         os: [ ubuntu-latest, macos-latest ]
-        rust: [ stable ]
-        include:
-          # No z3-solver feature: only the internal arithmetic backend is compiled in.
-          - features: ''
-            arithmetic: 'internal'
-          # z3-solver enabled: exercise the two z3 backends.
-          - features: 'local-z3'
-            arithmetic: 'z3'
-          - features: 'local-z3'
-            arithmetic: 'z3incremental'
+        arithmetic: [ internal, z3, z3incremental ]
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -69,9 +60,7 @@ jobs:
           submodules: recursive
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
@@ -84,13 +73,12 @@ jobs:
         run: brew update && brew install cmake
 
       - name: Setup Z3
-        if: matrix.features == 'local-z3'
         uses: ./.github/actions/setup-z3
 
       - name: Run tests
         env:
           SUNDANCE_ARITHMETIC: ${{ matrix.arithmetic }}
-        run: cargo test --release --no-default-features --features "${{ matrix.features }}" -- --nocapture
+        run: cargo test --release --no-default-features --features local-z3 -- --nocapture
 
   lints:
     name: Lints
