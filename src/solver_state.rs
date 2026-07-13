@@ -267,11 +267,22 @@ impl SolverState {
         } else if y == false_id {
             -self.get_lit_from_u64(self.to_solver_uid(x))
         } else {
+            // Reuse an existing lit under either orientation: user asserts
+            // may register `(= a b)` while congruence merges produce `(= b a)`.
             let sx = self.to_solver_uid(x);
             let sy = self.to_solver_uid(y);
-            let eq_term_class = self.context.eq(self.get_term(sx), self.get_term(sy));
-            self.insert_predecessor(&eq_term_class, None, None, true);
-            self.get_or_allocate_lit_for_term(&eq_term_class)
+            let tx = self.get_term(sx);
+            let ty = self.get_term(sy);
+            let eq_xy = self.context.eq(tx.clone(), ty.clone());
+            if let Some(lit) = self.cnf_cache.var_map.get(&eq_xy.uid()).copied() {
+                return lit;
+            }
+            let eq_yx = self.context.eq(ty, tx);
+            if let Some(lit) = self.cnf_cache.var_map.get(&eq_yx.uid()).copied() {
+                return lit;
+            }
+            self.insert_predecessor(&eq_xy, None, None, true);
+            self.get_or_allocate_lit_for_term(&eq_xy)
         }
     }
 
@@ -487,10 +498,12 @@ impl SolverState {
         let num = term.uid();
 
         // Arithmetic term tracking
-        if term.get_sort(self.context.arena()).to_string() == "Int"
-            && !self.arithmetic_terms.contains(&num)
-        {
-            self.arithmetic_terms.push(num);
+        if term.get_sort(self.context.arena()).to_string() == "Int" {
+            if !self.arithmetic_terms.contains(&num) {
+                self.arithmetic_terms.push(num);
+            }
+            let egraph_id = self.to_egraph_id(num);
+            self.egraph.mark_arithmetic(egraph_id);
         }
 
         // Quantifier registration
@@ -608,9 +621,7 @@ pub fn process_assignment(
             t,
             true_egraph_id
         );
-        let union_result = solver_state
-            .egraph
-            .assert_equal(egraph_t, true_egraph_id, level);
+        let union_result = solver_state.egraph.assert_equal(egraph_t, true_egraph_id);
         if let Some(conflict) = union_result.conflict {
             let mut model_terms: Vec<i32> = conflict
                 .equalities
@@ -634,9 +645,7 @@ pub fn process_assignment(
             t,
             false_egraph_id
         );
-        let union_result = solver_state
-            .egraph
-            .assert_equal(egraph_t, false_egraph_id, level);
+        let union_result = solver_state.egraph.assert_equal(egraph_t, false_egraph_id);
         if let Some(conflict) = union_result.conflict {
             let mut model_terms: Vec<i32> = conflict
                 .equalities
@@ -739,7 +748,7 @@ pub fn process_assignment(
                 }
             }
         }
-        Assertion::Equality { t1, t2, level, .. } => {
+        Assertion::Equality { t1, t2, .. } => {
             debug_println!(
                 16,
                 0,
@@ -750,7 +759,7 @@ pub fn process_assignment(
 
             let et1 = solver_state.to_egraph_id(t1);
             let et2 = solver_state.to_egraph_id(t2);
-            let union_result = solver_state.egraph.assert_equal(et1, et2, level);
+            let union_result = solver_state.egraph.assert_equal(et1, et2);
             if let Some(conflict) = union_result.conflict {
                 let mut model_terms: Vec<i32> = conflict
                     .equalities
@@ -777,7 +786,7 @@ pub fn process_assignment(
 
             let et1 = solver_state.to_egraph_id(t1);
             let et2 = solver_state.to_egraph_id(t2);
-            let result = solver_state.egraph.assert_disequal(et1, et2, lit, level);
+            let result = solver_state.egraph.assert_disequal(et1, et2, lit);
             if let Some(conflict) = result.conflict {
                 let mut model_terms: Vec<i32> = conflict
                     .equalities
@@ -799,14 +808,12 @@ pub fn process_assignment(
             }
             None
         }
-        Assertion::Distinct { terms, level, .. } => {
+        Assertion::Distinct { terms, .. } => {
             let egraph_terms: Vec<u32> = terms
                 .iter()
                 .map(|t| solver_state.to_egraph_id(*t))
                 .collect();
-            let result = solver_state
-                .egraph
-                .assert_distinct(&egraph_terms, lit, level);
+            let result = solver_state.egraph.assert_distinct(&egraph_terms, lit);
             if let Some(conflict) = result.conflict {
                 let mut model_terms: Vec<i32> = conflict
                     .equalities

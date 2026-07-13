@@ -5,6 +5,7 @@
 use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::CustomExternalPropagator;
 use crate::debug_println;
+use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
@@ -67,6 +68,18 @@ pub fn cdcl_decision_procedure(
         solver.connect_terminator(t);
     }
 
+    #[cfg(feature = "z3-solver")]
+    let using_z3_incremental = matches!(arithmetic, ArithSolver::Z3Incremental);
+    #[cfg(not(feature = "z3-solver"))]
+    let using_z3_incremental = false;
+    solver_state
+        .egraph
+        .incremental_arithmetic(using_z3_incremental);
+
+    #[cfg(feature = "z3-solver")]
+    let z3_incremental =
+        using_z3_incremental.then(crate::arithmetic::z3incremental::Z3IncrementalState::new);
+
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
         solver_state,
@@ -79,6 +92,8 @@ pub fn cdcl_decision_procedure(
         stats: SolverStats::new(),
         pending: None,
         max_arith_conflicts_per_round,
+        #[cfg(feature = "z3-solver")]
+        z3_incremental,
     };
 
     solver.connect_external_propagator(&mut propagator);
