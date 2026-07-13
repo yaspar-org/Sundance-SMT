@@ -57,10 +57,8 @@ pub struct Z3IncrementalState {
     lits_by_level: Vec<Vec<i32>>,
     /// Per-level `z3::push` count, popped on backtrack.
     push_counts: Vec<u32>,
-    /// Definitional equalities (e.g. `var_5 == 5`, `var_{(+xy)} == var_x + var_y`).
-    /// Global theory facts — replayed as assumptions since asserting them
-    /// would tie them to a push scope that later gets popped.
-    pinned_defs: Vec<Bool>,
+    /// Egraph ids materialized per level; evicted from `var_map` on backtrack.
+    vars_by_level: Vec<Vec<u32>>,
     current_level: usize,
 }
 
@@ -74,7 +72,7 @@ impl Z3IncrementalState {
             active_lits: DeterministicHashSet::default(),
             lits_by_level: vec![Vec::new()],
             push_counts: vec![0],
-            pinned_defs: Vec::new(),
+            vars_by_level: vec![Vec::new()],
             current_level: 0,
         }
     }
@@ -88,26 +86,26 @@ impl Z3IncrementalState {
         while self.lits_by_level.len() <= self.current_level {
             self.lits_by_level.push(Vec::new());
         }
+        while self.vars_by_level.len() <= self.current_level {
+            self.vars_by_level.push(Vec::new());
+        }
     }
 
-    /// Get or create the Z3 `Int` variable for an egraph id, pinning its
-    /// structural definition on first creation (e.g. `var_5 == 5`,
-    /// `var_{(+xy)} == var_x + var_y`). Uninterpreted apps and Globals get
-    /// no pin. Pins are stored in `pinned_defs` and replayed as assumptions
-    /// on every `check_assumptions` — `Solver::assert` would tie them to
-    /// the current push scope and lose them on `pop`.
-    ///
-    /// This is the only var-materialization entry point.
+    /// Get or create the Z3 `Int` variable for an egraph id. On first
+    /// creation, asserts the structural definition (e.g. `var_5 == 5`)
+    /// directly into Z3's current scope. On backtrack the scope is popped
+    /// and `var_map` is cleared, so the next `var_for` re-materializes.
     fn var_for(&mut self, egraph_id: u32, solver_state: &mut SolverState) -> Int {
         if let Some(v) = self.var_map.get(&egraph_id) {
             return v.clone();
         }
         let v = Int::new_const(format!("var_{egraph_id}"));
         self.var_map.insert(egraph_id, v.clone());
+        self.ensure_level_slot();
+        self.vars_by_level[self.current_level].push(egraph_id);
 
         let solver_uid = solver_state.to_solver_uid(egraph_id);
         if let Some(expr) = extract_lazy_expression(solver_uid, solver_state) {
-            // Skip pinning `var_i == 0 + 1*var_i` (plain Global or uninterp App).
             let is_self_reference = expr.len() == 2
                 && expr.get(&Coefficient::Constant) == Some(&IBig::from(0))
                 && expr.get(&Coefficient::Term(egraph_id)) == Some(&IBig::from(1));
@@ -120,7 +118,7 @@ impl Z3IncrementalState {
                         rhs += e;
                     }
                 }
-                self.pinned_defs.push(Int::eq(&v, rhs));
+                self.solver.assert(Int::eq(&v, rhs));
                 debug_println!(21, 0, "[z3inc] def var_{}=={:?}", egraph_id, entries);
             }
         }
@@ -226,6 +224,11 @@ impl Z3IncrementalState {
                     self.active_lits.remove(&l);
                 }
             }
+            if let Some(vars) = self.vars_by_level.pop() {
+                for id in vars {
+                    self.var_map.remove(&id);
+                }
+            }
             self.current_level -= 1;
         }
         self.ensure_level_slot();
@@ -307,27 +310,23 @@ impl Z3IncrementalState {
         new_lits
     }
 
-    /// Run `check_assumptions` under the currently-active trackers plus the
-    /// pinned defs. On SAT, bucket each arithmetic term whose egraph id is
-    /// its own class root by model value for the caller's Nelson-Oppen
-    /// probe. On UNSAT, recover the SAT lits from the unsat core.
+    /// Run `check_assumptions` under the currently-active trackers. On SAT,
+    /// bucket each arithmetic term whose egraph id is its own class root by
+    /// model value for the caller's Nelson-Oppen probe. On UNSAT, recover
+    /// the SAT lits from the unsat core.
     pub fn check(&mut self, solver_state: &mut SolverState) -> ArithResult {
         debug_println!(21, 0, "[z3inc] check() at level {}", self.current_level);
-        // Materialize every arithmetic term's var + pin before checking, so
-        // `check_assumptions` sees all definitional equalities in the model.
+        // Materialize every arithmetic term's var + definition before checking.
         let arithmetic_terms = solver_state.arithmetic_terms.clone();
         for term_id in &arithmetic_terms {
             let egraph_id = solver_state.to_egraph_id(*term_id);
             let _ = self.var_for(egraph_id, solver_state);
         }
-        // `assert_and_track` asserts `tracker => constraint`, so we need to
-        // include each active tracker in the assumptions.
-        let mut assumptions: Vec<Bool> = self
+        let assumptions: Vec<Bool> = self
             .active_lits
             .iter()
             .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()).cloned())
             .collect();
-        assumptions.extend(self.pinned_defs.iter().cloned());
         match self.solver.check_assumptions(&assumptions) {
             SatResult::Sat => {
                 let model = self.solver.get_model().unwrap();
@@ -350,7 +349,6 @@ impl Z3IncrementalState {
             SatResult::Unsat => {
                 let core = self.solver.get_unsat_core();
                 // Trackers are named `lit_{abs_lit}` (possibly `|...|`-quoted).
-                // Pinned-def asts also appear in the core; filter them out.
                 // Recover the signed lit via `active_lits`.
                 let lits: DeterministicHashSet<i32> = core
                     .iter()
