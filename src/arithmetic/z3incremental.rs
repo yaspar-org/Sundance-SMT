@@ -352,7 +352,7 @@ impl Z3IncrementalState {
                 // Trackers are named `lit_{abs_lit}` (possibly `|...|`-quoted).
                 // Pinned-def asts also appear in the core; filter them out.
                 // Recover the signed lit via `active_lits`.
-                let mut lits: DeterministicHashSet<i32> = core
+                let lits: DeterministicHashSet<i32> = core
                     .iter()
                     .filter_map(|ast| {
                         let raw = ast.to_string();
@@ -366,12 +366,10 @@ impl Z3IncrementalState {
                         Some(-signed)
                     })
                     .collect();
-                // Empty core would mean the contradiction lies entirely in
-                // pinned defs — that's a bug. Fall back to blaming every
-                // active lit rather than reporting an unsound `Unsat([])`.
-                if lits.is_empty() {
-                    lits.extend(self.active_lits.iter().map(|l| -l));
-                }
+                assert!(
+                    !lits.is_empty(),
+                    "z3incremental: unsat core contained no tracked lits"
+                );
                 ArithResult::Unsat(lits.into_iter().collect(), LiaStats::new())
             }
             SatResult::Unknown => panic!("z3incremental: Z3 returned unknown"),
