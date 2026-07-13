@@ -1,0 +1,8 @@
+(declare-sort A 0)
+(declare-const x A)
+(declare-const y A)
+(declare-const n Int)
+(assert (= x y))
+(assert (> n 0))
+(assert (< n 5))
+(check-sat)

@@ -1,0 +1,5 @@
+(set-logic ALL)
+(declare-const y Int)
+(assert (> y 5))
+(assert (= (* 2 y) 12))
+(check-sat)

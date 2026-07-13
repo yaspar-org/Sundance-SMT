@@ -19,7 +19,7 @@ use std::str::FromStr;
 use yaspar_ir::ast::alg::Constant;
 use yaspar_ir::ast::{
     ATerm::{self, App, Eq, Global, Not},
-    Repr,
+    FetchSort, Repr,
 };
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -187,15 +187,19 @@ fn extract_constraint_from_term(
 
     match term.repr() {
         App(identifier, args, _) if !polarity => {
+            if args.len() != 2 {
+                return None;
+            }
+            match identifier.0.symbol.as_str() {
+                "<=" | ">=" | "<" | ">" => {}
+                _ => return None,
+            }
             debug_println!(
                 2,
                 0,
                 "[ARITH CHECK] Extracting linear constraint for NOT APP term {}",
                 term
             );
-            if args.len() != 2 {
-                return None;
-            }
             let (left_expr, additional_constraint_l) =
                 extract_linear_expression(args[0].uid(), solver_state);
             let (right_expr, additional_constraint_r) =
@@ -203,7 +207,6 @@ fn extract_constraint_from_term(
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
-            // Handle comparison operators: <=, >=, <, >, =
             match identifier.0.symbol.as_str() {
                 "<=" => {
                     // ~ (a <= b) -> a > b
@@ -241,19 +244,23 @@ fn extract_constraint_from_term(
                         additional_constraint,
                     ))
                 }
-                _ => None,
+                _ => unreachable!(),
             }
         }
         App(identifier, args, _) if polarity => {
+            if args.len() != 2 {
+                return None;
+            }
+            match identifier.0.symbol.as_str() {
+                "<=" | ">=" | "<" | ">" => {}
+                _ => return None,
+            }
             debug_println!(
                 2,
                 0,
                 "[ARITH CHECK] Extracting linear constraint for APP term {}",
                 term
             );
-            if args.len() != 2 {
-                return None;
-            }
             let (left_expr, additional_constraint_l) =
                 extract_linear_expression(args[0].uid(), solver_state);
             let (right_expr, additional_constraint_r) =
@@ -261,7 +268,6 @@ fn extract_constraint_from_term(
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
-            // Handle comparison operators: <=, >=, <, >, =
             match identifier.0.symbol.as_str() {
                 "<=" => Some(LinearConstraint::new(
                     left_expr,
@@ -287,10 +293,13 @@ fn extract_constraint_from_term(
                     FunctionType::Lt,
                     additional_constraint,
                 )),
-                _ => None,
+                _ => unreachable!(),
             }
         }
         Eq(a, b) if polarity => {
+            if a.get_sort(solver_state).to_string() != "Int" {
+                return None;
+            }
             debug_println!(
                 2,
                 0,
@@ -346,7 +355,7 @@ pub fn extract_linear_expression(
             } else {
                 panic!(
                     "non-numeric constant in arithmetic expression: {}",
-                    solver_state.get_term(term_id)
+                    solver_state.get_term(term_id),
                 );
             }
         }

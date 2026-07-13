@@ -1090,5 +1090,8 @@
   "arithmetic/mod_constant_divisor_unsat.smt2": "unsat",
   "arithmetic/mod_negative_divisor_sat.smt2": "sat",
   "arithmetic/mod_negative_divisor_unsat.smt2": "unsat",
-  "arithmetic/mod_negative_numerator_unsat.smt2": "unsat"
+  "arithmetic/mod_negative_numerator_unsat.smt2": "unsat",
+  "arithmetic/bool_arg_in_function.smt2": "unsat",
+  "arithmetic/non_int_equality_filtering.smt2": "sat",
+  "arithmetic/mul_constant_times_var.smt2": "sat"
 }
