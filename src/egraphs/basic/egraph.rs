@@ -239,11 +239,11 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
-    /// Equality watches: maps an unordered pair {t1, t2} (stored as (min, max))
-    /// to the SAT literal that should be propagated when t1 and t2 become equal.
-    /// The keys are original (non-canonical) term IDs — we check at merge time
-    /// whether the two sides of a watched pair now share a root.
-    eq_watches: Vec<(u32, u32, i32)>,
+    /// Equality watches: maps an ordered pair (t1, t2) of egraph term IDs to
+    /// the SAT literal for the atom `(= t1 t2)`. When cc_union merges exactly
+    /// these two IDs (directly or via congruence), the literal is propagated.
+    /// Both orientations are stored for O(1) lookup.
+    eq_watches: FastDeterministicHashMap<(u32, u32), i32>,
     /// Pending theory propagations to deliver to the SAT solver via cb_propagate.
     propagation_queue: Vec<(u32, u32, i32)>,
 }
@@ -279,7 +279,7 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
-            eq_watches: Vec::new(),
+            eq_watches: FastDeterministicHashMap::default(),
             propagation_queue: Vec::new(),
         }
     }
@@ -1405,30 +1405,20 @@ impl Egraph {
             self.display_term(x_root)
         );
 
-        self.check_eq_watches();
+        // Check if this specific merge corresponds to a watched equality atom.
+        if let Some(&lit) = self.eq_watches.get(&(x, y)) {
+            debug_println!(
+                7,
+                0,
+                "EGRAPH PROPAGATION: {} and {} merged, propagating lit {}",
+                self.display_term(x),
+                self.display_term(y),
+                lit
+            );
+            self.propagation_queue.push((x, y, lit));
+        }
 
         EgraphResult::ok()
-    }
-
-    /// Check all equality watches and queue propagations for any whose
-    /// two sides are now in the same equivalence class.
-    fn check_eq_watches(&mut self) {
-        for i in 0..self.eq_watches.len() {
-            let (t1, t2, lit) = self.eq_watches[i];
-            if self.find(t1) == self.find(t2)
-                && !self.propagation_queue.iter().any(|(_, _, l)| *l == lit)
-            {
-                debug_println!(
-                    7,
-                    0,
-                    "EGRAPH PROPAGATION: {} and {} merged, propagating lit {}",
-                    self.display_term(t1),
-                    self.display_term(t2),
-                    lit
-                );
-                self.propagation_queue.push((t1, t2, lit));
-            }
-        }
     }
 
     /// Make vertex the root of its proof-forest tree.
@@ -1742,9 +1732,8 @@ impl EgraphTrait for Egraph {
     }
 
     fn register_eq(&mut self, t1: Self::TermId, t2: Self::TermId, lit: Lit) {
-        if !self.eq_watches.iter().any(|(a, b, _)| (*a == t1 && *b == t2) || (*a == t2 && *b == t1)) {
-            self.eq_watches.push((t1, t2, lit));
-        }
+        self.eq_watches.entry((t1, t2)).or_insert(lit);
+        self.eq_watches.entry((t2, t1)).or_insert(lit);
     }
 
     fn register_boolean_term(
