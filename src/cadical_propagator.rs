@@ -16,17 +16,23 @@ use crate::quantifiers::quantifier::{
 };
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// A pending theory propagation: the literal to propagate and its reason clause.
-/// The reason clause is of the form `¬eq1 ∨ ¬eq2 ∨ ... ∨ propagated_lit`,
-/// where eq1, eq2, ... are the asserted equalities that explain why t1 = t2.
-pub struct PendingPropagation {
+/// A pending theory propagation whose explanation is built only if CaDiCaL
+/// requests it.
+pub(crate) struct PendingPropagation {
     pub lit: i32,
-    pub reason_clause: Vec<i32>,
+    pub t1: u32,
+    pub t2: u32,
+}
+
+pub(crate) enum PropagationReason {
+    Unexplained { t1: u32, t2: u32 },
+    Equalities(Vec<(u32, u32)>),
+    Clause(Vec<i32>),
 }
 
 /// Our implementation of a Cadical Propagator
@@ -48,10 +54,9 @@ pub struct CustomExternalPropagator<'a> {
     #[cfg(feature = "z3-solver")]
     pub z3_incremental: Option<Z3IncrementalState>,
     /// Pending theory propagations from the egraph. Drained via cb_propagate.
-    pub pending_propagations: Vec<PendingPropagation>,
-    /// Index into the reason clause currently being emitted by cb_add_reason_clause_lit.
-    /// Maps propagated literal -> reason clause literals.
-    pub reason_clauses: DeterministicHashMap<i32, Vec<i32>>,
+    pub(crate) pending_propagations: Vec<PendingPropagation>,
+    /// Lazy or materialized reason for each delivered propagation.
+    pub(crate) reason_clauses: FastDeterministicHashMap<i32, PropagationReason>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -156,6 +161,68 @@ impl<'a> CustomExternalPropagator<'a> {
             }
         }
     }
+
+    fn materialize_reason_clause(&mut self, propagated_lit: i32) {
+        let Some(reason) = self.reason_clauses.remove(&propagated_lit) else {
+            return;
+        };
+        let equalities = match reason {
+            PropagationReason::Unexplained { t1, t2 } => self
+                .solver_state
+                .egraph
+                .explain_equality(t1, t2)
+                .expect("propagated equality must still be explainable"),
+            PropagationReason::Equalities(equalities) => equalities,
+            PropagationReason::Clause(clause) => {
+                self.reason_clauses
+                    .insert(propagated_lit, PropagationReason::Clause(clause));
+                return;
+            }
+        };
+
+        let mut clause: Vec<i32> = equalities
+            .iter()
+            .map(|(a, b)| -self.solver_state.make_eq(*a, *b))
+            .collect();
+        clause.push(propagated_lit);
+        for &reason_lit in &clause {
+            self.add_observed_variable(reason_lit);
+            self.add_lit_to_proof_tracer(reason_lit);
+        }
+        self.reason_clauses
+            .insert(propagated_lit, PropagationReason::Clause(clause));
+    }
+
+    fn preserve_reasons_across_backtrack(&mut self, level: usize) {
+        let mut surviving = Vec::new();
+        let mut discarded = Vec::new();
+        for (&lit, reason) in &self.reason_clauses {
+            let index = lit.unsigned_abs() as usize;
+            let survives = index < self.assignments.len()
+                && self.assignments[index] != 0
+                && self.assignments[index].unsigned_abs() as usize <= level + 1;
+            if survives {
+                if let PropagationReason::Unexplained { t1, t2 } = reason {
+                    surviving.push((lit, *t1, *t2));
+                }
+            } else {
+                discarded.push(lit);
+            }
+        }
+
+        for (lit, t1, t2) in surviving {
+            let equalities = self
+                .solver_state
+                .egraph
+                .explain_equality(t1, t2)
+                .expect("surviving propagated equality must still be explainable");
+            self.reason_clauses
+                .insert(lit, PropagationReason::Equalities(equalities));
+        }
+        for lit in discarded {
+            self.reason_clauses.remove(&lit);
+        }
+    }
 }
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
@@ -225,30 +292,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     if abs_prop < self.assignments.len() && self.assignments[abs_prop] != 0 {
                         continue;
                     }
-                    // Build the reason clause: ¬eq1 ∨ ¬eq2 ∨ ... ∨ propagated_lit
-                    // The explanation is: which asserted equalities cause t1 = t2?
-                    if let Some(equalities) = self.solver_state.egraph.explain_equality(prop.t1, prop.t2) {
-                        let mut reason_clause: Vec<i32> = equalities
-                            .iter()
-                            .map(|(a, b)| -self.solver_state.make_eq(*a, *b))
-                            .collect();
-                        reason_clause.push(prop_lit);
-                        debug_println!(
-                            7,
-                            0,
-                            "PROPAGATOR: Queuing propagation of {} with reason {:?}",
-                            prop_lit,
-                            reason_clause
-                        );
-                        for &reason_lit in &reason_clause {
-                            self.add_observed_variable(reason_lit);
-                            self.add_lit_to_proof_tracer(reason_lit);
-                        }
-                        self.pending_propagations.push(PendingPropagation {
-                            lit: prop_lit,
-                            reason_clause,
-                        });
-                    }
+                    self.pending_propagations.push(PendingPropagation {
+                        lit: prop_lit,
+                        t1: prop.t1,
+                        t2: prop.t2,
+                    });
                 }
             }
 
@@ -366,6 +414,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level,
             level
         );
+
+        // Preserve explanations only for propagated assignments that remain on
+        // CaDiCaL's trail. The egraph proof paths are about to be backtracked.
+        self.preserve_reasons_across_backtrack(level);
 
         // Reset solver-level assignments
         for i in 1..self.assignments.len() {
@@ -708,14 +760,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn cb_propagate(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Propagation callback invoked");
         if let Some(prop) = self.pending_propagations.pop() {
-            debug_println!(
-                7,
-                0,
-                "PROPAGATOR: Propagating literal {} with reason {:?}",
+            debug_println!(7, 0, "PROPAGATOR: Propagating literal {}", prop.lit);
+            self.reason_clauses.insert(
                 prop.lit,
-                prop.reason_clause
+                PropagationReason::Unexplained {
+                    t1: prop.t1,
+                    t2: prop.t2,
+                },
             );
-            self.reason_clauses.insert(prop.lit, prop.reason_clause);
             prop.lit
         } else {
             0
@@ -729,7 +781,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "PROPAGATOR: Adding reason clause for literal {}",
             propagated_lit
         );
-        if let Some(reason) = self.reason_clauses.get_mut(&propagated_lit) {
+        self.materialize_reason_clause(propagated_lit);
+        if let Some(PropagationReason::Clause(reason)) =
+            self.reason_clauses.get_mut(&propagated_lit)
+        {
             if let Some(lit) = reason.pop() {
                 lit
             } else {

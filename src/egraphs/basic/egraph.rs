@@ -8,7 +8,9 @@ use super::unionfind::ProofTracker;
 use crate::debug_println;
 use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit, Propagation};
 use crate::log::is_important;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
+use crate::utils::{
+    DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
+};
 use std::default::Default;
 use std::fmt;
 
@@ -20,17 +22,19 @@ type SigKey = (CanonicalOp, Children);
 /// (level, key, term_id, was_inserted)
 type SigTrailEntry = (usize, SigKey, u32, bool);
 
+type EqKey = (u32, u32);
+
 enum EqWatchTrailEntry {
     Registered {
         level: usize,
         atom: u32,
-        key: SigKey,
+        key: EqKey,
     },
     Rekeyed {
         level: usize,
         atom: u32,
-        old_key: SigKey,
-        new_key: SigKey,
+        old_key: EqKey,
+        new_key: EqKey,
     },
 }
 
@@ -264,10 +268,12 @@ pub struct Egraph {
     /// Equality watches indexed by their current canonical signature.
     /// Multiple atoms can share a signature after their operands merge, so each
     /// key stores every `(atom, lit)` watch for that signature.
-    eq_atom_lits: FastDeterministicHashMap<SigKey, Vec<(u32, i32)>>,
-    /// Current signature for each watched equality atom. This makes rekeying
-    /// affected watches local to predecessors of the class being merged/split.
-    eq_atom_signatures: FastDeterministicHashMap<u32, SigKey>,
+    eq_atom_lits: FastDeterministicHashMap<EqKey, Vec<(u32, i32)>>,
+    /// Current canonical operand pair for each watched equality atom.
+    eq_atom_signatures: FastDeterministicHashMap<u32, EqKey>,
+    /// Reverse index from an operand e-class root to watched equality atoms
+    /// whose canonical signature mentions that root.
+    eq_atoms_by_root: FastDeterministicHashMap<u32, FastDeterministicHashSet<u32>>,
     /// Trail for restoring the canonical equality-watch index on backtrack.
     eq_watch_trail: Vec<EqWatchTrailEntry>,
     /// Pending theory propagations to deliver to the SAT solver via cb_propagate.
@@ -308,6 +314,7 @@ impl Egraph {
             arithmetic_merge_queue: Vec::new(),
             eq_atom_lits: FastDeterministicHashMap::default(),
             eq_atom_signatures: FastDeterministicHashMap::default(),
+            eq_atoms_by_root: FastDeterministicHashMap::default(),
             eq_watch_trail: Vec::new(),
             propagation_queue: Vec::new(),
         }
@@ -979,7 +986,7 @@ impl Egraph {
                     self.move_eq_atom_watch(atom, &new_key, old_key);
                 }
                 EqWatchTrailEntry::Registered { atom, key, .. } => {
-                    if let Some(restored_key) = self.compute_signature(atom)
+                    if let Some(restored_key) = self.compute_eq_key(atom)
                         && restored_key != key
                     {
                         self.move_eq_atom_watch(atom, &key, restored_key);
@@ -1331,7 +1338,7 @@ impl Egraph {
             self.display_term(y_root)
         );
         self.make_root(y, proof_parent);
-        self.reindex_eq_atom_predecessors(y_root, level);
+        self.reindex_eq_atoms_for_root(y_root, level);
 
         // Early conflict check: x_root's existing disequalities may already be
         // violated now that y's class has been merged in.
@@ -1482,28 +1489,19 @@ impl Egraph {
         EgraphResult::ok()
     }
 
-    /// Look up equality atoms whose two operands are about to become equal by
-    /// merging the classes rooted at `x_root` and `y_root` (one operand in each
-    /// class). Such an atom `(= a b)` lives in the sig_table under
-    /// `(Eq, [x_root, y_root])` or the reverse, so two lookups on the pre-merge
-    /// roots find every newly-satisfied atom — including transitive merges that
-    /// an exact-operand-pair check would miss. Must be called BEFORE the merge
-    /// re-canonicalizes the sig_table. Returns (operand1, operand2, lit) tuples.
+    /// Look up equality atoms whose operands span the two classes being merged.
+    /// Equality is symmetric, so the canonical key is an unordered root pair.
+    /// Must be called before the watch index is rekeyed by the merge.
     fn eq_atom_propagations_for_merge(&self, x_root: u32, y_root: u32) -> Vec<(u32, u32, i32)> {
         if self.eq_atom_lits.is_empty() {
             return Vec::new();
         }
         let mut out = Vec::new();
-        for key in [
-            (CanonicalOp::Eq, Children::from_slice(&[x_root, y_root])),
-            (CanonicalOp::Eq, Children::from_slice(&[y_root, x_root])),
-        ] {
-            if let Some(watches) = self.eq_atom_lits.get(&key) {
-                for &(atom, lit) in watches {
-                    if let TermSlot::Term(e) = &self.terms[atom as usize] {
-                        let ch = e.children.as_slice();
-                        out.push((ch[0], ch[1], lit));
-                    }
+        if let Some(watches) = self.eq_atom_lits.get(&Self::eq_key(x_root, y_root)) {
+            for &(atom, lit) in watches {
+                if let TermSlot::Term(e) = &self.terms[atom as usize] {
+                    let ch = e.children.as_slice();
+                    out.push((ch[0], ch[1], lit));
                 }
             }
         }
@@ -1512,29 +1510,29 @@ impl Egraph {
 
     /// Rekey watched equality atoms whose signatures changed because `root`
     /// was merged into another class or restored by backtracking.
-    fn reindex_eq_atom_predecessors(&mut self, root: u32, level: usize) {
-        let atoms: Vec<u32> = self.predecessors[root as usize]
-            .keys()
-            .filter(|atom| self.eq_atom_signatures.contains_key(atom))
-            .copied()
-            .collect();
+    fn reindex_eq_atoms_for_root(&mut self, root: u32, level: usize) {
+        let atoms: Vec<u32> = self
+            .eq_atoms_by_root
+            .get(&root)
+            .map(|atoms| atoms.iter().copied().collect())
+            .unwrap_or_default();
         for atom in atoms {
             self.reindex_eq_atom(atom, level);
         }
     }
 
     fn reindex_eq_atom(&mut self, atom: u32, level: usize) {
-        let Some(old_key) = self.eq_atom_signatures.get(&atom).cloned() else {
+        let Some(old_key) = self.eq_atom_signatures.get(&atom).copied() else {
             return;
         };
-        let Some(new_key) = self.compute_signature(atom) else {
+        let Some(new_key) = self.compute_eq_key(atom) else {
             return;
         };
         if old_key == new_key {
             return;
         }
 
-        self.move_eq_atom_watch(atom, &old_key, new_key.clone());
+        self.move_eq_atom_watch(atom, &old_key, new_key);
         self.eq_watch_trail.push(EqWatchTrailEntry::Rekeyed {
             level,
             atom,
@@ -1543,7 +1541,7 @@ impl Egraph {
         });
     }
 
-    fn move_eq_atom_watch(&mut self, atom: u32, old_key: &SigKey, new_key: SigKey) {
+    fn move_eq_atom_watch(&mut self, atom: u32, old_key: &EqKey, new_key: EqKey) {
         let mut watch = None;
         let mut remove_old_key = false;
         if let Some(watches) = self.eq_atom_lits.get_mut(old_key) {
@@ -1560,12 +1558,48 @@ impl Egraph {
         }
 
         if let Some(watch) = watch {
-            self.eq_atom_lits
-                .entry(new_key.clone())
-                .or_default()
-                .push(watch);
+            self.remove_eq_atom_from_root_index(atom, old_key);
+            self.add_eq_atom_to_root_index(atom, &new_key);
+            self.eq_atom_lits.entry(new_key).or_default().push(watch);
             self.eq_atom_signatures.insert(atom, new_key);
         }
+    }
+
+    fn add_eq_atom_to_root_index(&mut self, atom: u32, key: &EqKey) {
+        for root in [key.0, key.1] {
+            self.eq_atoms_by_root.entry(root).or_default().insert(atom);
+        }
+    }
+
+    fn remove_eq_atom_from_root_index(&mut self, atom: u32, key: &EqKey) {
+        for root in [key.0, key.1] {
+            let remove_root = if let Some(atoms) = self.eq_atoms_by_root.get_mut(&root) {
+                atoms.remove(&atom);
+                atoms.is_empty()
+            } else {
+                false
+            };
+            if remove_root {
+                self.eq_atoms_by_root.remove(&root);
+            }
+        }
+    }
+
+    fn eq_key(a: u32, b: u32) -> EqKey {
+        if a <= b { (a, b) } else { (b, a) }
+    }
+
+    fn compute_eq_key(&self, atom: u32) -> Option<EqKey> {
+        let TermSlot::Term(entry) = &self.terms[atom as usize] else {
+            return None;
+        };
+        if entry.op != Op::Eq {
+            return None;
+        }
+        let [left, right] = entry.children.as_slice() else {
+            return None;
+        };
+        Some(Self::eq_key(self.find(*left), self.find(*right)))
     }
 
     /// Make vertex the root of its proof-forest tree.
@@ -1882,14 +1916,13 @@ impl EgraphTrait for Egraph {
         if self.eq_atom_signatures.contains_key(&eq_atom) {
             return;
         }
-        let Some(signature) = self.compute_signature(eq_atom) else {
-            return;
-        };
+        let signature = Self::eq_key(self.find(t1), self.find(t2));
         self.eq_atom_lits
-            .entry(signature.clone())
+            .entry(signature)
             .or_default()
             .push((eq_atom, lit));
-        self.eq_atom_signatures.insert(eq_atom, signature.clone());
+        self.add_eq_atom_to_root_index(eq_atom, &signature);
+        self.eq_atom_signatures.insert(eq_atom, signature);
         self.eq_watch_trail.push(EqWatchTrailEntry::Registered {
             level: self.decision_level,
             atom: eq_atom,
