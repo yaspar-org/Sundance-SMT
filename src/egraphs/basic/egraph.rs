@@ -20,6 +20,28 @@ type SigKey = (CanonicalOp, Children);
 /// (level, key, term_id, was_inserted)
 type SigTrailEntry = (usize, SigKey, u32, bool);
 
+enum EqWatchTrailEntry {
+    Registered {
+        level: usize,
+        atom: u32,
+        key: SigKey,
+    },
+    Rekeyed {
+        level: usize,
+        atom: u32,
+        old_key: SigKey,
+        new_key: SigKey,
+    },
+}
+
+impl EqWatchTrailEntry {
+    fn level(&self) -> usize {
+        match self {
+            Self::Registered { level, .. } | Self::Rekeyed { level, .. } => *level,
+        }
+    }
+}
+
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== Egraph Summary ===")?;
@@ -239,13 +261,15 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
-    /// Maps an equality-atom egraph term ID to its SAT literal. When a merge
-    /// makes the atom's two operands equal, the literal is propagated. Merges
-    /// are detected via the sig_table: an eq atom `(= a b)` lives in the
-    /// sig_table under `(Eq, [find(a), find(b)])`, so a single lookup on the
-    /// pre-merge roots finds any watched atom whose sides are about to unify —
-    /// including transitive merges, which an exact-operand-pair check misses.
-    eq_atom_lits: FastDeterministicHashMap<u32, i32>,
+    /// Equality watches indexed by their current canonical signature.
+    /// Multiple atoms can share a signature after their operands merge, so each
+    /// key stores every `(atom, lit)` watch for that signature.
+    eq_atom_lits: FastDeterministicHashMap<SigKey, Vec<(u32, i32)>>,
+    /// Current signature for each watched equality atom. This makes rekeying
+    /// affected watches local to predecessors of the class being merged/split.
+    eq_atom_signatures: FastDeterministicHashMap<u32, SigKey>,
+    /// Trail for restoring the canonical equality-watch index on backtrack.
+    eq_watch_trail: Vec<EqWatchTrailEntry>,
     /// Pending theory propagations to deliver to the SAT solver via cb_propagate.
     /// Each entry is (operand1, operand2, lit) for explain_equality + delivery.
     propagation_queue: Vec<(u32, u32, i32)>,
@@ -283,6 +307,8 @@ impl Egraph {
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
             eq_atom_lits: FastDeterministicHashMap::default(),
+            eq_atom_signatures: FastDeterministicHashMap::default(),
+            eq_watch_trail: Vec::new(),
             propagation_queue: Vec::new(),
         }
     }
@@ -935,6 +961,33 @@ impl Egraph {
             self.proof_forest_backtrack(backtrack_equality, y, y_root);
         }
 
+        // Restore equality-watch signatures after restoring union-find. Watches
+        // registered above the target level persist, but must be canonicalized
+        // against the restored roots.
+        while self
+            .eq_watch_trail
+            .last()
+            .is_some_and(|entry| entry.level() > level)
+        {
+            match self.eq_watch_trail.pop().unwrap() {
+                EqWatchTrailEntry::Rekeyed {
+                    atom,
+                    old_key,
+                    new_key,
+                    ..
+                } => {
+                    self.move_eq_atom_watch(atom, &new_key, old_key);
+                }
+                EqWatchTrailEntry::Registered { atom, key, .. } => {
+                    if let Some(restored_key) = self.compute_signature(atom)
+                        && restored_key != key
+                    {
+                        self.move_eq_atom_watch(atom, &key, restored_key);
+                    }
+                }
+            }
+        }
+
         // Replay sig_trail in reverse AFTER UF is restored.
         // Use the stored key directly — recomputing from find() would give the wrong key.
         while let Some((entry_level, _, _, _)) = self.sig_trail.last() {
@@ -1278,6 +1331,7 @@ impl Egraph {
             self.display_term(y_root)
         );
         self.make_root(y, proof_parent);
+        self.reindex_eq_atom_predecessors(y_root, level);
 
         // Early conflict check: x_root's existing disequalities may already be
         // violated now that y's class has been merged in.
@@ -1444,15 +1498,74 @@ impl Egraph {
             (CanonicalOp::Eq, Children::from_slice(&[x_root, y_root])),
             (CanonicalOp::Eq, Children::from_slice(&[y_root, x_root])),
         ] {
-            if let Some(&atom) = self.sig_table.get(&key)
-                && let Some(&lit) = self.eq_atom_lits.get(&atom)
-                && let TermSlot::Term(e) = &self.terms[atom as usize]
-            {
-                let ch = e.children.as_slice();
-                out.push((ch[0], ch[1], lit));
+            if let Some(watches) = self.eq_atom_lits.get(&key) {
+                for &(atom, lit) in watches {
+                    if let TermSlot::Term(e) = &self.terms[atom as usize] {
+                        let ch = e.children.as_slice();
+                        out.push((ch[0], ch[1], lit));
+                    }
+                }
             }
         }
         out
+    }
+
+    /// Rekey watched equality atoms whose signatures changed because `root`
+    /// was merged into another class or restored by backtracking.
+    fn reindex_eq_atom_predecessors(&mut self, root: u32, level: usize) {
+        let atoms: Vec<u32> = self.predecessors[root as usize]
+            .keys()
+            .filter(|atom| self.eq_atom_signatures.contains_key(atom))
+            .copied()
+            .collect();
+        for atom in atoms {
+            self.reindex_eq_atom(atom, level);
+        }
+    }
+
+    fn reindex_eq_atom(&mut self, atom: u32, level: usize) {
+        let Some(old_key) = self.eq_atom_signatures.get(&atom).cloned() else {
+            return;
+        };
+        let Some(new_key) = self.compute_signature(atom) else {
+            return;
+        };
+        if old_key == new_key {
+            return;
+        }
+
+        self.move_eq_atom_watch(atom, &old_key, new_key.clone());
+        self.eq_watch_trail.push(EqWatchTrailEntry::Rekeyed {
+            level,
+            atom,
+            old_key,
+            new_key,
+        });
+    }
+
+    fn move_eq_atom_watch(&mut self, atom: u32, old_key: &SigKey, new_key: SigKey) {
+        let mut watch = None;
+        let mut remove_old_key = false;
+        if let Some(watches) = self.eq_atom_lits.get_mut(old_key) {
+            if let Some(index) = watches
+                .iter()
+                .position(|(watched_atom, _)| *watched_atom == atom)
+            {
+                watch = Some(watches.swap_remove(index));
+            }
+            remove_old_key = watches.is_empty();
+        }
+        if remove_old_key {
+            self.eq_atom_lits.remove(old_key);
+        }
+
+        if let Some(watch) = watch {
+            self.eq_atom_lits
+                .entry(new_key.clone())
+                .or_default()
+                .push(watch);
+            self.eq_atom_signatures.insert(atom, new_key);
+        }
     }
 
     /// Make vertex the root of its proof-forest tree.
@@ -1765,11 +1878,29 @@ impl EgraphTrait for Egraph {
         id
     }
 
-    fn register_eq(&mut self, eq_atom: Self::TermId, _t1: Self::TermId, _t2: Self::TermId, lit: Lit) {
-        // `eq_atom` is the egraph term id of the `(= t1 t2)` atom itself. We
-        // detect its operands merging via the sig_table (see `eq_atom_lits`),
-        // so all we store here is atom_id -> lit.
-        self.eq_atom_lits.entry(eq_atom).or_insert(lit);
+    fn register_eq(&mut self, eq_atom: Self::TermId, t1: Self::TermId, t2: Self::TermId, lit: Lit) {
+        if self.eq_atom_signatures.contains_key(&eq_atom) {
+            return;
+        }
+        let Some(signature) = self.compute_signature(eq_atom) else {
+            return;
+        };
+        self.eq_atom_lits
+            .entry(signature.clone())
+            .or_default()
+            .push((eq_atom, lit));
+        self.eq_atom_signatures.insert(eq_atom, signature.clone());
+        self.eq_watch_trail.push(EqWatchTrailEntry::Registered {
+            level: self.decision_level,
+            atom: eq_atom,
+            key: signature,
+        });
+
+        // Dynamically-created equality atoms can be registered after their
+        // operands have already merged.
+        if self.find(t1) == self.find(t2) {
+            self.propagation_queue.push((t1, t2, lit));
+        }
     }
 
     fn register_boolean_term(
@@ -1877,5 +2008,94 @@ impl EgraphTrait for Egraph {
     ) -> Option<Vec<(Self::TermId, Self::TermId)>> {
         let mut tracker = ProofTracker::new();
         self.leastcommonancestor(t1, t2, &mut tracker)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local(egraph: &mut Egraph, name: &str) -> u32 {
+        egraph.register_term(Op::Local(name.to_string()), &[], false)
+    }
+
+    fn watch_eq(egraph: &mut Egraph, left: u32, right: u32, lit: i32) {
+        let atom = egraph.register_term(Op::Eq, &[left, right], false);
+        egraph.register_eq(atom, left, right, lit);
+    }
+
+    #[test]
+    fn propagation_lookup_returns_all_watches_for_a_canonical_signature() {
+        let mut egraph = Egraph::new();
+        let a = local(&mut egraph, "a");
+        let b = local(&mut egraph, "b");
+        let c = local(&mut egraph, "c");
+        let d = local(&mut egraph, "d");
+        watch_eq(&mut egraph, a, b, 1);
+        watch_eq(&mut egraph, c, d, 2);
+
+        assert!(egraph.assert_equal(a, c).conflict.is_none());
+        assert!(egraph.assert_equal(b, d).conflict.is_none());
+        assert!(egraph.drain_propagations().is_empty());
+
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        let mut lits: Vec<i32> = egraph
+            .drain_propagations()
+            .into_iter()
+            .map(|propagation| propagation.lit)
+            .collect();
+        lits.sort_unstable();
+        assert_eq!(lits, vec![1, 2]);
+    }
+
+    #[test]
+    fn propagation_index_is_rekeyed_on_backtrack() {
+        let mut egraph = Egraph::new();
+        let a = local(&mut egraph, "a");
+        let b = local(&mut egraph, "b");
+        let c = local(&mut egraph, "c");
+        watch_eq(&mut egraph, a, b, 7);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(c, a).conflict.is_none());
+        assert!(egraph.drain_propagations().is_empty());
+        egraph.backtrack_to(0);
+
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        let propagations = egraph.drain_propagations();
+        assert_eq!(propagations.len(), 1);
+        assert_eq!(propagations[0].lit, 7);
+    }
+
+    #[test]
+    fn watch_registered_under_a_temporary_merge_is_rekeyed_on_backtrack() {
+        let mut egraph = Egraph::new();
+        let a = local(&mut egraph, "a");
+        let b = local(&mut egraph, "b");
+        let c = local(&mut egraph, "c");
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(c, a).conflict.is_none());
+        watch_eq(&mut egraph, a, b, 9);
+        egraph.backtrack_to(0);
+
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        let propagations = egraph.drain_propagations();
+        assert_eq!(propagations.len(), 1);
+        assert_eq!(propagations[0].lit, 9);
+    }
+
+    #[test]
+    fn registering_an_already_true_equality_queues_it_immediately() {
+        let mut egraph = Egraph::new();
+        let a = local(&mut egraph, "a");
+        let b = local(&mut egraph, "b");
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+
+        watch_eq(&mut egraph, a, b, 11);
+
+        let propagations = egraph.drain_propagations();
+        assert_eq!(propagations.len(), 1);
+        assert_eq!(propagations[0].lit, 11);
     }
 }
