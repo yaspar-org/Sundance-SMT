@@ -239,12 +239,15 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
-    /// Equality watches: maps an ordered pair (t1, t2) of egraph term IDs to
-    /// the SAT literal for the atom `(= t1 t2)`. When cc_union merges exactly
-    /// these two IDs (directly or via congruence), the literal is propagated.
-    /// Both orientations are stored for O(1) lookup.
-    eq_watches: FastDeterministicHashMap<(u32, u32), i32>,
+    /// Maps an equality-atom egraph term ID to its SAT literal. When a merge
+    /// makes the atom's two operands equal, the literal is propagated. Merges
+    /// are detected via the sig_table: an eq atom `(= a b)` lives in the
+    /// sig_table under `(Eq, [find(a), find(b)])`, so a single lookup on the
+    /// pre-merge roots finds any watched atom whose sides are about to unify —
+    /// including transitive merges, which an exact-operand-pair check misses.
+    eq_atom_lits: FastDeterministicHashMap<u32, i32>,
     /// Pending theory propagations to deliver to the SAT solver via cb_propagate.
+    /// Each entry is (operand1, operand2, lit) for explain_equality + delivery.
     propagation_queue: Vec<(u32, u32, i32)>,
 }
 
@@ -279,7 +282,7 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
-            eq_watches: FastDeterministicHashMap::default(),
+            eq_atom_lits: FastDeterministicHashMap::default(),
             propagation_queue: Vec::new(),
         }
     }
@@ -1207,6 +1210,11 @@ impl Egraph {
             (x, y, x_root, y_root)
         };
 
+        // Look up watched equality atoms whose operands span these two classes,
+        // BEFORE the merge re-canonicalizes the sig_table. Queued at the end
+        // only once the merge has actually succeeded (no conflict).
+        let eq_atom_propagations = self.eq_atom_propagations_for_merge(x_root, y_root);
+
         // `mark_arithmetic` runs *after* `register_term` in
         // `insert_predecessor`, so a congruence merge here can precede tagging
         // on one side. If either root is tagged, queue the merge and upgrade
@@ -1405,20 +1413,46 @@ impl Egraph {
             self.display_term(x_root)
         );
 
-        // Check if this specific merge corresponds to a watched equality atom.
-        if let Some(&lit) = self.eq_watches.get(&(x, y)) {
+        for (a, b, lit) in eq_atom_propagations {
             debug_println!(
                 7,
                 0,
-                "EGRAPH PROPAGATION: {} and {} merged, propagating lit {}",
-                self.display_term(x),
-                self.display_term(y),
+                "EGRAPH PROPAGATION: ({} = {}) became true (operands merged), propagating lit {}",
+                self.display_term(a),
+                self.display_term(b),
                 lit
             );
-            self.propagation_queue.push((x, y, lit));
+            self.propagation_queue.push((a, b, lit));
         }
 
         EgraphResult::ok()
+    }
+
+    /// Look up equality atoms whose two operands are about to become equal by
+    /// merging the classes rooted at `x_root` and `y_root` (one operand in each
+    /// class). Such an atom `(= a b)` lives in the sig_table under
+    /// `(Eq, [x_root, y_root])` or the reverse, so two lookups on the pre-merge
+    /// roots find every newly-satisfied atom — including transitive merges that
+    /// an exact-operand-pair check would miss. Must be called BEFORE the merge
+    /// re-canonicalizes the sig_table. Returns (operand1, operand2, lit) tuples.
+    fn eq_atom_propagations_for_merge(&self, x_root: u32, y_root: u32) -> Vec<(u32, u32, i32)> {
+        if self.eq_atom_lits.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for key in [
+            (CanonicalOp::Eq, Children::from_slice(&[x_root, y_root])),
+            (CanonicalOp::Eq, Children::from_slice(&[y_root, x_root])),
+        ] {
+            if let Some(&atom) = self.sig_table.get(&key)
+                && let Some(&lit) = self.eq_atom_lits.get(&atom)
+                && let TermSlot::Term(e) = &self.terms[atom as usize]
+            {
+                let ch = e.children.as_slice();
+                out.push((ch[0], ch[1], lit));
+            }
+        }
+        out
     }
 
     /// Make vertex the root of its proof-forest tree.
@@ -1731,9 +1765,11 @@ impl EgraphTrait for Egraph {
         id
     }
 
-    fn register_eq(&mut self, t1: Self::TermId, t2: Self::TermId, lit: Lit) {
-        self.eq_watches.entry((t1, t2)).or_insert(lit);
-        self.eq_watches.entry((t2, t1)).or_insert(lit);
+    fn register_eq(&mut self, eq_atom: Self::TermId, _t1: Self::TermId, _t2: Self::TermId, lit: Lit) {
+        // `eq_atom` is the egraph term id of the `(= t1 t2)` atom itself. We
+        // detect its operands merging via the sig_table (see `eq_atom_lits`),
+        // so all we store here is atom_id -> lit.
+        self.eq_atom_lits.entry(eq_atom).or_insert(lit);
     }
 
     fn register_boolean_term(

@@ -281,9 +281,9 @@ impl SolverState {
             if let Some(lit) = self.cnf_cache.var_map.get(&eq_yx.uid()).copied() {
                 return lit;
             }
-            self.insert_predecessor(&eq_xy, None, None, true);
+            let eq_atom = self.insert_predecessor(&eq_xy, None, None, true);
             let lit = self.get_or_allocate_lit_for_term(&eq_xy);
-            self.egraph.register_eq(x, y, lit);
+            self.egraph.register_eq(eq_atom, x, y, lit);
             lit
         }
     }
@@ -576,11 +576,14 @@ pub fn register_equality_watches(solver_state: &mut SolverState) {
         {
             let left_uid = left.uid();
             let right_uid = right.uid();
-            if let (Some(&eid_left), Some(&eid_right)) = (
+            if let (Some(&eq_atom), Some(&eid_left), Some(&eid_right)) = (
+                solver_state.id_map.get_by_left(&uid),
                 solver_state.id_map.get_by_left(&left_uid),
                 solver_state.id_map.get_by_left(&right_uid),
             ) {
-                solver_state.egraph.register_eq(eid_left, eid_right, lit);
+                solver_state
+                    .egraph
+                    .register_eq(eq_atom, eid_left, eid_right, lit);
             }
         }
     }

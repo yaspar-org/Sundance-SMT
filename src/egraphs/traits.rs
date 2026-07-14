@@ -94,10 +94,11 @@ pub trait EgraphTrait {
     /// Compile a pattern for e-matching and return its PatternId.
     fn compile_pattern(&mut self, pattern: Pattern<Self::TermId>) -> PatternId;
 
-    /// Register an equality `t1 = t2` with its corresponding SAT literal.
-    /// Sets up a watch: when `t1` and `t2` become equal, `lit` is propagated.
-    /// When they become provably disequal, `-lit` is propagated.
-    fn register_eq(&mut self, t1: Self::TermId, t2: Self::TermId, lit: Lit);
+    /// Register an equality atom `(= t1 t2)` for theory propagation.
+    /// `eq_atom` is the term ID of the equality atom itself; `t1`/`t2` are its
+    /// operands. When `t1` and `t2` become equal in the egraph, `lit` is queued
+    /// for propagation to the SAT solver.
+    fn register_eq(&mut self, eq_atom: Self::TermId, t1: Self::TermId, t2: Self::TermId, lit: Lit);
 
     /// Register a boolean non-equality term with its SAT literal.
     /// When the term becomes equal to `true_term`, `lit` is propagated.
