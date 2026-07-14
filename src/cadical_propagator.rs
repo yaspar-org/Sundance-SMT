@@ -390,8 +390,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.solver_state.egraph.backtrack_to(level);
 
         // Clear pending propagations — they refer to merges that may have been undone.
+        // Note: reason_clauses is NOT cleared here because CaDiCaL may request
+        // the reason for a previously-propagated literal during conflict analysis
+        // even after backtracking.
         self.pending_propagations.clear();
-        self.reason_clauses.clear();
 
         #[cfg(feature = "z3-solver")]
         {
