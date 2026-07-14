@@ -21,6 +21,14 @@ use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// A pending theory propagation: the literal to propagate and its reason clause.
+/// The reason clause is of the form `¬eq1 ∨ ¬eq2 ∨ ... ∨ propagated_lit`,
+/// where eq1, eq2, ... are the asserted equalities that explain why t1 = t2.
+pub struct PendingPropagation {
+    pub lit: i32,
+    pub reason_clause: Vec<i32>,
+}
+
 /// Our implementation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
@@ -39,6 +47,11 @@ pub struct CustomExternalPropagator<'a> {
     /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
     #[cfg(feature = "z3-solver")]
     pub z3_incremental: Option<Z3IncrementalState>,
+    /// Pending theory propagations from the egraph. Drained via cb_propagate.
+    pub pending_propagations: Vec<PendingPropagation>,
+    /// Index into the reason clause currently being emitted by cb_add_reason_clause_lit.
+    /// Maps propagated literal -> reason clause literals.
+    pub reason_clauses: DeterministicHashMap<i32, Vec<i32>>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -201,6 +214,44 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
             }
 
+            // Drain theory propagations from the egraph.
+            {
+                use crate::egraphs::EgraphTrait;
+                let propagations = self.solver_state.egraph.drain_propagations();
+                for prop in propagations {
+                    let prop_lit = prop.lit;
+                    // Skip if the literal is already assigned
+                    let abs_prop = prop_lit.unsigned_abs() as usize;
+                    if abs_prop < self.assignments.len() && self.assignments[abs_prop] != 0 {
+                        continue;
+                    }
+                    // Build the reason clause: ¬eq1 ∨ ¬eq2 ∨ ... ∨ propagated_lit
+                    // The explanation is: which asserted equalities cause t1 = t2?
+                    if let Some(equalities) = self.solver_state.egraph.explain_equality(prop.t1, prop.t2) {
+                        let mut reason_clause: Vec<i32> = equalities
+                            .iter()
+                            .map(|(a, b)| -self.solver_state.make_eq(*a, *b))
+                            .collect();
+                        reason_clause.push(prop_lit);
+                        debug_println!(
+                            7,
+                            0,
+                            "PROPAGATOR: Queuing propagation of {} with reason {:?}",
+                            prop_lit,
+                            reason_clause
+                        );
+                        for &reason_lit in &reason_clause {
+                            self.add_observed_variable(reason_lit);
+                            self.add_lit_to_proof_tracer(reason_lit);
+                        }
+                        self.pending_propagations.push(PendingPropagation {
+                            lit: prop_lit,
+                            reason_clause,
+                        });
+                    }
+                }
+            }
+
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
             {
@@ -337,6 +388,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // any congruence merges from `union_to_eclass` replay, so the queue
         // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
+
+        // Clear pending propagations — they refer to merges that may have been undone.
+        self.pending_propagations.clear();
+        self.reason_clauses.clear();
 
         #[cfg(feature = "z3-solver")]
         {
@@ -650,21 +705,38 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn cb_propagate(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Propagation callback invoked");
-        // For now, no propagation
-        // This could deduce new assignments
-        0
+        if let Some(prop) = self.pending_propagations.pop() {
+            debug_println!(
+                7,
+                0,
+                "PROPAGATOR: Propagating literal {} with reason {:?}",
+                prop.lit,
+                prop.reason_clause
+            );
+            self.reason_clauses.insert(prop.lit, prop.reason_clause);
+            prop.lit
+        } else {
+            0
+        }
     }
 
-    fn cb_add_reason_clause_lit(&mut self, _propagated_lit: i32) -> i32 {
+    fn cb_add_reason_clause_lit(&mut self, propagated_lit: i32) -> i32 {
         debug_println!(
             7,
             0,
             "PROPAGATOR: Adding reason clause for literal {}",
-            _propagated_lit
+            propagated_lit
         );
-        // For now, no reason clauses
-        // This could explain propagations
-        0
+        if let Some(reason) = self.reason_clauses.get_mut(&propagated_lit) {
+            if let Some(lit) = reason.pop() {
+                lit
+            } else {
+                self.reason_clauses.remove(&propagated_lit);
+                0
+            }
+        } else {
+            0
+        }
     }
 
     fn cb_has_external_clause(&mut self, is_forgettable: &mut bool) -> bool {

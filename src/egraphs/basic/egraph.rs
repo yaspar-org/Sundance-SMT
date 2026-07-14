@@ -6,7 +6,7 @@ use super::proofforest::*;
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use super::unionfind::ProofTracker;
 use crate::debug_println;
-use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
+use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit, Propagation};
 use crate::log::is_important;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
 use std::default::Default;
@@ -239,6 +239,13 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Equality watches: maps an unordered pair {t1, t2} (stored as (min, max))
+    /// to the SAT literal that should be propagated when t1 and t2 become equal.
+    /// The keys are original (non-canonical) term IDs — we check at merge time
+    /// whether the two sides of a watched pair now share a root.
+    eq_watches: Vec<(u32, u32, i32)>,
+    /// Pending theory propagations to deliver to the SAT solver via cb_propagate.
+    propagation_queue: Vec<(u32, u32, i32)>,
 }
 
 impl Default for Egraph {
@@ -272,6 +279,8 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
+            eq_watches: Vec::new(),
+            propagation_queue: Vec::new(),
         }
     }
 
@@ -965,6 +974,9 @@ impl Egraph {
         // below) survive.
         self.arithmetic_merge_queue.clear();
 
+        // Propagation queue is also stale after backtrack.
+        self.propagation_queue.clear();
+
         // Re-do union_to_eclass via sig table probe. Entries added at or below
         // `level` were already reconciled with the sig_table at that level and
         // their signatures are stable under this backtrack.
@@ -1393,7 +1405,30 @@ impl Egraph {
             self.display_term(x_root)
         );
 
+        self.check_eq_watches();
+
         EgraphResult::ok()
+    }
+
+    /// Check all equality watches and queue propagations for any whose
+    /// two sides are now in the same equivalence class.
+    fn check_eq_watches(&mut self) {
+        for i in 0..self.eq_watches.len() {
+            let (t1, t2, lit) = self.eq_watches[i];
+            if self.find(t1) == self.find(t2)
+                && !self.propagation_queue.iter().any(|(_, _, l)| *l == lit)
+            {
+                debug_println!(
+                    7,
+                    0,
+                    "EGRAPH PROPAGATION: {} and {} merged, propagating lit {}",
+                    self.display_term(t1),
+                    self.display_term(t2),
+                    lit
+                );
+                self.propagation_queue.push((t1, t2, lit));
+            }
+        }
     }
 
     /// Make vertex the root of its proof-forest tree.
@@ -1706,8 +1741,10 @@ impl EgraphTrait for Egraph {
         id
     }
 
-    fn register_eq(&mut self, _t1: Self::TermId, _t2: Self::TermId, _lit: Lit) {
-        // TODO: watch-based equality propagation (future optimization)
+    fn register_eq(&mut self, t1: Self::TermId, t2: Self::TermId, lit: Lit) {
+        if !self.eq_watches.iter().any(|(a, b, _)| (*a == t1 && *b == t2) || (*a == t2 && *b == t1)) {
+            self.eq_watches.push((t1, t2, lit));
+        }
     }
 
     fn register_boolean_term(
@@ -1741,6 +1778,13 @@ impl EgraphTrait for Egraph {
 
     fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)> {
         std::mem::take(&mut self.arithmetic_merge_queue)
+    }
+
+    fn drain_propagations(&mut self) -> Vec<Propagation<Self::TermId>> {
+        std::mem::take(&mut self.propagation_queue)
+            .into_iter()
+            .map(|(t1, t2, lit)| Propagation { lit, t1, t2 })
+            .collect()
     }
 
     fn notify_new_decision_level(&mut self) {

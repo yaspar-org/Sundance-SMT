@@ -9,7 +9,7 @@ use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
-use crate::utils::DeterministicHashSet;
+use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, Status, Terminator};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -94,6 +94,8 @@ pub fn cdcl_decision_procedure(
         max_arith_conflicts_per_round,
         #[cfg(feature = "z3-solver")]
         z3_incremental,
+        pending_propagations: Vec::new(),
+        reason_clauses: DeterministicHashMap::default(),
     };
 
     solver.connect_external_propagator(&mut propagator);

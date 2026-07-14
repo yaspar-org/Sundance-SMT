@@ -14,6 +14,17 @@ use std::hash::Hash;
 /// Zero means "no decision" when returned from decision methods.
 pub type Lit = i32;
 
+/// A theory propagation: the egraph determined that `lit` must be true
+/// because terms `t1` and `t2` became equal (or a boolean term merged with true/false).
+#[derive(Debug, Clone)]
+pub struct Propagation<T> {
+    /// The SAT literal to propagate.
+    pub lit: Lit,
+    /// The two terms whose equality implies this literal.
+    pub t1: T,
+    pub t2: T,
+}
+
 /// Conflict explanation: the equalities that were asserted (and their
 /// congruence consequences) that together violate a disequality.
 /// T is a generic parameter for the Term type that we use
@@ -109,6 +120,10 @@ pub trait EgraphTrait {
     /// Drain arithmetic equalities produced by merges since the last drain.
     /// Callers must drain before advancing the decision level.
     fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
+
+    /// Drain pending theory propagations. Each entry is a literal whose
+    /// watched equality became true in the egraph (both sides merged).
+    fn drain_propagations(&mut self) -> Vec<Propagation<Self::TermId>>;
 
     // --- Decision level ---
 

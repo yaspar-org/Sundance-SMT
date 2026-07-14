@@ -282,7 +282,9 @@ impl SolverState {
                 return lit;
             }
             self.insert_predecessor(&eq_xy, None, None, true);
-            self.get_or_allocate_lit_for_term(&eq_xy)
+            let lit = self.get_or_allocate_lit_for_term(&eq_xy);
+            self.egraph.register_eq(x, y, lit);
+            lit
         }
     }
 
@@ -553,6 +555,33 @@ impl SolverState {
                 polarity,
                 skolemized: false,
             });
+        }
+    }
+}
+
+/// Register all existing equality atoms (terms of the form `(= t1 t2)`) that
+/// have SAT literals as watches in the egraph. Call after CNF conversion is
+/// complete so that all literals are allocated.
+pub fn register_equality_watches(solver_state: &mut SolverState) {
+    use crate::egraphs::EgraphTrait;
+    let var_map_entries: Vec<(u64, i32)> = solver_state
+        .cnf_cache
+        .var_map
+        .iter()
+        .map(|(uid, lit)| (*uid, *lit))
+        .collect();
+    for (uid, lit) in var_map_entries {
+        if let Some(TermOption::Some(term)) = solver_state.terms_list.get(uid as usize).cloned()
+            && let Eq(left, right) = term.repr()
+        {
+            let left_uid = left.uid();
+            let right_uid = right.uid();
+            if let (Some(&eid_left), Some(&eid_right)) = (
+                solver_state.id_map.get_by_left(&left_uid),
+                solver_state.id_map.get_by_left(&right_uid),
+            ) {
+                solver_state.egraph.register_eq(eid_left, eid_right, lit);
+            }
         }
     }
 }
