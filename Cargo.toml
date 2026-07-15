@@ -44,6 +44,8 @@ harness = true
 
 [profile.release]
 debug = true
+lto = "fat"
+codegen-units = 1
 
 [lib]
 name = "sundance_smt"

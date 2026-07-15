@@ -1,2 +1,5 @@
 [env]
 Z3_SYS_BUNDLED_DIR_OVERRIDE = { value = "z3", relative = true }
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]
