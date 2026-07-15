@@ -34,7 +34,7 @@ pub fn check_integer_constraints_satisfiable_lia(
     debug_println!(21, 4, "trying to solve with constraints: {:?}", constraints);
     debug_println!(21, 4, "and arithmetic literals {:?}", arithmetic_literals);
 
-    let mut var_map = DeterministicHashMap::new();
+    let mut var_map = DeterministicHashMap::default();
 
     // Create a context for the internal arithmetic solver then build it up
     let mut ctx = ConvContext::new();
@@ -120,7 +120,7 @@ pub fn check_integer_constraints_satisfiable_lia(
             match ret.decision {
                 SolverDecision::FEASIBLE(assignment) => {
                     let mut model_hashmap: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
-                        DeterministicHashMap::new();
+                        DeterministicHashMap::default();
                     for (term_id, root_var) in &roots {
                         if let Some(value) = assignment.get(root_var) {
                             let val: IBig = value.to_int().value().clone();

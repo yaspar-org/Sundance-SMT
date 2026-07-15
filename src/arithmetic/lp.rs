@@ -347,7 +347,7 @@ pub fn extract_linear_expression(
         solver_state.get_term(term_id)
     );
     let term = solver_state.get_term(term_id);
-    let mut expr = DeterministicHashMap::new();
+    let mut expr = DeterministicHashMap::default();
     expr.insert(Coefficient::Constant, IBig::from(0));
     let mut additional_constraints = vec![];
     match term.repr() {

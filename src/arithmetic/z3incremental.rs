@@ -66,8 +66,8 @@ impl Z3IncrementalState {
     pub fn new() -> Self {
         Self {
             solver: Solver::new(),
-            var_map: DeterministicHashMap::new(),
-            tracker_by_abs_lit: DeterministicHashMap::new(),
+            var_map: DeterministicHashMap::default(),
+            tracker_by_abs_lit: DeterministicHashMap::default(),
             non_arithmetic_lits: DeterministicHashSet::default(),
             active_lits: DeterministicHashSet::default(),
             lits_by_level: vec![Vec::new()],
@@ -331,7 +331,7 @@ impl Z3IncrementalState {
             SatResult::Sat => {
                 let model = self.solver.get_model().unwrap();
                 let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
-                    DeterministicHashMap::new();
+                    DeterministicHashMap::default();
                 for term_id in &arithmetic_terms {
                     let egraph_id = solver_state.to_egraph_id(*term_id);
                     if solver_state.egraph.find(egraph_id) != egraph_id {
@@ -390,7 +390,7 @@ fn extract_lazy_expression(
     solver_state: &mut SolverState,
 ) -> Option<DeterministicHashMap<Coefficient, Integer>> {
     let term = solver_state.get_term(term_id);
-    let mut expr: DeterministicHashMap<Coefficient, Integer> = DeterministicHashMap::new();
+    let mut expr: DeterministicHashMap<Coefficient, Integer> = DeterministicHashMap::default();
     expr.insert(Coefficient::Constant, IBig::from(0));
 
     let opaque = |ss: &mut SolverState, expr: &mut DeterministicHashMap<Coefficient, Integer>| {

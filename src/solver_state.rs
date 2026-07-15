@@ -27,7 +27,7 @@ use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
 
-use crate::utils::DeterministicHashMap;
+use crate::utils::{DeterministicHashMap, HashableBTreeMap};
 
 fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     match term.repr() {
@@ -119,7 +119,7 @@ pub struct SolverState {
     pub quantifiers: Vec<Quantifier>,
 
     /// Tracks quantifier instantiations to avoid duplicates.
-    pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<String, Term>>>,
+    pub added_instantiations: HashMap<u64, HashSet<HashableBTreeMap<String, Term>>>,
 
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
@@ -171,7 +171,7 @@ impl SolverState {
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
             datatype_info,
-            term_constructors: DeterministicHashMap::new(),
+            term_constructors: DeterministicHashMap::default(),
             nelson_oppen_ineq_literals: HashSet::new(),
             datatype_axioms_applied: HashSet::new(),
             arithmetic_terms: vec![],

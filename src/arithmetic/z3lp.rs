@@ -57,7 +57,7 @@ pub fn check_integer_constraints_satisfiable_z3(
         }
     }
 
-    let mut var_map: DeterministicHashMap<u32, Int> = DeterministicHashMap::new();
+    let mut var_map: DeterministicHashMap<u32, Int> = DeterministicHashMap::default();
     for id in variable_ids {
         var_map
             .entry(id)
@@ -172,7 +172,7 @@ pub fn check_integer_constraints_satisfiable_z3(
             let model = solver.get_model().unwrap();
 
             let mut model_hashmap: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
-                DeterministicHashMap::new();
+                DeterministicHashMap::default();
             for (var, value) in roots {
                 let model_val = model.eval(&value, true).unwrap();
                 let model_val_str = model_val.to_string();

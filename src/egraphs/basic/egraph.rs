@@ -256,8 +256,8 @@ impl Egraph {
             proof_forest: vec![ProofForestEdge::Root {
                 size: 1000,
                 child: 0,
-                disequalities: DeterministicHashMap::new(),
-                children: DeterministicHashSet::new(),
+                disequalities: DeterministicHashMap::default(),
+                children: DeterministicHashSet::default(),
                 arithmetic: false,
             }],
             proof_forest_backtrack_stack: Vec::new(),
@@ -266,8 +266,8 @@ impl Egraph {
             predecessor_level: vec![1, 1],
             function_maps: DeterministicHashMap::default(),
             decision_level: 0,
-            predecessors_created_by_quantifiers: DeterministicHashMap::new(),
-            union_to_eclass: DeterministicHashMap::new(),
+            predecessors_created_by_quantifiers: DeterministicHashMap::default(),
+            union_to_eclass: DeterministicHashMap::default(),
             sig_table: FastDeterministicHashMap::default(),
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
@@ -326,9 +326,9 @@ impl Egraph {
 
         self.proof_forest[id as usize] = ProofForestEdge::Root {
             size: 1,
-            disequalities: DeterministicHashMap::new(),
+            disequalities: DeterministicHashMap::default(),
             child: 0,
-            children: DeterministicHashSet::new(),
+            children: DeterministicHashSet::default(),
             arithmetic: false,
         };
 
@@ -403,8 +403,8 @@ impl Egraph {
                 ProofForestEdge::Root {
                     size: 1000,
                     child: 0,
-                    disequalities: DeterministicHashMap::new(),
-                    children: DeterministicHashSet::new(),
+                    disequalities: DeterministicHashMap::default(),
+                    children: DeterministicHashSet::default(),
                     arithmetic: false,
                 },
             );
@@ -425,9 +425,9 @@ impl Egraph {
         self.terms[id as usize] = TermSlot::Opaque;
         self.proof_forest[id as usize] = ProofForestEdge::Root {
             size: 1,
-            disequalities: DeterministicHashMap::new(),
+            disequalities: DeterministicHashMap::default(),
             child: 0,
-            children: DeterministicHashSet::new(),
+            children: DeterministicHashSet::default(),
             arithmetic: false,
         };
         id
@@ -633,10 +633,10 @@ impl Egraph {
             pairs,
             parent: 0,
             child: 0,
-            disequalities: DeterministicHashMap::new(),
+            disequalities: DeterministicHashMap::default(),
             level,
             hash: self.predecessor_hash,
-            children: DeterministicHashSet::new(),
+            children: DeterministicHashSet::default(),
         };
         self.cc_union(a, b, proof_parent, level)
     }
@@ -862,10 +862,10 @@ impl Egraph {
             term: Some((t1, t2)),
             parent: 0,
             child: 0,
-            disequalities: DeterministicHashMap::new(),
+            disequalities: DeterministicHashMap::default(),
             level,
             hash: self.predecessor_hash,
-            children: DeterministicHashSet::new(),
+            children: DeterministicHashSet::default(),
         };
         self.cc_union(t1, t2, proof_parent, level)
     }
@@ -986,8 +986,8 @@ impl Egraph {
 
         // Clear at level 0
         if level == 0 {
-            self.predecessors_created_by_quantifiers = DeterministicHashMap::new();
-            self.union_to_eclass = DeterministicHashMap::new();
+            self.predecessors_created_by_quantifiers = DeterministicHashMap::default();
+            self.union_to_eclass = DeterministicHashMap::default();
             self.proof_forest_backtrack_stack = vec![];
             self.sig_trail.clear();
         }
@@ -1053,7 +1053,7 @@ impl Egraph {
 
         let childs_child = child_edge.get_child();
 
-        let mut new_disequalities = DeterministicHashMap::new();
+        let mut new_disequalities = DeterministicHashMap::default();
         for (k, v) in child_edge.disequalities().iter() {
             if valid_hash(v.hash, v.level, &self.predecessor_level) {
                 debug_println!(11, 0, "Keeping disequality {}: {} in {}", k, v, child);
@@ -1084,7 +1084,7 @@ impl Egraph {
             size: 0,
             child: childs_child,
             disequalities: new_disequalities,
-            children: DeterministicHashSet::new(),
+            children: DeterministicHashSet::default(),
             arithmetic: merged_root_arithmetic,
         };
 
@@ -1426,7 +1426,7 @@ impl Egraph {
                         pairs,
                         parent: vertex,
                         child: parent,
-                        disequalities: DeterministicHashMap::new(),
+                        disequalities: DeterministicHashMap::default(),
                         level,
                         hash,
                         children,
@@ -1452,7 +1452,7 @@ impl Egraph {
                         term,
                         parent: vertex,
                         child: parent,
-                        disequalities: DeterministicHashMap::new(),
+                        disequalities: DeterministicHashMap::default(),
                         level,
                         hash,
                         children,

@@ -14,7 +14,7 @@ use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
 use crate::solver_state::SolverState;
 use crate::solver_types::Polarity;
-use crate::utils::DeterministicHashMap;
+use crate::utils::HashableBTreeMap;
 
 use crate::debug_println;
 use yaspar_ir::ast::{LetElim, Sort, Str, Substitute, Substitution, Term, TermAllocator};
@@ -136,7 +136,7 @@ pub(crate) fn instantiate_quantifiers(
 
             for subs_ids in list_assignments.iter() {
                 // Convert ID map to Term map for substitution
-                let subs: DeterministicHashMap<String, Term> = subs_ids
+                let subs: HashableBTreeMap<String, Term> = subs_ids
                     .iter()
                     .map(|(k, v)| {
                         (
