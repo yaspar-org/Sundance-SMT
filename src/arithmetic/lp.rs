@@ -27,6 +27,11 @@ pub enum ArithSolver {
     Internal,
     #[cfg(feature = "z3-solver")]
     Z3,
+    /// Persistent `z3::Solver` kept in sync with CaDiCaL's trail and the
+    /// egraph's merge stream.
+    #[cfg(feature = "z3-solver")]
+    #[value(name = "z3incremental", alias = "z3-incremental")]
+    Z3Incremental,
     None,
 }
 
@@ -36,6 +41,8 @@ impl Display for ArithSolver {
             ArithSolver::Internal => "internal".fmt(f),
             #[cfg(feature = "z3-solver")]
             ArithSolver::Z3 => "z3".fmt(f),
+            #[cfg(feature = "z3-solver")]
+            ArithSolver::Z3Incremental => "z3incremental".fmt(f),
             ArithSolver::None => "none".fmt(f),
         }
     }
@@ -50,7 +57,7 @@ impl fmt::Display for ArithSolverParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'z3', 'none'",
+            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'z3', 'z3incremental', 'none'",
             self.invalid_input
         )
     }
@@ -75,6 +82,8 @@ impl FromStr for ArithSolver {
             "internal" => Ok(ArithSolver::Internal),
             #[cfg(feature = "z3-solver")]
             "z3" => Ok(ArithSolver::Z3),
+            #[cfg(feature = "z3-solver")]
+            "z3incremental" => Ok(ArithSolver::Z3Incremental),
             "none" => Ok(ArithSolver::None),
             _ => Err(ArithSolverParseError {
                 invalid_input: s.to_string(),
@@ -93,6 +102,12 @@ pub fn check_integer_constraints_satisfiable(
         ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, solver_state),
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, solver_state),
+        // Z3Incremental is driven from the propagator's Z3IncrementalState;
+        // reaching this arm means the wiring was bypassed.
+        #[cfg(feature = "z3-solver")]
+        ArithSolver::Z3Incremental => {
+            panic!("Z3Incremental must be driven via the propagator, not this entry point")
+        }
         ArithSolver::None => ArithResult::None,
     }
 }

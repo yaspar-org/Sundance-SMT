@@ -18,6 +18,10 @@ pub(super) enum ProofForestEdge {
         child: u32, // TODO: I am not 100% sure if child actually does anything, I think it is useful for reversing edges in the proof forest, but not 100% sure
         disequalities: DeterministicHashMap<u32, DisequalTerm>, // TODO: this might lead to a lot of allocations
         children: DeterministicHashSet<u32>,
+        /// True iff the class contains an Int-sorted term. `cc_union`
+        /// propagates the flag with OR: if either pre-merge root is tagged,
+        /// the surviving root becomes tagged.
+        arithmetic: bool,
     },
     /// Represents a node with an equality relationship
     Equality {
@@ -51,11 +55,12 @@ impl fmt::Display for ProofForestEdge {
                 child,
                 disequalities,
                 children,
+                arithmetic,
             } => {
                 write!(
                     f,
-                    "Root(size: {}, child: {:?}, disequalities: {:?}, children: {:?})",
-                    size, child, disequalities, children
+                    "Root(size: {}, child: {:?}, disequalities: {:?}, children: {:?}, arithmetic: {})",
+                    size, child, disequalities, children, arithmetic
                 )
             }
             ProofForestEdge::Equality {
@@ -196,12 +201,14 @@ impl ProofForestEdge {
                 size,
                 child,
                 children,
+                arithmetic,
                 ..
             } => ProofForestEdge::Root {
                 size,
                 child,
                 disequalities: diseq,
                 children,
+                arithmetic,
             },
             ProofForestEdge::Equality {
                 term,

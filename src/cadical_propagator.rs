@@ -3,6 +3,8 @@
 
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
+#[cfg(feature = "z3-solver")]
+use crate::arithmetic::z3incremental::Z3IncrementalState;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
@@ -34,6 +36,9 @@ pub struct CustomExternalPropagator<'a> {
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
     /// Once reached, stop probing further pairs even if unprobed pairs remain.
     pub max_arith_conflicts_per_round: usize,
+    /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
+    #[cfg(feature = "z3-solver")]
+    pub z3_incremental: Option<Z3IncrementalState>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -84,15 +89,10 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
-    /// Emit trichotomy clause (x<y ∨ x>y ∨ x=y) for a pair of solver-uid terms
-    /// as a raw 3-literal disjunction (no Tseitin OR-gate). Registers the fresh
-    /// lt/gt/eq literals as observed. No-op if the pair was already emitted.
-    ///
-    /// The `from_quantifier: true` flag on `insert_predecessor` (which becomes
-    /// `dynamic: true` on `register_term`) is *not* about quantifiers here — it
-    /// tells the egraph to find and merge with existing congruent terms, which
-    /// is what we want since these lt/gt/eq atoms may already exist in the
-    /// egraph from other sources.
+    /// Emit `(x<y ∨ x>y ∨ x=y)` as a raw 3-literal clause (no Tseitin gate).
+    /// No-op if this pair's trichotomy has already been emitted. The `true`
+    /// on `insert_predecessor` is the `dynamic: true` flag — these atoms may
+    /// exist elsewhere in the egraph and we want congruence to find them.
     fn emit_trichotomy_for_pair(&mut self, x: u64, y: u64) {
         if let Some((lt_term, gt_term, eq_term)) =
             nelson_oppen_trichotomy_terms(x, y, self.solver_state)
@@ -183,6 +183,23 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.solver_state, self.decision_level);
+
+            // Drain merges triggered by this assignment, then push the lit
+            // itself if it's arithmetic.
+            #[cfg(feature = "z3-solver")]
+            {
+                let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
+                    let lits = z3.drain_merge_queue(self.solver_state);
+                    z3.on_literal_assignment(*lit, self.solver_state);
+                    lits
+                } else {
+                    Vec::new()
+                };
+                for new_lit in new_merge_lits {
+                    self.add_observed_variable(new_lit);
+                    self.add_lit_to_proof_tracer(new_lit);
+                }
+            }
 
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
@@ -280,6 +297,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .resize(self.solver_state.hash_at_level.len() * 2, 0);
         }
         self.solver_state.hash_at_level[self.decision_level] = self.solver_state.current_hash;
+
+        self.solver_state.egraph.notify_new_decision_level();
+
+        #[cfg(feature = "z3-solver")]
+        if let Some(z3) = self.z3_incremental.as_mut() {
+            z3.notify_new_decision_level();
+        }
     }
 
     fn notify_backtrack(&mut self, level: usize) {
@@ -309,8 +333,24 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         self.decision_level = level;
 
-        // Delegate to egraph for all egraph-internal backtracking
+        // `backtrack_to` clears the arithmetic queue at entry then re-fires
+        // any congruence merges from `union_to_eclass` replay, so the queue
+        // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
+
+        #[cfg(feature = "z3-solver")]
+        {
+            let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
+                z3.notify_backtrack(level);
+                z3.drain_merge_queue(self.solver_state)
+            } else {
+                Vec::new()
+            };
+            for new_lit in new_merge_lits {
+                self.add_observed_variable(new_lit);
+                self.add_lit_to_proof_tracer(new_lit);
+            }
+        }
 
         debug_println!(16, 0, "Ending backtracking at level {}", level);
         debug_println!(11, 0, "{}", self.solver_state.egraph);
@@ -372,7 +412,30 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
-        match check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state) {
+        // The incremental backend already saw every atom via notify_assignment
+        // — just flush any post-hoc merges and call check(). Otherwise use the
+        // eager entry point.
+        #[cfg(feature = "z3-solver")]
+        let (arith_result, drained_new_lits) = if let Some(z3) = self.z3_incremental.as_mut() {
+            let new_lits = z3.drain_merge_queue(self.solver_state);
+            let r = z3.check(self.solver_state);
+            (r, new_lits)
+        } else {
+            (
+                check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state),
+                Vec::<i32>::new(),
+            )
+        };
+        #[cfg(feature = "z3-solver")]
+        for new_lit in drained_new_lits {
+            self.add_observed_variable(new_lit);
+            self.add_lit_to_proof_tracer(new_lit);
+        }
+        #[cfg(not(feature = "z3-solver"))]
+        let arith_result =
+            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state);
+
+        match arith_result {
             ArithResult::Unsat(arithmetic_literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
                 {
@@ -388,20 +451,19 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
             ArithResult::Sat(literals, arith_stats) => {
                 self.stats.arith.accumulate(&arith_stats);
-                assert!(
+                debug_assert!(
                     self.max_arith_conflicts_per_round > 0,
                     "max_arith_conflicts_per_round must be > 0"
                 );
-                // Model-based Nelson-Oppen probe: try to merge every pair of
-                // equal-model-value terms. Each merge gets its own fake decision
-                // level so a conflicting merge can be undone individually while
-                // successful earlier merges stay in place. Collect all conflicts
-                // found this round, then backtrack the entire probe stack.
+                // Nelson-Oppen probe: try to merge every pair of terms Z3
+                // gave the same model value. Each merge gets its own probe
+                // level so a conflict can be undone without losing earlier
+                // successful merges. Collect all conflicts, then backtrack
+                // the whole probe stack.
                 let base_level = self.decision_level;
-                let mut next_probe_level = base_level + 1;
+                let mut probe_level = base_level;
                 let mut conflicts: Vec<Conflict<u32>> = Vec::new();
-                // Canonical (egraph_root, egraph_root) pair -> (solver_uid, solver_uid).
-                // Presence of a key = "we probe-merged this pair this round".
+                // Probed pairs, keyed by canonical (egraph_root, egraph_root).
                 let mut probe_pair_uids: DeterministicHashMap<(u32, u32), (u64, u64)> =
                     DeterministicHashMap::default();
 
@@ -427,16 +489,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             (y_root, x_root)
                         };
                         probe_pair_uids.insert((lo_root, hi_root), (x, y));
-                        let attempt_level = next_probe_level;
-                        next_probe_level += 1;
-                        let result =
-                            self.solver_state
-                                .egraph
-                                .assert_equal(x_root, y_root, attempt_level);
+                        // Bump the egraph's decision level so this speculative
+                        // merge can be undone individually if it conflicts.
+                        self.solver_state.egraph.notify_new_decision_level();
+                        probe_level += 1;
+                        let result = self.solver_state.egraph.assert_equal(x_root, y_root);
+                        // Probe merges are speculative — discard queue entries
+                        // so they don't leak into Z3IncrementalState.
+                        let _ = self.solver_state.egraph.drain_arithmetic_equalities();
                         if let Some(c) = result.conflict {
-                            // Undo just this conflicting merge; keep earlier merges.
-                            self.solver_state.egraph.backtrack_to(attempt_level - 1);
-                            next_probe_level = attempt_level;
+                            self.solver_state.egraph.backtrack_to(probe_level - 1);
+                            probe_level -= 1;
                             conflicts.push(c);
                             if conflicts.len() >= self.max_arith_conflicts_per_round {
                                 break 'outer;
@@ -446,10 +509,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
 
                 for conflict in &conflicts {
-                    // Emit at most one trichotomy per conflict — walking backward
-                    // through the proof path, pick the last probe-merged pair whose
-                    // trichotomy has NOT already been emitted. Other probe-merge pairs
-                    // fall back on make_eq allocating a bare eq literal.
+                    // Walk the proof path backward, pick the last probe-merged
+                    // pair whose trichotomy hasn't been emitted yet. Emit at
+                    // most one trichotomy per conflict; other probed pairs
+                    // fall back on `make_eq` allocating a bare eq lit.
                     let fresh_probe_pair = conflict.equalities.iter().rev().find_map(|&(a, b)| {
                         let (lo_root, hi_root) = if a < b { (a, b) } else { (b, a) };
                         let (x_uid, y_uid) = *probe_pair_uids.get(&(lo_root, hi_root))?;
@@ -483,8 +546,27 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     self.disequalities.borrow_mut().push(conflict_clause);
                 }
 
-                // Undo all remaining successful probe merges.
+                // Undo remaining probe merges. `backtrack_to` may repopulate
+                // the queue via `union_to_eclass` re-firing (e.g. from the
+                // trichotomy terms just registered); drain those into Z3.
                 self.solver_state.egraph.backtrack_to(base_level);
+                #[cfg(feature = "z3-solver")]
+                {
+                    let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
+                        z3.drain_merge_queue(self.solver_state)
+                    } else {
+                        self.solver_state.egraph.drain_arithmetic_equalities();
+                        Vec::new()
+                    };
+                    for new_lit in new_merge_lits {
+                        self.add_observed_variable(new_lit);
+                        self.add_lit_to_proof_tracer(new_lit);
+                    }
+                }
+                #[cfg(not(feature = "z3-solver"))]
+                {
+                    self.solver_state.egraph.drain_arithmetic_equalities();
+                }
             }
             ArithResult::None => {}
         }

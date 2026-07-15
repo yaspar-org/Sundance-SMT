@@ -98,18 +98,30 @@ pub trait EgraphTrait {
         lit: Lit,
     ) -> Self::TermId;
 
+    /// Tag `term`'s class as arithmetic. When incremental arithmetic is on,
+    /// any merge (direct or congruence-derived) where either pre-merge root
+    /// is tagged appends the merge to the arithmetic equality queue.
+    fn mark_arithmetic(&mut self, term: Self::TermId);
+
+    /// Enable/disable arithmetic equality collection.
+    fn incremental_arithmetic(&mut self, enabled: bool);
+
+    /// Drain arithmetic equalities produced by merges since the last drain.
+    /// Callers must drain before advancing the decision level.
+    fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
+
+    // --- Decision level ---
+
+    /// Advance the internal decision level by one.
+    fn notify_new_decision_level(&mut self);
+
     // --- Assertions ---
 
-    /// Assert `t1 = t2` at the given decision level.
+    /// Assert `t1 = t2` at the current decision level.
     /// Performs congruence closure. Returns a conflict if a disequality is violated.
-    fn assert_equal(
-        &mut self,
-        t1: Self::TermId,
-        t2: Self::TermId,
-        level: usize,
-    ) -> EgraphResult<Self::TermId>;
+    fn assert_equal(&mut self, t1: Self::TermId, t2: Self::TermId) -> EgraphResult<Self::TermId>;
 
-    /// Assert `t1 ≠ t2` at the given decision level.
+    /// Assert `t1 ≠ t2` at the current decision level.
     /// `lit` is the SAT literal that caused this disequality (for conflict reporting).
     /// Returns a conflict if `t1` and `t2` are already in the same equivalence class.
     fn assert_disequal(
@@ -117,17 +129,11 @@ pub trait EgraphTrait {
         t1: Self::TermId,
         t2: Self::TermId,
         lit: Lit,
-        level: usize,
     ) -> EgraphResult<Self::TermId>;
 
-    /// Assert all terms in `terms` are pairwise distinct at the given decision level.
+    /// Assert all terms in `terms` are pairwise distinct at the current decision level.
     /// `lit` is the SAT literal for the distinct assertion.
-    fn assert_distinct(
-        &mut self,
-        terms: &[Self::TermId],
-        lit: Lit,
-        level: usize,
-    ) -> EgraphResult<Self::TermId>;
+    fn assert_distinct(&mut self, terms: &[Self::TermId], lit: Lit) -> EgraphResult<Self::TermId>;
 
     // --- Queries ---
 
