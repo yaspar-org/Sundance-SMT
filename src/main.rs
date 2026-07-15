@@ -142,8 +142,8 @@ fn main() -> Result<(), String> {
         boolean_dt_constraints.extend(additional_constraints);
     }
 
-    // Register equality watches in the egraph for theory propagation.
-    sundance_smt::solver_state::register_equality_watches(&mut solver_state);
+    // Register Boolean theory watches after CNF has allocated all SAT literals.
+    sundance_smt::solver_state::register_theory_watches(&mut solver_state);
 
     // filtering prop_skeleton to get rid of -l l terms
     let prop_skeleton_filtered = prop_skeleton

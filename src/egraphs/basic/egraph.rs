@@ -46,6 +46,32 @@ impl EqWatchTrailEntry {
     }
 }
 
+type BooleanWatch = (u32, i32);
+
+enum BooleanWatchTrailEntry {
+    Registered {
+        level: usize,
+        term: u32,
+        lit: i32,
+        indexed_root: Option<u32>,
+    },
+    Merged {
+        level: usize,
+        surviving_root: u32,
+        demoted_root: u32,
+        surviving_len: usize,
+        moved_count: usize,
+    },
+}
+
+impl BooleanWatchTrailEntry {
+    fn level(&self) -> usize {
+        match self {
+            Self::Registered { level, .. } | Self::Merged { level, .. } => *level,
+        }
+    }
+}
+
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== Egraph Summary ===")?;
@@ -276,6 +302,16 @@ pub struct Egraph {
     eq_atoms_by_root: FastDeterministicHashMap<u32, FastDeterministicHashSet<u32>>,
     /// Trail for restoring the canonical equality-watch index on backtrack.
     eq_watch_trail: Vec<EqWatchTrailEntry>,
+    /// Egraph IDs of the distinguished Boolean constants.
+    boolean_constants: Option<(u32, u32)>,
+    /// Boolean SAT literals attached to their current non-constant e-class.
+    /// A class merged into true or false deliberately keeps its watches under
+    /// the demoted root so the constant class never accumulates them.
+    boolean_lits_by_root: FastDeterministicHashMap<u32, Vec<BooleanWatch>>,
+    /// Permanent registration index used to make registration idempotent.
+    boolean_term_lits: FastDeterministicHashMap<u32, i32>,
+    /// Trail for restoring Boolean watch ownership after union-find rollback.
+    boolean_watch_trail: Vec<BooleanWatchTrailEntry>,
     /// Pending theory propagations to deliver to the SAT solver via cb_propagate.
     /// Each entry is (operand1, operand2, lit) for explain_equality + delivery.
     propagation_queue: Vec<(u32, u32, i32)>,
@@ -316,6 +352,10 @@ impl Egraph {
             eq_atom_signatures: FastDeterministicHashMap::default(),
             eq_atoms_by_root: FastDeterministicHashMap::default(),
             eq_watch_trail: Vec::new(),
+            boolean_constants: None,
+            boolean_lits_by_root: FastDeterministicHashMap::default(),
+            boolean_term_lits: FastDeterministicHashMap::default(),
+            boolean_watch_trail: Vec::new(),
             propagation_queue: Vec::new(),
         }
     }
@@ -968,6 +1008,66 @@ impl Egraph {
             self.proof_forest_backtrack(backtrack_equality, y, y_root);
         }
 
+        // Restore Boolean watch ownership after union-find so registrations
+        // made under a temporary root can be re-homed using the restored root.
+        let mut restored_registrations = Vec::new();
+        while self
+            .boolean_watch_trail
+            .last()
+            .is_some_and(|entry| entry.level() > level)
+        {
+            match self.boolean_watch_trail.pop().unwrap() {
+                BooleanWatchTrailEntry::Registered {
+                    term,
+                    lit,
+                    indexed_root,
+                    ..
+                } => {
+                    let restored_root = self.boolean_watch_root(term);
+                    self.move_boolean_watch(term, lit, indexed_root, restored_root);
+                    if level > 0 {
+                        restored_registrations.push(BooleanWatchTrailEntry::Registered {
+                            level,
+                            term,
+                            lit,
+                            indexed_root: restored_root,
+                        });
+                    }
+                }
+                BooleanWatchTrailEntry::Merged {
+                    surviving_root,
+                    demoted_root,
+                    surviving_len,
+                    moved_count,
+                    ..
+                } => {
+                    let (watches, remove_surviving_root) = {
+                        let surviving_watches = self
+                            .boolean_lits_by_root
+                            .get_mut(&surviving_root)
+                            .expect("missing surviving Boolean watch class during rollback");
+                        assert_eq!(
+                            surviving_watches.len(),
+                            surviving_len + moved_count,
+                            "Boolean watches added after a merge were not rolled back first"
+                        );
+                        let watches = surviving_watches.split_off(surviving_len);
+                        (watches, surviving_watches.is_empty())
+                    };
+                    if remove_surviving_root {
+                        self.boolean_lits_by_root.remove(&surviving_root);
+                    }
+                    assert!(
+                        self.boolean_lits_by_root
+                            .insert(demoted_root, watches)
+                            .is_none(),
+                        "demoted Boolean watch class already existed during rollback"
+                    );
+                }
+            }
+        }
+        self.boolean_watch_trail.extend(restored_registrations);
+
         // Restore equality-watch signatures after restoring union-find. Watches
         // registered above the target level persist, but must be canonicalized
         // against the restored roots.
@@ -1270,6 +1370,12 @@ impl Egraph {
             (x, y, x_root, y_root)
         };
 
+        // Read Boolean watches before the demoted root stops being canonical.
+        // Constant classes never absorb watches; ordinary classes transfer
+        // ownership and trail the exact entries for rollback.
+        let boolean_propagations = self.boolean_propagations_for_merge(x_root, y_root);
+        self.merge_boolean_watches(x_root, y_root, level);
+
         // Look up watched equality atoms whose operands span these two classes,
         // BEFORE the merge re-canonicalizes the sig_table. Queued at the end
         // only once the merge has actually succeeded (no conflict).
@@ -1486,7 +1592,117 @@ impl Egraph {
             self.propagation_queue.push((a, b, lit));
         }
 
+        for (term, constant, lit) in boolean_propagations {
+            debug_println!(
+                7,
+                0,
+                "EGRAPH PROPAGATION: {} became equal to {}, propagating lit {}",
+                self.display_term(term),
+                self.display_term(constant),
+                lit
+            );
+            self.propagation_queue.push((term, constant, lit));
+        }
+
         EgraphResult::ok()
+    }
+
+    fn boolean_constant_value(&self, root: u32) -> Option<bool> {
+        let (true_term, false_term) = self.boolean_constants?;
+        if root == true_term {
+            Some(true)
+        } else if root == false_term {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    fn boolean_watch_root(&self, term: u32) -> Option<u32> {
+        let root = self.find(term);
+        self.boolean_constant_value(root).is_none().then_some(root)
+    }
+
+    fn boolean_propagations_for_merge(
+        &self,
+        surviving_root: u32,
+        demoted_root: u32,
+    ) -> Vec<(u32, u32, i32)> {
+        let Some(value) = self.boolean_constant_value(surviving_root) else {
+            return Vec::new();
+        };
+        self.boolean_lits_by_root
+            .get(&demoted_root)
+            .into_iter()
+            .flatten()
+            .map(|&(term, lit)| (term, surviving_root, if value { lit } else { -lit }))
+            .collect()
+    }
+
+    fn merge_boolean_watches(&mut self, surviving_root: u32, demoted_root: u32, level: usize) {
+        if self.boolean_constant_value(surviving_root).is_some() {
+            return;
+        }
+        let Some(watches) = self.boolean_lits_by_root.remove(&demoted_root) else {
+            return;
+        };
+        let moved_count = watches.len();
+        let surviving_watches = self.boolean_lits_by_root.entry(surviving_root).or_default();
+        let surviving_len = surviving_watches.len();
+        surviving_watches.extend(watches);
+        if level > 0 {
+            self.boolean_watch_trail
+                .push(BooleanWatchTrailEntry::Merged {
+                    level,
+                    surviving_root,
+                    demoted_root,
+                    surviving_len,
+                    moved_count,
+                });
+        }
+    }
+
+    fn remove_boolean_watch(&mut self, root: u32, term: u32, lit: i32) {
+        let remove_root = {
+            let watches = self
+                .boolean_lits_by_root
+                .get_mut(&root)
+                .unwrap_or_else(|| panic!("missing Boolean watch root {root} during rollback"));
+            let index = watches
+                .iter()
+                .position(|watch| *watch == (term, lit))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing Boolean watch ({term}, {lit}) under root {root} during rollback"
+                    )
+                });
+            watches.swap_remove(index);
+            watches.is_empty()
+        };
+        if remove_root {
+            self.boolean_lits_by_root.remove(&root);
+        }
+    }
+
+    fn move_boolean_watch(
+        &mut self,
+        term: u32,
+        lit: i32,
+        old_root: Option<u32>,
+        new_root: Option<u32>,
+    ) {
+        if old_root == new_root {
+            return;
+        }
+        if let Some(root) = old_root {
+            self.remove_boolean_watch(root, term, lit);
+        }
+        if let Some(root) = new_root {
+            self.boolean_lits_by_root
+                .entry(root)
+                .or_default()
+                .push((term, lit));
+        }
     }
 
     /// Look up equality atoms whose operands span the two classes being merged.
@@ -1936,13 +2152,42 @@ impl EgraphTrait for Egraph {
         }
     }
 
-    fn register_boolean_term(
-        &mut self,
-        op: Self::Op,
-        children: &[Self::TermId],
-        _lit: Lit,
-    ) -> Self::TermId {
-        self.register_term(op, children, false)
+    fn set_boolean_constants(&mut self, true_term: Self::TermId, false_term: Self::TermId) {
+        assert_ne!(true_term, false_term);
+        self.boolean_constants = Some((true_term, false_term));
+    }
+
+    fn register_boolean_term(&mut self, term: Self::TermId, lit: Lit) {
+        if let Some(&registered_lit) = self.boolean_term_lits.get(&term) {
+            debug_assert_eq!(registered_lit, lit);
+            return;
+        }
+
+        self.boolean_term_lits.insert(term, lit);
+        let indexed_root = self.boolean_watch_root(term);
+        if let Some(root) = indexed_root {
+            self.boolean_lits_by_root
+                .entry(root)
+                .or_default()
+                .push((term, lit));
+        } else {
+            let root = self.find(term);
+            let value = self
+                .boolean_constant_value(root)
+                .expect("Boolean watch without an index must be constant");
+            self.propagation_queue
+                .push((term, root, if value { lit } else { -lit }));
+        }
+
+        if self.decision_level > 0 {
+            self.boolean_watch_trail
+                .push(BooleanWatchTrailEntry::Registered {
+                    level: self.decision_level,
+                    term,
+                    lit,
+                    indexed_root,
+                });
+        }
     }
 
     fn mark_arithmetic(&mut self, term: Self::TermId) {
@@ -2055,6 +2300,146 @@ mod tests {
     fn watch_eq(egraph: &mut Egraph, left: u32, right: u32, lit: i32) {
         let atom = egraph.register_term(Op::Eq, &[left, right], false);
         egraph.register_eq(atom, left, right, lit);
+    }
+
+    fn boolean_constants(egraph: &mut Egraph) -> (u32, u32) {
+        let true_term = egraph.register_constant(Op::Constant("true".to_string()));
+        let false_term = egraph.register_constant(Op::Constant("false".to_string()));
+        egraph.set_boolean_constants(true_term, false_term);
+        (true_term, false_term)
+    }
+
+    #[test]
+    fn boolean_watch_propagates_when_term_becomes_true() {
+        let mut egraph = Egraph::new();
+        let (true_term, _) = boolean_constants(&mut egraph);
+        let term = local(&mut egraph, "p");
+        egraph.register_boolean_term(term, 17);
+
+        assert!(egraph.assert_equal(term, true_term).conflict.is_none());
+
+        let propagations = egraph.drain_propagations();
+        assert_eq!(propagations.len(), 1);
+        assert_eq!(propagations[0].lit, 17);
+        assert_eq!((propagations[0].t1, propagations[0].t2), (term, true_term));
+    }
+
+    #[test]
+    fn boolean_watch_propagates_negated_when_term_becomes_false() {
+        let mut egraph = Egraph::new();
+        let (_, false_term) = boolean_constants(&mut egraph);
+        let term = local(&mut egraph, "p");
+        egraph.register_boolean_term(term, 19);
+
+        assert!(egraph.assert_equal(term, false_term).conflict.is_none());
+
+        let propagations = egraph.drain_propagations();
+        assert_eq!(propagations.len(), 1);
+        assert_eq!(propagations[0].lit, -19);
+        assert_eq!((propagations[0].t1, propagations[0].t2), (term, false_term));
+    }
+
+    #[test]
+    fn ordinary_merge_transfers_all_boolean_watches_without_polluting_true() {
+        let mut egraph = Egraph::new();
+        let (true_term, _) = boolean_constants(&mut egraph);
+        let p = local(&mut egraph, "p");
+        let q = local(&mut egraph, "q");
+        egraph.register_boolean_term(p, 23);
+        egraph.register_boolean_term(q, 29);
+
+        assert!(egraph.assert_equal(p, q).conflict.is_none());
+        assert!(egraph.drain_propagations().is_empty());
+        assert!(egraph.assert_equal(q, true_term).conflict.is_none());
+
+        let mut lits: Vec<i32> = egraph
+            .drain_propagations()
+            .into_iter()
+            .map(|propagation| propagation.lit)
+            .collect();
+        lits.sort_unstable();
+        assert_eq!(lits, vec![23, 29]);
+        assert!(!egraph.boolean_lits_by_root.contains_key(&true_term));
+        assert_eq!(egraph.boolean_lits_by_root.get(&p).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn boolean_watch_transfer_is_restored_on_backtrack() {
+        let mut egraph = Egraph::new();
+        let (true_term, _) = boolean_constants(&mut egraph);
+        let p = local(&mut egraph, "p");
+        let q = local(&mut egraph, "q");
+        egraph.register_boolean_term(p, 31);
+        egraph.register_boolean_term(q, 37);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(p, q).conflict.is_none());
+        egraph.backtrack_to(0);
+        assert!(egraph.assert_equal(p, true_term).conflict.is_none());
+
+        let propagations = egraph.drain_propagations();
+        assert_eq!(propagations.len(), 1);
+        assert_eq!(propagations[0].lit, 31);
+        assert_eq!(egraph.boolean_lits_by_root.get(&q).unwrap(), &vec![(q, 37)]);
+    }
+
+    #[test]
+    fn boolean_watch_registered_under_temporary_root_is_rehomed_on_backtrack() {
+        let mut egraph = Egraph::new();
+        let (true_term, _) = boolean_constants(&mut egraph);
+        let p = local(&mut egraph, "p");
+        let q = local(&mut egraph, "q");
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(p, q).conflict.is_none());
+        egraph.register_boolean_term(q, 41);
+        egraph.backtrack_to(0);
+        assert!(egraph.assert_equal(q, true_term).conflict.is_none());
+
+        let propagations = egraph.drain_propagations();
+        assert_eq!(propagations.len(), 1);
+        assert_eq!(propagations[0].lit, 41);
+    }
+
+    #[test]
+    fn boolean_watch_registered_while_true_survives_backtrack() {
+        let mut egraph = Egraph::new();
+        let (true_term, _) = boolean_constants(&mut egraph);
+        let p = local(&mut egraph, "p");
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(p, true_term).conflict.is_none());
+        egraph.register_boolean_term(p, 43);
+        assert_eq!(egraph.drain_propagations()[0].lit, 43);
+        egraph.backtrack_to(0);
+        assert!(egraph.assert_equal(p, true_term).conflict.is_none());
+
+        let propagations = egraph.drain_propagations();
+        assert_eq!(propagations.len(), 1);
+        assert_eq!(propagations[0].lit, 43);
+    }
+
+    #[test]
+    fn boolean_watch_registration_survives_staged_backtracks() {
+        let mut egraph = Egraph::new();
+        let (true_term, _) = boolean_constants(&mut egraph);
+        let p = local(&mut egraph, "p");
+        let q = local(&mut egraph, "q");
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(p, q).conflict.is_none());
+        egraph.notify_new_decision_level();
+        egraph.register_boolean_term(q, 47);
+
+        egraph.backtrack_to(1);
+        egraph.backtrack_to(0);
+        assert!(egraph.assert_equal(p, true_term).conflict.is_none());
+        assert!(egraph.drain_propagations().is_empty());
+        assert!(egraph.assert_equal(q, true_term).conflict.is_none());
+
+        let propagations = egraph.drain_propagations();
+        assert_eq!(propagations.len(), 1);
+        assert_eq!(propagations[0].lit, 47);
     }
 
     #[test]

@@ -100,15 +100,13 @@ pub trait EgraphTrait {
     /// for propagation to the SAT solver.
     fn register_eq(&mut self, eq_atom: Self::TermId, t1: Self::TermId, t2: Self::TermId, lit: Lit);
 
+    /// Identify the egraph terms used as the Boolean constants.
+    fn set_boolean_constants(&mut self, true_term: Self::TermId, false_term: Self::TermId);
+
     /// Register a boolean non-equality term with its SAT literal.
     /// When the term becomes equal to `true_term`, `lit` is propagated.
     /// When it becomes equal to `false_term`, `-lit` is propagated.
-    fn register_boolean_term(
-        &mut self,
-        op: Self::Op,
-        children: &[Self::TermId],
-        lit: Lit,
-    ) -> Self::TermId;
+    fn register_boolean_term(&mut self, term: Self::TermId, lit: Lit);
 
     /// Tag `term`'s class as arithmetic. When incremental arithmetic is on,
     /// any merge (direct or congruence-derived) where either pre-merge root

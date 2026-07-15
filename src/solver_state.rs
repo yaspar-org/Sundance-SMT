@@ -243,11 +243,13 @@ impl SolverState {
     }
 
     pub fn get_or_allocate_lit_for_term(&mut self, term: &Term) -> i32 {
-        if let Some(lit) = self.get_lit_from_term_safe(term) {
+        let lit = if let Some(lit) = self.get_lit_from_term_safe(term) {
             lit
         } else {
             self.cnf_env().new_var_for_term(term)
-        }
+        };
+        self.register_theory_watch(term, lit);
+        lit
     }
 
     /// Convert an equality between two egraph IDs to a SAT literal.
@@ -347,6 +349,28 @@ impl SolverState {
         self.terms_list[false_uid as usize] = TermOption::Some(false_term.clone());
         self.id_map.insert(true_uid, true_egraph_id);
         self.id_map.insert(false_uid, false_egraph_id);
+        self.egraph
+            .set_boolean_constants(true_egraph_id, false_egraph_id);
+    }
+
+    fn register_theory_watch(&mut self, term: &Term, lit: i32) {
+        let uid = term.uid();
+        if uid == self.true_uid || uid == self.false_uid {
+            return;
+        }
+        let Some(&term_id) = self.id_map.get_by_left(&uid) else {
+            return;
+        };
+        if let Eq(left, right) = term.repr() {
+            if let (Some(&left_id), Some(&right_id)) = (
+                self.id_map.get_by_left(&left.uid()),
+                self.id_map.get_by_left(&right.uid()),
+            ) {
+                self.egraph.register_eq(term_id, left_id, right_id, lit);
+            }
+        } else {
+            self.egraph.register_boolean_term(term_id, lit);
+        }
     }
 
     /// Extract Op from a yaspar Term.
@@ -559,11 +583,10 @@ impl SolverState {
     }
 }
 
-/// Register all existing equality atoms (terms of the form `(= t1 t2)`) that
-/// have SAT literals as watches in the egraph. Call after CNF conversion is
-/// complete so that all literals are allocated.
-pub fn register_equality_watches(solver_state: &mut SolverState) {
-    use crate::egraphs::EgraphTrait;
+/// Register all existing Boolean SAT terms as egraph theory watches. Equality
+/// atoms use their operand signature; every other Boolean term is attached to
+/// its current e-class root.
+pub fn register_theory_watches(solver_state: &mut SolverState) {
     let var_map_entries: Vec<(u64, i32)> = solver_state
         .cnf_cache
         .var_map
@@ -571,22 +594,17 @@ pub fn register_equality_watches(solver_state: &mut SolverState) {
         .map(|(uid, lit)| (*uid, *lit))
         .collect();
     for (uid, lit) in var_map_entries {
-        if let Some(TermOption::Some(term)) = solver_state.terms_list.get(uid as usize).cloned()
-            && let Eq(left, right) = term.repr()
-        {
-            let left_uid = left.uid();
-            let right_uid = right.uid();
-            if let (Some(&eq_atom), Some(&eid_left), Some(&eid_right)) = (
-                solver_state.id_map.get_by_left(&uid),
-                solver_state.id_map.get_by_left(&left_uid),
-                solver_state.id_map.get_by_left(&right_uid),
-            ) {
-                solver_state
-                    .egraph
-                    .register_eq(eq_atom, eid_left, eid_right, lit);
-            }
-        }
+        let term = match solver_state.terms_list.get(uid as usize).cloned() {
+            Some(TermOption::Some(term) | TermOption::Uninitialized(term)) => term,
+            _ => continue,
+        };
+        solver_state.register_theory_watch(&term, lit);
     }
+}
+
+/// Backwards-compatible name for callers that only expect equality watches.
+pub fn register_equality_watches(solver_state: &mut SolverState) {
+    register_theory_watches(solver_state);
 }
 
 impl HasArena for SolverState {
