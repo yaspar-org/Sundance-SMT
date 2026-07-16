@@ -148,6 +148,9 @@ pub struct SolverState {
     /// Whether to skolemize eagerly.
     pub eager_skolem: bool,
 
+    /// See `harvest_ground_terms`.
+    pub harvest_quant_terms: bool,
+
     /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
     pub base_case_tester_lits: Vec<i32>,
 }
@@ -155,7 +158,13 @@ pub struct SolverState {
 impl SolverState {
     /// Create a new SolverState. Takes ownership of the Context and config flags,
     /// creates the inner Egraph using the existing constructor.
-    pub fn new(context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
+    pub fn new(
+        context: Context,
+        lazy_dt: bool,
+        ddsmt: bool,
+        eager_skolem: bool,
+        harvest_quant_terms: bool,
+    ) -> Self {
         let egraph = Egraph::new();
         let datatype_info = DatatypeInfo::from_context(&context);
 
@@ -179,6 +188,7 @@ impl SolverState {
             lazy_dt,
             ddsmt,
             eager_skolem,
+            harvest_quant_terms,
             egraph,
             base_case_tester_lits: vec![],
         }
@@ -411,6 +421,12 @@ impl SolverState {
             let egraph_id = self.egraph.register_opaque();
             self.id_map.insert(num, egraph_id);
             self.register_arithmetic_and_quantifier(term, guard);
+            // Register ground subterms occurring under this quantifier so they
+            // are visible to other triggers (a no-op on uninstantiated axioms;
+            // see `harvest_ground_terms`).
+            if self.harvest_quant_terms {
+                self.harvest_ground_terms(term, from_quantifier);
+            }
             return egraph_id;
         }
 
@@ -432,6 +448,63 @@ impl SolverState {
         self.id_map.insert(num, egraph_id);
         self.register_arithmetic_and_quantifier(term, guard);
         egraph_id
+    }
+
+    /// Register the closed compound applications occurring in a quantifier's
+    /// body into the e-graph, so a matcher can find them.
+    ///
+    /// Only closed (bound-variable-free) `f(args..)` terms are registered:
+    /// once an axiom is instantiated its inner subterms become ground, and
+    /// registering them lets a trigger on `f` fire. Nothing happens on an
+    /// uninstantiated axiom, whose interesting subterms are still open. Only
+    /// the body is walked, never the triggers: a trigger is a matching template,
+    /// not an assertion that its ground instance exists.
+    fn harvest_ground_terms(&mut self, term: &Term, from_quantifier: bool) {
+        let body = match term.repr() {
+            Forall(_, middle) | Exists(_, middle) => match middle.repr() {
+                Annotated(inner, _) => inner,
+                _ => middle,
+            },
+            _ => return,
+        };
+        self.harvest_ground_terms_rec(body, from_quantifier);
+    }
+
+    fn harvest_ground_terms_rec(&mut self, term: &Term, from_quantifier: bool) {
+        use yaspar_ir::ast::fv::is_closed;
+
+        if is_closed(term) && !Self::contains_quantifier(term) {
+            // Only compound applications matter as trigger targets. Skipping
+            // nullary leaves (constants, sort/type symbols) avoids flooding the
+            // e-graph and the arithmetic term list to no benefit.
+            if matches!(term.repr(), App(_, args, _) if !args.is_empty()) {
+                self.insert_predecessor(term, None, None, from_quantifier);
+            }
+            return;
+        }
+
+        // A nested quantifier: descend into its body only (never its triggers),
+        // and never hand it to `insert_predecessor` (that would enroll a
+        // quantifier with no SAT literal).
+        if let Forall(_, _) | Exists(_, _) = term.repr() {
+            self.harvest_ground_terms(term, from_quantifier);
+            return;
+        }
+
+        // Open (non-quantifier) term: descend to reach ground pieces inside.
+        let (_, subterms) = get_subterms(term);
+        for sub in subterms {
+            self.harvest_ground_terms_rec(sub, from_quantifier);
+        }
+    }
+
+    /// Whether `term` contains a `forall`/`exists` anywhere in its structure.
+    fn contains_quantifier(term: &Term) -> bool {
+        if let Exists(_, _) | Forall(_, _) = term.repr() {
+            return true;
+        }
+        let (_, subterms) = get_subterms(term);
+        subterms.iter().any(|s| Self::contains_quantifier(s))
     }
 
     /// Build a Pattern tree from a yaspar Term and compile it into the egraph.

@@ -38,6 +38,11 @@ pub struct Args {
     /// Eagerly skolemize every quantifier
     #[arg(long, default_value_t = false)]
     pub eager_skolem: bool,
+    /// Register ground subterms occurring inside a quantifier's body into the
+    /// e-graph, so other triggers can match them. Pass an explicit value
+    /// (e.g. `--harvest-quant-terms false`) to disable.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub harvest_quant_terms: bool,
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,
