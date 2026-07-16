@@ -7,6 +7,7 @@ use crate::cadical_propagator::CustomExternalPropagator;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
+use crate::relevancy::RelevancyState;
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
@@ -43,6 +44,7 @@ pub fn cdcl_decision_procedure(
     timeout: u64,
     elevate: i32,
     max_arith_conflicts_per_round: usize,
+    relevancy: bool,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -80,12 +82,25 @@ pub fn cdcl_decision_procedure(
     let z3_incremental =
         using_z3_incremental.then(crate::arithmetic::z3incremental::Z3IncrementalState::new);
 
+    // Set up relevancy filtering: pre-compute formula structure, mark roots.
+    let mut relevancy_state = RelevancyState::new(relevancy);
+    if relevancy {
+        relevancy_state.initialize_structure(solver_state);
+        // Mark root literals relevant: unit clauses are assertion roots.
+        let root_lits: Vec<i32> = clauses
+            .iter()
+            .filter(|c| c.len() == 1)
+            .map(|c| c[0])
+            .collect();
+        relevancy_state.mark_roots_relevant(&root_lits);
+    }
+
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
         solver_state,
         disequalities: RefCell::new(vec![]),
         fixed_literals: DeterministicHashSet::default(),
-        proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference
+        proof_tracer: Rc::clone(&proof_tracer),
         assignments: vec![0, 0],
         solver: &mut solver as *mut CaDiCal,
         arithmetic,
@@ -94,6 +109,7 @@ pub fn cdcl_decision_procedure(
         max_arith_conflicts_per_round,
         #[cfg(feature = "z3-solver")]
         z3_incremental,
+        relevancy: relevancy_state,
     };
 
     solver.connect_external_propagator(&mut propagator);

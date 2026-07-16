@@ -50,4 +50,7 @@ pub struct Args {
     /// Max arithmetic-model conflicts collected per model-check (usize::MAX = uncapped).
     #[arg(long, default_value_t = usize::MAX)]
     pub max_arith_conflicts_per_round: usize,
+    /// Enable relevancy filtering (skip theory work for irrelevant atoms)
+    #[arg(long, default_value_t = false)]
+    pub relevancy: bool,
 }

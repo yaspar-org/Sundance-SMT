@@ -14,6 +14,7 @@ use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemiz
 use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
+use crate::relevancy::RelevancyState;
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -39,6 +40,8 @@ pub struct CustomExternalPropagator<'a> {
     /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
     #[cfg(feature = "z3-solver")]
     pub z3_incremental: Option<Z3IncrementalState>,
+    /// Relevancy propagation state — gates theory solver work.
+    pub relevancy: RelevancyState,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -176,6 +179,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             if self.fixed_literals.contains(lit) {
                 debug_println!(6, 0, "Skipping literal {lit} because it is fixed");
+                continue;
+            }
+
+            // Notify relevancy propagation and check if this literal is relevant
+            let is_relevant = self.relevancy.notify_assignment(
+                *lit,
+                self.decision_level,
+                &self.assignments,
+            );
+
+            if !is_relevant {
+                debug_println!(6, 0, "Skipping literal {lit} because it is not relevant");
                 continue;
             }
 
@@ -332,6 +347,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         self.decision_level = level;
+
+        // Undo relevancy marks added above this level
+        self.relevancy.backtrack_to(level);
 
         // `backtrack_to` clears the arithmetic queue at entry then re-fires
         // any congruence merges from `union_to_eclass` replay, so the queue

@@ -181,6 +181,7 @@ fn main() -> Result<(), String> {
         args.timeout,
         args.elevate,
         args.max_arith_conflicts_per_round,
+        args.relevancy,
     );
 
     match return_value {
