@@ -40,6 +40,8 @@ pub struct SolverStats {
     pub instantiation_rounds: u64,
     /// Accumulated arithmetic sub-solver statistics
     pub arith: ArithStats,
+    /// Literals skipped by relevancy filtering
+    pub relevancy_skipped: u64,
 }
 
 impl SolverStats {
@@ -52,6 +54,7 @@ impl SolverStats {
             instantiations: 0,
             instantiation_rounds: 0,
             arith: ArithStats::default(),
+            relevancy_skipped: 0,
         }
     }
 
@@ -87,7 +90,8 @@ impl fmt::Display for SolverStats {
         )?;
         writeln!(f, "    \"lra_solve_calls\": {}", self.arith.num_lra_solve)?;
         writeln!(f, "  }},")?;
-        writeln!(f, "  \"solve_time\": {:.3}", elapsed.as_secs_f64())?;
+        writeln!(f, "  \"solve_time\": {:.3},", elapsed.as_secs_f64())?;
+        writeln!(f, "  \"relevancy_skipped\": {}", self.relevancy_skipped)?;
         write!(f, "}}")
     }
 }

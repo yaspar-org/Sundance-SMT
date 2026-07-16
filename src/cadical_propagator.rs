@@ -191,6 +191,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             if !is_relevant {
                 debug_println!(6, 0, "Skipping literal {lit} because it is not relevant");
+                self.stats.relevancy_skipped += 1;
                 continue;
             }
 
