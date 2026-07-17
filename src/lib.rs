@@ -10,6 +10,7 @@ pub mod cnf;
 pub mod config;
 pub mod datatypes;
 pub mod egraphs;
+mod goal_distance;
 pub mod log;
 pub mod preprocess;
 mod proof;

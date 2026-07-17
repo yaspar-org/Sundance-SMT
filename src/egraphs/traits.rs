@@ -14,6 +14,15 @@ use std::hash::Hash;
 /// Zero means "no decision" when returned from decision methods.
 pub type Lit = i32;
 
+/// One successful multi-trigger match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerMatch<T> {
+    /// Pattern-variable bindings produced by the match.
+    pub substitution: crate::utils::DeterministicHashMap<String, T>,
+    /// Concrete egraph terms matched by each top-level trigger pattern.
+    pub matched_terms: Vec<T>,
+}
+
 /// Conflict explanation: the equalities that were asserted (and their
 /// congruence consequences) that together violate a disequality.
 /// T is a generic parameter for the Term type that we use
@@ -155,7 +164,7 @@ pub trait EgraphTrait {
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
-    ) -> Vec<crate::utils::DeterministicHashMap<String, Self::TermId>>;
+    ) -> Vec<TriggerMatch<Self::TermId>>;
 
     // --- Backtracking ---
 

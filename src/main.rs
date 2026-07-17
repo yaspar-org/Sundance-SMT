@@ -59,6 +59,7 @@ fn main() -> Result<(), String> {
             }
         })
         .collect::<Vec<_>>();
+    let user_assertion_count = assertions.len();
 
     let mut prop_skeleton: Vec<Vec<i32>> = vec![];
 
@@ -77,14 +78,28 @@ fn main() -> Result<(), String> {
     solver_state.register_bool_constants(&true_term, &false_term);
 
     let global_names = solver_state.context.all_defined_symbols();
-    let mut nnf_terms = vec![];
-    for assert in assertions {
-        debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
+    let expanded_assertions: Vec<Term> = assertions
+        .into_iter()
+        .map(|assert| {
+            assert
+                .let_elim(&mut solver_state.context)
+                .gsubst(global_names.clone(), &mut solver_state.context)
+        })
+        .collect();
 
-        // inline the let bindings
-        let expanded_term = assert
-            .let_elim(&mut solver_state.context)
-            .gsubst(global_names.clone(), &mut solver_state.context);
+    if args.goal_based_instantiation {
+        solver_state.initialize_goal_distance(&expanded_assertions[..user_assertion_count]);
+    }
+
+    let mut nnf_terms = vec![];
+    for expanded_term in expanded_assertions {
+        debug_println!(
+            22,
+            0,
+            "We have the assertion {} [{}]",
+            expanded_term,
+            expanded_term.uid()
+        );
         debug_println!(10, 0, "Expanded form: {}", expanded_term);
 
         let skolemized_term = expanded_term;

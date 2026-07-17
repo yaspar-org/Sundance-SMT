@@ -23,6 +23,7 @@ use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
+use crate::goal_distance::GoalDistance;
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
@@ -148,6 +149,9 @@ pub struct SolverState {
     /// Whether to skolemize eagerly.
     pub eager_skolem: bool,
 
+    /// Goal-relative term distances used to prioritize quantifier instantiations.
+    pub(crate) goal_distance: Option<GoalDistance>,
+
     /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
     pub base_case_tester_lits: Vec<i32>,
 }
@@ -179,8 +183,20 @@ impl SolverState {
             lazy_dt,
             ddsmt,
             eager_skolem,
+            goal_distance: None,
             egraph,
             base_case_tester_lits: vec![],
+        }
+    }
+
+    /// Use the last real assertion as the goal for instantiation prioritization.
+    pub fn initialize_goal_distance(&mut self, assertions: &[Term]) {
+        if !assertions.is_empty() {
+            self.goal_distance = Some(GoalDistance::new(
+                assertions,
+                assertions.len() - 1,
+                &self.context,
+            ));
         }
     }
 

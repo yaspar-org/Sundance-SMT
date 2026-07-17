@@ -24,6 +24,19 @@ cargo build
 cargo run -- path/to/your/smt/file.smt2
 ```
 
+For verification queries whose final assertion is the goal, enable
+goal-relative quantifier-instantiation ordering with:
+
+```bash
+cargo run -- path/to/your/smt/file.smt2 --goal-based-instantiation
+```
+
+This mode treats the final user assertion as distance zero and computes
+SHAKE-style layers through shared user-defined symbols. Quantifier bodies remain
+hidden until one of their trigger symbol sets is reachable. E-matches are then
+ordered by the distances of their concrete trigger terms, instantiated bodies,
+and bindings. The mode only reorders candidates; it does not discard them.
+
 ## Testing
 
 ```bash

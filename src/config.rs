@@ -23,9 +23,9 @@ pub struct Args {
     // /// Set the maximum activation depth for quantifier instantiations
     // #[arg(long, default_value_t = 5)]
     // pub max_activation_depth: usize,
-    // /// Enable instantiation based on goal
-    // #[arg(long)]
-    // pub goal_based_instantiation: bool,
+    /// Prioritize quantifier instantiations by syntactic distance from the last assertion
+    #[arg(long, default_value_t = false)]
+    pub goal_based_instantiation: bool,
     #[cfg_attr(feature = "z3-solver", arg(long, default_value_t = ArithSolver::Z3Incremental, value_enum))]
     #[cfg_attr(not(feature = "z3-solver"), arg(long, default_value_t = ArithSolver::Internal, value_enum))]
     pub arithmetic: ArithSolver,

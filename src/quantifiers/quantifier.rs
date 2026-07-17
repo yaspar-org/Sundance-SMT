@@ -19,6 +19,16 @@ use crate::utils::DeterministicHashMap;
 use crate::debug_println;
 use yaspar_ir::ast::{LetElim, Sort, Str, Substitute, Substitution, Term, TermAllocator};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct InstantiationPriority {
+    furthest_trigger_distance: u32,
+    total_trigger_distance: u64,
+    instance_distance: u32,
+    furthest_binding_distance: u32,
+    total_binding_distance: u64,
+    discovery_order: usize,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum QuantifierInstance {
     Instantiation { clauses: Vec<Vec<i32>> },
@@ -30,6 +40,7 @@ struct DeferredInstantiation {
     is_exists: bool,
     literal: i32,
     quantifier_id: u64,
+    priority: InstantiationPriority,
 }
 
 struct DeferredSkolemization {
@@ -66,7 +77,8 @@ pub(crate) fn instantiate_quantifiers(
     let quantifiers = &solver_state.quantifiers.clone();
     let mut skolemized_quantifier_idxs = vec![];
     let mut deferred_skolemizations: VecDeque<DeferredSkolemization> = VecDeque::new();
-    let mut deferred_instantiations: VecDeque<DeferredInstantiation> = VecDeque::new();
+    let mut deferred_instantiations: Vec<DeferredInstantiation> = Vec::new();
+    let mut discovery_order = 0;
 
     // We `enumerate()` so we can update quantifiers[i].skolemized after the loop
     for (i, quantifier) in quantifiers.iter().enumerate() {
@@ -134,7 +146,38 @@ pub(crate) fn instantiate_quantifiers(
                 continue;
             }
 
-            for subs_ids in list_assignments.iter() {
+            for trigger_match in &list_assignments {
+                let subs_ids = &trigger_match.substitution;
+                let trigger_distances: Vec<u32> = solver_state
+                    .goal_distance
+                    .as_ref()
+                    .map(|distances| {
+                        trigger_match
+                            .matched_terms
+                            .iter()
+                            .map(|id| {
+                                distances.term_distance(
+                                    solver_state.get_term_ref(solver_state.to_solver_uid(*id)),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let binding_distances: Vec<u32> = solver_state
+                    .goal_distance
+                    .as_ref()
+                    .map(|distances| {
+                        subs_ids
+                            .values()
+                            .map(|id| {
+                                distances.term_distance(
+                                    solver_state.get_term_ref(solver_state.to_solver_uid(*id)),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
                 // Convert ID map to Term map for substitution
                 let subs: DeterministicHashMap<String, Term> = subs_ids
                     .iter()
@@ -163,18 +206,66 @@ pub(crate) fn instantiate_quantifiers(
                     &mut solver_state.context,
                 );
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
-                deferred_instantiations.push_back(DeferredInstantiation {
+                let priority = if let Some(distances) = &solver_state.goal_distance {
+                    InstantiationPriority {
+                        furthest_trigger_distance: trigger_distances
+                            .iter()
+                            .copied()
+                            .max()
+                            .unwrap_or(0),
+                        total_trigger_distance: trigger_distances
+                            .iter()
+                            .map(|distance| u64::from(*distance))
+                            .sum(),
+                        instance_distance: distances.term_distance(&substituted_term),
+                        furthest_binding_distance: binding_distances
+                            .iter()
+                            .copied()
+                            .max()
+                            .unwrap_or(0),
+                        total_binding_distance: binding_distances
+                            .iter()
+                            .map(|distance| u64::from(*distance))
+                            .sum(),
+                        discovery_order,
+                    }
+                } else {
+                    InstantiationPriority {
+                        furthest_trigger_distance: 0,
+                        total_trigger_distance: 0,
+                        instance_distance: 0,
+                        furthest_binding_distance: 0,
+                        total_binding_distance: 0,
+                        discovery_order,
+                    }
+                };
+                discovery_order += 1;
+                deferred_instantiations.push(DeferredInstantiation {
                     substituted_term,
                     is_exists: quantifier_is_exists,
                     literal: quantifier_literal,
                     quantifier_id: quantifier.id,
+                    priority,
                 });
             }
         }
     }
 
+    deferred_instantiations.sort_by_key(|deferred| deferred.priority);
+    if solver_state.goal_distance.is_some() {
+        debug_println!(
+            19,
+            0,
+            "Goal-prioritized instantiation distances: {:?}",
+            deferred_instantiations
+                .iter()
+                .map(|deferred| deferred.priority)
+                .collect::<Vec<_>>()
+        );
+    }
+
     PendingInstantiations {
-        deferred_instantiations,
+        deferred_instantiations: deferred_instantiations.into(),
         deferred_skolemizations,
         skolemized_quantifier_idxs,
     }
@@ -311,6 +402,7 @@ fn process_deferred_instantiations(
         is_exists,
         literal,
         quantifier_id,
+        priority: _,
     } in deferred_instantiations
     {
         let t = if is_exists {
@@ -377,4 +469,54 @@ fn process_deferred_instantiations(
         results.push(QuantifierInstance::Instantiation { clauses });
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InstantiationPriority;
+
+    #[test]
+    fn instantiation_priority_prefers_trigger_then_instance_and_binding_distance() {
+        let mut priorities = [
+            InstantiationPriority {
+                furthest_trigger_distance: 2,
+                total_trigger_distance: 2,
+                instance_distance: 2,
+                furthest_binding_distance: 0,
+                total_binding_distance: 0,
+                discovery_order: 0,
+            },
+            InstantiationPriority {
+                furthest_trigger_distance: 1,
+                total_trigger_distance: 1,
+                instance_distance: 1,
+                furthest_binding_distance: 3,
+                total_binding_distance: 4,
+                discovery_order: 1,
+            },
+            InstantiationPriority {
+                furthest_trigger_distance: 1,
+                total_trigger_distance: 1,
+                instance_distance: 1,
+                furthest_binding_distance: 2,
+                total_binding_distance: 4,
+                discovery_order: 2,
+            },
+            InstantiationPriority {
+                furthest_trigger_distance: 1,
+                total_trigger_distance: 1,
+                instance_distance: 1,
+                furthest_binding_distance: 2,
+                total_binding_distance: 3,
+                discovery_order: 3,
+            },
+        ];
+
+        priorities.sort();
+
+        assert_eq!(priorities[0].discovery_order, 3);
+        assert_eq!(priorities[1].discovery_order, 2);
+        assert_eq!(priorities[2].discovery_order, 1);
+        assert_eq!(priorities[3].discovery_order, 0);
+    }
 }
