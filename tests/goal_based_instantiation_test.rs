@@ -14,6 +14,8 @@ fn run_solver(goal_based: bool) -> (String, String) {
     ]);
     if goal_based {
         command.arg("--goal-based-instantiation");
+    } else {
+        command.arg("--no-goal-based-instantiation");
     }
     let output = command.output().expect("failed to run sundance-smt");
 
@@ -53,5 +55,32 @@ fn disabled_mode_preserves_ematch_discovery_order() {
     assert!(
         first_instantiation.contains("(p b)") && first_instantiation.contains("(q b)"),
         "expected the b-instance first, got: {first_instantiation}"
+    );
+}
+
+#[test]
+fn arithmetic_conflict_preempts_farther_pending_instantiations() {
+    let output = Command::new(env!("CARGO_BIN_EXE_sundance-smt"))
+        .args([
+            "tests/goal_based_instantiation/theory_conflict.smt2",
+            "--arithmetic",
+            "internal",
+            "--goal-based-instantiation",
+            "--stats",
+        ])
+        .output()
+        .expect("failed to run sundance-smt");
+
+    assert!(
+        output.status.success(),
+        "solver failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "unsat");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"instantiations\": 1,"),
+        "expected the nearest instance to trigger arithmetic before the farther one: {stderr}"
     );
 }

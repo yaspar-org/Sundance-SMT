@@ -377,9 +377,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
-        // If we have pending instantiations from a previous round, materialize one
-        // immediately without redoing arithmetic or datatype checks.
-        if let Some(mut pending) = self.pending.take()
+        // Non-goal mode preserves the original fast-draining behavior. Goal
+        // mode drains one trigger-distance tier at a time, checking theories
+        // before moving on to a farther tier.
+        let fast_pending = self.pending.as_ref().is_some_and(|pending| {
+            self.solver_state.goal_distance.is_none() || pending.can_fast_materialize()
+        });
+        if fast_pending
+            && let Some(mut pending) = self.pending.take()
             && let Some(instances) =
                 materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
         {
@@ -599,9 +604,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
-        debug_println!(11, 0, "Starting quantifier instantiations");
-        self.stats.instantiation_rounds += 1;
-        let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
+        let mut pending = if let Some(pending) = self.pending.take() {
+            debug_println!(
+                11,
+                0,
+                "Continuing with the next goal-distance tier after theory checks"
+            );
+            pending
+        } else {
+            debug_println!(11, 0, "Starting quantifier instantiations");
+            self.stats.instantiation_rounds += 1;
+            instantiate_quantifiers(self.solver_state, &self.assignments)
+        };
 
         if pending.is_empty() {
             debug_println!(10, 0, "{}", self.solver_state.egraph);

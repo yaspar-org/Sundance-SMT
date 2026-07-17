@@ -54,6 +54,7 @@ pub(crate) struct PendingInstantiations {
     deferred_instantiations: VecDeque<DeferredInstantiation>,
     deferred_skolemizations: VecDeque<DeferredSkolemization>,
     skolemized_quantifier_idxs: Vec<usize>,
+    active_trigger_distance: Option<u32>,
 }
 
 impl PendingInstantiations {
@@ -63,6 +64,18 @@ impl PendingInstantiations {
 
     pub(crate) fn skolemized_quantifier_idxs(&self) -> &[usize] {
         &self.skolemized_quantifier_idxs
+    }
+
+    pub(crate) fn can_fast_materialize(&self) -> bool {
+        if !self.deferred_skolemizations.is_empty() {
+            return true;
+        }
+
+        self.active_trigger_distance.is_some_and(|active_distance| {
+            self.deferred_instantiations
+                .front()
+                .is_some_and(|next| next.priority.furthest_trigger_distance == active_distance)
+        })
     }
 }
 
@@ -268,6 +281,7 @@ pub(crate) fn instantiate_quantifiers(
         deferred_instantiations: deferred_instantiations.into(),
         deferred_skolemizations,
         skolemized_quantifier_idxs,
+        active_trigger_distance: None,
     }
 }
 
@@ -296,6 +310,7 @@ pub(crate) fn materialize_next(
 
     // Then instantiations
     if let Some(deferred) = pending.deferred_instantiations.pop_front() {
+        pending.active_trigger_distance = Some(deferred.priority.furthest_trigger_distance);
         let results = process_deferred_instantiations(
             vec![deferred],
             solver_state,

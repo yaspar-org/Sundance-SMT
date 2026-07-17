@@ -87,7 +87,7 @@ fn main() -> Result<(), String> {
         })
         .collect();
 
-    if args.goal_based_instantiation {
+    if args.goal_based_instantiation && !args.no_goal_based_instantiation {
         solver_state.initialize_goal_distance(&expanded_assertions[..user_assertion_count]);
     }
 

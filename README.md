@@ -24,11 +24,11 @@ cargo build
 cargo run -- path/to/your/smt/file.smt2
 ```
 
-For verification queries whose final assertion is the goal, enable
-goal-relative quantifier-instantiation ordering with:
+Goal-relative quantifier-instantiation ordering is enabled by default. Disable
+it for comparison with:
 
 ```bash
-cargo run -- path/to/your/smt/file.smt2 --goal-based-instantiation
+cargo run -- path/to/your/smt/file.smt2 --no-goal-based-instantiation
 ```
 
 This mode treats the final user assertion as distance zero and computes
