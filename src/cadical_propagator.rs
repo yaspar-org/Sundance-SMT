@@ -116,9 +116,9 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     pub fn sync_external_stats(&mut self) {
-        self.stats.added_eqs = self.solver_state.egraph.added_eqs;
-        self.stats.mk_bool_vars = (self.solver_state.cnf_cache.next_var - 1) as u64;
-        self.stats.del_clauses = self.proof_tracer.borrow().deleted_clauses;
+        self.stats.egraph_merges = self.solver_state.egraph.stats.merges;
+        self.stats.bool_vars = (self.solver_state.cnf_cache.next_var - 1) as u64;
+        self.stats.deleted_clauses = self.proof_tracer.borrow().deleted_clauses;
         self.stats.dt_accessor_ax = self.solver_state.stat_dt_accessor_ax;
         self.stats.dt_constructor_ax = self.solver_state.stat_dt_constructor_ax;
         self.stats.dt_splits = self.solver_state.stat_dt_splits;
@@ -698,7 +698,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         } else {
             // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
-            self.stats.mk_clauses += 1;
+            self.stats.clauses += 1;
             debug_println!(
                 4,
                 0,

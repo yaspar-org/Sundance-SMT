@@ -132,7 +132,7 @@ pub fn cdcl_decision_procedure(
 
     debug_println!(2, 1, "All clauses added, starting solver");
 
-    propagator.stats.mk_clauses += clauses.len() as u64 + boolean_dt_constraints.len() as u64;
+    propagator.stats.clauses += clauses.len() as u64 + boolean_dt_constraints.len() as u64;
 
     let result = solve(&mut solver);
 

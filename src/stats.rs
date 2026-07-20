@@ -30,10 +30,10 @@ pub struct RoundStats {
     pub conflicts: u64,
     pub arith_checks: u64,
     pub instantiations: u64,
-    pub added_eqs: u64,
-    pub mk_bool_vars: u64,
-    pub mk_clauses: u64,
-    pub del_clauses: u64,
+    pub egraph_merges: u64,
+    pub bool_vars: u64,
+    pub clauses: u64,
+    pub deleted_clauses: u64,
     pub dt_accessor_ax: u64,
     pub dt_constructor_ax: u64,
     pub dt_splits: u64,
@@ -61,13 +61,13 @@ pub struct SolverStats {
     /// Number of theory conflicts (cb_check_found_model returning false)
     pub conflicts: u64,
     /// Number of clauses created (initial + theory lemmas fed to CaDiCaL)
-    pub mk_clauses: u64,
+    pub clauses: u64,
     /// Number of clauses deleted by CaDiCaL
-    pub del_clauses: u64,
+    pub deleted_clauses: u64,
     /// Number of boolean variables allocated
-    pub mk_bool_vars: u64,
-    /// Number of equality merges in the egraph
-    pub added_eqs: u64,
+    pub bool_vars: u64,
+    /// Number of equality merges in the egraph (where roots differed)
+    pub egraph_merges: u64,
     /// Number of datatype accessor axioms (selector projections)
     pub dt_accessor_ax: u64,
     /// Number of datatype constructor axioms (tester/exhaustiveness)
@@ -84,10 +84,10 @@ pub struct SolverStats {
     snapshot_conflicts: u64,
     snapshot_arith_checks: u64,
     snapshot_instantiations: u64,
-    snapshot_added_eqs: u64,
-    snapshot_mk_bool_vars: u64,
-    snapshot_mk_clauses: u64,
-    snapshot_del_clauses: u64,
+    snapshot_egraph_merges: u64,
+    snapshot_bool_vars: u64,
+    snapshot_clauses: u64,
+    snapshot_deleted_clauses: u64,
     snapshot_dt_accessor_ax: u64,
     snapshot_dt_constructor_ax: u64,
     snapshot_dt_splits: u64,
@@ -105,10 +105,10 @@ impl SolverStats {
             instantiation_rounds: 0,
             arith: ArithStats::default(),
             conflicts: 0,
-            mk_clauses: 0,
-            del_clauses: 0,
-            mk_bool_vars: 0,
-            added_eqs: 0,
+            clauses: 0,
+            deleted_clauses: 0,
+            bool_vars: 0,
+            egraph_merges: 0,
             dt_accessor_ax: 0,
             dt_constructor_ax: 0,
             dt_splits: 0,
@@ -119,10 +119,10 @@ impl SolverStats {
             snapshot_conflicts: 0,
             snapshot_arith_checks: 0,
             snapshot_instantiations: 0,
-            snapshot_added_eqs: 0,
-            snapshot_mk_bool_vars: 0,
-            snapshot_mk_clauses: 0,
-            snapshot_del_clauses: 0,
+            snapshot_egraph_merges: 0,
+            snapshot_bool_vars: 0,
+            snapshot_clauses: 0,
+            snapshot_deleted_clauses: 0,
             snapshot_dt_accessor_ax: 0,
             snapshot_dt_constructor_ax: 0,
             snapshot_dt_splits: 0,
@@ -157,10 +157,10 @@ impl SolverStats {
             conflicts: self.conflicts - self.snapshot_conflicts,
             arith_checks: self.arith_checks - self.snapshot_arith_checks,
             instantiations: self.instantiations - self.snapshot_instantiations,
-            added_eqs: self.added_eqs - self.snapshot_added_eqs,
-            mk_bool_vars: self.mk_bool_vars - self.snapshot_mk_bool_vars,
-            mk_clauses: self.mk_clauses - self.snapshot_mk_clauses,
-            del_clauses: self.del_clauses - self.snapshot_del_clauses,
+            egraph_merges: self.egraph_merges - self.snapshot_egraph_merges,
+            bool_vars: self.bool_vars - self.snapshot_bool_vars,
+            clauses: self.clauses - self.snapshot_clauses,
+            deleted_clauses: self.deleted_clauses - self.snapshot_deleted_clauses,
             dt_accessor_ax: self.dt_accessor_ax - self.snapshot_dt_accessor_ax,
             dt_constructor_ax: self.dt_constructor_ax - self.snapshot_dt_constructor_ax,
             dt_splits: self.dt_splits - self.snapshot_dt_splits,
@@ -178,10 +178,10 @@ impl SolverStats {
         self.snapshot_conflicts = self.conflicts;
         self.snapshot_arith_checks = self.arith_checks;
         self.snapshot_instantiations = self.instantiations;
-        self.snapshot_added_eqs = self.added_eqs;
-        self.snapshot_mk_bool_vars = self.mk_bool_vars;
-        self.snapshot_mk_clauses = self.mk_clauses;
-        self.snapshot_del_clauses = self.del_clauses;
+        self.snapshot_egraph_merges = self.egraph_merges;
+        self.snapshot_bool_vars = self.bool_vars;
+        self.snapshot_clauses = self.clauses;
+        self.snapshot_deleted_clauses = self.deleted_clauses;
         self.snapshot_dt_accessor_ax = self.dt_accessor_ax;
         self.snapshot_dt_constructor_ax = self.dt_constructor_ax;
         self.snapshot_dt_splits = self.dt_splits;
@@ -209,10 +209,10 @@ impl fmt::Display for SolverStats {
             "  \"instantiation_rounds\": {},",
             self.instantiation_rounds
         )?;
-        writeln!(f, "  \"added_eqs\": {},", self.added_eqs)?;
-        writeln!(f, "  \"mk_bool_vars\": {},", self.mk_bool_vars)?;
-        writeln!(f, "  \"mk_clauses\": {},", self.mk_clauses)?;
-        writeln!(f, "  \"del_clauses\": {},", self.del_clauses)?;
+        writeln!(f, "  \"egraph_merges\": {},", self.egraph_merges)?;
+        writeln!(f, "  \"bool_vars\": {},", self.bool_vars)?;
+        writeln!(f, "  \"clauses\": {},", self.clauses)?;
+        writeln!(f, "  \"deleted_clauses\": {},", self.deleted_clauses)?;
         writeln!(f, "  \"dt_accessor_ax\": {},", self.dt_accessor_ax)?;
         writeln!(f, "  \"dt_constructor_ax\": {},", self.dt_constructor_ax)?;
         writeln!(f, "  \"dt_splits\": {},", self.dt_splits)?;
@@ -235,10 +235,10 @@ impl fmt::Display for SolverStats {
                 writeln!(f, "      \"conflicts\": {},", round.conflicts)?;
                 writeln!(f, "      \"arith_checks\": {},", round.arith_checks)?;
                 writeln!(f, "      \"instantiations\": {},", round.instantiations)?;
-                writeln!(f, "      \"added_eqs\": {},", round.added_eqs)?;
-                writeln!(f, "      \"mk_bool_vars\": {},", round.mk_bool_vars)?;
-                writeln!(f, "      \"mk_clauses\": {},", round.mk_clauses)?;
-                writeln!(f, "      \"del_clauses\": {},", round.del_clauses)?;
+                writeln!(f, "      \"egraph_merges\": {},", round.egraph_merges)?;
+                writeln!(f, "      \"bool_vars\": {},", round.bool_vars)?;
+                writeln!(f, "      \"clauses\": {},", round.clauses)?;
+                writeln!(f, "      \"deleted_clauses\": {},", round.deleted_clauses)?;
                 writeln!(f, "      \"dt_accessor_ax\": {},", round.dt_accessor_ax)?;
                 writeln!(
                     f,
