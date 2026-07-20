@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
-    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Term,
-    TermAllocator,
+    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization, Repr,
+    Term, TermAllocator,
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -119,7 +119,7 @@ pub struct SolverState {
     pub quantifiers: Vec<Quantifier>,
 
     /// Tracks quantifier instantiations to avoid duplicates.
-    pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<String, Term>>>,
+    pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
 
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
@@ -370,7 +370,7 @@ impl SolverState {
             }
             Global(qid, _) => Op::App(qid.id_str().get().to_string()),
             Constant(c, _) => Op::Constant(format!("{:?}", c)),
-            Local(local) => Op::Local(local.symbol.to_string()),
+            Local(local) => Op::Local(local.clone()),
             _ => panic!("extract_op: unsupported term type {:?}", term.repr()),
         }
     }
@@ -449,7 +449,7 @@ impl SolverState {
 
         let op = Self::extract_op(term);
         match &op {
-            Op::Local(name) => Pattern::Var(name.clone()),
+            Op::Local(local) => Pattern::Var(local.clone()),
             Op::Constant(_)
             | Op::App(_)
             | Op::Eq

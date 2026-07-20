@@ -4,6 +4,8 @@
 //! Internal term representation for the Sundance egraph.
 //! These types are specific to our egraph implementation, not part of the generic trait.
 
+use yaspar_ir::ast::Local;
+
 /// Egraph-internal term ID. Uses u32 so the type checker catches accidental
 /// mixing with solver-level u64 UIDs.
 pub type EgraphId = u32;
@@ -29,7 +31,7 @@ pub enum Op {
     /// Distinct
     Distinct,
     /// Pattern variable (only used in e-matching, never registered)
-    Local(String),
+    Local(Local),
     /// Global constant (variable name)
     Constant(String),
 }
@@ -146,7 +148,7 @@ pub enum TermSlot {
 #[derive(Debug, Clone)]
 pub enum Pattern<T = EgraphId> {
     /// A variable to be bound during matching
-    Var(String),
+    Var(Local),
     /// A ground term already in the egraph — match by equivalence class
     Ground(T),
     /// A function application with sub-patterns

@@ -76,7 +76,6 @@ fn main() -> Result<(), String> {
 
     solver_state.register_bool_constants(&true_term, &false_term);
 
-    let global_names = solver_state.context.all_defined_symbols();
     let mut nnf_terms = vec![];
     for assert in assertions {
         debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
@@ -84,7 +83,7 @@ fn main() -> Result<(), String> {
         // inline the let bindings
         let expanded_term = assert
             .let_elim(&mut solver_state.context)
-            .gsubst(global_names.clone(), &mut solver_state.context);
+            .gsubst_all(&mut solver_state.context);
         debug_println!(10, 0, "Expanded form: {}", expanded_term);
 
         let skolemized_term = expanded_term;
