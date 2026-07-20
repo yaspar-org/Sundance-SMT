@@ -9,6 +9,7 @@
 
 use crate::egraphs::repr::{Pattern, PatternId};
 use std::hash::Hash;
+use yaspar_ir::ast::Local;
 
 /// A SAT literal: positive means the variable is true, negative means false.
 /// Zero means "no decision" when returned from decision methods.
@@ -151,11 +152,11 @@ pub trait EgraphTrait {
     /// - `Some(t)` means the pattern must match in the same equivalence class as `t`
     /// - `None` means the pattern can match any term of the right function
     ///
-    /// Returns a list of substitution maps (variable name → matched term ID).
+    /// Returns a list of substitution maps (bound variable `Local` → matched term ID).
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
-    ) -> Vec<crate::utils::DeterministicHashMap<String, Self::TermId>>;
+    ) -> Vec<crate::utils::DeterministicHashMap<Local, Self::TermId>>;
 
     // --- Backtracking ---
 
