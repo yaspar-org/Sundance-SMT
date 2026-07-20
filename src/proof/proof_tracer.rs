@@ -20,6 +20,8 @@ pub struct SMTProofTracer {
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     instantiations_for_smt2: Vec<(Term, Vec<(Term, bool)>)>,
+    /// Number of clauses deleted by CaDiCaL (for stats)
+    pub deleted_clauses: u64,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -148,6 +150,7 @@ impl SMTProofTracer {
             sorts,
             symbol_table,
             instantiations_for_smt2: Vec::new(),
+            deleted_clauses: 0,
         }
     }
 
