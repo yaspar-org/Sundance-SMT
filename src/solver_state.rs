@@ -846,35 +846,15 @@ pub fn find_if_eq_diseq<'a>(
 ) -> Assertion {
     let hash = solver_state.current_hash;
     match term.repr() {
-        App(f, t, _)
-            if (matches!(f.get_kind(), Some(IdentifierKind::Is(_)))
-                || (f.get_kind().is_none() && f.id_str().get().starts_with("is-")))
-                && t.len() == 1
-                && sign =>
-        {
-            let ctor_name = if let Some(IdentifierKind::Is(sym)) = f.get_kind() {
-                Some(sym.clone())
-            } else {
-                let name = &f.id_str().get()[3..];
-                solver_state
-                    .datatype_info
-                    .constructors
-                    .keys()
-                    .find(|k| *k.get() == *name)
-                    .cloned()
-            };
-            if let Some(ctor_name) = ctor_name {
-                let inner_term = t[0].clone();
-                Assertion::Tester {
-                    ctor_name,
-                    inner_term,
-                    term: term.clone(),
-                }
-            } else {
-                Assertion::Other
+        App(f, t, _) if sign && let Some(IdentifierKind::Is(ctor_name)) = f.get_kind() => {
+            assert_eq!(t.len(), 1);
+            let inner_term = t[0].clone();
+            Assertion::Tester {
+                ctor_name,
+                inner_term,
+                term: term.clone(),
             }
         }
-
         Eq(left, right) => {
             if sign {
                 debug_println!(1, 2, "Creating equality assertion");
