@@ -738,7 +738,7 @@ impl Egraph {
         let max_recursion_depth = 100;
         if indent > max_recursion_depth {
             debug_println!(11, 0, "We have the proof forest :{}", self);
-            panic!("Should not have this many recusive calls to LCH");
+            panic!("Should not have this many recursive calls to LCH");
         }
         loop {
             visited.insert(curr);
