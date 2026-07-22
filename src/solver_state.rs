@@ -150,6 +150,14 @@ pub struct SolverState {
 
     /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
     pub base_case_tester_lits: Vec<i32>,
+
+    // --- Stats counters (harvested into SolverStats at end of solve) ---
+    /// Number of datatype accessor axioms generated (selector projection axioms)
+    pub stat_dt_accessor_ax: u64,
+    /// Number of datatype constructor axioms generated (tester/exhaustiveness clauses)
+    pub stat_dt_constructor_ax: u64,
+    /// Number of datatype case splits (deferred tester clauses)
+    pub stat_dt_splits: u64,
 }
 
 impl SolverState {
@@ -181,6 +189,9 @@ impl SolverState {
             eager_skolem,
             egraph,
             base_case_tester_lits: vec![],
+            stat_dt_accessor_ax: 0,
+            stat_dt_constructor_ax: 0,
+            stat_dt_splits: 0,
         }
     }
 

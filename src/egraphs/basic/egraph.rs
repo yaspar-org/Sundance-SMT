@@ -240,6 +240,15 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Accumulated egraph statistics.
+    pub(crate) stats: EgraphStats,
+}
+
+/// Statistics accumulated by the egraph.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct EgraphStats {
+    /// Number of successful equality merges (where roots differed).
+    pub(crate) merges: u64,
 }
 
 impl Default for Egraph {
@@ -273,6 +282,7 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
+            stats: EgraphStats::default(),
         }
     }
 
@@ -1187,6 +1197,8 @@ impl Egraph {
                 diseq_lit: None,
             });
         }
+
+        self.stats.merges += 1;
 
         // Ensure the constant (if any) remains the root: make the constant
         // side "x" so that x_root stays as root after the union.
