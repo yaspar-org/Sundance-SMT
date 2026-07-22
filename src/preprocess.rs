@@ -71,7 +71,7 @@ pub fn check_for_function_bool(
             } else {
                 // For terms like ite/implies, cnf_tseitin converts to NNF first, so only the NNF
                 // term's UID ends up in var_map. Register the original term's UID here so
-                // downstream code can find its literal.
+                // downstream code (e.g. the tautology clause below) can find its literal.
                 assert!(vector_lit.len() == 1);
                 if vector_lit.len() == 1 {
                     solver_state
@@ -86,6 +86,11 @@ pub fn check_for_function_bool(
             }
         }
 
+        // for each bool term with corresponding literal "l", we must add the clause "-l l 0"
+        // might not have term in context because of simplications done in flat_and/flat_or
+        if let Some(lit) = solver_state.cnf_cache.var_map.get(&term.uid()) {
+            vector.push(vec![-lit, *lit]);
+        }
     }
 
     // if a term has a datatype type, then create tester applications for each constructor

@@ -36,31 +36,12 @@ pub struct CustomExternalPropagator<'a> {
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
     /// Once reached, stop probing further pairs even if unprobed pairs remain.
     pub max_arith_conflicts_per_round: usize,
-    pub last_observed_var: i32,
     /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
     #[cfg(feature = "z3-solver")]
     pub z3_incremental: Option<Z3IncrementalState>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
-    /// Register any new CNF variables created since the last sync.
-    pub fn sync_new_vars(&mut self) {
-        let next = self.solver_state.cnf_cache.next_var;
-        if next <= self.last_observed_var {
-            return;
-        }
-        for var in self.last_observed_var..next {
-            if let Some(&uid) = self.solver_state.cnf_cache.var_map_reverse.get(&var) {
-                if self.solver_state.get_term_safe(uid).is_none() {
-                    continue;
-                }
-                self.add_observed_variable(var);
-                self.add_lit_to_proof_tracer(var);
-            }
-        }
-        self.last_observed_var = next;
-    }
-
     pub fn add_lit_to_proof_tracer(&mut self, lit: i32) {
         let lit = lit.abs(); // only add the positive version
         if self.proof_tracer.borrow().is_lit_registered(lit) {
@@ -80,23 +61,17 @@ impl<'a> CustomExternalPropagator<'a> {
         );
 
         if let Some(id) = self.solver_state.cnf_cache.var_map_reverse.get(&lit) {
-            if self.solver_state.get_term_safe(*id).is_none() {
-                return;
-            }
             let term = self.solver_state.get_term(*id);
             self.proof_tracer
                 .borrow_mut()
                 .register_term(lit, &term, true);
         } else if let Some(id) = self.solver_state.cnf_cache.var_map_reverse.get(&-lit) {
-            if self.solver_state.get_term_safe(*id).is_none() {
-                return;
-            }
             let term = self.solver_state.get_term(*id);
             self.proof_tracer
                 .borrow_mut()
                 .register_term(-lit, &term, false);
         } else {
-            return;
+            panic!("Literal {lit} does not occur positively or negatively in the terms list");
         }
     }
 
@@ -132,7 +107,10 @@ impl<'a> CustomExternalPropagator<'a> {
             let gt_lit = self.solver_state.get_or_allocate_lit_for_term(&gt_term);
             let eq_lit = self.solver_state.get_or_allocate_lit_for_term(&eq_term);
             let clause = vec![lt_lit, gt_lit, eq_lit];
-            self.sync_new_vars();
+            for lit in &clause {
+                self.add_observed_variable(*lit);
+                self.add_lit_to_proof_tracer(*lit);
+            }
             self.disequalities.borrow_mut().push(clause);
         }
     }
@@ -145,18 +123,25 @@ impl<'a> CustomExternalPropagator<'a> {
             match inst {
                 Instantiation { clauses } => {
                     for clause in clauses {
+                        for lit in clause {
+                            self.add_observed_variable(*lit);
+                            self.add_lit_to_proof_tracer(*lit);
+                        }
                         self.disequalities.borrow_mut().push(clause.clone());
                     }
                     self.stats.instantiations += 1;
                 }
                 Skolemization { clauses } => {
                     for clause in clauses {
+                        for lit in clause {
+                            self.add_observed_variable(*lit);
+                            self.add_lit_to_proof_tracer(*lit);
+                        }
                         self.disequalities.borrow_mut().push(clause.clone());
                     }
                 }
             }
         }
-        self.sync_new_vars();
     }
 }
 
@@ -203,12 +188,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             // itself if it's arithmetic.
             #[cfg(feature = "z3-solver")]
             {
-                if let Some(z3) = self.z3_incremental.as_mut() {
-                    z3.drain_merge_queue(self.solver_state);
+                let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
+                    let lits = z3.drain_merge_queue(self.solver_state);
                     z3.on_literal_assignment(*lit, self.solver_state);
+                    lits
+                } else {
+                    Vec::new()
+                };
+                for new_lit in new_merge_lits {
+                    self.add_observed_variable(new_lit);
+                    self.add_lit_to_proof_tracer(new_lit);
                 }
             }
-            self.sync_new_vars();
 
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
@@ -255,9 +246,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     );
                     debug_println!(11, 1, "This corresponds to ");
                     for lit in shrunk_constraint.iter() {
+                        self.add_lit_to_proof_tracer(*lit);
+                        self.add_observed_variable(*lit);
                         debug_println!(11, 1, "  {}", self.solver_state.get_term_from_lit(*lit));
                     }
-                    self.sync_new_vars();
 
                     // Store the theory lemma with its proof steps
                     // TODO: I am not doing proof step stuff right now, but I need to add it back in
@@ -348,12 +340,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         #[cfg(feature = "z3-solver")]
         {
-            if let Some(z3) = self.z3_incremental.as_mut() {
+            let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
                 z3.notify_backtrack(level);
-                z3.drain_merge_queue(self.solver_state);
+                z3.drain_merge_queue(self.solver_state)
+            } else {
+                Vec::new()
+            };
+            for new_lit in new_merge_lits {
+                self.add_observed_variable(new_lit);
+                self.add_lit_to_proof_tracer(new_lit);
             }
         }
-        self.sync_new_vars();
 
         debug_println!(16, 0, "Ending backtracking at level {}", level);
         debug_println!(11, 0, "{}", self.solver_state.egraph);
@@ -419,13 +416,21 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // — just flush any post-hoc merges and call check(). Otherwise use the
         // eager entry point.
         #[cfg(feature = "z3-solver")]
-        let arith_result = if let Some(z3) = self.z3_incremental.as_mut() {
-            z3.drain_merge_queue(self.solver_state);
-            z3.check(self.solver_state)
+        let (arith_result, drained_new_lits) = if let Some(z3) = self.z3_incremental.as_mut() {
+            let new_lits = z3.drain_merge_queue(self.solver_state);
+            let r = z3.check(self.solver_state);
+            (r, new_lits)
         } else {
-            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state)
+            (
+                check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state),
+                Vec::<i32>::new(),
+            )
         };
-        self.sync_new_vars();
+        #[cfg(feature = "z3-solver")]
+        for new_lit in drained_new_lits {
+            self.add_observed_variable(new_lit);
+            self.add_lit_to_proof_tracer(new_lit);
+        }
         #[cfg(not(feature = "z3-solver"))]
         let arith_result =
             check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state);
@@ -534,9 +539,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         conflict_clause.push(-lit);
                     }
 
+                    for lit in &conflict_clause {
+                        self.add_observed_variable(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
+                    }
                     self.disequalities.borrow_mut().push(conflict_clause);
                 }
-                self.sync_new_vars();
 
                 // Undo remaining probe merges. `backtrack_to` may repopulate
                 // the queue via `union_to_eclass` re-firing (e.g. from the
@@ -544,17 +552,21 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.solver_state.egraph.backtrack_to(base_level);
                 #[cfg(feature = "z3-solver")]
                 {
-                    if let Some(z3) = self.z3_incremental.as_mut() {
-                        z3.drain_merge_queue(self.solver_state);
+                    let new_merge_lits = if let Some(z3) = self.z3_incremental.as_mut() {
+                        z3.drain_merge_queue(self.solver_state)
                     } else {
                         self.solver_state.egraph.drain_arithmetic_equalities();
+                        Vec::new()
+                    };
+                    for new_lit in new_merge_lits {
+                        self.add_observed_variable(new_lit);
+                        self.add_lit_to_proof_tracer(new_lit);
                     }
                 }
                 #[cfg(not(feature = "z3-solver"))]
                 {
                     self.solver_state.egraph.drain_arithmetic_equalities();
                 }
-                self.sync_new_vars();
             }
             ArithResult::None => {}
         }
@@ -576,8 +588,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let new_clauses =
                 crate::datatypes::occurs_check::generate_deferred_tester_clauses(self.solver_state);
             if !new_clauses.is_empty() {
+                for clause in &new_clauses {
+                    for lit in clause {
+                        self.add_observed_variable(*lit);
+                        self.add_lit_to_proof_tracer(*lit);
+                    }
+                }
                 self.disequalities.borrow_mut().extend(new_clauses);
-                self.sync_new_vars();
                 return false;
             }
         }
