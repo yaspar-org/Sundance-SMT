@@ -245,9 +245,9 @@ pub struct Egraph {
 
 /// Statistics accumulated by the egraph.
 #[derive(Debug, Default, Clone)]
-pub struct EgraphStats {
+pub(crate) struct EgraphStats {
     /// Number of successful equality merges (where roots differed).
-    pub merges: u64,
+    pub(crate) merges: u64,
 }
 
 impl Default for Egraph {
