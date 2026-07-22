@@ -8,7 +8,9 @@ use super::unionfind::ProofTracker;
 use crate::debug_println;
 use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
 use crate::log::is_important;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
+use crate::utils::{
+    DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
+};
 use std::default::Default;
 use std::fmt;
 
@@ -740,9 +742,9 @@ impl Egraph {
             self.display_term(u),
             self.display_term(v)
         );
-        let mut visited = DeterministicHashSet::default();
+        let mut visited = FastDeterministicHashSet::default();
 
-        let mut path_from_u = vec![];
+        let mut path_from_u: Vec<u32> = vec![];
         let mut curr = u;
 
         let max_recursion_depth = 100;
@@ -751,50 +753,41 @@ impl Egraph {
             panic!("Should not have this many recusive calls to LCH");
         }
         loop {
-            let parent = self.proof_forest[curr as usize].clone();
             visited.insert(curr);
-            if let ProofForestEdge::Root { .. } = parent {
-                visited.insert(curr);
+            if let ProofForestEdge::Root { .. } = self.proof_forest[curr as usize] {
                 break;
             }
-            curr = parent.get_parent();
-            path_from_u.push(parent);
+            path_from_u.push(curr);
+            curr = self.proof_forest[curr as usize].get_parent();
         }
 
-        let mut path_from_v = vec![];
+        let mut path_from_v: Vec<u32> = vec![];
         curr = v;
-        let mut parent: ProofForestEdge;
         loop {
-            parent = self.proof_forest[curr as usize].clone();
             if visited.contains(&curr) {
                 break;
             }
-            if let ProofForestEdge::Root { .. } = parent {
+            if let ProofForestEdge::Root { .. } = self.proof_forest[curr as usize] {
                 return None;
             }
-            curr = parent.get_parent();
-            path_from_v.push(parent);
+            path_from_v.push(curr);
+            curr = self.proof_forest[curr as usize].get_parent();
         }
-
-        let mut proof: Vec<ProofForestEdge> = Vec::new();
-        proof.extend(
-            path_from_u
-                .iter()
-                .take_while(|x| **x != parent)
-                .cloned()
-                .collect::<Vec<ProofForestEdge>>(),
-        );
-        proof.extend(path_from_v);
+        let lca = curr;
 
         assert!(visited.contains(&curr));
 
         let mut final_proof = vec![];
-        let mut proof_congruences = vec![];
+        let mut proof_congruences: Vec<&[(u32, u32)]> = vec![];
 
-        debug_println!(11, indent + 1, "We get the unprocessed proof {:?}", proof);
+        let proof_nodes = path_from_u
+            .iter()
+            .take_while(|&&node| node != lca)
+            .chain(path_from_v.iter());
+
         debug_println!(16, indent + 1, "We have the proof:");
-        for proof_term in proof {
-            match proof_term {
+        for &node in proof_nodes {
+            match &self.proof_forest[node as usize] {
                 ProofForestEdge::Root { .. } => {
                     eprintln!("ERROR: Root should not be processed");
                     std::process::exit(1);
@@ -802,7 +795,7 @@ impl Egraph {
                 ProofForestEdge::Congruence { pairs, .. } => {
                     if is_important(20) {
                         debug_println!(20, indent + 12, "Congruence ");
-                        for (t1, t2) in pairs.clone() {
+                        for &(t1, t2) in pairs.iter() {
                             debug_println!(
                                 20,
                                 indent + 12,
@@ -814,10 +807,10 @@ impl Egraph {
                             );
                         }
                     }
-                    proof_congruences.push(pairs);
+                    proof_congruences.push(pairs.as_slice());
                 }
                 ProofForestEdge::Equality { term, .. } => {
-                    if let Some((t1, t2)) = term {
+                    if let Some(&(t1, t2)) = term.as_ref() {
                         debug_println!(
                             20,
                             indent + 12,
@@ -842,9 +835,9 @@ impl Egraph {
         }
 
         for pairs in proof_congruences {
-            for pair in pairs {
+            for &(a, b) in pairs {
                 if let Some(subproof) =
-                    self.leastcommonancestor_helper(pair.0, pair.1, tracker, indent + 1)
+                    self.leastcommonancestor_helper(a, b, tracker, indent + 1)
                 {
                     final_proof.extend(subproof);
                 }

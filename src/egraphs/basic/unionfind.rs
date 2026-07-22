@@ -127,7 +127,15 @@ impl ProofTracker {
             debug_println!(0, 3, "Following path {} -> {:?} in proof tracker", x, next);
             match next {
                 ProofTrackerValue::Root { size: _ } => x,
-                ProofTrackerValue::Parent { parent } => self.find(*parent),
+                ProofTrackerValue::Parent { parent } => {
+                    let parent = *parent;
+                    let root = self.find(parent);
+                    if root != parent {
+                        self.forest
+                            .insert(x, ProofTrackerValue::Parent { parent: root });
+                    }
+                    root
+                }
             }
         } else {
             debug_println!(0, 3, "Found root {} in proof tracker", x);
