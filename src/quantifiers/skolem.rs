@@ -4,7 +4,6 @@
 //! Skolemization of existential quantifiers
 
 use crate::debug_println;
-use std::collections::HashMap;
 use yaspar_ir::ast::ATerm::{Annotated, Exists, Forall};
 use yaspar_ir::ast::alg::QualifiedIdentifier;
 use yaspar_ir::ast::subst::{Substitute, Substitution};
@@ -23,7 +22,7 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
             } else {
                 // Create a fresh skolem variable for each existentially quantified variable
                 debug_println!(6, 0, "We are skolemizing the term {}", term);
-                let mut skolem_substitutions = HashMap::new();
+                let mut skolem_substitutions = Substitution::empty();
 
                 let mut skolem_variables = vec![];
 
@@ -41,7 +40,9 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                     let skolem_id = QualifiedIdentifier::simple(skolem_symbol);
                     let skolem_term = context.global(skolem_id, Some(var_binding.2.clone()));
 
-                    skolem_substitutions.insert(var_binding.0.clone(), skolem_term);
+                    // Key the substitution on the bound variable's `Local` (id + symbol + sort)
+                    // so distinct variables that print identically never collide.
+                    skolem_substitutions.push(var_binding.clone().into(), skolem_term);
                 }
 
                 let deannotated_body = if let Annotated(inner_term, _) = body.repr() {
@@ -51,9 +52,7 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                     body
                 };
                 // Substitute the skolem variables into the body
-                // todo: substitution needs a builder
-                let substituted_term =
-                    deannotated_body.subst(&Substitution::new_str(skolem_substitutions), context);
+                let substituted_term = deannotated_body.subst(&skolem_substitutions, context);
 
                 let negated_substituted_term = context.not(substituted_term);
                 (negated_substituted_term, skolem_variables)
@@ -70,7 +69,7 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
             } else {
                 // Create a fresh skolem variable for each existentially quantified variable
                 debug_println!(6, 0, "We are skolemizing the term {}", term);
-                let mut skolem_substitutions = HashMap::new();
+                let mut skolem_substitutions = Substitution::empty();
 
                 let mut skolem_variables = vec![];
 
@@ -88,7 +87,9 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                     let skolem_id = QualifiedIdentifier::simple(skolem_symbol);
                     let skolem_term = context.global(skolem_id, Some(var_binding.2.clone()));
 
-                    skolem_substitutions.insert(var_binding.0.clone(), skolem_term);
+                    // Key the substitution on the bound variable's `Local` (id + symbol + sort)
+                    // so distinct variables that print identically never collide.
+                    skolem_substitutions.push(var_binding.clone().into(), skolem_term);
                 }
 
                 let deannotated_body = if let Annotated(inner_term, _) = body.repr() {
@@ -98,9 +99,7 @@ pub fn skolemize(term: &Term, context: &mut Context, polarity: bool) -> (Term, V
                     body
                 };
                 // Substitute the skolem variables into the body
-                // todo: substitution needs a builder
-                let substituted_term =
-                    deannotated_body.subst(&Substitution::new_str(skolem_substitutions), context);
+                let substituted_term = deannotated_body.subst(&skolem_substitutions, context);
 
                 (substituted_term, skolem_variables)
             }
