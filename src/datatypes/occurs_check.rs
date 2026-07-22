@@ -175,6 +175,9 @@ pub fn generate_deferred_tester_clauses(solver_state: &mut SolverState) -> Vec<V
         };
 
         let clauses = learn_exactly_one_tester_clause(solver_state, &term, &dt_dec, false);
+        if !clauses.is_empty() {
+            solver_state.stat_dt_splits += 1;
+        }
         all_clauses.extend(clauses);
     }
 
