@@ -12,6 +12,7 @@ use crate::utils::{
 };
 use std::default::Default;
 use std::fmt;
+use yaspar_ir::ast::Local;
 
 /// Key for the signature table: (operator, canonical children).
 type SigKey = (CanonicalOp, Children);
@@ -240,6 +241,15 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Accumulated egraph statistics.
+    pub(crate) stats: EgraphStats,
+}
+
+/// Statistics accumulated by the egraph.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct EgraphStats {
+    /// Number of successful equality merges (where roots differed).
+    pub(crate) merges: u64,
 }
 
 impl Default for Egraph {
@@ -273,6 +283,7 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
+            stats: EgraphStats::default(),
         }
     }
 
@@ -737,7 +748,7 @@ impl Egraph {
         let max_recursion_depth = 100;
         if indent > max_recursion_depth {
             debug_println!(11, 0, "We have the proof forest :{}", self);
-            panic!("Should not have this many recusive calls to LCH");
+            panic!("Should not have this many recursive calls to LCH");
         }
         loop {
             visited.insert(curr);
@@ -1159,6 +1170,8 @@ impl Egraph {
             });
         }
 
+        self.stats.merges += 1;
+
         // Ensure the constant (if any) remains the root: make the constant
         // side "x" so that x_root stays as root after the union.
         let (x, y, x_root, y_root) = if y_root_is_const {
@@ -1443,9 +1456,9 @@ impl Egraph {
     /// Returns all valid variable assignments.
     fn match_patterns(
         &mut self,
-        assignment: &mut DeterministicHashMap<String, u32>,
+        assignment: &mut DeterministicHashMap<Local, u32>,
         pattern_term_pairs: &[(PatternId, Option<u32>)],
-    ) -> Vec<DeterministicHashMap<String, u32>> {
+    ) -> Vec<DeterministicHashMap<Local, u32>> {
         if pattern_term_pairs.is_empty() {
             return vec![assignment.clone()];
         }
@@ -1462,11 +1475,11 @@ impl Egraph {
     /// Match a single pattern against an optional ground term, then continue with remaining pairs.
     fn match_pattern_recursive(
         &mut self,
-        assignment: &mut DeterministicHashMap<String, u32>,
+        assignment: &mut DeterministicHashMap<Local, u32>,
         pattern: &Pattern,
         ground_hint: Option<u32>,
         remaining: &Vec<(PatternId, Option<u32>)>,
-    ) -> Vec<DeterministicHashMap<String, u32>> {
+    ) -> Vec<DeterministicHashMap<Local, u32>> {
         match pattern {
             Pattern::Var(name) => {
                 let ground = ground_hint.expect("Pattern::Var requires a ground term to bind");
@@ -1509,8 +1522,8 @@ impl Egraph {
         func_name: &str,
         sub_patterns: &[Pattern],
         remaining: &Vec<(PatternId, Option<u32>)>,
-        assignment: &mut DeterministicHashMap<String, u32>,
-    ) -> Vec<DeterministicHashMap<String, u32>> {
+        assignment: &mut DeterministicHashMap<Local, u32>,
+    ) -> Vec<DeterministicHashMap<Local, u32>> {
         let function_terms = match self.function_maps.get(func_name) {
             Some(terms) => terms.clone(),
             None => return vec![],
@@ -1549,11 +1562,11 @@ impl Egraph {
     /// Match sub-patterns against ground subterms, then continue with remaining pattern pairs.
     fn match_subpatterns(
         &mut self,
-        assignment: &mut DeterministicHashMap<String, u32>,
+        assignment: &mut DeterministicHashMap<Local, u32>,
         sub_patterns: &[Pattern],
         ground_subterms: &[u32],
         remaining: &Vec<(PatternId, Option<u32>)>,
-    ) -> Vec<DeterministicHashMap<String, u32>> {
+    ) -> Vec<DeterministicHashMap<Local, u32>> {
         if sub_patterns.is_empty() {
             return self.match_patterns(assignment, remaining);
         }
@@ -1754,7 +1767,7 @@ impl EgraphTrait for Egraph {
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
-    ) -> Vec<DeterministicHashMap<String, u32>> {
+    ) -> Vec<DeterministicHashMap<Local, u32>> {
         let mut assignment = DeterministicHashMap::default();
         self.match_patterns(&mut assignment, &trigger_term_pairs)
     }

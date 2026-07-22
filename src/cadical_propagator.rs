@@ -136,6 +136,15 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
+    pub fn sync_external_stats(&mut self) {
+        self.stats.egraph_merges = self.solver_state.egraph.stats.merges;
+        self.stats.bool_vars = (self.solver_state.cnf_cache.next_var - 1) as u64;
+        self.stats.deleted_clauses = self.proof_tracer.borrow().deleted_clauses;
+        self.stats.dt_accessor_ax = self.solver_state.stat_dt_accessor_ax;
+        self.stats.dt_constructor_ax = self.solver_state.stat_dt_constructor_ax;
+        self.stats.dt_splits = self.solver_state.stat_dt_splits;
+    }
+
     fn apply_instances(
         &mut self,
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
@@ -376,6 +385,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 0,
                 "Trying to check model when the disequalities are not empty"
             );
+            self.stats.conflicts += 1;
             return false;
         }
 
@@ -393,6 +403,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             } else {
                 self.pending = Some(pending);
             }
+            self.stats.conflicts += 1;
             return false;
         }
 
@@ -440,6 +451,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         arithmetic_literals
                     );
                     self.disequalities.borrow_mut().push(arithmetic_literals);
+                    self.stats.conflicts += 1;
                     return false;
                 }
             }
@@ -559,6 +571,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         if !self.disequalities.borrow().is_empty() {
+            self.stats.conflicts += 1;
             return false;
         }
 
@@ -568,6 +581,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 crate::datatypes::occurs_check::datatype_occurs_check(self.solver_state)
             {
                 self.disequalities.borrow_mut().push(conflict_clause);
+                self.stats.conflicts += 1;
                 return false;
             }
 
@@ -577,11 +591,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             if !new_clauses.is_empty() {
                 self.disequalities.borrow_mut().extend(new_clauses);
                 self.sync_new_vars();
+                self.stats.conflicts += 1;
                 return false;
             }
         }
 
         debug_println!(11, 0, "Starting quantifier instantiations");
+        self.sync_external_stats();
+        self.stats.begin_round();
         self.stats.instantiation_rounds += 1;
         let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
 
@@ -608,6 +625,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         debug_println!(4, 0, "Returning false in cb_check_found_model");
+        self.stats.conflicts += 1;
         false
     }
 
@@ -662,6 +680,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         } else {
             // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
+            self.stats.clauses += 1;
             debug_println!(
                 4,
                 0,

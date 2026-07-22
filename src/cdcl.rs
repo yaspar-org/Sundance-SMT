@@ -125,6 +125,8 @@ pub fn cdcl_decision_procedure(
 
     debug_println!(2, 1, "All clauses added, starting solver");
 
+    propagator.stats.clauses += clauses.len() as u64 + boolean_dt_constraints.len() as u64;
+
     let result = solve(&mut solver);
 
     // Disconnect the proof tracer before dropping the propagator
@@ -149,6 +151,10 @@ pub fn cdcl_decision_procedure(
             debug_println!(2, 0, "eDRAT proof written to: {}", p.display());
         }
     }
+
+    // Harvest stats from solver_state, egraph, and proof tracer
+    propagator.sync_external_stats();
+    propagator.stats.finish();
     (result, propagator.stats)
 }
 
