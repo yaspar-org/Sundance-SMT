@@ -49,7 +49,9 @@ impl<'a> CustomExternalPropagator<'a> {
         if next <= self.last_observed_var {
             return;
         }
-        for var in self.last_observed_var..next {
+        let start = self.last_observed_var;
+        self.last_observed_var = next;
+        for var in start..next {
             if let Some(&uid) = self.solver_state.cnf_cache.var_map_reverse.get(&var) {
                 if self.solver_state.get_term_safe(uid).is_none() {
                     continue;
@@ -58,7 +60,6 @@ impl<'a> CustomExternalPropagator<'a> {
                 self.add_lit_to_proof_tracer(var);
             }
         }
-        self.last_observed_var = next;
     }
 
     pub fn add_lit_to_proof_tracer(&mut self, lit: i32) {
