@@ -142,24 +142,13 @@ fn main() -> Result<(), String> {
         boolean_dt_constraints.extend(additional_constraints);
     }
 
-    // filtering prop_skeleton to get rid of -l l terms
-    let prop_skeleton_filtered = prop_skeleton
-        .iter()
-        .filter(|list| !(list.len() == 2 && list[0] == -list[1]))
-        .collect::<Vec<_>>();
-
-    debug_println!(
-        22,
-        0,
-        "We have the prop_skeleton {:?}",
-        prop_skeleton_filtered
-    );
+    debug_println!(22, 0, "We have the prop_skeleton {:?}", prop_skeleton);
 
     debug_println!(
         24,
         0,
         "We have the prop_skeleton in terms: {:?}",
-        prop_skeleton_filtered
+        prop_skeleton
             .iter()
             .map(|x| x
                 .iter()
