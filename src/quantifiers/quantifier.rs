@@ -17,7 +17,7 @@ use crate::solver_types::Polarity;
 use crate::utils::DeterministicHashMap;
 
 use crate::debug_println;
-use yaspar_ir::ast::{LetElim, Sort, Str, Substitute, Substitution, Term, TermAllocator};
+use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, TermAllocator};
 
 #[derive(Debug, Clone)]
 pub(crate) enum QuantifierInstance {
@@ -135,8 +135,8 @@ pub(crate) fn instantiate_quantifiers(
             }
 
             for subs_ids in list_assignments.iter() {
-                // Convert ID map to Term map for substitution
-                let subs: DeterministicHashMap<String, Term> = subs_ids
+                // Convert the (Local -> egraph id) map into a (Local -> Term) map for substitution
+                let subs: DeterministicHashMap<Local, Term> = subs_ids
                     .iter()
                     .map(|(k, v)| {
                         (
@@ -158,10 +158,7 @@ pub(crate) fn instantiate_quantifiers(
                     .insert(subs.clone());
 
                 let term = solver_state.get_term(body);
-                let substitution = Substitution::new(
-                    subs.iter().map(|(s, t)| (s, t.clone())),
-                    &mut solver_state.context,
-                );
+                let substitution = Substitution::new(subs);
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
                 deferred_instantiations.push_back(DeferredInstantiation {
                     substituted_term,
