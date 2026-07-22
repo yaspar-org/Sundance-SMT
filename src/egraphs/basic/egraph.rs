@@ -4,7 +4,6 @@
 use super::datastructures::{CanonicalOp, DisequalTerm, Predecessor};
 use super::proofforest::*;
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
-use super::unionfind::ProofTracker;
 use crate::debug_println;
 use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
 use crate::log::is_important;
@@ -716,7 +715,6 @@ impl Egraph {
         &self,
         u: u32,
         v: u32,
-        tracker: &mut ProofTracker,
     ) -> Option<Vec<(u32, u32)>> {
         debug_println!(
             11,
@@ -725,14 +723,13 @@ impl Egraph {
             self.display_term(u),
             self.display_term(v)
         );
-        self.leastcommonancestor_helper(u, v, tracker, 0)
+        self.leastcommonancestor_helper(u, v, 0)
     }
 
     fn leastcommonancestor_helper(
         &self,
         u: u32,
         v: u32,
-        tracker: &mut ProofTracker,
         indent: usize,
     ) -> Option<Vec<(u32, u32)>> {
         debug_println!(
@@ -820,9 +817,7 @@ impl Egraph {
                             self.display_term(t2),
                             t2
                         );
-                        if tracker.union(t1, t2) {
-                            final_proof.push((t1, t2));
-                        }
+                        final_proof.push((t1, t2));
                         debug_println!(
                             11,
                             1,
@@ -837,7 +832,7 @@ impl Egraph {
         for pairs in proof_congruences {
             for &(a, b) in pairs {
                 if let Some(subproof) =
-                    self.leastcommonancestor_helper(a, b, tracker, indent + 1)
+                    self.leastcommonancestor_helper(a, b, indent + 1)
                 {
                     final_proof.extend(subproof);
                 }
@@ -867,8 +862,7 @@ impl Egraph {
     /// Returns a conflict if t1 and t2 are already in the same equivalence class.
     fn assert_disequal(&mut self, t1: u32, t2: u32, diseq_lit: i32) -> EgraphResult<u32> {
         let level = self.decision_level;
-        let mut tracker = ProofTracker::new();
-        if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
+        if let Some(equalities) = self.leastcommonancestor(t1, t2) {
             // diseq_lit is None: the disequality being asserted is implicit in the
             // conflict (the caller reconstructs it from the assertion context).
             return EgraphResult::with_conflict(Conflict {
@@ -1143,9 +1137,8 @@ impl Egraph {
         if x_root_is_const && y_root_is_const {
             debug_assert!(self.display_term(x_root) != self.display_term(y_root));
             let mut equalities = Vec::new();
-            let mut tracker = ProofTracker::new();
             if x != x_root
-                && let Some(path) = self.leastcommonancestor(x, x_root, &mut tracker)
+                && let Some(path) = self.leastcommonancestor(x, x_root)
             {
                 equalities.extend(path);
             }
@@ -1159,17 +1152,15 @@ impl Egraph {
                 }
                 ProofForestEdge::Congruence { pairs, .. } => {
                     for (a, b) in pairs {
-                        tracker = ProofTracker::new();
-                        if let Some(path) = self.leastcommonancestor(*a, *b, &mut tracker) {
+                        if let Some(path) = self.leastcommonancestor(*a, *b) {
                             equalities.extend(path);
                         }
                     }
                 }
                 _ => {}
             }
-            tracker = ProofTracker::new();
             if y != y_root
-                && let Some(path) = self.leastcommonancestor(y, y_root, &mut tracker)
+                && let Some(path) = self.leastcommonancestor(y, y_root)
             {
                 equalities.extend(path);
             }
@@ -1255,11 +1246,9 @@ impl Egraph {
         // Early conflict check: x_root's existing disequalities may already be
         // violated now that y's class has been merged in.
         if let Some(disequality) = self.check_self_disequality(x_root) {
-            let mut tracker = ProofTracker::new();
             if let Some(equalities) = self.leastcommonancestor(
                 disequality.original_disequality.0,
                 disequality.original_disequality.1,
-                &mut tracker,
             ) {
                 return EgraphResult::with_conflict(Conflict {
                     equalities,
@@ -1799,7 +1788,6 @@ impl EgraphTrait for Egraph {
         t1: Self::TermId,
         t2: Self::TermId,
     ) -> Option<Vec<(Self::TermId, Self::TermId)>> {
-        let mut tracker = ProofTracker::new();
-        self.leastcommonancestor(t1, t2, &mut tracker)
+        self.leastcommonancestor(t1, t2)
     }
 }
