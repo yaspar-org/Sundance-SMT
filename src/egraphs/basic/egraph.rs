@@ -711,11 +711,7 @@ impl Egraph {
 
     /// Explain why u ≡ v by walking the proof forest to their least common ancestor.
     /// Returns None if u and v are not in the same equivalence class.
-    fn leastcommonancestor(
-        &self,
-        u: u32,
-        v: u32,
-    ) -> Option<Vec<(u32, u32)>> {
+    fn leastcommonancestor(&self, u: u32, v: u32) -> Option<Vec<(u32, u32)>> {
         debug_println!(
             11,
             1,
@@ -726,12 +722,7 @@ impl Egraph {
         self.leastcommonancestor_helper(u, v, 0)
     }
 
-    fn leastcommonancestor_helper(
-        &self,
-        u: u32,
-        v: u32,
-        indent: usize,
-    ) -> Option<Vec<(u32, u32)>> {
+    fn leastcommonancestor_helper(&self, u: u32, v: u32, indent: usize) -> Option<Vec<(u32, u32)>> {
         debug_println!(
             20,
             indent,
@@ -831,9 +822,7 @@ impl Egraph {
 
         for pairs in proof_congruences {
             for &(a, b) in pairs {
-                if let Some(subproof) =
-                    self.leastcommonancestor_helper(a, b, indent + 1)
-                {
+                if let Some(subproof) = self.leastcommonancestor_helper(a, b, indent + 1) {
                     final_proof.extend(subproof);
                 }
             }
