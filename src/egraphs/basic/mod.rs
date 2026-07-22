@@ -5,4 +5,3 @@ mod datastructures;
 pub mod egraph;
 mod proofforest;
 pub mod repr;
-mod unionfind;
