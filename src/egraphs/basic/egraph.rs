@@ -240,7 +240,7 @@ pub struct Egraph {
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
     /// Accumulated egraph statistics.
-    pub stats: EgraphStats,
+    pub(crate) stats: EgraphStats,
 }
 
 /// Statistics accumulated by the egraph.
