@@ -96,8 +96,6 @@ impl<'a> CustomExternalPropagator<'a> {
             self.proof_tracer
                 .borrow_mut()
                 .register_term(-lit, &term, false);
-        } else {
-            return;
         }
     }
 

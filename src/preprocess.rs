@@ -85,7 +85,6 @@ pub fn check_for_function_bool(
                 }
             }
         }
-
     }
 
     // if a term has a datatype type, then create tester applications for each constructor
