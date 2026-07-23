@@ -33,6 +33,7 @@ pub struct RoundStats {
     pub egraph_merges: u64,
     pub bool_vars: u64,
     pub clauses: u64,
+    pub binary_clauses: u64,
     pub deleted_clauses: u64,
     pub dt_accessor_ax: u64,
     pub dt_constructor_ax: u64,
@@ -60,8 +61,10 @@ pub struct SolverStats {
     pub arith: ArithStats,
     /// Number of theory conflicts (cb_check_found_model returning false)
     pub conflicts: u64,
-    /// Number of clauses created (initial + theory lemmas fed to CaDiCaL)
+    /// Number of clauses with 3+ literals fed to CaDiCaL
     pub clauses: u64,
+    /// Number of binary clauses (exactly 2 literals) fed to CaDiCaL
+    pub binary_clauses: u64,
     /// Number of clauses deleted by CaDiCaL
     pub deleted_clauses: u64,
     /// Number of boolean variables allocated
@@ -87,6 +90,7 @@ pub struct SolverStats {
     snapshot_egraph_merges: u64,
     snapshot_bool_vars: u64,
     snapshot_clauses: u64,
+    snapshot_binary_clauses: u64,
     snapshot_deleted_clauses: u64,
     snapshot_dt_accessor_ax: u64,
     snapshot_dt_constructor_ax: u64,
@@ -106,6 +110,7 @@ impl SolverStats {
             arith: ArithStats::default(),
             conflicts: 0,
             clauses: 0,
+            binary_clauses: 0,
             deleted_clauses: 0,
             bool_vars: 0,
             egraph_merges: 0,
@@ -122,6 +127,7 @@ impl SolverStats {
             snapshot_egraph_merges: 0,
             snapshot_bool_vars: 0,
             snapshot_clauses: 0,
+            snapshot_binary_clauses: 0,
             snapshot_deleted_clauses: 0,
             snapshot_dt_accessor_ax: 0,
             snapshot_dt_constructor_ax: 0,
@@ -160,6 +166,7 @@ impl SolverStats {
             egraph_merges: self.egraph_merges - self.snapshot_egraph_merges,
             bool_vars: self.bool_vars - self.snapshot_bool_vars,
             clauses: self.clauses - self.snapshot_clauses,
+            binary_clauses: self.binary_clauses - self.snapshot_binary_clauses,
             deleted_clauses: self.deleted_clauses - self.snapshot_deleted_clauses,
             dt_accessor_ax: self.dt_accessor_ax - self.snapshot_dt_accessor_ax,
             dt_constructor_ax: self.dt_constructor_ax - self.snapshot_dt_constructor_ax,
@@ -181,6 +188,7 @@ impl SolverStats {
         self.snapshot_egraph_merges = self.egraph_merges;
         self.snapshot_bool_vars = self.bool_vars;
         self.snapshot_clauses = self.clauses;
+        self.snapshot_binary_clauses = self.binary_clauses;
         self.snapshot_deleted_clauses = self.deleted_clauses;
         self.snapshot_dt_accessor_ax = self.dt_accessor_ax;
         self.snapshot_dt_constructor_ax = self.dt_constructor_ax;
@@ -212,6 +220,7 @@ impl fmt::Display for SolverStats {
         writeln!(f, "  \"egraph_merges\": {},", self.egraph_merges)?;
         writeln!(f, "  \"bool_vars\": {},", self.bool_vars)?;
         writeln!(f, "  \"clauses\": {},", self.clauses)?;
+        writeln!(f, "  \"binary_clauses\": {},", self.binary_clauses)?;
         writeln!(f, "  \"deleted_clauses\": {},", self.deleted_clauses)?;
         writeln!(f, "  \"dt_accessor_ax\": {},", self.dt_accessor_ax)?;
         writeln!(f, "  \"dt_constructor_ax\": {},", self.dt_constructor_ax)?;
@@ -238,6 +247,7 @@ impl fmt::Display for SolverStats {
                 writeln!(f, "      \"egraph_merges\": {},", round.egraph_merges)?;
                 writeln!(f, "      \"bool_vars\": {},", round.bool_vars)?;
                 writeln!(f, "      \"clauses\": {},", round.clauses)?;
+                writeln!(f, "      \"binary_clauses\": {},", round.binary_clauses)?;
                 writeln!(f, "      \"deleted_clauses\": {},", round.deleted_clauses)?;
                 writeln!(f, "      \"dt_accessor_ax\": {},", round.dt_accessor_ax)?;
                 writeln!(

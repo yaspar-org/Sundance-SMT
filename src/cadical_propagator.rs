@@ -680,7 +680,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         } else {
             // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
-            self.stats.clauses += 1;
+            let clause_len = self.disequalities.borrow().last().map_or(0, |c| c.len());
+            match clause_len {
+                0 | 1 => {} // don't count unit or empty clauses
+                2 => self.stats.binary_clauses += 1,
+                _ => self.stats.clauses += 1,
+            }
             debug_println!(
                 4,
                 0,

@@ -125,7 +125,13 @@ pub fn cdcl_decision_procedure(
 
     debug_println!(2, 1, "All clauses added, starting solver");
 
-    propagator.stats.clauses += boolean_dt_constraints.len() as u64;
+    for clause in &boolean_dt_constraints {
+        match clause.len() {
+            0 | 1 => {}
+            2 => propagator.stats.binary_clauses += 1,
+            _ => propagator.stats.clauses += 1,
+        }
+    }
 
     let result = solve(&mut solver);
 
