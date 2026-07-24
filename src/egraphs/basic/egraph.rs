@@ -4,11 +4,12 @@
 use super::datastructures::{CanonicalOp, DisequalTerm, Predecessor};
 use super::proofforest::*;
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
-use super::unionfind::ProofTracker;
 use crate::debug_println;
 use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
 use crate::log::is_important;
-use crate::utils::{DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap};
+use crate::utils::{
+    DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
+};
 use std::default::Default;
 use std::fmt;
 use yaspar_ir::ast::Local;
@@ -240,6 +241,15 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Accumulated egraph statistics.
+    pub(crate) stats: EgraphStats,
+}
+
+/// Statistics accumulated by the egraph.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct EgraphStats {
+    /// Number of successful equality merges (where roots differed).
+    pub(crate) merges: u64,
 }
 
 impl Default for Egraph {
@@ -273,6 +283,7 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
+            stats: EgraphStats::default(),
         }
     }
 
@@ -711,12 +722,7 @@ impl Egraph {
 
     /// Explain why u ≡ v by walking the proof forest to their least common ancestor.
     /// Returns None if u and v are not in the same equivalence class.
-    fn leastcommonancestor(
-        &self,
-        u: u32,
-        v: u32,
-        tracker: &mut ProofTracker,
-    ) -> Option<Vec<(u32, u32)>> {
+    fn leastcommonancestor(&self, u: u32, v: u32) -> Option<Vec<(u32, u32)>> {
         debug_println!(
             11,
             1,
@@ -724,16 +730,10 @@ impl Egraph {
             self.display_term(u),
             self.display_term(v)
         );
-        self.leastcommonancestor_helper(u, v, tracker, 0)
+        self.leastcommonancestor_helper(u, v, 0)
     }
 
-    fn leastcommonancestor_helper(
-        &self,
-        u: u32,
-        v: u32,
-        tracker: &mut ProofTracker,
-        indent: usize,
-    ) -> Option<Vec<(u32, u32)>> {
+    fn leastcommonancestor_helper(&self, u: u32, v: u32, indent: usize) -> Option<Vec<(u32, u32)>> {
         debug_println!(
             20,
             indent,
@@ -741,61 +741,52 @@ impl Egraph {
             self.display_term(u),
             self.display_term(v)
         );
-        let mut visited = DeterministicHashSet::default();
+        let mut visited = FastDeterministicHashSet::default();
 
-        let mut path_from_u = vec![];
+        let mut path_from_u: Vec<u32> = vec![];
         let mut curr = u;
 
         let max_recursion_depth = 100;
         if indent > max_recursion_depth {
             debug_println!(11, 0, "We have the proof forest :{}", self);
-            panic!("Should not have this many recusive calls to LCH");
+            panic!("Should not have this many recursive calls to LCH");
         }
         loop {
-            let parent = self.proof_forest[curr as usize].clone();
             visited.insert(curr);
-            if let ProofForestEdge::Root { .. } = parent {
-                visited.insert(curr);
+            if let ProofForestEdge::Root { .. } = self.proof_forest[curr as usize] {
                 break;
             }
-            curr = parent.get_parent();
-            path_from_u.push(parent);
+            path_from_u.push(curr);
+            curr = self.proof_forest[curr as usize].get_parent();
         }
 
-        let mut path_from_v = vec![];
+        let mut path_from_v: Vec<u32> = vec![];
         curr = v;
-        let mut parent: ProofForestEdge;
         loop {
-            parent = self.proof_forest[curr as usize].clone();
             if visited.contains(&curr) {
                 break;
             }
-            if let ProofForestEdge::Root { .. } = parent {
+            if let ProofForestEdge::Root { .. } = self.proof_forest[curr as usize] {
                 return None;
             }
-            curr = parent.get_parent();
-            path_from_v.push(parent);
+            path_from_v.push(curr);
+            curr = self.proof_forest[curr as usize].get_parent();
         }
-
-        let mut proof: Vec<ProofForestEdge> = Vec::new();
-        proof.extend(
-            path_from_u
-                .iter()
-                .take_while(|x| **x != parent)
-                .cloned()
-                .collect::<Vec<ProofForestEdge>>(),
-        );
-        proof.extend(path_from_v);
+        let lca = curr;
 
         assert!(visited.contains(&curr));
 
         let mut final_proof = vec![];
-        let mut proof_congruences = vec![];
+        let mut proof_congruences: Vec<&[(u32, u32)]> = vec![];
 
-        debug_println!(11, indent + 1, "We get the unprocessed proof {:?}", proof);
+        let proof_nodes = path_from_u
+            .iter()
+            .take_while(|&&node| node != lca)
+            .chain(path_from_v.iter());
+
         debug_println!(16, indent + 1, "We have the proof:");
-        for proof_term in proof {
-            match proof_term {
+        for &node in proof_nodes {
+            match &self.proof_forest[node as usize] {
                 ProofForestEdge::Root { .. } => {
                     eprintln!("ERROR: Root should not be processed");
                     std::process::exit(1);
@@ -803,7 +794,7 @@ impl Egraph {
                 ProofForestEdge::Congruence { pairs, .. } => {
                     if is_important(20) {
                         debug_println!(20, indent + 12, "Congruence ");
-                        for (t1, t2) in pairs.clone() {
+                        for &(t1, t2) in pairs.iter() {
                             debug_println!(
                                 20,
                                 indent + 12,
@@ -815,10 +806,10 @@ impl Egraph {
                             );
                         }
                     }
-                    proof_congruences.push(pairs);
+                    proof_congruences.push(pairs.as_slice());
                 }
                 ProofForestEdge::Equality { term, .. } => {
-                    if let Some((t1, t2)) = term {
+                    if let Some(&(t1, t2)) = term.as_ref() {
                         debug_println!(
                             20,
                             indent + 12,
@@ -828,9 +819,7 @@ impl Egraph {
                             self.display_term(t2),
                             t2
                         );
-                        if tracker.union(t1, t2) {
-                            final_proof.push((t1, t2));
-                        }
+                        final_proof.push((t1, t2));
                         debug_println!(
                             11,
                             1,
@@ -843,10 +832,8 @@ impl Egraph {
         }
 
         for pairs in proof_congruences {
-            for pair in pairs {
-                if let Some(subproof) =
-                    self.leastcommonancestor_helper(pair.0, pair.1, tracker, indent + 1)
-                {
+            for &(a, b) in pairs {
+                if let Some(subproof) = self.leastcommonancestor_helper(a, b, indent + 1) {
                     final_proof.extend(subproof);
                 }
             }
@@ -875,8 +862,7 @@ impl Egraph {
     /// Returns a conflict if t1 and t2 are already in the same equivalence class.
     fn assert_disequal(&mut self, t1: u32, t2: u32, diseq_lit: i32) -> EgraphResult<u32> {
         let level = self.decision_level;
-        let mut tracker = ProofTracker::new();
-        if let Some(equalities) = self.leastcommonancestor(t1, t2, &mut tracker) {
+        if let Some(equalities) = self.leastcommonancestor(t1, t2) {
             // diseq_lit is None: the disequality being asserted is implicit in the
             // conflict (the caller reconstructs it from the assertion context).
             return EgraphResult::with_conflict(Conflict {
@@ -1151,9 +1137,8 @@ impl Egraph {
         if x_root_is_const && y_root_is_const {
             debug_assert!(self.display_term(x_root) != self.display_term(y_root));
             let mut equalities = Vec::new();
-            let mut tracker = ProofTracker::new();
             if x != x_root
-                && let Some(path) = self.leastcommonancestor(x, x_root, &mut tracker)
+                && let Some(path) = self.leastcommonancestor(x, x_root)
             {
                 equalities.extend(path);
             }
@@ -1167,17 +1152,15 @@ impl Egraph {
                 }
                 ProofForestEdge::Congruence { pairs, .. } => {
                     for (a, b) in pairs {
-                        tracker = ProofTracker::new();
-                        if let Some(path) = self.leastcommonancestor(*a, *b, &mut tracker) {
+                        if let Some(path) = self.leastcommonancestor(*a, *b) {
                             equalities.extend(path);
                         }
                     }
                 }
                 _ => {}
             }
-            tracker = ProofTracker::new();
             if y != y_root
-                && let Some(path) = self.leastcommonancestor(y, y_root, &mut tracker)
+                && let Some(path) = self.leastcommonancestor(y, y_root)
             {
                 equalities.extend(path);
             }
@@ -1187,6 +1170,8 @@ impl Egraph {
                 diseq_lit: None,
             });
         }
+
+        self.stats.merges += 1;
 
         // Ensure the constant (if any) remains the root: make the constant
         // side "x" so that x_root stays as root after the union.
@@ -1263,11 +1248,9 @@ impl Egraph {
         // Early conflict check: x_root's existing disequalities may already be
         // violated now that y's class has been merged in.
         if let Some(disequality) = self.check_self_disequality(x_root) {
-            let mut tracker = ProofTracker::new();
             if let Some(equalities) = self.leastcommonancestor(
                 disequality.original_disequality.0,
                 disequality.original_disequality.1,
-                &mut tracker,
             ) {
                 return EgraphResult::with_conflict(Conflict {
                     equalities,
@@ -1807,7 +1790,6 @@ impl EgraphTrait for Egraph {
         t1: Self::TermId,
         t2: Self::TermId,
     ) -> Option<Vec<(Self::TermId, Self::TermId)>> {
-        let mut tracker = ProofTracker::new();
-        self.leastcommonancestor(t1, t2, &mut tracker)
+        self.leastcommonancestor(t1, t2)
     }
 }

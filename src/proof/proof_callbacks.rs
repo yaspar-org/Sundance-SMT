@@ -40,6 +40,7 @@ impl ProofTracer for SMTProofTracer {
     }
 
     fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {
+        self.deleted_clauses += 1;
         self.record_deletion(&clause.to_vec());
     }
 
