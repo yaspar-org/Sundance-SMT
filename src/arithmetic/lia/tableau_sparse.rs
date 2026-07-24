@@ -51,6 +51,33 @@ impl TableauSparse {
         self.matrix.ncols()
     }
 
+    /// Append an empty row, returning its index (= the old `nrows`).
+    ///
+    /// Grows the tableau to accommodate a new basic (slack) variable's row.
+    pub fn add_row(&mut self) -> usize {
+        self.matrix.add_row()
+    }
+
+    /// Append an empty column, returning its index (= the old `ncols`).
+    ///
+    /// Grows the tableau to accommodate a new non-basic variable's column.
+    pub fn add_col(&mut self) -> usize {
+        self.matrix.add_col()
+    }
+
+    /// Set a single entry, inserting, updating, or (if `val` is zero) removing it.
+    pub fn set_entry(&mut self, row: usize, col: usize, val: Rational) -> TableauResult<()> {
+        self.matrix
+            .update_or_insert(row, col, val)
+            .map(|_| ())
+            .map_err(|e| TableauError(e.0))
+    }
+
+    /// Iterate over the non-zero `(col, &coefficient)` entries of a row.
+    pub fn row_entries(&self, row: usize) -> impl Iterator<Item = (usize, &Rational)> {
+        self.matrix.row_entries(row)
+    }
+
     /// Convert this sparse tableau to a dense tableau.
     ///
     /// Used in tests to compare the equivalence of the sparse/dense pivot algorithms.
@@ -97,6 +124,18 @@ impl Tableau for TableauSparse {
 
     fn col_nnz(&self, col: usize) -> usize {
         self.matrix.col_nnz(col)
+    }
+
+    fn add_row(&mut self) -> TableauResult<usize> {
+        Ok(TableauSparse::add_row(self))
+    }
+
+    fn add_col(&mut self) -> TableauResult<usize> {
+        Ok(TableauSparse::add_col(self))
+    }
+
+    fn set_entry(&mut self, row: usize, col: usize, val: Rational) -> TableauResult<()> {
+        TableauSparse::set_entry(self, row, col, val)
     }
 }
 
