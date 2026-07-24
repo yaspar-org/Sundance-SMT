@@ -291,6 +291,7 @@
     "arithmetic/atmosphere_reduced_reduced.smt2": "unsat",
     "arithmetic/atmosphere_reduced.smt2": "unsat",
     "arithmetic/bignumber.smt2": "unsat",
+    "arithmetic/mult_by_one_diseq_unsat.smt2": "unsat",
     "arithmetic/equalitytest.smt2": "unsat",
     "arithmetic/falsearithfact.smt2": "unsat",
     "arithmetic/falsearithfact2.smt2": "unsat",

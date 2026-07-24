@@ -27,8 +27,15 @@ pub fn check_integer_constraints_satisfiable_lia(
 ) -> ArithResult {
     let (constraints, arithmetic_literals) = extract_linear_constraints(terms, solver_state);
 
-    if constraints.is_empty() && arithmetic_literals.is_empty() {
-        return ArithResult::None; // No constraints mean trivially satisfiable
+    // Even with no explicit inequality/equality constraints, arithmetic terms
+    // carry definitional equalities (e.g. `(* 1 y) == y`) that, combined with
+    // egraph disequalities, are refuted via Nelson-Oppen. Only short-circuit
+    // when there is genuinely no arithmetic content to define.
+    if constraints.is_empty()
+        && arithmetic_literals.is_empty()
+        && solver_state.arithmetic_terms.is_empty()
+    {
+        return ArithResult::None; // No arithmetic content means trivially satisfiable
     }
 
     debug_println!(21, 4, "trying to solve with constraints: {:?}", constraints);
