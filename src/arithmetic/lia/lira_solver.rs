@@ -7,9 +7,7 @@
 //! integer and real arithmetic problems.
 
 use dashu::{Integer, Rational};
-use slotmap;
 
-use crate::arithmetic::lia::bounds::Bounds;
 use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::qdelta::QDelta;
@@ -20,547 +18,264 @@ use crate::arithmetic::lia::stats::Stats;
 use crate::arithmetic::lia::variables::{Var, VarType};
 use crate::debug_println;
 
-// ---- New Implementation
-
-// pointer to a BrtNode in the slotmap
-type K = slotmap::DefaultKey;
-
-/// Represents branching an integer variable
-#[derive(Debug)]
-struct Branch {
-    var: Var,                // variable branched on
-    bounds: Bounds<Integer>, // new bounds for `var`
-}
-
-/// Represents action to take on at an active node before invoking the LRASolver
-#[derive(Debug)]
-enum BrtAction {
-    // no bound assertions needed before LRA solve
-    NoOp,
-    // variable choice and bound assertions to make before LRA solve
-    BranchTo(Branch),
-}
-
-/// A node is
-/// - active: Q-feasibility is unknown and we have not branched yet
-/// - branched: the node is Q-feasible, but some int variable was assigned a non-int value
-///   the node is branched on that variable
-/// - pruned: the node is proved to be mixed-infeasible with given set of conflict variables
-#[derive(Debug)]
-enum BrtNodeState {
-    // BrtNode that has not yet been LRA solved; setup data included
-    Active(BrtAction),
-    // branched node: left and right point to child nodes which may be in any state
-    Branched(Var, /* left node */ K, /* right node */ K),
-    // pruned node: BnB has proven the problem at this node is UNSAT and the [Conflict]
-    // contains a subset of the asserted slack variable bounds that explain it
+/// Outcome of exploring one node of the branch-and-bound tree.
+///
+/// Branch-and-bound is a depth-first search over the tree of integer bound
+/// refinements. Each node solves the rational relaxation under the bounds asserted
+/// along the path from the root; [`explore`](LIRASolver::explore) returns one of these
+/// for every node, and a parent combines its two children's outcomes into its own.
+enum NodeOutcome {
+    /// A rational assignment satisfying every integrality constraint in scope. The search
+    /// short-circuits on the first one found.
+    Feasible(Assignment<Var>),
+    /// The subtree rooted at this node is infeasible; the [`Conflict`] is a subset of the
+    /// asserted bounds (identified by their slack variables) that explains why.
     Pruned(Conflict<Var>),
+    /// The search hit a resource limit (LRA-solve budget or maximum depth) before proving
+    /// feasibility or infeasibility.
+    Unknown,
 }
 
-#[derive(Debug)]
-struct BrtNode {
-    // node's bracktrack level
-    level: Option<usize>,
-    // node's state
-    state: BrtNodeState,
-    // pointer to node's parent; root has None
-    parent: Option<K>,
+/// Which side of a branch to assert for an integer variable `x` currently sitting at a
+/// fractional value `v`. The two sides partition the integers: `x <= floor(v)` or
+/// `x >= ceil(v)`, so together they lose no integer solutions.
+#[derive(Clone, Copy)]
+enum BranchSide {
+    /// Assert `x <= floor(v)` as an upper bound.
+    Floor,
+    /// Assert `x >= ceil(v)` as a lower bound.
+    Ceil,
 }
 
-/// Structure for exploring a branching tree starting from an active root node
-#[derive(Debug)]
-struct BrtExplorer {
-    root_k: K,
-    arena: slotmap::SlotMap<K, BrtNode>,
-    active: Vec<K>,
-}
-
-impl BrtExplorer {
-    pub fn new(root: BrtNode) -> Self {
-        let mut arena = slotmap::SlotMap::new();
-        let root_k = arena.insert(root);
-        Self {
-            root_k,
-            arena,
-            active: vec![root_k],
-        }
-    }
-
-    /// Starting at a node, resolve conflicts upward in the branching tree until
-    /// no further resolutions are possible.
-    ///
-    /// To resolve conflicts upwards means to look at the parent of `start` and its
-    /// children. If the other child's state is Pruned(C_1) and `start`'s state is
-    /// Pruned(C_2) then we change the parent's state to Pruned(res(C_1, C2))
-    ///
-    /// Returns the backtrack level corresponding to the node where resolution stops. This
-    /// level needs to be backtracked to at the call site after resolution.
-    ///
-    /// TODO: lira_solver::resolve: clean up debug statements
-    fn resolve(&mut self, start_k: K) -> usize {
-        let mut current_k = start_k;
-        while let Some(parent_k) = self.arena[current_k].parent {
-            // Current state
-            let mut current_conflict = match &self.arena[current_k].state {
-                BrtNodeState::Active(_) | BrtNodeState::Branched(_, _, _) => break,
-                BrtNodeState::Pruned(c) => c.clone(), // TODO: resolve: cloning conflicts at every node is expensive
-            };
-            debug_println!(
-                15,
-                0,
-                "lia::lira_solver::resolve: current node is pruned and has conflicts {:?}",
-                current_conflict
-            );
-            debug_println!(
-                15,
-                0,
-                "lia::lira_solver::resolve: parent node {:?}",
-                self.arena[parent_k]
-            );
-
-            // Parent state
-            match self.arena[parent_k].state {
-                BrtNodeState::Branched(var, left_k, right_k) => {
-                    debug_println!(
-                        15,
-                        0,
-                        "lia::lira_solver::resolve: parent node is branched on {var}"
-                    );
-                    let other_k = if current_k == left_k { right_k } else { left_k };
-                    let other_conflict = match &self.arena[other_k].state {
-                        // the other branch hasn't been fully explored yet
-                        BrtNodeState::Active(_) => {
-                            debug_println!(
-                                15,
-                                0,
-                                "lia::lira_solver::resolve: other branch is still active; ending conflict resolution"
-                            );
-                            return self.arena[parent_k].level.unwrap(); // safe b/c parent is branched, not active
-                        }
-                        BrtNodeState::Branched(other_var, _, _) => {
-                            debug_assert!(var == *other_var);
-                            debug_println!(
-                                15,
-                                0,
-                                "lia::lira_solver::resolve: other branch is still branched; ending conflict resolution"
-                            );
-                            return self.arena[parent_k].level.unwrap(); // safe b/c parent is branched, not active
-                        }
-                        // the other branch is fully explored and pruned
-                        BrtNodeState::Pruned(c) => c,
-                    };
-                    debug_println!(
-                        15,
-                        0,
-                        "lia::lira_solver::resolve: other branch is pruned and has conflicts {:?}",
-                        other_conflict
-                    );
-                    current_conflict = current_conflict.resolve(var, other_conflict);
-                    debug_println!(
-                        15,
-                        0,
-                        "lia::lira_solver::resolve: after resolution conflicts are {:?}",
-                        current_conflict
-                    );
-                    self.arena[parent_k].state = BrtNodeState::Pruned(current_conflict);
-                }
-                // If the parent is Active or Pruned, it's a bug
-                // there's nothing to resolve
-                BrtNodeState::Pruned(_) | BrtNodeState::Active(_) => {
-                    unreachable!("lia::lira_solver::resolve: unexpected active/pruned parent")
-                }
-            }
-            current_k = parent_k;
-        }
-        self.arena[current_k].level.unwrap() // safe b/c final node is guaranteed not to be active
-    }
-}
-
-/// Linear integer and real arithmetic solver
+/// Linear integer and real arithmetic solver.
+///
+/// Wraps an [`LRASolver`] and adds integrality reasoning via branch-and-bound. The LRA
+/// solver is used incrementally: the search asserts a bound, recurses, then backtracks to
+/// the saved level, so a single [`LRASolver`] instance serves the whole tree.
 #[derive(Debug)]
 pub struct LIRASolver {
-    /// The underlying LRA solver
+    /// The underlying LRA solver, driven incrementally across the whole search.
     lra_solver: LRASolver,
-    /// Stack of variable bounds for tracking during solving
-    explorer: BrtExplorer,
-    /// Solver configuration
+    /// Solver configuration.
     config: SolverConfig,
-    /// Runtime statistics
+    /// Runtime statistics accumulated across all LRA solves.
     stats: Stats,
 }
 
 impl LIRASolver {
-    /// Create a new LIRASolver with the given LRASolver
+    /// Create a new LIRASolver wrapping the given LRASolver.
     pub fn new(lra_solver: LRASolver, config: SolverConfig) -> Self {
-        let root = BrtNode {
-            level: Some(0usize),
-            state: BrtNodeState::Active(BrtAction::NoOp),
-            parent: None,
-        };
         Self {
             lra_solver,
-            explorer: BrtExplorer::new(root),
             config,
             stats: Stats::new(),
         }
     }
 
-    // Setup LRA solver state for the active branch pointed to by `current_k`.
-    //
-    // Returns the backtracking level of the active node's parent.
-    fn setup_active(&mut self, current_k: K) -> SolverResult<()> {
-        let current = self
-            .explorer
-            .arena
-            .get_mut(current_k)
-            .expect("invalid node key {current_k:?}");
-        // `new_current_state` is optionally updated below to avoid needing to modify
-        // current.state in the match where &mut current.state is borrowed
-        let mut new_current_state: Option<BrtNodeState> = None;
-        let mut new_bt_level: Option<usize> = None;
-        match &current.state {
-            BrtNodeState::Active(setup) => {
-                match setup {
-                    BrtAction::BranchTo(Branch { var, bounds }) => {
-                        debug_println!(15, 0, "lia::lira_solver: pushing branch {var} in {bounds}");
-                        match (&bounds.lower, &bounds.upper) {
-                            (Some(l), None) => {
-                                new_bt_level = Some(self.lra_solver.set_backtrack());
-                                let ass_res = self
-                                    .lra_solver
-                                    .assert_lower(var, &QDelta::from(Rational::from(l.clone())))?;
-                                if let Some(false) = ass_res {
-                                    debug_println!(
-                                        15,
-                                        0,
-                                        "lia::lira_solver: (assert_lower) branch is trivially INFEASIBLE"
-                                    );
-                                    // conflict is the single variable asserted upon
-                                    new_current_state = Some(BrtNodeState::Pruned(
-                                        vec![*var].into_iter().collect(),
-                                    ));
-                                }
-                            }
-                            (None, Some(u)) => {
-                                new_bt_level = Some(self.lra_solver.set_backtrack());
-                                let ass_res = self
-                                    .lra_solver
-                                    .assert_upper(var, &QDelta::from(Rational::from(u.clone())))?;
-                                if let Some(false) = ass_res {
-                                    // branch is trivially UNSAT
-                                    debug_println!(
-                                        15,
-                                        0,
-                                        "lia::lira_solver: (assert_upper) branch is trivially INFEASIBLE"
-                                    );
-                                    // conflict is the single variable asserted upon
-                                    new_current_state = Some(BrtNodeState::Pruned(
-                                        vec![*var].into_iter().collect(),
-                                    ));
-                                }
-                            }
-                            _ => {
-                                unreachable!(
-                                    "branch_and_bound: only one bound direction should be set"
-                                )
-                            }
-                        }
-                    }
-                    _ => {
-                        // no-op
-                    }
-                }
-            }
-            _ => unreachable!("unexpected node state"),
-        };
-
-        // Now that we can release &mut current, update it and other fields in &mut self
-        if let Some(c) = new_current_state {
-            current.state = c;
-            if matches!(current.state, BrtNodeState::Pruned(_)) {
-                // in case new state is `Pruned`, resolve conflicts before continuing Resolution
-                // includes backtracking to the LRASolver state at the final node visited
-                let res_level = self.explorer.resolve(current_k);
-                self.lra_solver.backtrack(res_level);
-            }
-        }
-        let current = self // get current again to avoid 2x mut borrow
-            .explorer
-            .arena
-            .get_mut(current_k)
-            .expect("invalid node key {current_k:?}");
-        if current.level.is_none() {
-            current.level = new_bt_level; // replaces the initial None in the solve SAT case
-        }
-        Ok(())
-    }
-
-    /// Solve a mixed-integer system.
+    /// Solve a mixed integer/real system.
     ///
-    /// First solves the relaxed rational system. If feasible with all integer variables
-    /// assigned integer values, returns immediately. Otherwise attempts heuristics
-    /// (rounding, unit cube test) before falling back to branch-and-bound.
+    /// First tries cheap heuristics (unit cube test, rounding) against the rational
+    /// relaxation, then falls back to branch-and-bound. Returns `FEASIBLE` with a model,
+    /// `INFEASIBLE` with a conflict core, or `UNKNOWN` if a resource limit was hit.
     pub fn solve(&mut self) -> SolverResult<SolverReturn> {
         debug_println!(21, 0, "lia::lira_solver: starting LIRASolver");
 
-        // Try unit cube test
+        // The unit cube test can find an integer point without any LRA solving, so try it
+        // before touching the relaxation.
         debug_println!(21, 0, "lia::lira_solver::solve: trying the unit cube test");
-        if let Some(cube_assg) = self.try_unit_cube_test()? {
+        if let Some(cube_assg) = self.lra_solver.try_unit_cube_test()? {
             debug_println!(21, 0, "lia::lira_solver::solve: unit cube test succeeded");
-            return Ok(SolverReturn::new(
-                SolverDecision::FEASIBLE(cube_assg),
-                self.stats.clone(),
-            ));
+            return Ok(self.finish(SolverDecision::FEASIBLE(cube_assg)));
         }
 
-        // Solve the rational relaxation
-        debug_println!(
-            21,
-            0,
-            "lia::lira_solver::solve: solving the rational relaxation"
-        );
+        // Solve the rational relaxation once up front. If it is infeasible or already
+        // integral we are done; otherwise try the rounding heuristic before branching.
+        debug_println!(21, 0, "lia::lira_solver::solve: solving the relaxation");
         let ret = self.lra_solver.solve()?;
         self.stats.combine(&ret.stats);
 
         match ret.decision {
-            SolverDecision::INFEASIBLE(cs) => Ok(SolverReturn::new(
-                SolverDecision::INFEASIBLE(cs),
-                self.stats.clone(),
-            )),
-            SolverDecision::UNKNOWN => Ok(SolverReturn::new(
-                SolverDecision::UNKNOWN,
-                self.stats.clone(),
-            )),
+            SolverDecision::INFEASIBLE(cs) => Ok(self.finish(SolverDecision::INFEASIBLE(cs))),
+            SolverDecision::UNKNOWN => Ok(self.finish(SolverDecision::UNKNOWN)),
             SolverDecision::FEASIBLE(assg) => {
-                debug_println!(
-                    21,
-                    0,
-                    "lia::lira_solver::solve: rational relaxation is feasible with assignment:"
-                );
-                debug_println!(21, 0, "{assg}");
-                // Check if all integer variables already have integer assignments
-                if self.find_next_int_var().is_none() {
-                    return Ok(SolverReturn::new(
-                        SolverDecision::FEASIBLE(assg),
-                        self.stats.clone(),
-                    ));
+                debug_println!(21, 0, "lia::lira_solver::solve: relaxation feasible:\n{assg}");
+
+                // The relaxation already satisfies every integrality constraint.
+                if self.find_fractional_int_var().is_none() {
+                    return Ok(self.finish(SolverDecision::FEASIBLE(assg)));
                 }
 
-                // Try rounding heuristic
                 debug_println!(21, 0, "lia::lira_solver::solve: trying rounding heuristic");
-                if let Some(rounded_assg) = self.try_rounding_heuristic() {
-                    debug_println!(
-                        21,
-                        0,
-                        "lia::lira_solver::solve: rounding heuristic succeeded"
-                    );
-                    return Ok(SolverReturn::new(
-                        SolverDecision::FEASIBLE(rounded_assg),
-                        self.stats.clone(),
-                    ));
+                if let Some(rounded) = self.lra_solver.try_rounding_heuristic() {
+                    debug_println!(21, 0, "lia::lira_solver::solve: rounding succeeded");
+                    return Ok(self.finish(SolverDecision::FEASIBLE(rounded)));
                 }
 
-                // Fall back to branch-and-bound
-                self.branch_and_bound()
+                // Fall back to branch-and-bound. The relaxation is already solved and its
+                // state is live in the LRA solver, so start exploring from the root at
+                // depth 0 rather than re-solving.
+                debug_println!(21, 0, "lia::lira_solver: starting branch-and-bound");
+                let outcome = self.branch(0)?;
+                Ok(self.finish(match outcome {
+                    NodeOutcome::Feasible(assg) => SolverDecision::FEASIBLE(assg),
+                    NodeOutcome::Pruned(conflict) => SolverDecision::INFEASIBLE(conflict),
+                    NodeOutcome::Unknown => SolverDecision::UNKNOWN,
+                }))
             }
         }
     }
 
-    /// Solve a mixed-integer system using branch-and-bound
-    fn branch_and_bound(&mut self) -> SolverResult<SolverReturn> {
-        debug_println!(21, 0, "lia::lira_solver: starting branch-and-bound");
-
-        while let Some(current_k) = self.explorer.active.pop() {
-            debug_println!(
-                21,
-                0,
-                "lia::lira_solver::solve: pop & setup node {:?}",
-                self.explorer.arena[current_k]
-            );
-            self.setup_active(current_k)?;
-            // Handle pruning that can happen during setup phase
-            if matches!(
-                self.explorer.arena[current_k].state,
-                BrtNodeState::Pruned(_)
-            ) {
-                // backtracking has already happened in (resolution in) the setup phase
-                continue;
+    /// Branch on the first fractional integer variable, given that the LRA solver already
+    /// holds a feasible rational model at this node.
+    ///
+    /// Explores the two children (`x <= floor(v)` and `x >= ceil(v)`) and combines their
+    /// outcomes:
+    /// - either child feasible  → propagate it up (the search is done),
+    /// - either child pruned by a conflict not mentioning `x` → that conflict alone proves
+    ///   this node infeasible, so the other branch is irrelevant and skipped,
+    /// - both children pruned    → resolve the two conflicts on `x` (drops `x`, unions the
+    ///   rest), yielding this node's conflict.
+    ///
+    /// `depth` is the node's distance from the root and equals the current recursion depth;
+    /// it drives the stack-overflow guard.
+    fn branch(&mut self, depth: usize) -> SolverResult<NodeOutcome> {
+        let (x, val) = match self.find_fractional_int_var() {
+            // Every integer variable is integral: this rational model is a real solution.
+            None => {
+                let model = self
+                    .lra_solver
+                    .get_rational_model()
+                    .expect("feasible node must have a rational model");
+                return Ok(NodeOutcome::Feasible(Assignment::new(model)));
             }
+            Some(pair) => pair,
+        };
+        debug_println!(15, 0, "lia::lira_solver: branching on {x} = {val}");
 
-            // Solve the rational system
-            debug_println!(21, 0, "lia::lira_solver: solving over Q");
-            let ret = self.lra_solver.solve()?;
-
-            // Update stats: LRASolver::solve bumps num_lra_solve by 1
-            self.stats.combine(&ret.stats);
-
-            // Depending on current solver config, stop early and return UNKNOWN if we have
-            // made too many LRA solver calls.
-            if let Some(max) = self.config.max_lra_solve_calls
-                && self.stats.num_lra_solve > max
-            {
-                debug_println!(
-                    21,
-                    0,
-                    "lia::lira_solver: max LRASolver calls reached, returning UNKNOWN"
-                );
-                return Ok(SolverReturn::new(
-                    SolverDecision::UNKNOWN,
-                    self.stats.clone(),
-                ));
-            }
-
-            match ret.decision {
-                SolverDecision::INFEASIBLE(cs) => {
-                    debug_println!(
-                        15,
-                        0,
-                        "lia::lira_solver: INFEASIBLE, pruning node and backtracking"
-                    );
-                    self.explorer.arena[current_k].state = BrtNodeState::Pruned(cs);
-                    let level = self.explorer.resolve(current_k);
-                    // Resolve optionally returns a final level to backtrack to; this
-                    // may jump several levels back, not just to the parent.
-                    debug_println!(
-                        15,
-                        0,
-                        "lia::lira_solver: after resolution, backtracking to level {level}"
-                    );
-                    self.lra_solver.backtrack(level)
+        // Floor branch: x <= floor(val).
+        match self.explore(x, BranchSide::Floor, val.floor(), depth)? {
+            NodeOutcome::Feasible(assg) => Ok(NodeOutcome::Feasible(assg)),
+            NodeOutcome::Unknown => Ok(NodeOutcome::Unknown),
+            NodeOutcome::Pruned(floor_conflict) => {
+                // If the floor branch's conflict does not depend on the bound we asserted
+                // on `x`, it already proves this whole node infeasible — the ceil branch
+                // cannot change that, so skip it. (This is exactly what resolving against
+                // an `x`-free conflict would yield, without exploring the sibling.)
+                if !floor_conflict.contains(&x) {
+                    debug_println!(15, 0, "lia::lira_solver: floor conflict independent of {x}");
+                    return Ok(NodeOutcome::Pruned(floor_conflict));
                 }
-                SolverDecision::FEASIBLE(assg) => {
-                    debug_println!(
-                        15,
-                        0,
-                        "lia::lira_solver: FEASIBLE, checking for non-integral assignments"
-                    );
-                    // identify the first integer type variable whose assigned value is not integral
-                    let (x, val) = match self.find_next_int_var() {
-                        None => {
-                            return Ok(SolverReturn::new(
-                                SolverDecision::FEASIBLE(assg),
-                                self.stats.clone(),
-                            ));
-                        } // rational solution meets all type constraints
-                        Some((x, val)) => {
-                            debug_println!(
-                                15,
-                                0,
-                                "lia::lira_solver: FEASIBLE, {x} is not assigned an integer: {val}"
-                            );
-                            (x, val)
+
+                // Ceil branch: x >= ceil(val).
+                match self.explore(x, BranchSide::Ceil, val.ceil(), depth)? {
+                    NodeOutcome::Feasible(assg) => Ok(NodeOutcome::Feasible(assg)),
+                    NodeOutcome::Unknown => Ok(NodeOutcome::Unknown),
+                    NodeOutcome::Pruned(ceil_conflict) => {
+                        if !ceil_conflict.contains(&x) {
+                            debug_println!(15, 0, "lia::lira_solver: ceil conflict independent of {x}");
+                            return Ok(NodeOutcome::Pruned(ceil_conflict));
                         }
-                    };
-
-                    // (x : Int) is assigned a non-integer solution, so we branch
-                    debug_println!(
-                        15,
-                        0,
-                        "lia::lira_solver: branching on var {x} with current assignment {val}"
-                    );
-                    let lower_branch = Bounds::below_of(val.floor()); // new upper bound for `x` in branch 1
-                    let upper_branch = Bounds::above_of(val.ceil()); // new lower bound for `x` in branch 2
-                    debug_println!(
-                        15,
-                        0,
-                        "lia::lira_solver: lower branch: {x} in {lower_branch}, upper branch: {x} in {upper_branch}"
-                    );
-
-                    // construct new lower and upper nodes to explore, add them to the tree
-                    // and the active stack
-                    //
-                    // Lower:
-                    let lower_node = BrtNode {
-                        level: None,
-                        state: BrtNodeState::Active(BrtAction::BranchTo(Branch {
-                            var: x,
-                            bounds: lower_branch,
-                        })),
-                        parent: Some(current_k),
-                    };
-                    let lower_node_k = self.explorer.arena.insert(lower_node);
-                    self.explorer.active.push(lower_node_k);
-
-                    // Upper:
-                    let upper_node = BrtNode {
-                        level: None,
-                        state: BrtNodeState::Active(BrtAction::BranchTo(Branch {
-                            var: x,
-                            bounds: upper_branch,
-                        })),
-                        parent: Some(current_k),
-                    };
-                    let upper_node_k = self.explorer.arena.insert(upper_node);
-                    self.explorer.active.push(upper_node_k);
-                    self.explorer.arena[current_k].state =
-                        BrtNodeState::Branched(x, lower_node_k, upper_node_k);
+                        // Both branches are infeasible and both depend on `x`. Resolve on
+                        // `x` to obtain a conflict that no longer mentions it, proving this
+                        // node infeasible.
+                        Ok(NodeOutcome::Pruned(floor_conflict.resolve(x, &ceil_conflict)))
+                    }
                 }
+            }
+        }
+    }
+
+    /// Assert one side of a branch on `x`, recurse, then backtrack the LRA solver to the
+    /// state on entry.
+    ///
+    /// `bound` is `floor(val)` (asserted as an upper bound) or `ceil(val)` (asserted as a
+    /// lower bound) depending on `side`. Returns the child subtree's [`NodeOutcome`].
+    fn explore(
+        &mut self,
+        x: Var,
+        side: BranchSide,
+        bound: Integer,
+        depth: usize,
+    ) -> SolverResult<NodeOutcome> {
+        // Guard both the LRA-solve budget and, via `depth`, the recursion stack.
+        if self.over_budget(depth) {
+            return Ok(NodeOutcome::Unknown);
+        }
+
+        let level = self.lra_solver.set_backtrack();
+        let qbound = QDelta::from(Rational::from(bound));
+        let assert_res = match side {
+            BranchSide::Floor => self.lra_solver.assert_upper(&x, &qbound)?,
+            BranchSide::Ceil => self.lra_solver.assert_lower(&x, &qbound)?,
+        };
+
+        let outcome = if let Some(false) = assert_res {
+            // The bound directly contradicts an existing one on `x`, so the branch is
+            // infeasible without any solving. The conflict is `x`'s bound alone.
+            debug_println!(15, 0, "lia::lira_solver: branch on {x} trivially infeasible");
+            NodeOutcome::Pruned([x].into_iter().collect())
+        } else {
+            // Solve the relaxation under the new bound, then recurse to branch deeper.
+            let ret = self.lra_solver.solve()?;
+            self.stats.combine(&ret.stats);
+            match ret.decision {
+                SolverDecision::INFEASIBLE(conflict) => NodeOutcome::Pruned(conflict),
+                SolverDecision::FEASIBLE(_) => self.branch(depth + 1)?,
                 SolverDecision::UNKNOWN => {
                     unreachable!("lra_solver decision cannot be UNKNOWN after solve")
                 }
             }
-        }
-        // active is now empty
+        };
 
-        // At this point, every node should be pruned and all conflicts resolved
-        // up to the root node. The initial linear mixed integer problem is infeasible.
-        let root_k = self.explorer.root_k;
-        let root = self
-            .explorer
-            .arena
-            .get(root_k)
-            .unwrap_or_else(|| panic!("invalid root key {root_k:?}"));
-        match &root.state {
-            BrtNodeState::Pruned(conflict) => Ok(SolverReturn::new(
-                SolverDecision::INFEASIBLE(conflict.clone()),
-                self.stats.clone(),
-            )),
-            state => unreachable!("invalid final root node state {state:?}"),
-        }
+        // Undo everything this branch asserted before returning to the parent.
+        self.lra_solver.backtrack(level);
+        Ok(outcome)
     }
 
-    /// Get a reference to the underlying LRASolver
+    /// Whether the search should stop and report `UNKNOWN`, because either the configured
+    /// LRA-solve budget or the maximum branch depth (also the recursion-depth guard) has
+    /// been reached.
+    fn over_budget(&self, depth: usize) -> bool {
+        if let Some(max) = self.config.max_lra_solve_calls
+            && self.stats.num_lra_solve > max
+        {
+            debug_println!(21, 0, "lia::lira_solver: max LRA-solve calls reached");
+            return true;
+        }
+        if let Some(max) = self.config.max_branch_depth
+            && depth >= max
+        {
+            debug_println!(21, 0, "lia::lira_solver: max branch depth reached");
+            return true;
+        }
+        false
+    }
+
+    /// Wrap a decision together with the accumulated stats into a [`SolverReturn`].
+    fn finish(&self, decision: SolverDecision) -> SolverReturn {
+        SolverReturn::new(decision, self.stats.clone())
+    }
+
+    /// Get a reference to the underlying LRASolver.
     pub fn lra_solver(&self) -> &LRASolver {
         &self.lra_solver
     }
 
-    /// Get a mutable reference to the underlying LRASolver
+    /// Get a mutable reference to the underlying LRASolver.
     pub fn lra_solver_mut(&mut self) -> &mut LRASolver {
         &mut self.lra_solver
     }
 
-    /// Find the first integer variable whose currently assigned value is
-    /// not integral and return it along with its current assignment.
-    fn find_next_int_var(&self) -> Option<(Var, Rational)> {
-        // Get the current model (assignment of variables)
+    /// Find the first integer-typed variable whose current rational assignment is not
+    /// integral, returning it with that value. `None` means the model is fully integral.
+    ///
+    /// TODO: track integer variables separately to avoid scanning the whole model.
+    fn find_fractional_int_var(&self) -> Option<(Var, Rational)> {
         let model = self.lra_solver.get_rational_model()?;
-
-        // Iterate through the variables in the model
-        //
-        // TODO: Maintain a separate list of Integer type variables
-        for (var, val) in model.iter() {
-            // Check if the variable is of integer type
-            if var.typ == VarType::Int {
-                // Check if the value is not an integer
-                if !val.is_int() {
-                    return Some((*var, val.clone()));
-                }
-            }
-        }
-
-        // No integer variables with non-integer values found
-        None
-    }
-
-    /// Attempt to round non-basic integer variables to the nearest integer value.
-    /// Delegates to the underlying LRASolver.
-    fn try_rounding_heuristic(&mut self) -> Option<Assignment<Var>> {
-        self.lra_solver.try_rounding_heuristic()
-    }
-
-    /// Attempt the unit cube test. Delegates to the underlying LRASolver.
-    fn try_unit_cube_test(&mut self) -> SolverResult<Option<Assignment<Var>>> {
-        self.lra_solver.try_unit_cube_test()
+        model
+            .iter()
+            .find(|(var, val)| var.typ == VarType::Int && !val.is_int())
+            .map(|(var, val)| (*var, val.clone()))
     }
 }
 
