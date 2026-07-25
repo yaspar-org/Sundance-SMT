@@ -15,10 +15,10 @@ pub struct SolverConfig {
     pub max_lra_solve_calls: Option<usize>,
     /// Maximum branch-and-bound tree depth explored before giving up.
     ///
-    /// The branch-and-bound search is recursive, so this doubles as a stack-overflow
-    /// guard: a node at depth `d` sits `d` frames deep on the call stack. When the limit
-    /// is reached the search returns `UNKNOWN` rather than recursing further. `None`
-    /// means unlimited (only safe when running on a thread with a large stack).
+    /// Branch-and-bound uses an explicit heap-allocated stack (not recursion), so depth is
+    /// bounded by heap memory rather than the OS thread stack; this limit can therefore be
+    /// set high without risking stack overflow. When it is reached the search returns
+    /// `UNKNOWN` rather than descending further. `None` means unlimited.
     pub max_branch_depth: Option<usize>,
 }
 
@@ -31,9 +31,10 @@ impl Default for SolverConfig {
             // significantly, some will return UNKNOWN instead since branch-and-bound
             // will return UNKNOWN when the limit is hit.
             max_lra_solve_calls: None,
-            // Deep enough that well-behaved problems never hit it, low enough to stay
-            // clear of the default thread stack limit on pathological inputs.
-            max_branch_depth: Some(4096),
+            // Branch-and-bound runs on an explicit heap stack, so this is no longer capped by
+            // the thread stack. Match `max_lra_solve_calls`' historical 2^17 headroom so
+            // regression tests reach SAT/UNSAT or TIMEOUT rather than bailing to UNKNOWN.
+            max_branch_depth: Some(1 << 17),
         }
     }
 }

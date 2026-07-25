@@ -47,6 +47,60 @@ enum BranchSide {
     Ceil,
 }
 
+/// One node of the branch-and-bound search, held on an explicit heap stack rather than the
+/// call stack (see [`LIRASolver::branch_iterative`]). Each frame records where it is in
+/// exploring its two children so the search can be suspended and resumed as the stack grows
+/// and shrinks.
+struct BranchFrame {
+    /// The fractional integer variable this node branches on.
+    x: Var,
+    /// Upper bound for the floor branch (`x <= floor_bound`).
+    floor_bound: Integer,
+    /// Lower bound for the ceil branch (`x >= ceil_bound`).
+    ceil_bound: Integer,
+    /// Distance from the root; drives the depth guard in [`LIRASolver::over_budget`].
+    depth: usize,
+    /// Which child this frame is about to explore or is currently waiting on.
+    stage: Stage,
+    /// The floor branch's conflict, kept while the ceil branch runs so the two can be
+    /// resolved on `x` once both branches are pruned.
+    floor_conflict: Option<Conflict<Var>>,
+    /// LRA backtrack level to restore once the currently-awaited child completes. `None`
+    /// when no bound is outstanding (the child finished without recursing, or none started).
+    pending_level: Option<usize>,
+}
+
+/// Where a [`BranchFrame`] is in exploring its two children.
+#[derive(Clone, Copy)]
+enum Stage {
+    /// Yet to explore the floor branch.
+    ExploreFloor,
+    /// Floor branch is running; its outcome is pending.
+    AwaitFloor,
+    /// Floor branch was pruned by a conflict on `x`; yet to explore the ceil branch.
+    ExploreCeil,
+    /// Ceil branch is running; its outcome is pending.
+    AwaitCeil,
+}
+
+/// Result of entering a branch node: either it was solved immediately (the relaxation is
+/// already integral) or it needs a [`BranchFrame`] pushed to explore its children.
+enum Descent {
+    Solved(NodeOutcome),
+    Branch(BranchFrame),
+}
+
+/// Result of asserting one branch bound and solving the relaxation under it.
+enum ExploreStep {
+    /// Exploration finished without recursing; the LRA solver has already been backtracked
+    /// to its pre-assertion state.
+    Done(NodeOutcome),
+    /// The relaxation is feasible but not yet integral, so a child branch should run at
+    /// `depth + 1`. The asserted bound is still live; `level` must be backtracked once the
+    /// child subtree completes.
+    Recurse { level: usize },
+}
+
 /// Linear integer and real arithmetic solver.
 ///
 /// Wraps an [`LRASolver`] and adds integrality reasoning via branch-and-bound. The LRA
@@ -115,7 +169,7 @@ impl LIRASolver {
                 // state is live in the LRA solver, so start exploring from the root at
                 // depth 0 rather than re-solving.
                 debug_println!(21, 0, "lia::lira_solver: starting branch-and-bound");
-                let outcome = self.branch(0)?;
+                let outcome = self.branch_iterative(0)?;
                 Ok(self.finish(match outcome {
                     NodeOutcome::Feasible(assg) => SolverDecision::FEASIBLE(assg),
                     NodeOutcome::Pruned(conflict) => SolverDecision::INFEASIBLE(conflict),
@@ -125,20 +179,175 @@ impl LIRASolver {
         }
     }
 
-    /// Branch on the first fractional integer variable, given that the LRA solver already
-    /// holds a feasible rational model at this node.
+    /// Branch-and-bound driven by an explicit heap stack instead of the call stack.
     ///
-    /// Explores the two children (`x <= floor(v)` and `x >= ceil(v)`) and combines their
-    /// outcomes:
+    /// This is a direct iterative rendering of the recursive descent: each `BranchFrame` on
+    /// `stack` is one node whose relaxation was feasible-but-fractional, and `stage` records
+    /// which child it is exploring. Because depth is now bounded by heap memory rather than
+    /// the OS thread stack, [`SolverConfig::max_branch_depth`] can be set far higher than a
+    /// recursive version could safely tolerate.
+    ///
+    /// The per-node combine rules are unchanged from the recursive form:
     /// - either child feasible  → propagate it up (the search is done),
     /// - either child pruned by a conflict not mentioning `x` → that conflict alone proves
     ///   this node infeasible, so the other branch is irrelevant and skipped,
     /// - both children pruned    → resolve the two conflicts on `x` (drops `x`, unions the
     ///   rest), yielding this node's conflict.
     ///
-    /// `depth` is the node's distance from the root and equals the current recursion depth;
-    /// it drives the stack-overflow guard.
-    fn branch(&mut self, depth: usize) -> SolverResult<NodeOutcome> {
+    /// The LRA solver is still driven incrementally with the same
+    /// `set_backtrack`/assert/solve/`backtrack` discipline the recursion used: every bound
+    /// asserted on the way down is undone on the way back up, in strict LIFO order.
+    fn branch_iterative(&mut self, root_depth: usize) -> SolverResult<NodeOutcome> {
+        let mut stack: Vec<BranchFrame> = Vec::new();
+        match self.descend(root_depth)? {
+            // The root relaxation is already integral (or otherwise decided) — no branching.
+            Descent::Solved(outcome) => Ok(outcome),
+            Descent::Branch(frame) => {
+                stack.push(frame);
+                self.run(&mut stack)
+            }
+        }
+    }
+
+    /// Drive the explicit stack to completion, returning the root node's outcome.
+    ///
+    /// `stack` must contain exactly the root frame on entry. On return the stack is empty and
+    /// the LRA solver has been backtracked to its state before branching began.
+    ///
+    /// `child` carries the outcome bubbling up from the most-recently-finished node to the
+    /// frame that explored it; it is consumed by the `Await*` stages and, once the stack is
+    /// empty, holds the root's outcome.
+    fn run(&mut self, stack: &mut Vec<BranchFrame>) -> SolverResult<NodeOutcome> {
+        let mut child: Option<NodeOutcome> = None;
+
+        while let Some(top) = stack.len().checked_sub(1) {
+            match stack[top].stage {
+                // Explore the floor branch: x <= floor(val).
+                Stage::ExploreFloor => {
+                    let (x, bound, depth) =
+                        (stack[top].x, stack[top].floor_bound.clone(), stack[top].depth);
+                    match self.step(x, BranchSide::Floor, bound, depth)? {
+                        // Floor branch finished without recursing. Combine at this node.
+                        ExploreStep::Done(outcome) => Self::combine_floor(stack, &mut child, outcome),
+                        // Floor branch is feasible-but-fractional; descend into its child.
+                        ExploreStep::Recurse { level } => {
+                            stack[top].stage = Stage::AwaitFloor;
+                            stack[top].pending_level = Some(level);
+                            self.push_child(stack, depth + 1, &mut child)?;
+                        }
+                    }
+                }
+
+                // The floor child we descended into has returned in `child`.
+                Stage::AwaitFloor => {
+                    let outcome = child.take().expect("await floor without child outcome");
+                    let level = stack[top].pending_level.take().expect("await floor without level");
+                    self.lra_solver.backtrack(level);
+                    Self::combine_floor(stack, &mut child, outcome);
+                }
+
+                // Explore the ceil branch: x >= ceil(val).
+                Stage::ExploreCeil => {
+                    let (x, bound, depth) =
+                        (stack[top].x, stack[top].ceil_bound.clone(), stack[top].depth);
+                    match self.step(x, BranchSide::Ceil, bound, depth)? {
+                        ExploreStep::Done(outcome) => Self::combine_ceil(stack, &mut child, outcome),
+                        ExploreStep::Recurse { level } => {
+                            stack[top].stage = Stage::AwaitCeil;
+                            stack[top].pending_level = Some(level);
+                            self.push_child(stack, depth + 1, &mut child)?;
+                        }
+                    }
+                }
+
+                // The ceil child we descended into has returned in `child`.
+                Stage::AwaitCeil => {
+                    let outcome = child.take().expect("await ceil without child outcome");
+                    let level = stack[top].pending_level.take().expect("await ceil without level");
+                    self.lra_solver.backtrack(level);
+                    Self::combine_ceil(stack, &mut child, outcome);
+                }
+            }
+        }
+
+        Ok(child.expect("stack drained without producing a root outcome"))
+    }
+
+    /// Fold the floor branch's `outcome` into the top frame: pop-and-propagate if the node is
+    /// decided, or advance it to the ceil branch otherwise.
+    fn combine_floor(
+        stack: &mut Vec<BranchFrame>,
+        child: &mut Option<NodeOutcome>,
+        outcome: NodeOutcome,
+    ) {
+        let top = stack.len() - 1;
+        let x = stack[top].x;
+        match outcome {
+            NodeOutcome::Feasible(assg) => Self::finish_frame(stack, child, NodeOutcome::Feasible(assg)),
+            NodeOutcome::Unknown => Self::finish_frame(stack, child, NodeOutcome::Unknown),
+            NodeOutcome::Pruned(floor_conflict) => {
+                // A floor conflict independent of `x` proves this node infeasible on its own;
+                // the ceil branch cannot change that, so skip it.
+                if !floor_conflict.contains(&x) {
+                    debug_println!(15, 0, "lia::lira_solver: floor conflict independent of {x}");
+                    Self::finish_frame(stack, child, NodeOutcome::Pruned(floor_conflict));
+                } else {
+                    // Keep the floor conflict and explore the ceil branch next.
+                    stack[top].floor_conflict = Some(floor_conflict);
+                    stack[top].stage = Stage::ExploreCeil;
+                }
+            }
+        }
+    }
+
+    /// Fold the ceil branch's `outcome` into the top frame, then pop-and-propagate the node's
+    /// final outcome.
+    fn combine_ceil(
+        stack: &mut Vec<BranchFrame>,
+        child: &mut Option<NodeOutcome>,
+        outcome: NodeOutcome,
+    ) {
+        let top = stack.len() - 1;
+        let x = stack[top].x;
+        let final_outcome = match outcome {
+            NodeOutcome::Feasible(assg) => NodeOutcome::Feasible(assg),
+            NodeOutcome::Unknown => NodeOutcome::Unknown,
+            NodeOutcome::Pruned(ceil_conflict) => {
+                if !ceil_conflict.contains(&x) {
+                    debug_println!(15, 0, "lia::lira_solver: ceil conflict independent of {x}");
+                    NodeOutcome::Pruned(ceil_conflict)
+                } else {
+                    // Both branches are infeasible and both depend on `x`. Resolve on `x` to
+                    // obtain a conflict that no longer mentions it, proving this node
+                    // infeasible.
+                    let floor_conflict = stack[top]
+                        .floor_conflict
+                        .take()
+                        .expect("ceil branch completed without a saved floor conflict");
+                    NodeOutcome::Pruned(floor_conflict.resolve(x, &ceil_conflict))
+                }
+            }
+        };
+        Self::finish_frame(stack, child, final_outcome);
+    }
+
+    /// Pop the top frame and hand its `outcome` to whatever explored it (its parent frame, or
+    /// the caller if it was the root) by stashing it in `child`.
+    fn finish_frame(
+        stack: &mut Vec<BranchFrame>,
+        child: &mut Option<NodeOutcome>,
+        outcome: NodeOutcome,
+    ) {
+        stack.pop();
+        *child = Some(outcome);
+    }
+
+    /// Enter a branch node given the LRA solver already holds a feasible rational model.
+    ///
+    /// Returns [`Descent::Solved`] when the model is already integral (a real solution), and
+    /// [`Descent::Branch`] with a fresh [`BranchFrame`] otherwise. `depth` is the node's
+    /// distance from the root.
+    fn descend(&mut self, depth: usize) -> SolverResult<Descent> {
         let (x, val) = match self.find_fractional_int_var() {
             // Every integer variable is integral: this rational model is a real solution.
             None => {
@@ -146,60 +355,57 @@ impl LIRASolver {
                     .lra_solver
                     .get_rational_model()
                     .expect("feasible node must have a rational model");
-                return Ok(NodeOutcome::Feasible(Assignment::new(model)));
+                return Ok(Descent::Solved(NodeOutcome::Feasible(Assignment::new(model))));
             }
             Some(pair) => pair,
         };
         debug_println!(15, 0, "lia::lira_solver: branching on {x} = {val}");
-
-        // Floor branch: x <= floor(val).
-        match self.explore(x, BranchSide::Floor, val.floor(), depth)? {
-            NodeOutcome::Feasible(assg) => Ok(NodeOutcome::Feasible(assg)),
-            NodeOutcome::Unknown => Ok(NodeOutcome::Unknown),
-            NodeOutcome::Pruned(floor_conflict) => {
-                // If the floor branch's conflict does not depend on the bound we asserted
-                // on `x`, it already proves this whole node infeasible — the ceil branch
-                // cannot change that, so skip it. (This is exactly what resolving against
-                // an `x`-free conflict would yield, without exploring the sibling.)
-                if !floor_conflict.contains(&x) {
-                    debug_println!(15, 0, "lia::lira_solver: floor conflict independent of {x}");
-                    return Ok(NodeOutcome::Pruned(floor_conflict));
-                }
-
-                // Ceil branch: x >= ceil(val).
-                match self.explore(x, BranchSide::Ceil, val.ceil(), depth)? {
-                    NodeOutcome::Feasible(assg) => Ok(NodeOutcome::Feasible(assg)),
-                    NodeOutcome::Unknown => Ok(NodeOutcome::Unknown),
-                    NodeOutcome::Pruned(ceil_conflict) => {
-                        if !ceil_conflict.contains(&x) {
-                            debug_println!(15, 0, "lia::lira_solver: ceil conflict independent of {x}");
-                            return Ok(NodeOutcome::Pruned(ceil_conflict));
-                        }
-                        // Both branches are infeasible and both depend on `x`. Resolve on
-                        // `x` to obtain a conflict that no longer mentions it, proving this
-                        // node infeasible.
-                        Ok(NodeOutcome::Pruned(floor_conflict.resolve(x, &ceil_conflict)))
-                    }
-                }
-            }
-        }
+        Ok(Descent::Branch(BranchFrame {
+            x,
+            floor_bound: val.floor(),
+            ceil_bound: val.ceil(),
+            depth,
+            stage: Stage::ExploreFloor,
+            floor_conflict: None,
+            pending_level: None,
+        }))
     }
 
-    /// Assert one side of a branch on `x`, recurse, then backtrack the LRA solver to the
-    /// state on entry.
+    /// Descend into a child node at `depth`, pushing a frame for it when it needs further
+    /// branching or writing its immediate outcome to `child` when it is solved outright.
+    fn push_child(
+        &mut self,
+        stack: &mut Vec<BranchFrame>,
+        depth: usize,
+        child: &mut Option<NodeOutcome>,
+    ) -> SolverResult<()> {
+        match self.descend(depth)? {
+            Descent::Solved(outcome) => *child = Some(outcome),
+            Descent::Branch(frame) => stack.push(frame),
+        }
+        Ok(())
+    }
+
+    /// Assert one side of a branch on `x` and solve the relaxation under it.
     ///
     /// `bound` is `floor(val)` (asserted as an upper bound) or `ceil(val)` (asserted as a
-    /// lower bound) depending on `side`. Returns the child subtree's [`NodeOutcome`].
-    fn explore(
+    /// lower bound) depending on `side`.
+    ///
+    /// Returns [`ExploreStep::Done`] — with the LRA solver already backtracked — when the
+    /// branch resolves without needing a child (budget hit, trivial contradiction, or an
+    /// infeasible relaxation). Returns [`ExploreStep::Recurse`] with the outstanding
+    /// backtrack `level` when the relaxation is feasible-but-fractional and a child should be
+    /// explored; the caller must `backtrack(level)` once that child completes.
+    fn step(
         &mut self,
         x: Var,
         side: BranchSide,
         bound: Integer,
         depth: usize,
-    ) -> SolverResult<NodeOutcome> {
-        // Guard both the LRA-solve budget and, via `depth`, the recursion stack.
+    ) -> SolverResult<ExploreStep> {
+        // Guard the LRA-solve budget and the (now heap-bounded) branch depth.
         if self.over_budget(depth) {
-            return Ok(NodeOutcome::Unknown);
+            return Ok(ExploreStep::Done(NodeOutcome::Unknown));
         }
 
         let level = self.lra_solver.set_backtrack();
@@ -209,27 +415,29 @@ impl LIRASolver {
             BranchSide::Ceil => self.lra_solver.assert_lower(&x, &qbound)?,
         };
 
-        let outcome = if let Some(false) = assert_res {
+        if let Some(false) = assert_res {
             // The bound directly contradicts an existing one on `x`, so the branch is
             // infeasible without any solving. The conflict is `x`'s bound alone.
             debug_println!(15, 0, "lia::lira_solver: branch on {x} trivially infeasible");
-            NodeOutcome::Pruned([x].into_iter().collect())
-        } else {
-            // Solve the relaxation under the new bound, then recurse to branch deeper.
-            let ret = self.lra_solver.solve()?;
-            self.stats.combine(&ret.stats);
-            match ret.decision {
-                SolverDecision::INFEASIBLE(conflict) => NodeOutcome::Pruned(conflict),
-                SolverDecision::FEASIBLE(_) => self.branch(depth + 1)?,
-                SolverDecision::UNKNOWN => {
-                    unreachable!("lra_solver decision cannot be UNKNOWN after solve")
-                }
-            }
-        };
+            self.lra_solver.backtrack(level);
+            return Ok(ExploreStep::Done(NodeOutcome::Pruned([x].into_iter().collect())));
+        }
 
-        // Undo everything this branch asserted before returning to the parent.
-        self.lra_solver.backtrack(level);
-        Ok(outcome)
+        // Solve the relaxation under the new bound.
+        let ret = self.lra_solver.solve()?;
+        self.stats.combine(&ret.stats);
+        match ret.decision {
+            SolverDecision::INFEASIBLE(conflict) => {
+                self.lra_solver.backtrack(level);
+                Ok(ExploreStep::Done(NodeOutcome::Pruned(conflict)))
+            }
+            // Feasible but not necessarily integral: keep the bound live and branch deeper.
+            // The caller backtracks `level` once the child subtree completes.
+            SolverDecision::FEASIBLE(_) => Ok(ExploreStep::Recurse { level }),
+            SolverDecision::UNKNOWN => {
+                unreachable!("lra_solver decision cannot be UNKNOWN after solve")
+            }
+        }
     }
 
     /// Whether the search should stop and report `UNKNOWN`, because either the configured
