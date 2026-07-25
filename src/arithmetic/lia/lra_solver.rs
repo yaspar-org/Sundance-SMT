@@ -501,6 +501,20 @@ impl LRASolver {
         self.restore_assignment();
     }
 
+    /// Clear a terminal `Unsat` state back to `Unknown`, so the solver can be reused after a
+    /// conflicting [`Self::solve`] — e.g. by an incremental frontend that re-checks feasibility
+    /// once the SAT layer has backtracked and relaxed bounds. Does nothing unless the solver is
+    /// currently `Unsat`.
+    ///
+    /// This is deliberately *not* folded into [`Self::backtrack`]: the branch-and-bound layer
+    /// relies on [`Self::set_backtrack`] being a no-op while `Unsat`, so [`Self::backtrack`] must
+    /// leave that state intact. Callers that want the state cleared opt in explicitly.
+    pub fn clear_unsat_state(&mut self) {
+        if matches!(self.state, LRASolverState::Unsat) {
+            self.state = LRASolverState::Unknown;
+        }
+    }
+
     /// Restore the tableau structure (basis, non-basis, coefficients, and variable owners)
     /// from a saved snapshot. Used by try_unit_cube_test to undo pivots performed during
     /// speculative solving.
