@@ -20,10 +20,10 @@ use crate::debug_println;
 
 /// Outcome of exploring one node of the branch-and-bound tree.
 ///
-/// Branch-and-bound is a depth-first search over the tree of integer bound
-/// refinements. Each node solves the rational relaxation under the bounds asserted
-/// along the path from the root; [`explore`](LIRASolver::explore) returns one of these
-/// for every node, and a parent combines its two children's outcomes into its own.
+/// Branch-and-bound is a depth-first search over the tree of integer bound refinements. Each node
+/// solves the rational relaxation under the bounds asserted along the path from the root; one of
+/// these is returned for every node, and a parent combines its two children's outcomes into its
+/// own.
 enum NodeOutcome {
     /// A rational assignment satisfying every integrality constraint in scope. The search
     /// short-circuits on the first one found.
