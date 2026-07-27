@@ -23,7 +23,7 @@ use crate::debug_println;
 /// Branch-and-bound is a depth-first search over the tree of integer bound refinements. Each node
 /// solves the rational relaxation under the bounds asserted along the path from the root; one of
 /// these is returned for every node, and a parent combines its two children's outcomes into its
-/// own.
+/// own. See [`LIRASolver::branch_iterative`].
 enum NodeOutcome {
     /// A rational assignment satisfying every integrality constraint in scope. The search
     /// short-circuits on the first one found.
@@ -134,8 +134,8 @@ impl LIRASolver {
     pub fn solve(&mut self) -> SolverResult<SolverReturn> {
         debug_println!(21, 0, "lia::lira_solver: starting LIRASolver");
 
-        // The unit cube test can find an integer point without any LRA solving, so try it
-        // before touching the relaxation.
+        // The unit cube test can find an integer point with a single LRA solve, so try it
+        // before further testing the relaxation and integer bounded branches.
         debug_println!(21, 0, "lia::lira_solver::solve: trying the unit cube test");
         if let Some(cube_assg) = self.lra_solver.try_unit_cube_test()? {
             debug_println!(21, 0, "lia::lira_solver::solve: unit cube test succeeded");
@@ -192,14 +192,14 @@ impl LIRASolver {
     /// recursive version could safely tolerate.
     ///
     /// The per-node combine rules are unchanged from the recursive form:
-    /// - either child feasible  → propagate it up (the search is done),
-    /// - either child pruned by a conflict not mentioning `x` → that conflict alone proves
+    /// - either child feasible -> propagate it up (the search is done),
+    /// - either child pruned by a conflict not mentioning `x` -> that conflict alone proves
     ///   this node infeasible, so the other branch is irrelevant and skipped,
-    /// - both children pruned    → resolve the two conflicts on `x` (drops `x`, unions the
+    /// - both children pruned -> resolve the two conflicts on `x` (drops `x`, unions the
     ///   rest), yielding this node's conflict.
     ///
     /// The LRA solver is still driven incrementally with the same
-    /// `set_backtrack`/assert/solve/`backtrack` discipline the recursion used: every bound
+    /// set_backtrack/assert/solve/backtrack discipline the recursion used: every bound
     /// asserted on the way down is undone on the way back up, in strict LIFO order.
     fn branch_iterative(&mut self, root_depth: usize) -> SolverResult<NodeOutcome> {
         let mut stack: Vec<BranchFrame> = Vec::new();
@@ -308,8 +308,8 @@ impl LIRASolver {
             }
             NodeOutcome::Unknown => Self::finish_frame(stack, child, NodeOutcome::Unknown),
             NodeOutcome::Pruned(floor_conflict) => {
-                // A floor conflict independent of `x` proves this node infeasible on its own;
-                // the ceil branch cannot change that, so skip it.
+                // Optimization: a floor conflict independent of `x` proves this node infeasible on
+                // its own; the ceil branch cannot change that, so skip it.
                 if !floor_conflict.contains(&x) {
                     debug_println!(15, 0, "lia::lira_solver: floor conflict independent of {x}");
                     Self::finish_frame(stack, child, NodeOutcome::Pruned(floor_conflict));
