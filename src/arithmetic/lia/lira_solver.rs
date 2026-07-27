@@ -152,7 +152,11 @@ impl LIRASolver {
             SolverDecision::INFEASIBLE(cs) => Ok(self.finish(SolverDecision::INFEASIBLE(cs))),
             SolverDecision::UNKNOWN => Ok(self.finish(SolverDecision::UNKNOWN)),
             SolverDecision::FEASIBLE(assg) => {
-                debug_println!(21, 0, "lia::lira_solver::solve: relaxation feasible:\n{assg}");
+                debug_println!(
+                    21,
+                    0,
+                    "lia::lira_solver::solve: relaxation feasible:\n{assg}"
+                );
 
                 // The relaxation already satisfies every integrality constraint.
                 if self.find_fractional_int_var().is_none() {
@@ -224,11 +228,16 @@ impl LIRASolver {
             match stack[top].stage {
                 // Explore the floor branch: x <= floor(val).
                 Stage::ExploreFloor => {
-                    let (x, bound, depth) =
-                        (stack[top].x, stack[top].floor_bound.clone(), stack[top].depth);
+                    let (x, bound, depth) = (
+                        stack[top].x,
+                        stack[top].floor_bound.clone(),
+                        stack[top].depth,
+                    );
                     match self.step(x, BranchSide::Floor, bound, depth)? {
                         // Floor branch finished without recursing. Combine at this node.
-                        ExploreStep::Done(outcome) => Self::combine_floor(stack, &mut child, outcome),
+                        ExploreStep::Done(outcome) => {
+                            Self::combine_floor(stack, &mut child, outcome)
+                        }
                         // Floor branch is feasible-but-fractional; descend into its child.
                         ExploreStep::Recurse { level } => {
                             stack[top].stage = Stage::AwaitFloor;
@@ -241,17 +250,25 @@ impl LIRASolver {
                 // The floor child we descended into has returned in `child`.
                 Stage::AwaitFloor => {
                     let outcome = child.take().expect("await floor without child outcome");
-                    let level = stack[top].pending_level.take().expect("await floor without level");
+                    let level = stack[top]
+                        .pending_level
+                        .take()
+                        .expect("await floor without level");
                     self.lra_solver.backtrack(level);
                     Self::combine_floor(stack, &mut child, outcome);
                 }
 
                 // Explore the ceil branch: x >= ceil(val).
                 Stage::ExploreCeil => {
-                    let (x, bound, depth) =
-                        (stack[top].x, stack[top].ceil_bound.clone(), stack[top].depth);
+                    let (x, bound, depth) = (
+                        stack[top].x,
+                        stack[top].ceil_bound.clone(),
+                        stack[top].depth,
+                    );
                     match self.step(x, BranchSide::Ceil, bound, depth)? {
-                        ExploreStep::Done(outcome) => Self::combine_ceil(stack, &mut child, outcome),
+                        ExploreStep::Done(outcome) => {
+                            Self::combine_ceil(stack, &mut child, outcome)
+                        }
                         ExploreStep::Recurse { level } => {
                             stack[top].stage = Stage::AwaitCeil;
                             stack[top].pending_level = Some(level);
@@ -263,7 +280,10 @@ impl LIRASolver {
                 // The ceil child we descended into has returned in `child`.
                 Stage::AwaitCeil => {
                     let outcome = child.take().expect("await ceil without child outcome");
-                    let level = stack[top].pending_level.take().expect("await ceil without level");
+                    let level = stack[top]
+                        .pending_level
+                        .take()
+                        .expect("await ceil without level");
                     self.lra_solver.backtrack(level);
                     Self::combine_ceil(stack, &mut child, outcome);
                 }
@@ -283,7 +303,9 @@ impl LIRASolver {
         let top = stack.len() - 1;
         let x = stack[top].x;
         match outcome {
-            NodeOutcome::Feasible(assg) => Self::finish_frame(stack, child, NodeOutcome::Feasible(assg)),
+            NodeOutcome::Feasible(assg) => {
+                Self::finish_frame(stack, child, NodeOutcome::Feasible(assg))
+            }
             NodeOutcome::Unknown => Self::finish_frame(stack, child, NodeOutcome::Unknown),
             NodeOutcome::Pruned(floor_conflict) => {
                 // A floor conflict independent of `x` proves this node infeasible on its own;
@@ -355,7 +377,9 @@ impl LIRASolver {
                     .lra_solver
                     .get_rational_model()
                     .expect("feasible node must have a rational model");
-                return Ok(Descent::Solved(NodeOutcome::Feasible(Assignment::new(model))));
+                return Ok(Descent::Solved(NodeOutcome::Feasible(Assignment::new(
+                    model,
+                ))));
             }
             Some(pair) => pair,
         };
@@ -418,9 +442,15 @@ impl LIRASolver {
         if let Some(false) = assert_res {
             // The bound directly contradicts an existing one on `x`, so the branch is
             // infeasible without any solving. The conflict is `x`'s bound alone.
-            debug_println!(15, 0, "lia::lira_solver: branch on {x} trivially infeasible");
+            debug_println!(
+                15,
+                0,
+                "lia::lira_solver: branch on {x} trivially infeasible"
+            );
             self.lra_solver.backtrack(level);
-            return Ok(ExploreStep::Done(NodeOutcome::Pruned([x].into_iter().collect())));
+            return Ok(ExploreStep::Done(NodeOutcome::Pruned(
+                [x].into_iter().collect(),
+            )));
         }
 
         // Solve the relaxation under the new bound.
