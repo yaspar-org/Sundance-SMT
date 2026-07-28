@@ -471,6 +471,35 @@ mod tests {
     }
 
     #[test]
+    fn assert_backtrack_reassert_constraint() {
+        // C: x >= 5 (encoded as 5 <= x). D: x <= 1. C alone is feasible; C && D is not.
+        // Exercises assert → backtrack → assert-again of the same constraint D.
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+
+        // Assert C at level 0; feasible on its own.
+        s.push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 10)
+            .unwrap();
+        assert!(is_sat(&s.check()));
+
+        // Push a decision level, assert D; C && D is infeasible.
+        s.notify_new_decision_level();
+        s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 20)
+            .unwrap();
+        assert!(matches!(s.check(), ArithCheckResult::Unsat(_)));
+
+        // Backtrack to where only C is asserted; D's bound is relaxed, so feasible again.
+        s.notify_backtrack(0);
+        assert!(is_sat(&s.check()));
+
+        // Assert D again: re-asserting the previously-backtracked constraint must once
+        // more render the system infeasible.
+        s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 20)
+            .unwrap();
+        assert!(matches!(s.check(), ArithCheckResult::Unsat(_)));
+    }
+
+    #[test]
     fn definition_is_enforced_in_model() {
         let mut s = IncrementalLraSolver::new();
         let x = s.register_var(None, true).unwrap();
