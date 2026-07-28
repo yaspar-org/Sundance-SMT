@@ -208,7 +208,10 @@ impl IncrementalLraSolver {
             // is tautological (new_var is fresh), so it is never needed in a conflict
             // core and is tracked with no literals.
             self.push_relation(
-                ArithConstraint::Eq(ArithExpr::linear(vec![(var_id, IBig::from(1))], IBig::from(0)), def),
+                ArithConstraint::Eq(
+                    ArithExpr::linear(vec![(var_id, IBig::from(1))], IBig::from(0)),
+                    def,
+                ),
                 None,
             )?;
         }
@@ -354,11 +357,7 @@ impl IncrementalLraSolver {
     /// Core of `push_constraint`/`push_equality`/definitions: lower a constraint
     /// `lhs ⋈ rhs` to a fresh slack row `Σ aᵢ xᵢ ⋈ c` and assert the implied bound(s)
     /// at the current decision level. `lit` is `None` for tautological definitions.
-    fn push_relation(
-        &mut self,
-        constraint: ArithConstraint,
-        lit: Option<i32>,
-    ) -> SolverResult<()> {
+    fn push_relation(&mut self, constraint: ArithConstraint, lit: Option<i32>) -> SolverResult<()> {
         // Normalize `lhs ⋈ rhs` to `(lhs.linear - rhs.linear) ⋈ (rhs.const - lhs.const)`.
         let (lhs, rhs, mk): (&ArithExpr, &ArithExpr, RelMk) = match &constraint {
             ArithConstraint::Leq(l, r) => (l, r, Rel::mk_le),
@@ -368,7 +367,8 @@ impl IncrementalLraSolver {
 
         let mut terms = self.expr_to_monomials(lhs, false)?;
         terms.extend(self.expr_to_monomials(rhs, true)?);
-        let rel_constant = Rational::from(rhs.constant.clone()) - Rational::from(lhs.constant.clone());
+        let rel_constant =
+            Rational::from(rhs.constant.clone()) - Rational::from(lhs.constant.clone());
         let rel = mk(terms, rel_constant);
 
         // Derive the QDelta bound(s) (handles strict-inequality δ adjustment) before
@@ -529,10 +529,16 @@ mod tests {
         let mut s = IncrementalLraSolver::new();
         let reported = s.register_var(None, true).unwrap();
         let hidden = s.register_var(None, false).unwrap();
-        s.push_constraint(ArithConstraint::Eq(term(reported, 1), ArithExpr::constant(1)), 10)
-            .unwrap();
-        s.push_constraint(ArithConstraint::Eq(term(hidden, 1), ArithExpr::constant(2)), 20)
-            .unwrap();
+        s.push_constraint(
+            ArithConstraint::Eq(term(reported, 1), ArithExpr::constant(1)),
+            10,
+        )
+        .unwrap();
+        s.push_constraint(
+            ArithConstraint::Eq(term(hidden, 1), ArithExpr::constant(2)),
+            20,
+        )
+        .unwrap();
         match s.check() {
             ArithCheckResult::Sat(buckets) => {
                 let all_reported: DeterministicHashSet<VarId> =
@@ -561,13 +567,19 @@ mod tests {
             .unwrap();
         // L1: x <= 10.
         s.notify_new_decision_level();
-        s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(10)), 20)
-            .unwrap();
+        s.push_constraint(
+            ArithConstraint::Leq(term(x, 1), ArithExpr::constant(10)),
+            20,
+        )
+        .unwrap();
         assert!(is_sat(&s.check()));
         // L2: x <= -1, contradicts x >= 0.
         s.notify_new_decision_level();
-        s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(-1)), 30)
-            .unwrap();
+        s.push_constraint(
+            ArithConstraint::Leq(term(x, 1), ArithExpr::constant(-1)),
+            30,
+        )
+        .unwrap();
         assert!(matches!(s.check(), ArithCheckResult::Unsat(_)));
         // Backtrack to L1: x <= -1 relaxed, but x <= 10 still active. Feasible.
         s.notify_backtrack(1);
@@ -596,8 +608,11 @@ mod tests {
         let mut s = IncrementalLraSolver::new();
         // VarId 99 was never registered.
         assert!(
-            s.push_constraint(ArithConstraint::Leq(term(99, 1), ArithExpr::constant(0)), 10)
-                .is_err()
+            s.push_constraint(
+                ArithConstraint::Leq(term(99, 1), ArithExpr::constant(0)),
+                10
+            )
+            .is_err()
         );
     }
 }

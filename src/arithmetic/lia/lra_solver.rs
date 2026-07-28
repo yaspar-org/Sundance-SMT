@@ -282,7 +282,8 @@ impl LRASolver {
                     SolverError(format!("add_relation: failed to grow tableau column: {e}"))
                 })?;
                 let new_idx = self.variables.len();
-                self.variables.push(VarInfo::new(v, Owner::NonBasic(new_col)));
+                self.variables
+                    .push(VarInfo::new(v, Owner::NonBasic(new_col)));
                 self.non_basic.push(new_idx);
                 self.var_to_idx.insert(v, new_idx);
             }
@@ -311,9 +312,10 @@ impl LRASolver {
         }
 
         // Step 3: grow the tableau by one row and write the non-zero coefficients.
-        let new_row = self.tableau.add_row().map_err(|e| {
-            SolverError(format!("add_relation: failed to grow tableau row: {e}"))
-        })?;
+        let new_row = self
+            .tableau
+            .add_row()
+            .map_err(|e| SolverError(format!("add_relation: failed to grow tableau row: {e}")))?;
         debug_assert_eq!(new_row, self.basic.len());
         for (c, coeff) in row.iter().enumerate() {
             if !coeff.is_zero() {
@@ -2191,7 +2193,9 @@ mod tests {
 
         // Slack is basic and owns the new row.
         let idx = *solver.var_to_idx.get(&slack).unwrap();
-        let new_row = solver.variables[idx].is_basic().expect("slack should be basic");
+        let new_row = solver.variables[idx]
+            .is_basic()
+            .expect("slack should be basic");
         assert_eq!(new_row, nrows_before);
 
         // β(slack) == β(x) + β(y).
@@ -2335,8 +2339,14 @@ mod tests {
         solver.add_relation(rel, slack).unwrap();
 
         // Bounds [-1, 5] contain 0, so the stuck slack is trivially feasible.
-        assert_eq!(solver.assert_lower(&slack, &(-1i32).into()).unwrap(), Some(true));
-        assert_eq!(solver.assert_upper(&slack, &5i32.into()).unwrap(), Some(true));
+        assert_eq!(
+            solver.assert_lower(&slack, &(-1i32).into()).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            solver.assert_upper(&slack, &5i32.into()).unwrap(),
+            Some(true)
+        );
         assert!(matches!(
             solver.solve().unwrap().decision,
             SolverDecision::FEASIBLE(_)
