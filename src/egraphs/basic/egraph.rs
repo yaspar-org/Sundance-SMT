@@ -473,8 +473,7 @@ impl Egraph {
         highest_level: usize,
         highest_hash: u32,
     ) -> (u32, usize, u32) {
-        let p = self.proof_forest[x as usize].clone();
-        match p {
+        match &self.proof_forest[x as usize] {
             ProofForestEdge::Root { .. } => (x, highest_level, highest_hash),
             ProofForestEdge::Congruence {
                 parent: p,
@@ -488,12 +487,12 @@ impl Egraph {
                 hash,
                 ..
             } => {
-                let (l, h) = if level > highest_level {
-                    (level, hash)
+                let (l, h) = if *level > highest_level {
+                    (*level, *hash)
                 } else {
                     (highest_level, highest_hash)
                 };
-                self.find_with_level(p, l, h)
+                self.find_with_level(*p, l, h)
             }
         }
     }

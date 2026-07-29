@@ -92,6 +92,7 @@ pub fn cdcl_decision_procedure(
         stats: SolverStats::new(),
         pending: None,
         max_arith_conflicts_per_round,
+        last_observed_var: 1,
         #[cfg(feature = "z3-solver")]
         z3_incremental,
     };
@@ -107,11 +108,6 @@ pub fn cdcl_decision_procedure(
     for (i, clause) in clauses.iter().enumerate() {
         debug_println!(11, 2, "Adding clause #{}: {:?}", i + 1, clause);
         add_clause_to_solver_and_to_proof(clause, &mut solver, proof_tracer.clone(), None);
-        for lit in clause {
-            // kind've annoying that I have to do this, but I don't think there is a better way
-            solver.add_observed_var(i32::abs(*lit));
-            debug_println!(0, 2, "Added observed variable: {}", i32::abs(*lit));
-        }
     }
 
     // adding this into disequalities instead so that it appears as a theory lemma
@@ -122,17 +118,20 @@ pub fn cdcl_decision_procedure(
             proof_tracer.clone(),
             Some(Theory::Datatypes),
         );
-        for lit in clause {
-            // kind've annoying that I have to do this, but I don't think there is a better way
-            solver.add_observed_var(i32::abs(*lit));
-            propagator.add_lit_to_proof_tracer(*lit); // todo: calling this in too many places, need to cut down
-            debug_println!(0, 2, "Added observed variable: {}", i32::abs(*lit));
-        }
     }
+
+    // Observe all known CNF variables at startup
+    propagator.sync_new_vars();
 
     debug_println!(2, 1, "All clauses added, starting solver");
 
-    propagator.stats.clauses += clauses.len() as u64 + boolean_dt_constraints.len() as u64;
+    for clause in &boolean_dt_constraints {
+        match clause.len() {
+            0 | 1 => {}
+            2 => propagator.stats.binary_clauses += 1,
+            _ => propagator.stats.clauses += 1,
+        }
+    }
 
     let result = solve(&mut solver);
 
