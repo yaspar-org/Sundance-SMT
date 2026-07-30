@@ -23,6 +23,9 @@ pub struct Args {
     /// Dump the eDRAT proof forest at termination for any result; complete on unsat, else a prefix
     #[arg(long)]
     pub partial_proof: Option<PathBuf>,
+    /// Log every refuted propositional model's trail to this file (DIMACS-style)
+    #[arg(long)]
+    pub trail_out: Option<PathBuf>,
     // /// Set the maximum activation depth for quantifier instantiations
     // #[arg(long, default_value_t = 5)]
     // pub max_activation_depth: usize,

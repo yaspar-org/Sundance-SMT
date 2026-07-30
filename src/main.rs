@@ -164,6 +164,7 @@ fn main() -> Result<(), String> {
         boolean_dt_constraints,
         args.proof,
         args.partial_proof,
+        args.trail_out,
         sorts,
         symbol_table,
         args.arithmetic,

@@ -38,6 +38,7 @@ pub fn cdcl_decision_procedure(
     boolean_dt_constraints: Vec<Vec<i32>>,
     proof_file: Option<PathBuf>,
     partial_proof_file: Option<PathBuf>,
+    trail_file: Option<PathBuf>,
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
@@ -96,6 +97,9 @@ pub fn cdcl_decision_procedure(
         last_observed_var: 1,
         #[cfg(feature = "z3-solver")]
         z3_incremental,
+        trail_out_active: trail_file.is_some(),
+        trail_atoms: std::collections::HashMap::new(),
+        refuted_trails: Vec::new(),
     };
 
     solver.connect_external_propagator(&mut propagator);
@@ -191,6 +195,28 @@ pub fn cdcl_decision_procedure(
                 if complete { "Complete" } else { "Partial" },
                 p.display()
             );
+        }
+    }
+
+    // Write the refuted-model trail: a `<id> <atom>` map, a blank line, then `<signed lits> 0` per model
+    if let Some(p) = trail_file {
+        let mut out = String::new();
+        let mut atoms: Vec<(&i32, &String)> = propagator.trail_atoms.iter().collect();
+        atoms.sort_by_key(|(id, _)| **id); // deterministic map order
+        for (id, atom) in atoms {
+            out.push_str(&format!("{} {}\n", id, atom));
+        }
+        out.push('\n'); // blank line separates the map from the trails
+        for trail in &propagator.refuted_trails {
+            for lit in trail {
+                out.push_str(&format!("{} ", lit));
+            }
+            out.push_str("0\n");
+        }
+        if let Err(e) = std::fs::write(&p, out) {
+            debug_println!(2, 0, "Failed to write trail log to {}: {}", p.display(), e);
+        } else {
+            debug_println!(2, 0, "trail log written to: {}", p.display());
         }
     }
 

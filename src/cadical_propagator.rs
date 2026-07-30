@@ -40,6 +40,10 @@ pub struct CustomExternalPropagator<'a> {
     /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
     #[cfg(feature = "z3-solver")]
     pub z3_incremental: Option<Z3IncrementalState>,
+    // --trail-out logging (inert unless trail_out_active): |lit| -> atom, and each refuted model
+    pub trail_out_active: bool,
+    pub trail_atoms: std::collections::HashMap<i32, String>,
+    pub refuted_trails: Vec<Vec<i32>>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -368,6 +372,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        // --trail-out: every model seen here in a non-SAT run is refuted, so record it at entry
+        if self.trail_out_active {
+            for &l in model {
+                let id = l.unsigned_abs() as i32;
+                if !self.trail_atoms.contains_key(&id) {
+                    let atom = format!("{}", self.solver_state.get_term_from_lit(id));
+                    self.trail_atoms.insert(id, atom);
+                }
+            }
+            self.refuted_trails.push(model.to_vec());
+        }
+
         debug_println!(
             24,
             0,
