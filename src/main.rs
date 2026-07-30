@@ -163,6 +163,7 @@ fn main() -> Result<(), String> {
         prop_skeleton,
         boolean_dt_constraints,
         args.proof,
+        args.partial_proof,
         sorts,
         symbol_table,
         args.arithmetic,

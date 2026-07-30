@@ -20,6 +20,9 @@ pub struct Args {
     /// Enable eDRAT proof production and write to specified file
     #[arg(long)]
     pub proof: Option<PathBuf>,
+    /// Dump the eDRAT proof forest at termination for any result; complete on unsat, else a prefix
+    #[arg(long)]
+    pub partial_proof: Option<PathBuf>,
     // /// Set the maximum activation depth for quantifier instantiations
     // #[arg(long, default_value_t = 5)]
     // pub max_activation_depth: usize,

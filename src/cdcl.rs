@@ -37,6 +37,7 @@ pub fn cdcl_decision_procedure(
     clauses: Vec<Vec<i32>>,
     boolean_dt_constraints: Vec<Vec<i32>>,
     proof_file: Option<PathBuf>,
+    partial_proof_file: Option<PathBuf>,
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
@@ -145,7 +146,7 @@ pub fn cdcl_decision_procedure(
     if let Some(p) = proof_file
         && result == Status::UNSATISFIABLE
     {
-        if let Err(e) = std::fs::write(&p, edrat_proof) {
+        if let Err(e) = std::fs::write(&p, &edrat_proof) {
             debug_println!(
                 2,
                 0,
@@ -155,6 +156,41 @@ pub fn cdcl_decision_procedure(
             );
         } else {
             debug_println!(2, 0, "eDRAT proof written to: {}", p.display());
+        }
+    }
+
+    // Dump the proof forest for any result: complete on unsat, else a prefix (no empty clause)
+    if let Some(p) = partial_proof_file {
+        let complete = result == Status::UNSATISFIABLE;
+        let status = match result {
+            Status::UNSATISFIABLE => "unsat",
+            Status::SATISFIABLE => "sat",
+            Status::UNKNOWN => "unknown",
+        };
+        let header = if complete {
+            "; COMPLETE eDRAT proof (result: unsat): a checkable refutation.\n".to_string()
+        } else {
+            format!(
+                "; PARTIAL eDRAT proof (result: {status}): every step derived so far,\n\
+                 ; but NO final empty clause -- a prefix, not a checkable refutation.\n"
+            )
+        };
+        if let Err(e) = std::fs::write(&p, format!("{header}{edrat_proof}")) {
+            debug_println!(
+                2,
+                0,
+                "Failed to write partial proof to {}: {}",
+                p.display(),
+                e
+            );
+        } else {
+            debug_println!(
+                2,
+                0,
+                "{} proof forest written to: {}",
+                if complete { "Complete" } else { "Partial" },
+                p.display()
+            );
         }
     }
 
