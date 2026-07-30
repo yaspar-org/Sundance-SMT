@@ -106,18 +106,21 @@ impl<'a> CustomExternalPropagator<'a> {
         self.queue_theory_clause(clause, Theory::Background);
     }
 
-    fn rebuild_egraph(&mut self) {
+    fn rebuild_egraph(&mut self) -> bool {
+        let mut found_conflict = false;
         loop {
             let result = self.solver_state.egraph.rebuild();
             // The basic backend never propagates literals, only conflicts.
             debug_assert!(result.propagations.is_empty());
             if let Some(conflict) = result.conflict {
+                found_conflict = true;
                 self.queue_egraph_conflict(&conflict);
             } else {
                 break;
             }
         }
         self.sync_new_vars();
+        found_conflict
     }
 
     fn rebuild_egraph_and_arithmetic(&mut self) {
@@ -307,9 +310,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.queue_egraph_conflict(&conflict);
                 continue;
             }
+            if self.rebuild_egraph() {
+                continue;
+            }
 
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.solver_state, self.decision_level);
+            if self.rebuild_egraph() {
+                continue;
+            }
 
             // Drain merges triggered by this assignment, then push the lit
             // itself if it's arithmetic.

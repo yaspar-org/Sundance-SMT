@@ -17,6 +17,9 @@ use yaspar_ir::ast::Local;
 /// Key for the signature table: (operator, canonical children).
 type SigKey = (CanonicalOp, Children);
 
+/// A complete repair pass is worthwhile only when incremental work is dense.
+const FULL_REBUILD_MIN_TERMS: usize = 1024;
+
 /// A Boolean value attached to an e-class and its SAT witness. Constants use zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BoolClassAssignment<T> {
@@ -231,12 +234,24 @@ pub struct Egraph {
         DeterministicHashMap<u32, DeterministicHashMap<u32, usize>>,
     /// Signature table for the last completed rebuild.
     sig_table: FastDeterministicHashMap<SigKey, u32>,
+    /// Backtrack trail for signature-table mutations.
+    sig_table_trail: Vec<(usize, SigKey, Option<u32>)>,
     /// Last rebuilt signature for each term.
     term_signatures: Vec<Option<SigKey>>,
+    /// All terms that participate in congruence, in registration order.
+    congruence_terms: Vec<u32>,
+    /// Backtrack trail for per-term signature-cache mutations.
+    term_signature_trail: Vec<(usize, u32, Option<SigKey>)>,
     /// Terms whose canonical signatures may have changed.
     pending_congruence: Vec<u32>,
-    /// Membership set for `pending_congruence`.
-    pending_congruence_set: FastDeterministicHashSet<u32>,
+    /// Dense membership flags for `pending_congruence`.
+    pending_congruence_flags: Vec<bool>,
+    /// Whether `pending_congruence` was expanded into a complete repair pass.
+    full_congruence_rebuild_active: bool,
+    /// Congruence-capable terms registered above level zero. Terms persist
+    /// after SAT backtracking, so their cache entries must be rebuilt at the
+    /// restored level.
+    congruence_registrations: Vec<(usize, u32)>,
     /// Whether to collect arithmetic-relevant merges for an incremental
     /// arithmetic backend.
     incremental_arithmetic: bool,
@@ -298,9 +313,14 @@ impl Egraph {
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
             sig_table: FastDeterministicHashMap::default(),
+            sig_table_trail: Vec::new(),
             term_signatures: vec![None],
+            congruence_terms: Vec::new(),
+            term_signature_trail: Vec::new(),
             pending_congruence: Vec::new(),
-            pending_congruence_set: FastDeterministicHashSet::default(),
+            pending_congruence_flags: vec![false],
+            full_congruence_rebuild_active: false,
+            congruence_registrations: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
             merge_tf: vec![false],
@@ -411,7 +431,14 @@ impl Egraph {
             }
         }
 
-        self.enqueue_congruence(id);
+        if matches!(op, Op::App(_) | Op::Eq | Op::Ite) {
+            self.congruence_terms.push(id);
+            if self.decision_level > 0 {
+                self.congruence_registrations
+                    .push((self.decision_level, id));
+            }
+            self.enqueue_congruence(id);
+        }
 
         false
     }
@@ -443,6 +470,8 @@ impl Egraph {
                 .resize(self.bool_assignments.len() * 2, None);
             self.term_signatures
                 .resize(self.term_signatures.len() * 2, None);
+            self.pending_congruence_flags
+                .resize(self.pending_congruence_flags.len() * 2, false);
         }
     }
 
@@ -641,54 +670,117 @@ impl Egraph {
     }
 
     fn enqueue_congruence(&mut self, term: u32) {
-        if self.compute_signature(term).is_some() && self.pending_congruence_set.insert(term) {
+        let participates = matches!(
+            &self.terms[term as usize],
+            TermSlot::Term(TermEntry {
+                op: Op::App(_) | Op::Eq | Op::Ite,
+                ..
+            })
+        );
+        if participates && !self.pending_congruence_flags[term as usize] {
+            self.pending_congruence_flags[term as usize] = true;
             self.pending_congruence.push(term);
         }
     }
 
-    fn enqueue_all_congruence_terms(&mut self) {
-        self.sig_table.clear();
-        self.term_signatures.fill(None);
-        self.pending_congruence.clear();
-        self.pending_congruence_set.clear();
-        for term in 0..self.next_id {
-            self.enqueue_congruence(term);
+    fn clear_pending_congruence(&mut self) {
+        for term in self.pending_congruence.drain(..) {
+            self.pending_congruence_flags[term as usize] = false;
         }
+        self.full_congruence_rebuild_active = false;
+    }
+
+    fn maybe_schedule_full_congruence_rebuild(&mut self) {
+        let total = self.congruence_terms.len();
+        if self.full_congruence_rebuild_active
+            || total < FULL_REBUILD_MIN_TERMS
+            || self.pending_congruence.len().saturating_mul(2) < total
+        {
+            return;
+        }
+        if self.pending_congruence.len() == total {
+            self.full_congruence_rebuild_active = true;
+            return;
+        }
+
+        self.clear_pending_congruence();
+        for &term in &self.congruence_terms {
+            self.pending_congruence_flags[term as usize] = true;
+            self.pending_congruence.push(term);
+        }
+        self.full_congruence_rebuild_active = true;
+    }
+
+    fn set_sig_table_entry(&mut self, key: SigKey, value: Option<u32>) {
+        let previous = self.sig_table.get(&key).copied();
+        if previous == value {
+            return;
+        }
+        if self.decision_level > 0 {
+            self.sig_table_trail
+                .push((self.decision_level, key.clone(), previous));
+        }
+        if let Some(term) = value {
+            self.sig_table.insert(key, term);
+        } else {
+            self.sig_table.remove(&key);
+        }
+    }
+
+    fn set_term_signature(&mut self, term: u32, signature: Option<SigKey>) {
+        if self.term_signatures[term as usize] == signature {
+            return;
+        }
+        if self.decision_level > 0 {
+            self.term_signature_trail.push((
+                self.decision_level,
+                term,
+                self.term_signatures[term as usize].clone(),
+            ));
+        }
+        self.term_signatures[term as usize] = signature;
     }
 
     /// Repair one canonical signature and merge a collision, if any.
     fn rebuild_congruence(&mut self, term: u32) -> EgraphResult<u32> {
         let Some(signature) = self.compute_signature(term) else {
-            self.term_signatures[term as usize] = None;
+            self.set_term_signature(term, None);
             return EgraphResult::ok();
         };
 
-        if let Some(old_signature) = self.term_signatures[term as usize].take()
+        if self.term_signatures[term as usize].as_ref() == Some(&signature)
+            && self.sig_table.get(&signature) == Some(&term)
+        {
+            return EgraphResult::ok();
+        }
+
+        if let Some(old_signature) = self.term_signatures[term as usize].clone()
             && self.sig_table.get(&old_signature) == Some(&term)
         {
-            self.sig_table.remove(&old_signature);
+            self.set_sig_table_entry(old_signature, None);
         }
+        self.set_term_signature(term, None);
 
         loop {
             let Some(existing) = self.sig_table.get(&signature).copied() else {
-                self.sig_table.insert(signature.clone(), term);
-                self.term_signatures[term as usize] = Some(signature);
+                self.set_sig_table_entry(signature.clone(), Some(term));
+                self.set_term_signature(term, Some(signature));
                 return EgraphResult::ok();
             };
 
             if existing == term {
-                self.term_signatures[term as usize] = Some(signature);
+                self.set_term_signature(term, Some(signature));
                 return EgraphResult::ok();
             }
 
             if self.compute_signature(existing).as_ref() != Some(&signature) {
-                self.sig_table.remove(&signature);
+                self.set_sig_table_entry(signature.clone(), None);
                 self.enqueue_congruence(existing);
                 continue;
             }
 
-            self.term_signatures[existing as usize] = Some(signature.clone());
-            self.term_signatures[term as usize] = Some(signature);
+            self.set_term_signature(existing, Some(signature.clone()));
+            self.set_term_signature(term, Some(signature));
             if self.find(existing) == self.find(term) {
                 return EgraphResult::ok();
             }
@@ -1183,6 +1275,30 @@ impl Egraph {
             self.merge_tf_upgrades.clear();
         }
 
+        while let Some((entry_level, _, _)) = self.sig_table_trail.last() {
+            if *entry_level <= level {
+                break;
+            }
+            let (_, key, previous) = self.sig_table_trail.pop().unwrap();
+            if let Some(term) = previous {
+                self.sig_table.insert(key, term);
+            } else {
+                self.sig_table.remove(&key);
+            }
+        }
+
+        while let Some((entry_level, _, _)) = self.term_signature_trail.last() {
+            if *entry_level <= level {
+                break;
+            }
+            let (_, term, previous) = self.term_signature_trail.pop().unwrap();
+            self.term_signatures[term as usize] = previous;
+        }
+
+        // Pending work belongs to the abandoned suffix of the SAT trail. The
+        // target level was fully rebuilt before the solver advanced past it.
+        self.clear_pending_congruence();
+
         // Re-add predecessors created by quantifiers at their new roots.
         // Skip entries added at or below `level`: their predecessor stamps are
         // still valid (predecessor_level only got bumped for levels > `level`)
@@ -1203,15 +1319,28 @@ impl Egraph {
             }
         }
 
-        // Merges and signatures computed above the target level are stale.
+        let mut relocated_registrations = Vec::new();
+        for (registered_at, term) in &mut self.congruence_registrations {
+            if *registered_at > level {
+                *registered_at = level;
+                relocated_registrations.push(*term);
+            }
+        }
+        for term in relocated_registrations {
+            self.enqueue_congruence(term);
+        }
+
+        // Merges queued for arithmetic above the target level are stale.
         self.arithmetic_merge_queue.clear();
-        self.enqueue_all_congruence_terms();
 
         // Clear at level 0
         if level == 0 {
             self.predecessors_created_by_quantifiers = DeterministicHashMap::new();
             self.proof_forest_backtrack_stack = vec![];
             self.bool_assignment_trail.clear();
+            self.sig_table_trail.clear();
+            self.term_signature_trail.clear();
+            self.congruence_registrations.clear();
         }
     }
 
@@ -1423,10 +1552,10 @@ impl Egraph {
 
         // Ensure the constant (if any) remains the root: make the constant
         // side "x" so that x_root stays as root after the union.
-        let (x, y, x_root, y_root) = if y_root_is_const {
-            (y, x, y_root, x_root)
+        let (x, y, x_root, y_root, surviving_root_is_const) = if y_root_is_const {
+            (y, x, y_root, x_root, true)
         } else {
-            (x, y, x_root, y_root)
+            (x, y, x_root, y_root, x_root_is_const)
         };
 
         // `mark_arithmetic` runs *after* `register_term` in
@@ -1607,7 +1736,7 @@ impl Egraph {
         self.predecessors[y_root as usize] = predecessors_v;
 
         debug_assert!(
-            !x_root_is_const || self.find(x_root) == x_root,
+            !surviving_root_is_const || self.find(x_root) == x_root,
             "constant root invariant violated for {}",
             self.display_term(x_root)
         );
@@ -2039,10 +2168,13 @@ impl EgraphTrait for Egraph {
                 continue;
             }
 
+            self.maybe_schedule_full_congruence_rebuild();
             let Some(term) = self.pending_congruence.pop() else {
+                self.full_congruence_rebuild_active = false;
                 return result;
             };
-            self.pending_congruence_set.remove(&term);
+            debug_assert!(self.pending_congruence_flags[term as usize]);
+            self.pending_congruence_flags[term as usize] = false;
             let congruence_result = self.rebuild_congruence(term);
             result.propagations.extend(congruence_result.propagations);
             if let Some(conflict) = congruence_result.conflict {
