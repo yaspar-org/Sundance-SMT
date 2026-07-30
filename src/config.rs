@@ -23,7 +23,7 @@ pub struct Args {
     /// Dump the eDRAT proof forest at termination for any result; complete on unsat, else a prefix
     #[arg(long)]
     pub partial_proof: Option<PathBuf>,
-    /// Log every refuted propositional model's trail to this file (DIMACS-style)
+    /// Log each refuted propositional model to this file: first a '<var> <atom>' map, then a blank line, then one '<signed lits> 0' trail per model
     #[arg(long)]
     pub trail_out: Option<PathBuf>,
     // /// Set the maximum activation depth for quantifier instantiations
