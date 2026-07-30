@@ -200,20 +200,28 @@ pub fn cdcl_decision_procedure(
 
     // Write the refuted-model trail: a `<id> <atom>` map, a blank line, then `<signed lits> 0` per model
     if let Some(p) = trail_file {
-        let mut out = String::new();
-        let mut atoms: Vec<(&i32, &String)> = propagator.trail_atoms.iter().collect();
-        atoms.sort_by_key(|(id, _)| **id); // deterministic map order
-        for (id, atom) in atoms {
-            out.push_str(&format!("{} {}\n", id, atom));
-        }
-        out.push('\n'); // blank line separates the map from the trails
-        for trail in &propagator.refuted_trails {
-            for lit in trail {
-                out.push_str(&format!("{} ", lit));
+        use std::io::Write;
+        let write_res = (|| -> std::io::Result<()> {
+            let file = std::fs::File::create(&p)?;
+            let mut w = std::io::BufWriter::new(file);
+
+            let mut atoms: Vec<(&i32, &String)> = propagator.trail_atoms.iter().collect();
+            atoms.sort_by_key(|(id, _)| **id); // deterministic map order
+            for (id, atom) in atoms {
+                writeln!(w, "{} {}", id, atom)?;
             }
-            out.push_str("0\n");
-        }
-        if let Err(e) = std::fs::write(&p, out) {
+            writeln!(w)?; // blank line separates the map from the trails
+
+            for trail in &propagator.refuted_trails {
+                for lit in trail {
+                    write!(w, "{} ", lit)?;
+                }
+                writeln!(w, "0")?;
+            }
+
+            w.flush()
+        })();
+        if let Err(e) = write_res {
             debug_println!(2, 0, "Failed to write trail log to {}: {}", p.display(), e);
         } else {
             debug_println!(2, 0, "trail log written to: {}", p.display());
