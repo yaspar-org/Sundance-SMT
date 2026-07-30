@@ -17,11 +17,6 @@ use yaspar_ir::ast::Local;
 /// Key for the signature table: (operator, canonical children).
 type SigKey = (CanonicalOp, Children);
 
-/// Trail entry for undoing sig_table modifications on backtrack.
-/// Stores the actual key used, so undo doesn't depend on UF state.
-/// (level, key, term_id, was_inserted)
-type SigTrailEntry = (usize, SigKey, u32, bool);
-
 /// A Boolean value attached to an e-class and its SAT witness. Constants use zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BoolClassAssignment<T> {
@@ -234,15 +229,14 @@ pub struct Egraph {
     /// valid at that level and don't need refreshing).
     predecessors_created_by_quantifiers:
         DeterministicHashMap<u32, DeterministicHashMap<u32, usize>>,
-    /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()]).
-    /// Value is the decision level at which the term was registered; entries added
-    /// at or below the backtrack target level are skipped during `backtrack_to`.
-    union_to_eclass: DeterministicHashMap<u32, usize>,
-    /// Signature table: maps (op, [find(c1),...,find(cn)]) → term_id.
-    /// Maintained in parallel with the existing congruence detection for now.
+    /// Signature table for the last completed rebuild.
     sig_table: FastDeterministicHashMap<SigKey, u32>,
-    /// Trail for backtracking the sig_table.
-    sig_trail: Vec<SigTrailEntry>,
+    /// Last rebuilt signature for each term.
+    term_signatures: Vec<Option<SigKey>>,
+    /// Terms whose canonical signatures may have changed.
+    pending_congruence: Vec<u32>,
+    /// Membership set for `pending_congruence`.
+    pending_congruence_set: FastDeterministicHashSet<u32>,
     /// Whether to collect arithmetic-relevant merges for an incremental
     /// arithmetic backend.
     incremental_arithmetic: bool,
@@ -262,9 +256,6 @@ pub struct Egraph {
     /// term ID. Keyed on the pair so re-queuing the same merge dedups for free;
     /// the value is the decision level at which it was queued (for backtracking).
     pending_merges: DeterministicHashMap<(u32, u32), usize>,
-    /// Deferred conflicts from APIs that cannot return an `EgraphResult`, with
-    /// the decision level at which each was detected.
-    pending_conflicts: Vec<(usize, Conflict<u32>)>,
     /// Boolean value and its SAT witness, stored only on e-class roots.
     bool_assignments: Vec<Option<BoolClassAssignment<u32>>>,
     /// Root-assignment changes to undo on SAT backtracking.
@@ -306,9 +297,10 @@ impl Egraph {
             function_maps: DeterministicHashMap::default(),
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
-            union_to_eclass: DeterministicHashMap::new(),
             sig_table: FastDeterministicHashMap::default(),
-            sig_trail: Vec::new(),
+            term_signatures: vec![None],
+            pending_congruence: Vec::new(),
+            pending_congruence_set: FastDeterministicHashSet::default(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
             merge_tf: vec![false],
@@ -316,7 +308,6 @@ impl Egraph {
             merge_tf_class_trail: Vec::new(),
             merge_tf_upgrades: Vec::new(),
             pending_merges: DeterministicHashMap::new(),
-            pending_conflicts: Vec::new(),
             bool_assignments: vec![None],
             bool_assignment_trail: Vec::new(),
             stats: EgraphStats::default(),
@@ -355,8 +346,7 @@ impl Egraph {
     /// Register a single term in the egraph
     /// Sets up terms_list, proof_forest, predecessors, function_maps for this term.
     /// Register a single term (non-recursive). Children must already be registered.
-    /// If `dynamic` is true, calls find_and_union_to_eclass to merge with any
-    /// existing congruent term (needed for quantifier instantiation and datatype axioms).
+    /// Congruence is deferred until `rebuild`.
     /// Returns true if the term was already registered.
     fn register_term_internal(&mut self, id: u32, op: Op, children: &[u32], dynamic: bool) -> bool {
         self.ensure_capacity(id);
@@ -421,25 +411,7 @@ impl Egraph {
             }
         }
 
-        // Insert into sig_table; if dynamic and sig already exists, merge via congruence.
-        if let Some(sig) = self.compute_signature(id) {
-            if let Some(&existing) = self.sig_table.get(&sig) {
-                if dynamic
-                    && self.find(existing) != self.find(id)
-                    && let Some(conflict) = self
-                        .congruence_merge(existing, id, self.decision_level)
-                        .conflict
-                {
-                    self.pending_conflicts.push((self.decision_level, conflict));
-                }
-            } else {
-                self.sig_table_insert(sig, id, self.decision_level);
-            }
-        }
-
-        if dynamic && !children.is_empty() {
-            self.union_to_eclass.insert(id, self.decision_level);
-        }
+        self.enqueue_congruence(id);
 
         false
     }
@@ -469,6 +441,8 @@ impl Egraph {
                 .resize(self.merge_tf_class.len() * 2, None);
             self.bool_assignments
                 .resize(self.bool_assignments.len() * 2, None);
+            self.term_signatures
+                .resize(self.term_signatures.len() * 2, None);
         }
     }
 
@@ -666,10 +640,60 @@ impl Egraph {
         Some((op, Children::from_slice(&canonical_children)))
     }
 
-    /// Insert a term into the sig_table, recording a trail entry for backtracking.
-    fn sig_table_insert(&mut self, key: SigKey, term_id: u32, level: usize) {
-        self.sig_table.insert(key.clone(), term_id);
-        self.sig_trail.push((level, key, term_id, true));
+    fn enqueue_congruence(&mut self, term: u32) {
+        if self.compute_signature(term).is_some() && self.pending_congruence_set.insert(term) {
+            self.pending_congruence.push(term);
+        }
+    }
+
+    fn enqueue_all_congruence_terms(&mut self) {
+        self.sig_table.clear();
+        self.term_signatures.fill(None);
+        self.pending_congruence.clear();
+        self.pending_congruence_set.clear();
+        for term in 0..self.next_id {
+            self.enqueue_congruence(term);
+        }
+    }
+
+    /// Repair one canonical signature and merge a collision, if any.
+    fn rebuild_congruence(&mut self, term: u32) -> EgraphResult<u32> {
+        let Some(signature) = self.compute_signature(term) else {
+            self.term_signatures[term as usize] = None;
+            return EgraphResult::ok();
+        };
+
+        if let Some(old_signature) = self.term_signatures[term as usize].take()
+            && self.sig_table.get(&old_signature) == Some(&term)
+        {
+            self.sig_table.remove(&old_signature);
+        }
+
+        loop {
+            let Some(existing) = self.sig_table.get(&signature).copied() else {
+                self.sig_table.insert(signature.clone(), term);
+                self.term_signatures[term as usize] = Some(signature);
+                return EgraphResult::ok();
+            };
+
+            if existing == term {
+                self.term_signatures[term as usize] = Some(signature);
+                return EgraphResult::ok();
+            }
+
+            if self.compute_signature(existing).as_ref() != Some(&signature) {
+                self.sig_table.remove(&signature);
+                self.enqueue_congruence(existing);
+                continue;
+            }
+
+            self.term_signatures[existing as usize] = Some(signature.clone());
+            self.term_signatures[term as usize] = Some(signature);
+            if self.find(existing) == self.find(term) {
+                return EgraphResult::ok();
+            }
+            return self.congruence_merge(existing, term, self.decision_level);
+        }
     }
 
     /// Build a congruence proof edge and merge two terms that have the same signature.
@@ -921,7 +945,7 @@ impl Egraph {
     }
 
     /// Assert t1 = t2 at the current decision level.
-    /// Performs congruence closure. Returns a conflict if a disequality is violated.
+    /// Congruence consequences are deferred until `rebuild`.
     fn assert_equal(&mut self, t1: u32, t2: u32) -> EgraphResult<u32> {
         let level = self.decision_level;
         let proof_parent = ProofForestEdge::Equality {
@@ -1137,8 +1161,6 @@ impl Egraph {
         }
         self.pending_merges
             .retain(|_, entry_level| *entry_level <= level);
-        self.pending_conflicts
-            .retain(|(entry_level, _)| *entry_level <= level);
         let mut relocated_upgrades = Vec::new();
         for (upgrade_level, term) in &mut self.merge_tf_upgrades {
             if *upgrade_level > level {
@@ -1161,22 +1183,6 @@ impl Egraph {
             self.merge_tf_upgrades.clear();
         }
 
-        // Replay sig_trail in reverse AFTER UF is restored.
-        // Use the stored key directly — recomputing from find() would give the wrong key.
-        while let Some((entry_level, _, _, _)) = self.sig_trail.last() {
-            if *entry_level <= level {
-                break;
-            }
-            let (_, key, term_id, was_inserted) = self.sig_trail.pop().unwrap();
-            if was_inserted {
-                if self.sig_table.get(&key) == Some(&term_id) {
-                    self.sig_table.remove(&key);
-                }
-            } else {
-                self.sig_table.insert(key, term_id);
-            }
-        }
-
         // Re-add predecessors created by quantifiers at their new roots.
         // Skip entries added at or below `level`: their predecessor stamps are
         // still valid (predecessor_level only got bumped for levels > `level`)
@@ -1197,41 +1203,14 @@ impl Egraph {
             }
         }
 
-        // Any merges left in the arithmetic queue from before this backtrack
-        // are stale — they refer to unions at levels we've just undone. Clear
-        // them so that only re-fired congruence merges (added by the loop
-        // below) survive.
+        // Merges and signatures computed above the target level are stale.
         self.arithmetic_merge_queue.clear();
-
-        // Re-do union_to_eclass via sig table probe. Entries added at or below
-        // `level` were already reconciled with the sig_table at that level and
-        // their signatures are stable under this backtrack.
-        let union_to_eclass_info = self.union_to_eclass.clone();
-        for (term, added_at) in union_to_eclass_info {
-            if added_at <= level {
-                continue;
-            }
-            if let Some(sig) = self.compute_signature(term) {
-                if let Some(&existing) = self.sig_table.get(&sig) {
-                    if self.find(existing) != self.find(term)
-                        && let Some(conflict) = self
-                            .congruence_merge(existing, term, self.decision_level)
-                            .conflict
-                    {
-                        self.pending_conflicts.push((self.decision_level, conflict));
-                    }
-                } else {
-                    self.sig_table_insert(sig, term, self.decision_level);
-                }
-            }
-        }
+        self.enqueue_all_congruence_terms();
 
         // Clear at level 0
         if level == 0 {
             self.predecessors_created_by_quantifiers = DeterministicHashMap::new();
-            self.union_to_eclass = DeterministicHashMap::new();
             self.proof_forest_backtrack_stack = vec![];
-            self.sig_trail.clear();
             self.bool_assignment_trail.clear();
         }
     }
@@ -1610,14 +1589,9 @@ impl Egraph {
             }
         }
 
-        // No explicit sig_table removal phase needed: old entries keyed on y_root
-        // become stale (unreachable by compute_signature after the union) and are
-        // naturally superseded by the fresh insertions below.
-        // Reinsert y_root's predecessors into sig_table with new canonical forms
-        // and immediately merge any congruent pairs found.
-        // Also move predecessors from y_root to x_root.
+        // Move predecessors from the demoted root to the surviving root and
+        // defer all induced congruence reasoning until rebuild.
         let predecessors_v = std::mem::take(&mut self.predecessors[y_root as usize]);
-        let mut y_root_pred_keys: Vec<u32> = Vec::new();
         for (pred_key, pred_val) in &predecessors_v {
             let new_pred = Predecessor {
                 level,
@@ -1627,24 +1601,10 @@ impl Egraph {
             };
             self.add_predecessor(x_root, *pred_key, new_pred);
             if valid_hash(pred_val.hash, pred_val.level, &self.predecessor_level) {
-                y_root_pred_keys.push(*pred_key);
+                self.enqueue_congruence(*pred_key);
             }
         }
         self.predecessors[y_root as usize] = predecessors_v;
-        for &pred_id in &y_root_pred_keys {
-            if let Some(new_sig) = self.compute_signature(pred_id) {
-                if let Some(&existing) = self.sig_table.get(&new_sig) {
-                    if self.find(existing) != self.find(pred_id) {
-                        let sub_result = self.congruence_merge(existing, pred_id, level);
-                        if sub_result.conflict.is_some() {
-                            return sub_result;
-                        }
-                    }
-                } else {
-                    self.sig_table_insert(new_sig, pred_id, level);
-                }
-            }
-        }
 
         debug_assert!(
             !x_root_is_const || self.find(x_root) == x_root,
@@ -2007,6 +1967,10 @@ impl EgraphTrait for Egraph {
             self.arithmetic_merge_queue.is_empty(),
             "arithmetic queue must be drained before advancing decision level"
         );
+        assert!(
+            self.pending_congruence.is_empty() && self.pending_merges.is_empty(),
+            "egraph must be rebuilt before advancing decision level"
+        );
         self.decision_level += 1;
         while self.decision_level >= self.predecessor_level.len() {
             self.predecessor_level
@@ -2064,21 +2028,28 @@ impl EgraphTrait for Egraph {
 
     fn rebuild(&mut self) -> EgraphResult<Self::TermId> {
         let mut result = EgraphResult::ok();
-        // Surface conflicts first: each forces a backtrack, so any merge run
-        // beforehand would just be undone.
-        if let Some((_, conflict)) = self.pending_conflicts.pop() {
-            result.conflict = Some(conflict);
-            return result;
-        }
-        while let Some(((term, bool_constant), _)) = self.pending_merges.pop_first() {
-            let merge_result = self.assert_equal(term, bool_constant);
-            result.propagations.extend(merge_result.propagations);
-            if let Some(conflict) = merge_result.conflict {
+        loop {
+            if let Some(((term, bool_constant), _)) = self.pending_merges.pop_first() {
+                let merge_result = self.assert_equal(term, bool_constant);
+                result.propagations.extend(merge_result.propagations);
+                if let Some(conflict) = merge_result.conflict {
+                    result.conflict = Some(conflict);
+                    return result;
+                }
+                continue;
+            }
+
+            let Some(term) = self.pending_congruence.pop() else {
+                return result;
+            };
+            self.pending_congruence_set.remove(&term);
+            let congruence_result = self.rebuild_congruence(term);
+            result.propagations.extend(congruence_result.propagations);
+            if let Some(conflict) = congruence_result.conflict {
                 result.conflict = Some(conflict);
                 return result;
             }
         }
-        result
     }
 
     fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool {

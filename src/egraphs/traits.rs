@@ -68,7 +68,8 @@ pub trait EgraphTrait {
 
     /// Register a term with its operator and children.
     /// The egraph assigns and returns the TermId.
-    /// If `dynamic` is true, finds and merges with existing congruent terms.
+    /// If `dynamic` is true, records any metadata needed for terms introduced
+    /// after the initial build. Congruence merging is deferred until `rebuild`.
     fn register_term(
         &mut self,
         op: Self::Op,
@@ -121,7 +122,8 @@ pub trait EgraphTrait {
     // --- Assertions ---
 
     /// Assert `t1 = t2` at the current decision level.
-    /// Performs congruence closure. Returns a conflict if a disequality is violated.
+    /// Returns a conflict if the direct union violates a disequality. Congruence
+    /// consequences are deferred until `rebuild`.
     fn assert_equal(&mut self, t1: Self::TermId, t2: Self::TermId) -> EgraphResult<Self::TermId>;
 
     /// Assert `t1 ≠ t2` at the current decision level.
@@ -155,10 +157,11 @@ pub trait EgraphTrait {
         bool_constant: Self::TermId,
     ) -> EgraphResult<Self::TermId>;
 
-    /// Restore congruence closure after deferred work.
+    /// Restore congruence closure after deferred registrations and unions.
     ///
-    /// A successful result means the egraph is up to date. A conflict may
-    /// leave additional work pending; call rebuild again after handling it.
+    /// A successful result means closure-dependent queries observe an
+    /// up-to-date egraph. A conflict may leave additional work pending; call
+    /// rebuild again after handling it.
     fn rebuild(&mut self) -> EgraphResult<Self::TermId>;
 
     /// Check if two terms are in the same equivalence class.
