@@ -44,8 +44,9 @@ harness = true
 
 [profile.release]
 debug = true
-lto = "fat"
-codegen-units = 1
+# causes GitHub CI to fail when older CPU runners are selected
+# lto = "fat"
+# codegen-units = 1
 
 [lib]
 name = "sundance_smt"
