@@ -346,7 +346,22 @@ impl LIRASolver {
                         .floor_conflict
                         .take()
                         .expect("ceil branch completed without a saved floor conflict");
-                    NodeOutcome::Pruned(floor_conflict.resolve(x, &ceil_conflict))
+                    let resolved = floor_conflict.resolve(x, &ceil_conflict);
+                    // An empty resolved would surface as `Infeasible({})`, which the propagator
+                    // reads as an empty learned clause and hence unconditional (global) UNSAT.
+                    // That is only ever the case if the two branches were mutually infeasible on
+                    // `x`'s bounds *alone* with no other assertion involved. In this solver `x` is
+                    // always an original (non-slack) variable whose only direct bounds are the
+                    // integer floor/ceil asserted by branching; at a fractional node
+                    // `L(x) <= floor(v) < v < ceil(v) <= U(x)`, so neither branch can be trivially
+                    // infeasible on `x` alone, and a real relaxation conflict always drags in the
+                    // slacks that constrained `x`. The `resolved` is therefore never empty.
+                    assert!(
+                        !resolved.is_empty(),
+                        "branch-and-bound resolved an empty conflict on {x:?}; \
+                         an empty theory core would force spurious global UNSAT"
+                    );
+                    NodeOutcome::Pruned(resolved)
                 }
             }
         };
@@ -638,6 +653,50 @@ mod tests {
             lira_solver.solve().unwrap().decision,
             SolverDecision::INFEASIBLE(_)
         ));
+    }
+
+    /// A node where *both* branches on the same integer variable are infeasible is the only
+    /// place branch-and-bound resolves two conflicts on a variable `x`. The resolvent must never be empty:
+    /// an empty theory core surfaces downstream as an empty learned clause and forces spurious
+    /// *global* UNSAT (see the `assert!` invariant in `combine_ceil`).
+    ///
+    /// Both problems below are the classic "integer trapped in a fractional interval": the real
+    /// relaxation is feasible (e.g. `x = y = 1/3`) but there is no integer in `[1/3, 2/3]`, so
+    /// both the floor (`y <= 0`) and ceil (`y >= 1`) branches are infeasible and get resolved.
+    #[test]
+    fn branch_and_bound_conflict_core_is_nonempty() {
+        // LIRA form: y is Int, x is Real.
+        let lira = r#"
+        (set-logic QF_LIRA)
+        (declare-fun x () Real)
+        (declare-fun y () Int)
+        (assert (>= (to_real y) x))
+        (assert (>= x (/ (to_real 1) (to_real 3))))
+        (assert (<= (to_real y) (/ (to_real 2) (to_real 3))))
+            "#;
+        // Pure-LIA form of the same trap.
+        let lia = r#"
+        (set-logic QF_LIA)
+        (declare-fun x () Int)
+        (declare-fun y () Int)
+        (assert (>= y x))
+        (assert (>= (* 3 x) 1))
+        (assert (<= (* 3 y) 2))
+            "#;
+
+        for smt in [lira, lia] {
+            let lra_solver = smt_to_lra_solver(smt, &SolverConfig::default())
+                .expect("Failed to create LRA solver");
+            let mut lira_solver = LIRASolver::new(lra_solver, SolverConfig::default());
+            match lira_solver.solve().unwrap().decision {
+                SolverDecision::INFEASIBLE(conflict) => assert!(
+                    !conflict.is_empty(),
+                    "branch-and-bound produced an empty conflict core, which would force \
+                     spurious global UNSAT downstream"
+                ),
+                other => panic!("expected INFEASIBLE, got {other:?}"),
+            }
+        }
     }
 
     #[test]
