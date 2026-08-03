@@ -20,8 +20,8 @@ pub struct Args {
     /// Enable eDRAT proof production and write to specified file
     #[arg(long)]
     pub proof: Option<PathBuf>,
-    /// Dump the eDRAT proof forest at termination for any result; complete on unsat, else a prefix
-    #[arg(long)]
+    /// Dump the eDRAT proof forest at termination for any result; complete on unsat, else a prefix. Mutually exclusive with --proof
+    #[arg(long, conflicts_with = "proof")]
     pub partial_proof: Option<PathBuf>,
     /// Log each refuted propositional model to this file: first a `<var> <atom>` map, then a blank line, then one `<signed lits> 0` trail per model
     #[arg(long)]
