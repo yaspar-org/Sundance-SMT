@@ -97,9 +97,16 @@ pub fn cdcl_decision_procedure(
         last_observed_var: 1,
         #[cfg(feature = "z3-solver")]
         z3_incremental,
-        trail_out_active: trail_file.is_some(),
+        trail_writer: trail_file
+            .as_ref()
+            .and_then(|p| match std::fs::File::create(p) {
+                Ok(f) => Some(std::io::BufWriter::new(f)),
+                Err(e) => {
+                    debug_println!(2, 0, "Failed to open trail log {}: {}", p.display(), e);
+                    None
+                }
+            }),
         trail_atoms: std::collections::HashMap::new(),
-        refuted_trails: Vec::new(),
     };
 
     solver.connect_external_propagator(&mut propagator);
@@ -167,8 +174,10 @@ pub fn cdcl_decision_procedure(
         write_partial_proof(&p, result, &edrat_proof);
     }
 
-    if let Some(p) = trail_file {
-        write_trail_log(&p, &propagator.trail_atoms, &propagator.refuted_trails);
+    // Trails were streamed during the solve; append the now-complete atom map.
+    if trail_file.is_some() {
+        propagator.finish_trail_log();
+        debug_println!(2, 0, "trail log written");
     }
 
     // Harvest stats from solver_state, egraph, and proof tracer
@@ -212,47 +221,6 @@ fn write_partial_proof(path: &std::path::Path, result: Status, edrat_proof: &str
             if complete { "Complete" } else { "Partial" },
             path.display()
         );
-    }
-}
-
-/// Write the refuted-model trail: a `<id> <atom>` map, a blank line, then one
-/// `<signed lits> 0` line per refuted model.
-fn write_trail_log(
-    path: &std::path::Path,
-    trail_atoms: &HashMap<i32, String>,
-    refuted_trails: &[Vec<i32>],
-) {
-    use std::io::Write;
-    let write_res = (|| -> std::io::Result<()> {
-        let file = std::fs::File::create(path)?;
-        let mut w = std::io::BufWriter::new(file);
-
-        let mut atoms: Vec<(&i32, &String)> = trail_atoms.iter().collect();
-        atoms.sort_by_key(|(id, _)| **id); // deterministic map order
-        for (id, atom) in atoms {
-            writeln!(w, "{} {}", id, atom)?;
-        }
-        writeln!(w)?; // blank line separates the map from the trails
-
-        for trail in refuted_trails {
-            for lit in trail {
-                write!(w, "{} ", lit)?;
-            }
-            writeln!(w, "0")?;
-        }
-
-        w.flush()
-    })();
-    if let Err(e) = write_res {
-        debug_println!(
-            2,
-            0,
-            "Failed to write trail log to {}: {}",
-            path.display(),
-            e
-        );
-    } else {
-        debug_println!(2, 0, "trail log written to: {}", path.display());
     }
 }
 
