@@ -179,12 +179,14 @@ pub fn cdcl_decision_procedure(
 
 /// Dump the eDRAT proof forest for any result: complete on unsat, else a prefix
 /// with no final empty clause. A leading `;` comment records which case it is.
+/// Header status: unsat -> unsat, sat -> unknown, unknown (cadical) ->
+/// timeout/interrupt.
 fn write_partial_proof(path: &std::path::Path, result: Status, edrat_proof: &str) {
     let complete = result == Status::UNSATISFIABLE;
     let status = match result {
         Status::UNSATISFIABLE => "unsat",
-        Status::SATISFIABLE => "sat",
-        Status::UNKNOWN => "unknown",
+        Status::SATISFIABLE => "unknown",
+        Status::UNKNOWN => "timeout/interrupt",
     };
     let header = if complete {
         "; COMPLETE eDRAT proof (result: unsat): a checkable refutation.\n".to_string()
