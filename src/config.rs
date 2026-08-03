@@ -58,6 +58,6 @@ pub struct Args {
     pub max_arith_conflicts_per_round: usize,
     /// Max quantifier instantiations to materialize per complete-model check.
     /// 0 = unbounded (materialize all pending).
-    #[arg(long, default_value_t = 75)]
+    #[arg(long, default_value_t = 85)]
     pub batch_cap: usize,
 }
