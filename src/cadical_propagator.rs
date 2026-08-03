@@ -669,15 +669,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // Materialize up to `batch_cap` pending instances in this single check.
         // batch_cap == 0 means unbounded (materialize all).
-        //
-        // Rationale: the original code materialized exactly ONE instance per
-        // complete-model check, forcing a full CaDiCaL model search between
-        // every single instantiation. On hard queries that feedback loop
-        // generates thousands of spurious matches (the e-graph evolves between
-        // each singleton instantiation). Batching cuts the number of full
-        // re-solves. But an unbounded batch can flood the SAT solver with a
-        // huge clause set on queries whose single matching round is large, so
-        // we cap the batch.
         let cap = self.batch_cap;
         let mut count = 0usize;
         while (cap == 0 || count < cap)
