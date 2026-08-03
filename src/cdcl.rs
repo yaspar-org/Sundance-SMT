@@ -43,6 +43,7 @@ pub fn cdcl_decision_procedure(
     timeout: u64,
     elevate: i32,
     max_arith_conflicts_per_round: usize,
+    batch_cap: usize,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -93,14 +94,7 @@ pub fn cdcl_decision_procedure(
         pending: None,
         max_arith_conflicts_per_round,
         last_observed_var: 1,
-        // SUNDANCE_BATCH_CAP env: max instantiations materialized per
-        // complete-model check. 0 = unbounded (materialize all).
-        // Default 50: empirically the best trade-off between the pathological
-        // one-at-a-time behavior (cap 1) and flooding the SAT solver (cap 0).
-        batch_cap: std::env::var("SUNDANCE_BATCH_CAP")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(50),
+        batch_cap,
         #[cfg(feature = "z3-solver")]
         z3_incremental,
     };

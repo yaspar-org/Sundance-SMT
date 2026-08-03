@@ -169,6 +169,7 @@ fn main() -> Result<(), String> {
         args.timeout,
         args.elevate,
         args.max_arith_conflicts_per_round,
+        args.batch_cap,
     );
 
     match return_value {
