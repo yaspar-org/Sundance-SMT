@@ -37,6 +37,8 @@ pub fn cdcl_decision_procedure(
     clauses: Vec<Vec<i32>>,
     boolean_dt_constraints: Vec<Vec<i32>>,
     proof_file: Option<PathBuf>,
+    partial_proof_file: Option<PathBuf>,
+    trail_file: Option<PathBuf>,
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
@@ -97,6 +99,16 @@ pub fn cdcl_decision_procedure(
         batch_cap,
         #[cfg(feature = "z3-solver")]
         z3_incremental,
+        trail_writer: trail_file
+            .as_ref()
+            .and_then(|p| match std::fs::File::create(p) {
+                Ok(f) => Some(std::io::BufWriter::new(f)),
+                Err(e) => {
+                    debug_println!(2, 0, "Failed to open trail log {}: {}", p.display(), e);
+                    None
+                }
+            }),
+        trail_atoms: std::collections::HashMap::new(),
     };
 
     solver.connect_external_propagator(&mut propagator);
@@ -147,7 +159,7 @@ pub fn cdcl_decision_procedure(
     if let Some(p) = proof_file
         && result == Status::UNSATISFIABLE
     {
-        if let Err(e) = std::fs::write(&p, edrat_proof) {
+        if let Err(e) = std::fs::write(&p, &edrat_proof) {
             debug_println!(
                 2,
                 0,
@@ -160,10 +172,58 @@ pub fn cdcl_decision_procedure(
         }
     }
 
+    if let Some(p) = partial_proof_file {
+        write_partial_proof(&p, result, &edrat_proof);
+    }
+
+    // Trails were streamed during the solve; append the now-complete atom map.
+    if trail_file.is_some() {
+        propagator.finish_trail_log();
+        debug_println!(2, 0, "trail log written");
+    }
+
     // Harvest stats from solver_state, egraph, and proof tracer
     propagator.sync_external_stats();
     propagator.stats.finish();
     (result, propagator.stats)
+}
+
+/// Dump the eDRAT proof forest for any result: complete on unsat, else a prefix
+/// with no final empty clause. A leading `;` comment records which case it is.
+/// Header status: unsat -> unsat, sat -> unknown, unknown (cadical) ->
+/// timeout/interrupt.
+fn write_partial_proof(path: &std::path::Path, result: Status, edrat_proof: &str) {
+    let complete = result == Status::UNSATISFIABLE;
+    let status = match result {
+        Status::UNSATISFIABLE => "unsat",
+        Status::SATISFIABLE => "unknown",
+        Status::UNKNOWN => "timeout/interrupt",
+    };
+    let header = if complete {
+        "; COMPLETE eDRAT proof (result: unsat): a checkable refutation.\n".to_string()
+    } else {
+        format!(
+            "; PARTIAL eDRAT proof (result: {status}): every step derived so far,\n\
+             ; but NO final empty clause -- a prefix, not a checkable refutation.\n"
+        )
+    };
+    if let Err(e) = std::fs::write(path, format!("{header}{edrat_proof}")) {
+        debug_println!(
+            2,
+            0,
+            "Failed to write partial proof to {}: {}",
+            path.display(),
+            e
+        );
+    } else {
+        debug_println!(
+            2,
+            0,
+            "{} proof forest written to: {}",
+            if complete { "Complete" } else { "Partial" },
+            path.display()
+        );
+    }
 }
 
 /// Adds the clause to the eDRAT proof and gives it to the CaDiCaL solver.
