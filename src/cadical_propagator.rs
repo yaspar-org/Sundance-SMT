@@ -40,9 +40,53 @@ pub struct CustomExternalPropagator<'a> {
     /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
     #[cfg(feature = "z3-solver")]
     pub z3_incremental: Option<Z3IncrementalState>,
+    // --trail-out logging (inert unless the writer is Some). Trails stream to
+    // disk as they are refuted; the small |lit| -> atom map is held and flushed
+    // at the end (only complete then, as new literals appear during the search).
+    pub trail_writer: Option<std::io::BufWriter<std::fs::File>>,
+    pub trail_atoms: std::collections::HashMap<i32, String>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
+    /// Stream one refuted model as a `t <signed lits>` line. A write error is
+    /// reported once then the writer is dropped; it must never abort the solve.
+    fn write_trail_line(&mut self, model: &[i32]) {
+        use std::io::Write;
+        let Some(w) = self.trail_writer.as_mut() else {
+            return;
+        };
+        let mut line = String::with_capacity(model.len() * 5 + 2);
+        line.push('t');
+        for lit in model {
+            use std::fmt::Write as _;
+            let _ = write!(line, " {lit}");
+        }
+        if let Err(e) = writeln!(w, "{line}") {
+            debug_println!(2, 0, "Failed to stream trail line: {}", e);
+            self.trail_writer = None; // stop trying after the first failure
+        }
+    }
+
+    /// Append the `m <id> <atom>` map (sorted by id) and close the trail log.
+    /// Called once after the solve, when the literal set is finally complete.
+    pub fn finish_trail_log(&mut self) {
+        use std::io::Write;
+        let Some(mut w) = self.trail_writer.take() else {
+            return;
+        };
+        let mut ids: Vec<&i32> = self.trail_atoms.keys().collect();
+        ids.sort();
+        let res = (|| -> std::io::Result<()> {
+            for id in ids {
+                writeln!(w, "m {} {}", id, self.trail_atoms[id])?;
+            }
+            w.flush()
+        })();
+        if let Err(e) = res {
+            debug_println!(2, 0, "Failed to write trail atom map: {}", e);
+        }
+    }
+
     /// Register any new CNF variables created since the last sync.
     pub fn sync_new_vars(&mut self) {
         let next = self.solver_state.cnf_cache.next_var;
@@ -368,6 +412,19 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        // --trail-out: every model seen here in a non-SAT run is refuted;
+        // note any new literals in the atom map and stream the trail line.
+        if self.trail_writer.is_some() {
+            for &l in model {
+                let id = l.unsigned_abs() as i32;
+                if !self.trail_atoms.contains_key(&id) {
+                    let atom = format!("{}", self.solver_state.get_term_from_lit(id));
+                    self.trail_atoms.insert(id, atom);
+                }
+            }
+            self.write_trail_line(model);
+        }
+
         debug_println!(
             24,
             0,

@@ -18,6 +18,18 @@ use yaspar_ir::untyped::UntypedAst;
 fn main() -> Result<(), String> {
     let args = Args::parse();
 
+    // --proof and --partial-proof both write an eDRAT dump; using them together
+    // is ambiguous (and with the same path the second write silently truncates
+    // the first, replacing a checkable refutation with a header-prefixed
+    // prefix, or vice versa). Reject the combination outright.
+    assert!(
+        !(args.proof.is_some() && args.partial_proof.is_some()),
+        "--proof and --partial-proof are mutually exclusive: both write an eDRAT \
+         dump, and pointing them at the same file would overwrite one with the \
+         other. Pass only one (--proof for a checkable refutation on unsat, \
+         --partial-proof for a dump on any result)."
+    );
+
     // Parse debug flag and level
     if args.debug > 0 {
         log::set_debug_level(args.debug);
@@ -163,6 +175,8 @@ fn main() -> Result<(), String> {
         prop_skeleton,
         boolean_dt_constraints,
         args.proof,
+        args.partial_proof,
+        args.trail_out,
         sorts,
         symbol_table,
         args.arithmetic,
