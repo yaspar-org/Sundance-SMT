@@ -745,6 +745,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
             let clause_len = self.disequalities.borrow().last().map_or(0, |c| c.len());
+            // INSTRUMENTATION: dump theory clauses to DIMACS (env SUNDANCE_DUMP_CNF)
+            if let Ok(path) = std::env::var("SUNDANCE_DUMP_CNF") {
+                use std::io::Write;
+                if let Some(cl) = self.disequalities.borrow().last() {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                        let line: String = cl.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" ");
+                        let _ = writeln!(f, "{} 0", line);
+                    }
+                }
+            }
             match clause_len {
                 0 | 1 => {} // don't count unit or empty clauses
                 2 => self.stats.binary_clauses += 1,

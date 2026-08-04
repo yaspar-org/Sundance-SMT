@@ -118,6 +118,18 @@ pub fn cdcl_decision_procedure(
     debug_println!(2, 0, "CDCL: Starting CDCL solver");
     debug_println!(1, 1, "Adding {} clauses to solver", clauses.len());
 
+    // INSTRUMENTATION: dump initial clauses to DIMACS (env SUNDANCE_DUMP_CNF)
+    if let Ok(path) = std::env::var("SUNDANCE_DUMP_CNF") {
+        use std::io::Write;
+        let _ = std::fs::remove_file(&path);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            for clause in clauses.iter().chain(boolean_dt_constraints.iter()) {
+                let line: String = clause.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(" ");
+                let _ = writeln!(f, "{} 0", line);
+            }
+        }
+    }
+
     // Add all clauses to the solver
     for (i, clause) in clauses.iter().enumerate() {
         debug_println!(11, 2, "Adding clause #{}: {:?}", i + 1, clause);

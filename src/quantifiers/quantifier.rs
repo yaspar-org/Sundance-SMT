@@ -134,6 +134,25 @@ pub(crate) fn instantiate_quantifiers(
                 continue;
             }
 
+            // INSTRUMENTATION: count total vs new (non-dup) matches per quantifier
+            if std::env::var("SUNDANCE_MATCH_STATS").is_ok() {
+                let total = list_assignments.len();
+                let mut newc = 0;
+                for subs_ids in list_assignments.iter() {
+                    let subs: DeterministicHashMap<Local, Term> = subs_ids
+                        .iter()
+                        .map(|(k, v)| (k.clone(), solver_state.get_term(solver_state.to_solver_uid(*v))))
+                        .collect();
+                    let dup = solver_state
+                        .added_instantiations
+                        .get(&quantifier.id)
+                        .map(|s| s.contains(&subs))
+                        .unwrap_or(false);
+                    if !dup { newc += 1; }
+                }
+                eprintln!("MATCH qid={} total={} new={}", quantifier.id, total, newc);
+            }
+
             for subs_ids in list_assignments.iter() {
                 // Convert the (Local -> egraph id) map into a (Local -> Term) map for substitution
                 let subs: DeterministicHashMap<Local, Term> = subs_ids
@@ -323,6 +342,11 @@ fn process_deferred_instantiations(
             t.clone(),
             solver_state.get_term(quantifier_id),
         );
+
+        // INSTRUMENTATION: dump instantiations for analysis (env SUNDANCE_DUMP_INSTS)
+        if std::env::var("SUNDANCE_DUMP_INSTS").is_ok() {
+            eprintln!("INST qid={} :: {}", quantifier_id, t);
+        }
 
         let let_elim_term = t.let_elim(&mut solver_state.context);
 
