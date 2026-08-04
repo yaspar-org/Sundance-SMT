@@ -170,6 +170,7 @@ fn main() -> Result<(), String> {
 
     let quantifiers = !solver_state.quantifiers.is_empty();
 
+    let cost_weights = args.cost_weights();
     let (return_value, stats) = cdcl_decision_procedure(
         &mut solver_state,
         prop_skeleton,
@@ -184,6 +185,7 @@ fn main() -> Result<(), String> {
         args.elevate,
         args.max_arith_conflicts_per_round,
         args.batch_cap,
+        cost_weights,
     );
 
     match return_value {

@@ -60,4 +60,84 @@ pub struct Args {
     /// 0 = unbounded (materialize all pending).
     #[arg(long, default_value_t = 85)]
     pub batch_cap: usize,
+
+    // --- Quantifier instantiation cost weights (Z3-style prioritization) ---
+    // Candidate instantiations are materialized cheapest-first. Each weight
+    // scales one term of the cost function; see `CostWeights`. Raising a weight
+    // makes that factor push instantiations later.
+    /// Cost weight on instantiation generation (depth).
+    #[arg(long, default_value_t = 1.0)]
+    pub qi_w_gen: f64,
+    /// Cost weight on the quantifier `:weight` annotation.
+    #[arg(long, default_value_t = 1.0)]
+    pub qi_w_weight: f64,
+    /// Cost weight on log2(1 + body size).
+    #[arg(long, default_value_t = 0.5)]
+    pub qi_w_size: f64,
+    /// Cost weight on body term depth.
+    #[arg(long, default_value_t = 0.5)]
+    pub qi_w_depth: f64,
+    /// Cost weight on the number of bound variables.
+    #[arg(long, default_value_t = 0.0)]
+    pub qi_w_vars: f64,
+    /// Cost weight on the firing multipattern width.
+    #[arg(long, default_value_t = 0.0)]
+    pub qi_w_pattern_width: f64,
+    /// Cost weight on (branch-local + total) instances of the quantifier.
+    #[arg(long, default_value_t = 1.0)]
+    pub qi_w_instances: f64,
+    /// Cost weight on the search scope (decision level).
+    #[arg(long, default_value_t = 0.0)]
+    pub qi_w_scope: f64,
+    /// Cost weight on the case-split factor (body disjunct count).
+    #[arg(long, default_value_t = 0.0)]
+    pub qi_w_cs_factor: f64,
+}
+
+/// Weights for the quantifier-instantiation cost function. Bundled out of
+/// [`Args`] so they can be threaded through the solver as one value.
+#[derive(Debug, Clone, Copy)]
+pub struct CostWeights {
+    pub generation: f64,
+    pub weight: f64,
+    pub size: f64,
+    pub depth: f64,
+    pub vars: f64,
+    pub pattern_width: f64,
+    pub instances: f64,
+    pub scope: f64,
+    pub cs_factor: f64,
+}
+
+impl Default for CostWeights {
+    fn default() -> Self {
+        CostWeights {
+            generation: 1.0,
+            weight: 1.0,
+            size: 0.5,
+            depth: 0.5,
+            vars: 0.0,
+            pattern_width: 0.0,
+            instances: 1.0,
+            scope: 0.0,
+            cs_factor: 0.0,
+        }
+    }
+}
+
+impl Args {
+    /// Collect the quantifier-instantiation cost weights from parsed args.
+    pub fn cost_weights(&self) -> CostWeights {
+        CostWeights {
+            generation: self.qi_w_gen,
+            weight: self.qi_w_weight,
+            size: self.qi_w_size,
+            depth: self.qi_w_depth,
+            vars: self.qi_w_vars,
+            pattern_width: self.qi_w_pattern_width,
+            instances: self.qi_w_instances,
+            scope: self.qi_w_scope,
+            cs_factor: self.qi_w_cs_factor,
+        }
+    }
 }

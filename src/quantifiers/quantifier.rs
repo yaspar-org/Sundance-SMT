@@ -4,10 +4,12 @@
 //! Instantiation of quantifiers
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::cmp::Ordering;
+use std::collections::{BinaryHeap, VecDeque};
 use std::rc::Rc;
 
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
+use crate::config::CostWeights;
 use crate::egraphs::EgraphTrait;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
@@ -30,6 +32,8 @@ struct DeferredInstantiation {
     is_exists: bool,
     literal: i32,
     quantifier_id: u64,
+    /// Instantiation depth of this candidate (see `SolverState::generation`).
+    generation: u32,
 }
 
 struct DeferredSkolemization {
@@ -39,8 +43,74 @@ struct DeferredSkolemization {
     literal: i32,
 }
 
+/// Inputs to the instantiation cost function. Mirrors the variables Z3 exposes
+/// in `smt.qi.cost` (generation, weight, size, depth, vars, pattern_width,
+/// instances, total_instances, scope, cs_factor).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CostInputs {
+    pub generation: u32,
+    pub weight: u32,
+    pub size: u32,
+    pub depth: u32,
+    pub vars: u32,
+    pub pattern_width: u32,
+    pub instances: u32,
+    pub total_instances: u32,
+    pub scope: u32,
+    pub cs_factor: u32,
+}
+
+/// Estimated cost of an instantiation. Cheaper candidates are materialized
+/// first. Weighted linear combination of the cost inputs; `size` is compressed
+/// with log2 so a large body does not dominate purely by size.
+pub(crate) fn instantiation_cost(inputs: &CostInputs, w: &CostWeights) -> f64 {
+    let size_term = ((1 + inputs.size) as f64).log2();
+    w.generation * inputs.generation as f64
+        + w.weight * inputs.weight as f64
+        + w.size * size_term
+        + w.depth * inputs.depth as f64
+        + w.vars * inputs.vars as f64
+        + w.pattern_width * inputs.pattern_width as f64
+        + w.instances * (inputs.instances + inputs.total_instances) as f64
+        + w.scope * inputs.scope as f64
+        + w.cs_factor * inputs.cs_factor as f64
+}
+
+/// A deferred instantiation paired with its cost and a FIFO tie-break sequence.
+/// Ordered so a `BinaryHeap` (a max-heap) yields the *cheapest* candidate first,
+/// breaking ties by insertion order (stable, and keeps `Ord` total over f64).
+struct PrioritizedInstantiation {
+    cost: f64,
+    seq: u64,
+    inst: DeferredInstantiation,
+}
+
+impl PartialEq for PrioritizedInstantiation {
+    fn eq(&self, other: &Self) -> bool {
+        self.cost == other.cost && self.seq == other.seq
+    }
+}
+impl Eq for PrioritizedInstantiation {}
+
+impl Ord for PrioritizedInstantiation {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse cost so the max-heap pops the smallest cost first; on equal
+        // cost, smaller seq (inserted earlier) should pop first, so reverse seq.
+        other
+            .cost
+            .partial_cmp(&self.cost)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+impl PartialOrd for PrioritizedInstantiation {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 pub(crate) struct PendingInstantiations {
-    deferred_instantiations: VecDeque<DeferredInstantiation>,
+    deferred_instantiations: BinaryHeap<PrioritizedInstantiation>,
     deferred_skolemizations: VecDeque<DeferredSkolemization>,
     skolemized_quantifier_idxs: Vec<usize>,
 }
@@ -56,17 +126,23 @@ impl PendingInstantiations {
 }
 
 /// Computes trigger matches and substitutions, returning deferred items
-/// that can be materialized one at a time.
+/// that can be materialized one at a time. Instantiation candidates are ranked
+/// by an estimated cost (cheapest first) using `weights`; `scope` is the current
+/// decision level, one of the cost inputs.
 pub(crate) fn instantiate_quantifiers(
     solver_state: &mut SolverState,
     assignments: &[i32],
+    weights: &CostWeights,
+    scope: usize,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
     let quantifiers = &solver_state.quantifiers.clone();
     let mut skolemized_quantifier_idxs = vec![];
     let mut deferred_skolemizations: VecDeque<DeferredSkolemization> = VecDeque::new();
-    let mut deferred_instantiations: VecDeque<DeferredInstantiation> = VecDeque::new();
+    let mut deferred_instantiations: BinaryHeap<PrioritizedInstantiation> = BinaryHeap::new();
+    // Monotonic sequence for FIFO tie-breaking among equal-cost candidates.
+    let mut seq: u64 = 0;
 
     // We `enumerate()` so we can update quantifiers[i].skolemized after the loop
     for (i, quantifier) in quantifiers.iter().enumerate() {
@@ -153,7 +229,18 @@ pub(crate) fn instantiate_quantifiers(
                 eprintln!("MATCH qid={} total={} new={}", quantifier.id, total, newc);
             }
 
+            let pattern_width = multipattern.len() as u32;
+
             for subs_ids in list_assignments.iter() {
+                // Generation of this candidate: one deeper than the deepest term
+                // bound by the trigger match (ground/original terms are gen 0).
+                let match_generation = subs_ids
+                    .iter()
+                    .map(|(_, v)| solver_state.generation_of(solver_state.to_solver_uid(*v)))
+                    .max()
+                    .unwrap_or(0);
+                let candidate_generation = match_generation.saturating_add(1);
+
                 // Convert the (Local -> egraph id) map into a (Local -> Term) map for substitution
                 let subs: DeterministicHashMap<Local, Term> = subs_ids
                     .iter()
@@ -179,12 +266,43 @@ pub(crate) fn instantiate_quantifiers(
                 let term = solver_state.get_term(body);
                 let substitution = Substitution::new(subs);
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
-                deferred_instantiations.push_back(DeferredInstantiation {
-                    substituted_term,
-                    is_exists: quantifier_is_exists,
-                    literal: quantifier_literal,
-                    quantifier_id: quantifier.id,
+
+                // Stamp the produced term's generation so any future matches
+                // rooted at it inherit the increased depth.
+                solver_state.set_generation(substituted_term.uid(), candidate_generation);
+
+                let cost = instantiation_cost(
+                    &CostInputs {
+                        generation: candidate_generation,
+                        weight: quantifier.weight,
+                        size: quantifier.body_size,
+                        depth: quantifier.body_depth,
+                        vars: quantifier.variables.len() as u32,
+                        pattern_width,
+                        instances: solver_state.branch_instances_of(quantifier.id),
+                        total_instances: solver_state
+                            .added_instantiations
+                            .get(&quantifier.id)
+                            .map(|s| s.len() as u32)
+                            .unwrap_or(0),
+                        scope: scope as u32,
+                        cs_factor: quantifier.cs_factor,
+                    },
+                    weights,
+                );
+
+                deferred_instantiations.push(PrioritizedInstantiation {
+                    cost,
+                    seq,
+                    inst: DeferredInstantiation {
+                        substituted_term,
+                        is_exists: quantifier_is_exists,
+                        literal: quantifier_literal,
+                        quantifier_id: quantifier.id,
+                        generation: candidate_generation,
+                    },
                 });
+                seq += 1;
             }
         }
     }
@@ -203,6 +321,7 @@ pub(crate) fn materialize_next(
     pending: &mut PendingInstantiations,
     solver_state: &mut SolverState,
     proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+    level: usize,
 ) -> Option<Vec<QuantifierInstance>> {
     let ddsmt = solver_state.ddsmt;
     let lazy_dt = solver_state.lazy_dt;
@@ -219,14 +338,15 @@ pub(crate) fn materialize_next(
         return Some(results);
     }
 
-    // Then instantiations
-    if let Some(deferred) = pending.deferred_instantiations.pop_front() {
+    // Then instantiations, cheapest cost first.
+    if let Some(prioritized) = pending.deferred_instantiations.pop() {
         let results = process_deferred_instantiations(
-            vec![deferred],
+            vec![prioritized.inst],
             solver_state,
             proof_tracer,
             ddsmt,
             lazy_dt,
+            level,
         );
         return Some(results);
     }
@@ -320,6 +440,7 @@ fn process_deferred_instantiations(
     proof_tracer: &Rc<RefCell<SMTProofTracer>>,
     ddsmt: bool,
     lazy_dt: bool,
+    level: usize,
 ) -> Vec<QuantifierInstance> {
     let mut results = vec![];
     for DeferredInstantiation {
@@ -327,8 +448,13 @@ fn process_deferred_instantiations(
         is_exists,
         literal,
         quantifier_id,
+        generation,
     } in deferred_instantiations
     {
+        // Count this instantiation against the current branch (rolled back on
+        // backtrack) so runaway self-instantiation is penalized in the cost.
+        solver_state.record_branch_instance(quantifier_id, level);
+
         let t = if is_exists {
             solver_state.context.not(substituted_term)
         } else {
@@ -345,12 +471,17 @@ fn process_deferred_instantiations(
 
         // INSTRUMENTATION: dump instantiations for analysis (env SUNDANCE_DUMP_INSTS)
         if std::env::var("SUNDANCE_DUMP_INSTS").is_ok() {
-            eprintln!("INST qid={} :: {}", quantifier_id, t);
+            eprintln!("INST qid={} gen={} :: {}", quantifier_id, generation, t);
         }
 
         let let_elim_term = t.let_elim(&mut solver_state.context);
 
         let nnf_term = let_elim_term.nnf(solver_state);
+
+        // Propagate generation onto the materialized terms so terms created here
+        // seed future matches at the correct depth.
+        solver_state.set_generation(t.uid(), generation);
+        solver_state.set_generation(nnf_term.uid(), generation);
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
@@ -398,4 +529,109 @@ fn process_deferred_instantiations(
         results.push(QuantifierInstance::Instantiation { clauses });
     }
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_inputs() -> CostInputs {
+        CostInputs {
+            generation: 0,
+            weight: 1,
+            size: 4,
+            depth: 2,
+            vars: 1,
+            pattern_width: 1,
+            instances: 0,
+            total_instances: 0,
+            scope: 0,
+            cs_factor: 1,
+        }
+    }
+
+    #[test]
+    fn deeper_generation_costs_more() {
+        let w = CostWeights::default();
+        let shallow = base_inputs();
+        let deep = CostInputs {
+            generation: 5,
+            ..base_inputs()
+        };
+        assert!(instantiation_cost(&deep, &w) > instantiation_cost(&shallow, &w));
+    }
+
+    #[test]
+    fn more_instances_costs_more() {
+        let w = CostWeights::default();
+        let few = base_inputs();
+        let many = CostInputs {
+            instances: 3,
+            total_instances: 10,
+            ..base_inputs()
+        };
+        assert!(instantiation_cost(&many, &w) > instantiation_cost(&few, &w));
+    }
+
+    #[test]
+    fn higher_weight_costs_more() {
+        let w = CostWeights::default();
+        let light = base_inputs();
+        let heavy = CostInputs {
+            weight: 100,
+            ..base_inputs()
+        };
+        assert!(instantiation_cost(&heavy, &w) > instantiation_cost(&light, &w));
+    }
+
+    #[test]
+    fn zero_weights_ignore_inputs() {
+        let w = CostWeights {
+            generation: 0.0,
+            weight: 0.0,
+            size: 0.0,
+            depth: 0.0,
+            vars: 0.0,
+            pattern_width: 0.0,
+            instances: 0.0,
+            scope: 0.0,
+            cs_factor: 0.0,
+        };
+        let a = base_inputs();
+        let b = CostInputs {
+            generation: 99,
+            weight: 99,
+            instances: 99,
+            ..base_inputs()
+        };
+        assert_eq!(instantiation_cost(&a, &w), instantiation_cost(&b, &w));
+    }
+
+    #[test]
+    fn heap_pops_cheapest_first() {
+        use yaspar_ir::ast::{Context, ObjectAllocatorExt};
+        // A max-heap of PrioritizedInstantiation must yield ascending cost,
+        // with insertion order (seq) breaking ties.
+        let mut context = Context::new();
+        let t = context.get_true();
+        let mk = |cost: f64, seq: u64| PrioritizedInstantiation {
+            cost,
+            seq,
+            inst: DeferredInstantiation {
+                substituted_term: t.clone(),
+                is_exists: false,
+                literal: 1,
+                quantifier_id: 0,
+                generation: 0,
+            },
+        };
+        let mut heap = BinaryHeap::new();
+        heap.push(mk(3.0, 0));
+        heap.push(mk(1.0, 1));
+        heap.push(mk(2.0, 2));
+        heap.push(mk(1.0, 3)); // same cost as seq 1, but later => pops after it
+        let order: Vec<(f64, u64)> =
+            std::iter::from_fn(|| heap.pop().map(|p| (p.cost, p.seq))).collect();
+        assert_eq!(order, vec![(1.0, 1), (1.0, 3), (2.0, 2), (3.0, 0)]);
+    }
 }

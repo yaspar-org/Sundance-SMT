@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
-    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization, Repr,
-    Term, TermAllocator,
+    AConstant, Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local,
+    Monomorphization, Repr, Term, TermAllocator,
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -88,6 +88,31 @@ fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     }
 }
 
+/// Number of sub-expressions (nodes) and term depth of `term`, computed in one
+/// traversal. A leaf has size 1 and depth 1. Used to cache static cost-function
+/// inputs for quantifier bodies.
+fn term_size_and_depth(term: &Term) -> (u32, u32) {
+    let mut size: u32 = 1;
+    let mut max_child_depth: u32 = 0;
+    for child in term.repr().sub_terms() {
+        let (csize, cdepth) = term_size_and_depth(child);
+        size = size.saturating_add(csize);
+        max_child_depth = max_child_depth.max(cdepth);
+    }
+    (size, max_child_depth.saturating_add(1))
+}
+
+/// Case-split factor: the number of top-level disjuncts in `term` (looking
+/// through a leading negation/annotation), clamped to at least 1. Quantifier
+/// bodies with more disjuncts fan out the search more when instantiated.
+fn disjunct_count(term: &Term) -> u32 {
+    match term.repr() {
+        Or(items) => (items.len() as u32).max(1),
+        Annotated(inner, _) | Not(inner) => disjunct_count(inner),
+        _ => 1,
+    }
+}
+
 /// Solver-level state that wraps the egraph with theory-specific bookkeeping.
 ///
 /// For now, the `Context` (term allocator) is accessed via `self.egraph.context`.
@@ -120,6 +145,21 @@ pub struct SolverState {
 
     /// Tracks quantifier instantiations to avoid duplicates.
     pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
+
+    /// Instantiation depth ("generation") of a term, keyed by solver UID.
+    /// Original/ground terms are generation 0 (absent entries default to 0).
+    /// A term produced by instantiating a quantifier gets `1 + max(generation
+    /// of the terms bound by the trigger match)`. Mirrors Z3's `generation`.
+    pub generation: DeterministicHashMap<u64, u32>,
+
+    /// Branch-local count of instantiations produced per quantifier id, i.e.
+    /// the number on the *current* search branch. Maintained with a rollback
+    /// log so it decrements on backtrack. Mirrors Z3's `instances`.
+    pub branch_instances: DeterministicHashMap<u64, u32>,
+    /// Rollback log for `branch_instances`: `(decision_level, quantifier_id)`
+    /// pushed each time a branch instantiation is recorded. On backtrack to
+    /// level L, entries with level > L are popped and their counts decremented.
+    pub branch_instance_log: Vec<(usize, u64)>,
 
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
@@ -178,6 +218,9 @@ impl SolverState {
             assertions: vec![],
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
+            generation: DeterministicHashMap::default(),
+            branch_instances: DeterministicHashMap::default(),
+            branch_instance_log: vec![],
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
@@ -313,6 +356,47 @@ impl SolverState {
             TermOption::None
         } else {
             self.terms_list[num as usize].clone()
+        }
+    }
+
+    /// Instantiation depth of the term with the given solver UID (0 if unknown,
+    /// i.e. an original/ground term).
+    pub fn generation_of(&self, uid: u64) -> u32 {
+        self.generation.get(&uid).copied().unwrap_or(0)
+    }
+
+    /// Record the generation of a produced term (keeps the max if seen before).
+    pub fn set_generation(&mut self, uid: u64, generation: u32) {
+        let entry = self.generation.entry(uid).or_insert(0);
+        *entry = (*entry).max(generation);
+    }
+
+    /// Branch-local instantiation count for a quantifier (0 if none yet).
+    pub fn branch_instances_of(&self, quantifier_id: u64) -> u32 {
+        self.branch_instances
+            .get(&quantifier_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Record one branch-local instantiation of `quantifier_id` at `level`,
+    /// logging it so it can be rolled back on backtrack.
+    pub fn record_branch_instance(&mut self, quantifier_id: u64, level: usize) {
+        *self.branch_instances.entry(quantifier_id).or_insert(0) += 1;
+        self.branch_instance_log.push((level, quantifier_id));
+    }
+
+    /// Roll back branch-local instantiation counts recorded above `level`.
+    /// Called from the propagator's backtrack callback.
+    pub fn rollback_branch_instances(&mut self, level: usize) {
+        while let Some(&(lvl, qid)) = self.branch_instance_log.last() {
+            if lvl <= level {
+                break;
+            }
+            self.branch_instance_log.pop();
+            if let Some(count) = self.branch_instances.get_mut(&qid) {
+                *count = count.saturating_sub(1);
+            }
         }
     }
 
@@ -519,14 +603,25 @@ impl SolverState {
 
         // Quantifier registration
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
+            // `:weight` defaults to 1; overridden by an SMT-LIB `:weight N` annotation.
+            let mut weight: u32 = 1;
             let (inner_term, trigger_ids) = if let Annotated(inner_term, attrs) = middle_term.repr()
             {
                 let mut trigger_ids = vec![];
                 for attr in attrs.iter() {
-                    if let Attribute::Pattern(s_exprs) = attr {
-                        let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
-                            s_exprs.iter().map(|p| self.build_pattern(p)).collect();
-                        trigger_ids.push(pattern_ids);
+                    match attr {
+                        Attribute::Pattern(s_exprs) => {
+                            let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
+                                s_exprs.iter().map(|p| self.build_pattern(p)).collect();
+                            trigger_ids.push(pattern_ids);
+                        }
+                        // `:weight N` — a numeric annotation controlling instantiation priority.
+                        Attribute::Constant(kw, AConstant::Numeral(n))
+                            if kw.symbol_of() == "weight" =>
+                        {
+                            weight = u32::try_from(n).unwrap_or(u32::MAX);
+                        }
+                        _ => {}
                     }
                 }
                 (inner_term, trigger_ids)
@@ -555,6 +650,10 @@ impl SolverState {
                 Polarity::Existential
             };
 
+            // Cache static cost-function inputs (computed once, by walking the body).
+            let (body_size, body_depth) = term_size_and_depth(inner_term);
+            let cs_factor = disjunct_count(inner_term);
+
             self.quantifiers.push(Quantifier {
                 triggers: trigger_ids,
                 variables,
@@ -563,6 +662,10 @@ impl SolverState {
                 guard,
                 polarity,
                 skolemized: false,
+                weight,
+                body_size,
+                body_depth,
+                cs_factor,
             });
         }
     }

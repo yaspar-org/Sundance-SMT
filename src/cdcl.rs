@@ -46,6 +46,7 @@ pub fn cdcl_decision_procedure(
     elevate: i32,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
+    cost_weights: crate::config::CostWeights,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -97,6 +98,7 @@ pub fn cdcl_decision_procedure(
         max_arith_conflicts_per_round,
         last_observed_var: 1,
         batch_cap,
+        cost_weights,
         #[cfg(feature = "z3-solver")]
         z3_incremental,
         trail_writer: trail_file

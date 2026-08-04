@@ -57,6 +57,15 @@ pub struct Quantifier {
     pub guard: Option<u64>,
     pub polarity: Polarity,
     pub skolemized: bool,
+    /// SMT-LIB `:weight` annotation (default 1). Higher weight => more expensive
+    /// => instantiated later. Feeds the instantiation cost function.
+    pub weight: u32,
+    /// Number of sub-expressions in the quantifier body (cached at registration).
+    pub body_size: u32,
+    /// Term depth of the quantifier body (cached at registration).
+    pub body_depth: u32,
+    /// Case-split factor: number of top-level disjuncts in the body (>= 1).
+    pub cs_factor: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

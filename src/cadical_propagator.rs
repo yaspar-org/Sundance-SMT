@@ -39,6 +39,8 @@ pub struct CustomExternalPropagator<'a> {
     pub last_observed_var: i32,
     /// Max instantiations to materialize per complete-model check. 0 = unbounded.
     pub batch_cap: usize,
+    /// Weights for the quantifier-instantiation cost function (cheapest first).
+    pub cost_weights: crate::config::CostWeights,
     /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
     #[cfg(feature = "z3-solver")]
     pub z3_incremental: Option<Z3IncrementalState>,
@@ -395,6 +397,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         self.decision_level = level;
 
+        // Roll back branch-local instantiation counts recorded above `level`,
+        // so the `instances` cost input reflects the current branch.
+        self.solver_state.rollback_branch_instances(level);
+
         // `backtrack_to` clears the arithmetic queue at entry then re-fires
         // any congruence merges from `union_to_eclass` replay, so the queue
         // on return holds exactly the merges that survive at `level`.
@@ -451,8 +457,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // If we have pending instantiations from a previous round, materialize one
         // immediately without redoing arithmetic or datatype checks.
         if let Some(mut pending) = self.pending.take()
-            && let Some(instances) =
-                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+            && let Some(instances) = materialize_next(
+                &mut pending,
+                self.solver_state,
+                &self.proof_tracer,
+                self.decision_level,
+            )
         {
             self.apply_instances(&instances);
             if pending.is_empty() {
@@ -659,7 +669,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.sync_external_stats();
         self.stats.begin_round();
         self.stats.instantiation_rounds += 1;
-        let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
+        let mut pending = instantiate_quantifiers(
+            self.solver_state,
+            &self.assignments,
+            &self.cost_weights,
+            self.decision_level,
+        );
 
         if pending.is_empty() {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
@@ -672,8 +687,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         let cap = self.batch_cap;
         let mut count = 0usize;
         while (cap == 0 || count < cap)
-            && let Some(instances) =
-                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+            && let Some(instances) = materialize_next(
+                &mut pending,
+                self.solver_state,
+                &self.proof_tracer,
+                self.decision_level,
+            )
         {
             self.apply_instances(&instances);
             count += 1;
