@@ -56,4 +56,8 @@ pub struct Args {
     /// Max arithmetic-model conflicts collected per model-check (usize::MAX = uncapped).
     #[arg(long, default_value_t = usize::MAX)]
     pub max_arith_conflicts_per_round: usize,
+    /// Max pending quantifier materialization steps per complete-model check (instantiations + skolemizations).
+    /// 0 = unbounded (materialize all pending).
+    #[arg(long, default_value_t = 85)]
+    pub batch_cap: usize,
 }

@@ -37,6 +37,8 @@ pub struct CustomExternalPropagator<'a> {
     /// Once reached, stop probing further pairs even if unprobed pairs remain.
     pub max_arith_conflicts_per_round: usize,
     pub last_observed_var: i32,
+    /// Max instantiations to materialize per complete-model check. 0 = unbounded.
+    pub batch_cap: usize,
     /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
     #[cfg(feature = "z3-solver")]
     pub z3_incremental: Option<Z3IncrementalState>,
@@ -665,14 +667,19 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return true;
         }
 
-        // Materialize the first one now
-        if let Some(instances) =
-            materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+        // Materialize up to `batch_cap` pending instances in this single check.
+        // batch_cap == 0 means unbounded (materialize all).
+        let cap = self.batch_cap;
+        let mut count = 0usize;
+        while (cap == 0 || count < cap)
+            && let Some(instances) =
+                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
         {
             self.apply_instances(&instances);
+            count += 1;
         }
 
-        // If there's more to materialize later, store the pending state
+        // If nothing remains, mark skolemized quantifiers; else keep pending.
         if pending.is_empty() {
             for i in pending.skolemized_quantifier_idxs() {
                 self.solver_state.quantifiers[*i].skolemized = true;

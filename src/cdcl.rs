@@ -45,6 +45,7 @@ pub fn cdcl_decision_procedure(
     timeout: u64,
     elevate: i32,
     max_arith_conflicts_per_round: usize,
+    batch_cap: usize,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -95,6 +96,7 @@ pub fn cdcl_decision_procedure(
         pending: None,
         max_arith_conflicts_per_round,
         last_observed_var: 1,
+        batch_cap,
         #[cfg(feature = "z3-solver")]
         z3_incremental,
         trail_writer: trail_file
