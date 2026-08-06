@@ -79,16 +79,29 @@ pub fn cdcl_decision_procedure(
         .egraph
         .incremental_arithmetic(using_z3_incremental);
 
-    #[cfg(feature = "z3-solver")]
-    let z3_incremental =
-        using_z3_incremental.then(crate::arithmetic::z3incremental::Z3IncrementalState::new);
+    let arith_translator = {
+        #[cfg(feature = "z3-solver")]
+        {
+            if using_z3_incremental {
+                Some(crate::arithmetic::incremental_solver::translation::ArithTranslator::new(
+                    Box::new(crate::arithmetic::incremental_solver::z3::Z3IncrementalState::new()),
+                ))
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "z3-solver"))]
+        {
+            None::<crate::arithmetic::incremental_solver::translation::ArithTranslator>
+        }
+    };
 
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
         solver_state,
         disequalities: RefCell::new(vec![]),
         fixed_literals: DeterministicHashSet::default(),
-        proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference
+        proof_tracer: Rc::clone(&proof_tracer),
         assignments: vec![0, 0],
         solver: &mut solver as *mut CaDiCal,
         arithmetic,
@@ -97,8 +110,7 @@ pub fn cdcl_decision_procedure(
         max_arith_conflicts_per_round,
         last_observed_var: 1,
         batch_cap,
-        #[cfg(feature = "z3-solver")]
-        z3_incremental,
+        arith: arith_translator,
         trail_writer: trail_file
             .as_ref()
             .and_then(|p| match std::fs::File::create(p) {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod lia;
+pub mod incremental_solver;
 pub mod lialp;
 pub mod lp;
 pub mod nelsonoppen;
