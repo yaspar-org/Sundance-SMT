@@ -149,16 +149,6 @@ impl<V: Zero + Clone + fmt::Debug> Matrix<V> {
         self.cols.len() - 1
     }
 
-    /// Iterate over the non-zero `(col, &value)` entries of a row.
-    ///
-    /// Returns an empty iterator if `row` is out of bounds.
-    pub fn row_entries(&self, row: usize) -> impl Iterator<Item = (usize, &V)> {
-        self.rows
-            .get(row)
-            .into_iter()
-            .flat_map(|r| r.iter().map(|(c, v)| (*c, v)))
-    }
-
     /// Perform a pivot operation on the NxM matrix at the specified row and column.
     ///
     /// The pivot transforms matrix elements according to:

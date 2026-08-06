@@ -31,7 +31,7 @@
 //!
 //! # Scope / limitations of this first frontend
 //!
-//! - **LRA (rational) reasoning only.** Registered variables are integer-sorted, but
+//! - **LRA (Real) reasoning only.** Registered variables are integer-sorted, but
 //!   integrality is *not* enforced: [`IncrementalLraSolver::check`] may report `Sat`
 //!   for a system that has no integer solution. Sound integer reasoning
 //!   (branch-and-bound) is a later increment.
@@ -204,9 +204,11 @@ impl IncrementalLraSolver {
         }
 
         if let Some(def) = definition {
-            // Assert `new_var == def`, i.e. `new_var - def == 0`, as a fresh row. This
-            // is tautological (new_var is fresh), so it is never needed in a conflict
-            // core and is tracked with no literals.
+            // Assert `new_var == def`, i.e. `new_var - def == 0`, as a fresh row tracked with no
+            // SAT literal, since `new_var` is fresh and this equality never constrains previously
+            // registered variables on its own. This is sound only under the convention that UNSAT
+            // cores are reported relative to all active definitions/background equalities, not as a
+            // self-contained refutation over SAT literals alone.
             self.push_relation(
                 ArithConstraint::Eq(
                     ArithExpr::linear(vec![(var_id, IBig::from(1))], IBig::from(0)),
@@ -277,12 +279,8 @@ impl IncrementalLraSolver {
     /// [`Self::mark_model_var`]) appear in the buckets, keyed by their truncated
     /// integer model value. Variables that are unconstrained (never referenced by any
     /// pushed row) default to `0`.
-    pub fn check(&mut self) -> ArithCheckResult {
-        let decision = self
-            .solver
-            .solve()
-            .expect("lra-inc: unexpected solver error")
-            .decision;
+    pub fn check(&mut self) -> SolverResult<ArithCheckResult> {
+        let decision = self.solver.solve()?.decision;
         match decision {
             SolverDecision::FEASIBLE(assignment) => {
                 let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<VarId>> =
@@ -294,7 +292,7 @@ impl IncrementalLraSolver {
                     buckets.entry(ibig).or_default().insert(*var_id);
                 }
                 debug_println!(21, 0, "[lra-inc] SAT buckets={:?}", buckets);
-                ArithCheckResult::Sat(buckets)
+                Ok(ArithCheckResult::Sat(buckets))
             }
             SolverDecision::INFEASIBLE(conflict) => {
                 let lits: DeterministicHashSet<i32> = conflict
@@ -302,7 +300,7 @@ impl IncrementalLraSolver {
                     .flat_map(|var| self.slack_to_lits.get(var).into_iter().flatten().copied())
                     .collect();
                 debug_println!(21, 0, "[lra-inc] UNSAT core lits={:?}", lits);
-                ArithCheckResult::Unsat(lits.into_iter().collect())
+                Ok(ArithCheckResult::Unsat(lits.into_iter().collect()))
             }
             SolverDecision::UNKNOWN => {
                 // Pure LRA `solve` terminates in FEASIBLE/INFEASIBLE; treat an
@@ -317,7 +315,7 @@ impl IncrementalLraSolver {
                     let ibig = value.to_int().value().clone();
                     buckets.entry(ibig).or_default().insert(*var_id);
                 }
-                ArithCheckResult::Sat(buckets)
+                Ok(ArithCheckResult::Sat(buckets))
             }
         }
     }
@@ -417,7 +415,7 @@ mod tests {
     #[test]
     fn empty_system_is_sat() {
         let mut s = IncrementalLraSolver::new();
-        assert!(is_sat(&s.check()));
+        assert!(is_sat(&s.check().unwrap()));
     }
 
     #[test]
@@ -427,7 +425,7 @@ mod tests {
         // x <= 5
         s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(5)), 10)
             .unwrap();
-        assert!(is_sat(&s.check()));
+        assert!(is_sat(&s.check().unwrap()));
     }
 
     #[test]
@@ -440,7 +438,7 @@ mod tests {
         // x <= 1, lit 20
         s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 20)
             .unwrap();
-        match s.check() {
+        match s.check().unwrap() {
             ArithCheckResult::Unsat(core) => {
                 // Both tracking lits (negated) should appear in the conflict clause.
                 assert!(core.contains(&-10), "core {core:?} missing -10");
@@ -457,17 +455,32 @@ mod tests {
         // Level 0: x >= 5.
         s.push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 10)
             .unwrap();
-        assert!(is_sat(&s.check()));
+        assert!(is_sat(&s.check().unwrap()));
 
         // Level 1: add x <= 1, making the system infeasible.
         s.notify_new_decision_level();
         s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 20)
             .unwrap();
-        assert!(matches!(s.check(), ArithCheckResult::Unsat(_)));
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
 
         // Backtrack to level 0: the x <= 1 bound is relaxed and the system is feasible.
         s.notify_backtrack(0);
-        assert!(is_sat(&s.check()));
+        match s.check().unwrap() {
+            ArithCheckResult::Sat(buckets) => {
+                // Verify the popped x <= 1 bound is actually gone: only x >= 5 remains, so x's
+                // model value must be >= 5 (i.e. strictly above the relaxed upper bound of 1).
+                let x_val = buckets
+                    .iter()
+                    .find(|(_, vars)| vars.contains(&x))
+                    .map(|(val, _)| val.clone())
+                    .expect("x should appear in the model");
+                assert!(
+                    x_val >= IBig::from(5),
+                    "x = {x_val} should be >= 5 with the x <= 1 bound relaxed"
+                );
+            }
+            ArithCheckResult::Unsat(_) => panic!("expected SAT after backtrack"),
+        }
     }
 
     #[test]
@@ -480,23 +493,23 @@ mod tests {
         // Assert C at level 0; feasible on its own.
         s.push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 10)
             .unwrap();
-        assert!(is_sat(&s.check()));
+        assert!(is_sat(&s.check().unwrap()));
 
         // Push a decision level, assert D; C && D is infeasible.
         s.notify_new_decision_level();
         s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 20)
             .unwrap();
-        assert!(matches!(s.check(), ArithCheckResult::Unsat(_)));
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
 
         // Backtrack to where only C is asserted; D's bound is relaxed, so feasible again.
         s.notify_backtrack(0);
-        assert!(is_sat(&s.check()));
+        assert!(is_sat(&s.check().unwrap()));
 
         // Assert D again: re-asserting the previously-backtracked constraint must once
         // more render the system infeasible.
         s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 20)
             .unwrap();
-        assert!(matches!(s.check(), ArithCheckResult::Unsat(_)));
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
     }
 
     #[test]
@@ -513,7 +526,7 @@ mod tests {
         // Pin x == 4, so y must be 7.
         s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(4)), 10)
             .unwrap();
-        match s.check() {
+        match s.check().unwrap() {
             ArithCheckResult::Sat(buckets) => {
                 // x is 4, y is 7.
                 assert!(buckets.get(&IBig::from(4)).unwrap().contains(&x));
@@ -532,7 +545,7 @@ mod tests {
         s.push_equality(x, y, 10).unwrap();
         s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(9)), 20)
             .unwrap();
-        match s.check() {
+        match s.check().unwrap() {
             ArithCheckResult::Sat(buckets) => {
                 let nine = buckets.get(&IBig::from(9)).unwrap();
                 assert!(nine.contains(&x) && nine.contains(&y));
@@ -550,7 +563,7 @@ mod tests {
             .unwrap();
         s.push_constraint(ArithConstraint::Lt(ArithExpr::constant(3), term(x, 1)), 20)
             .unwrap();
-        assert!(matches!(s.check(), ArithCheckResult::Unsat(_)));
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
     }
 
     #[test]
@@ -568,7 +581,7 @@ mod tests {
             20,
         )
         .unwrap();
-        match s.check() {
+        match s.check().unwrap() {
             ArithCheckResult::Sat(buckets) => {
                 let all_reported: DeterministicHashSet<VarId> =
                     buckets.values().flatten().copied().collect();
@@ -579,7 +592,7 @@ mod tests {
         }
         // mark_model_var makes the hidden var appear.
         s.mark_model_var(hidden);
-        match s.check() {
+        match s.check().unwrap() {
             ArithCheckResult::Sat(buckets) => {
                 assert!(buckets.get(&IBig::from(2)).unwrap().contains(&hidden));
             }
@@ -601,7 +614,7 @@ mod tests {
             20,
         )
         .unwrap();
-        assert!(is_sat(&s.check()));
+        assert!(is_sat(&s.check().unwrap()));
         // L2: x <= -1, contradicts x >= 0.
         s.notify_new_decision_level();
         s.push_constraint(
@@ -609,10 +622,10 @@ mod tests {
             30,
         )
         .unwrap();
-        assert!(matches!(s.check(), ArithCheckResult::Unsat(_)));
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
         // Backtrack to L1: x <= -1 relaxed, but x <= 10 still active. Feasible.
         s.notify_backtrack(1);
-        assert!(is_sat(&s.check()));
+        assert!(is_sat(&s.check().unwrap()));
     }
 
     #[test]

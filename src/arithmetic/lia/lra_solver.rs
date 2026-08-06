@@ -274,6 +274,16 @@ impl LRASolver {
             )));
         }
 
+        // The slack must be fresh with respect to `rel` too: if `rel` mentioned `slack`, Step 1
+        // would introduce it as a non-basic column and Step 5 would then register it again as a
+        // basic variable, producing duplicate `VarInfo`s and corrupting `var_to_idx`/basis. Callers
+        // constructing slacks via the incremental frontend never hit this, but guard explicitly.
+        if rel.terms_ref().iter().any(|term| term.var() == slack) {
+            return Err(SolverError(format!(
+                "add_relation: slack variable {slack:?} occurs in the relation's terms"
+            )));
+        }
+
         // Step 1: register any brand-new problem variables as unbounded non-basic columns.
         for term in rel.terms_ref() {
             let v = term.var();
@@ -453,9 +463,12 @@ impl LRASolver {
     /// post-date the snapshot are absent from the map and default to zero; their basic slack rows
     /// are then made consistent by the recomputation step.
     fn restore_assignment(&mut self) {
+        // Take the snapshot out of `self` so the loops below can mutably borrow `self` without
+        // cloning the map; it is put back at the end so repeated backtracks to the same level
+        // still see it.
         let previous_model = self
             .old_assignment
-            .clone()
+            .take()
             .expect("cannot restore assignment: no previous assignment exists");
         // Non-basics: take the snapshot value, or zero for variables added after the snapshot.
         for &idx in self.non_basic.iter() {
@@ -467,6 +480,7 @@ impl LRASolver {
             let val = self.calculate_assignment(row);
             self.variables[self.basic[row]].val = val;
         }
+        self.old_assignment = Some(previous_model);
     }
 
     /// Set a backtrack point and return the new backtrack level

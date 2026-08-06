@@ -73,11 +73,6 @@ impl TableauSparse {
             .map_err(|e| TableauError(e.0))
     }
 
-    /// Iterate over the non-zero `(col, &coefficient)` entries of a row.
-    pub fn row_entries(&self, row: usize) -> impl Iterator<Item = (usize, &Rational)> {
-        self.matrix.row_entries(row)
-    }
-
     /// Convert this sparse tableau to a dense tableau.
     ///
     /// Used in tests to compare the equivalence of the sparse/dense pivot algorithms.
