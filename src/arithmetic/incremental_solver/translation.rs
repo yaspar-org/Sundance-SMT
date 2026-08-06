@@ -289,15 +289,17 @@ impl ArithTranslator {
         self.vars_by_level.push(Vec::new());
     }
 
-    /// Notify backtrack and evict vars registered at higher levels.
+    /// Notify backtrack. VarId bindings are permanent (never recycled), so the
+    /// egraph_id -> VarId map is *not* evicted here: a term keeps the same VarId
+    /// for the whole solve. Evicting it would force re-registration under a new
+    /// VarId on every backtrack — either recycling an index (colliding two
+    /// contradictory `var_N` definitions in Z3, a spurious empty-core unsat) or
+    /// growing the VarId space without bound. We still pop the per-level record
+    /// so level bookkeeping stays aligned with the solver.
     pub fn notify_backtrack(&mut self, level: usize) {
         self.solver.notify_backtrack(level);
         while self.vars_by_level.len() > level + 1 {
-            if let Some(egraph_ids) = self.vars_by_level.pop() {
-                for eid in egraph_ids {
-                    self.egraph_to_var.remove(&eid);
-                }
-            }
+            self.vars_by_level.pop();
         }
     }
 }

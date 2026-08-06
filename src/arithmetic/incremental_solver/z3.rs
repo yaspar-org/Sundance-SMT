@@ -40,8 +40,15 @@ pub struct Z3IncrementalState {
     lits_by_level: Vec<Vec<i32>>,
     /// Per-level `z3::push` count.
     push_counts: Vec<u32>,
-    /// VarIds registered per level; definitions are scoped to their level.
+    /// VarIds registered per level. VarIds are never recycled, but this records
+    /// which level a var was born at for bookkeeping.
     vars_by_level: Vec<Vec<VarId>>,
+    /// Definitional asserts (`var_N == rhs`) recorded per level. A definition is
+    /// a structural fact true at every level, but `solver.assert` lands it in the
+    /// current push scope, so `notify_backtrack`'s `pop` would drop it. On
+    /// backtrack we re-assert popped definitions at the surviving level so they
+    /// persist for the whole solve.
+    defs_by_level: Vec<Vec<Bool>>,
     current_level: usize,
 }
 
@@ -56,6 +63,7 @@ impl Z3IncrementalState {
             lits_by_level: vec![Vec::new()],
             push_counts: vec![0],
             vars_by_level: vec![Vec::new()],
+            defs_by_level: vec![Vec::new()],
             current_level: 0,
         }
     }
@@ -69,6 +77,9 @@ impl Z3IncrementalState {
         }
         while self.vars_by_level.len() <= self.current_level {
             self.vars_by_level.push(Vec::new());
+        }
+        while self.defs_by_level.len() <= self.current_level {
+            self.defs_by_level.push(Vec::new());
         }
     }
 
@@ -132,7 +143,10 @@ impl IncrementalArithSolver for Z3IncrementalState {
 
         if let Some(rhs_expr) = definition {
             let rhs = self.expr_to_z3(&rhs_expr);
-            self.solver.assert(Int::eq(&v, rhs));
+            let def = Int::eq(&v, rhs);
+            self.solver.assert(&def);
+            // Record so backtrack can re-assert it if its push scope is popped.
+            self.defs_by_level[self.current_level].push(def);
             debug_println!(21, 0, "[z3inc] def var_{}", id);
         }
         id
@@ -160,13 +174,27 @@ impl IncrementalArithSolver for Z3IncrementalState {
                     self.active_lits.remove(&l);
                 }
             }
-            if let Some(var_ids) = self.vars_by_level.pop() {
-                // Truncate vars back — these definitions lived in a popped scope.
-                for _ in var_ids {
-                    self.vars.pop();
+            // VarIds are never recycled. Each `var_N` constant is a distinct Z3
+            // symbol whose definitional assert (`var_N == rhs`) is a structural
+            // fact true at every level, so it is sound to keep across backtracks.
+            // Popping `self.vars` here would let a later `register_var` reuse the
+            // index `N` for a *different* term, colliding two contradictory
+            // definitions on the same `var_N` and yielding a spurious empty-core
+            // unsat, so `self.vars` is left intact.
+            self.vars_by_level.pop();
+            // The `solver.pop` above also discarded the definitional asserts made
+            // at this level (they land in the current push scope). Re-assert them
+            // at the surviving level so `var_N` keeps its definition — otherwise
+            // the var becomes unconstrained and check() spuriously returns SAT.
+            if let Some(defs) = self.defs_by_level.pop() {
+                self.current_level -= 1;
+                for def in defs {
+                    self.solver.assert(&def);
+                    self.defs_by_level[self.current_level].push(def);
                 }
+            } else {
+                self.current_level -= 1;
             }
-            self.current_level -= 1;
         }
         self.ensure_level_slot();
     }
