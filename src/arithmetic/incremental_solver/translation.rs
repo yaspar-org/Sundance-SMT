@@ -23,7 +23,7 @@ use yaspar_ir::ast::{
 
 /// Bridges the propagator's egraph/term world and the abstract arithmetic solver.
 pub struct ArithTranslator {
-    pub solver: Box<dyn IncrementalArithSolver>,
+    solver: Box<dyn IncrementalArithSolver>,
     /// egraph_id -> VarId.
     egraph_to_var: DeterministicHashMap<u32, VarId>,
     /// VarId -> Some(solver_uid) for translating check results back.
