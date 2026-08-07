@@ -8,8 +8,8 @@
 use crate::arithmetic::incremental_solver::{
     ArithCheckResult, ArithConstraint, ArithExpr, IncrementalArithSolver, VarId,
 };
-use crate::arithmetic::lp::{ArithResult, Coefficient};
 use crate::arithmetic::lia::stats::Stats as LiaStats;
+use crate::arithmetic::lp::{ArithResult, Coefficient};
 use crate::egraphs::EgraphTrait;
 use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -265,8 +265,7 @@ impl ArithTranslator {
                 for (value, var_ids) in buckets {
                     let mut set = DeterministicHashSet::default();
                     for var_id in var_ids {
-                        if let Some(Some(solver_uid)) =
-                            self.var_to_solver_uid.get(var_id as usize)
+                        if let Some(Some(solver_uid)) = self.var_to_solver_uid.get(var_id as usize)
                         {
                             let egraph_id = solver_state.to_egraph_id(*solver_uid);
                             if solver_state.egraph.find(egraph_id) == egraph_id {

@@ -108,8 +108,8 @@ impl Z3IncrementalState {
 
     fn constraint_to_z3(&self, c: &ArithConstraint) -> Bool {
         match c {
-            ArithConstraint::Leq(l, r) => Int::le(&self.expr_to_z3(l), &self.expr_to_z3(r)),
-            ArithConstraint::Lt(l, r) => Int::lt(&self.expr_to_z3(l), &self.expr_to_z3(r)),
+            ArithConstraint::Leq(l, r) => Int::le(&self.expr_to_z3(l), self.expr_to_z3(r)),
+            ArithConstraint::Lt(l, r) => Int::lt(&self.expr_to_z3(l), self.expr_to_z3(r)),
             ArithConstraint::Eq(l, r) => Int::eq(&self.expr_to_z3(l), self.expr_to_z3(r)),
         }
     }
@@ -211,7 +211,13 @@ impl IncrementalArithSolver for Z3IncrementalState {
         self.active_lits.insert(lit);
         self.lits_by_level[self.current_level].push(lit);
         self.solver.assert_and_track(ast, &tracker);
-        debug_println!(21, 0, "[z3inc] pushed constraint lit={} at level {}", lit, self.current_level);
+        debug_println!(
+            21,
+            0,
+            "[z3inc] pushed constraint lit={} at level {}",
+            lit,
+            self.current_level
+        );
     }
 
     fn push_equality(&mut self, a: VarId, b: VarId, lit: i32) {
@@ -228,7 +234,15 @@ impl IncrementalArithSolver for Z3IncrementalState {
         self.active_lits.insert(lit);
         self.lits_by_level[self.current_level].push(lit);
         self.solver.assert_and_track(ast, &tracker);
-        debug_println!(21, 0, "[z3inc] pushed equality var_{}==var_{} lit={} at level {}", a, b, lit, self.current_level);
+        debug_println!(
+            21,
+            0,
+            "[z3inc] pushed equality var_{}==var_{} lit={} at level {}",
+            a,
+            b,
+            lit,
+            self.current_level
+        );
     }
 
     fn check(&mut self) -> ArithCheckResult {
@@ -244,19 +258,18 @@ impl IncrementalArithSolver for Z3IncrementalState {
                 let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<VarId>> =
                     DeterministicHashMap::new();
                 for &var_id in &self.model_vars {
-                    if let Some(v) = self.vars.get(var_id as usize) {
-                        if let Some(val) = model.eval(v, true) {
+                    if let Some(v) = self.vars.get(var_id as usize)
+                        && let Some(val) = model.eval(v, true) {
                             let ibig = parse_z3_model_int(&val.to_string());
                             buckets.entry(ibig).or_default().insert(var_id);
                         }
-                    }
                 }
                 debug_println!(21, 0, "[z3inc] SAT");
                 ArithCheckResult::Sat(buckets)
             }
             SatResult::Unsat => {
                 let core = self.solver.get_unsat_core();
-                let mut lits: Vec<i32> = core
+                let lits: Vec<i32> = core
                     .iter()
                     .filter_map(|ast| {
                         let raw = ast.to_string();
