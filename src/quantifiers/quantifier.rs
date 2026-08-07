@@ -359,11 +359,10 @@ fn process_deferred_instantiations(
                 ProofStepType::Instantiation,
             );
 
-        // The instantiated body must only be asserted when the quantifier holds,
-        // i.e. `quantifier => body`. Mirror the skolemization path: emit the guard
-        // implication and gate every Tseitin/theory clause with `-nnf_term_literal`.
-        // Without this guard the body is asserted unconditionally, which is unsound
-        // (e.g. `(=> A (forall x. P x))` would force `P` even when `A` is false).
+        // Assert the body only when the quantifier holds (`quantifier => body`):
+        // emit the guard implication and gate each clause with `-nnf_term_literal`,
+        // as the skolemization path does. Otherwise the body holds unconditionally,
+        // which is unsound.
         let inst_imp = vec![-quantifier_dimacs_literal, nnf_term_literal];
         let mut clauses = vec![inst_imp];
 
