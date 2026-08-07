@@ -259,10 +259,11 @@ impl IncrementalArithSolver for Z3IncrementalState {
                     DeterministicHashMap::new();
                 for &var_id in &self.model_vars {
                     if let Some(v) = self.vars.get(var_id as usize)
-                        && let Some(val) = model.eval(v, true) {
-                            let ibig = parse_z3_model_int(&val.to_string());
-                            buckets.entry(ibig).or_default().insert(var_id);
-                        }
+                        && let Some(val) = model.eval(v, true)
+                    {
+                        let ibig = parse_z3_model_int(&val.to_string());
+                        buckets.entry(ibig).or_default().insert(var_id);
+                    }
                 }
                 debug_println!(21, 0, "[z3inc] SAT");
                 ArithCheckResult::Sat(buckets)
