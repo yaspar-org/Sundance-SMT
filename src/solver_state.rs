@@ -564,9 +564,7 @@ impl SolverState {
                 // silently dropping it (which would risk an unsound/incomplete
                 // answer), fail loudly so the case is surfaced.
                 if trigger_ids.is_empty() {
-                    panic!(
-                        "Could not infer a trigger for untriggered forall: {term}"
-                    );
+                    panic!("Could not infer a trigger for untriggered forall: {term}");
                 }
             }
 
