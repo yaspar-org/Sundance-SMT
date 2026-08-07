@@ -32,9 +32,8 @@ impl Default for SolverConfig {
             // will return UNKNOWN when the limit is hit.
             max_lra_solve_calls: None,
             // Branch-and-bound runs on an explicit heap stack, so this is no longer capped by
-            // the thread stack. Match `max_lra_solve_calls`' historical 2^17 headroom so
-            // regression tests reach SAT/UNSAT or TIMEOUT rather than bailing to UNKNOWN.
-            max_branch_depth: Some(1 << 17),
+            // the thread stack.
+            max_branch_depth: Some(1 << 18),
         }
     }
 }
