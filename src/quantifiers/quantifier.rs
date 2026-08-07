@@ -334,7 +334,7 @@ fn process_deferred_instantiations(
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
 
-        let mut clauses: Vec<_> = cnf_term
+        let raw_clauses: Vec<Vec<i32>> = cnf_term
             .into_iter()
             .map(|x| x.into_iter().collect::<Vec<_>>())
             .collect();
@@ -359,17 +359,35 @@ fn process_deferred_instantiations(
                 ProofStepType::Instantiation,
             );
 
-        proof_tracer
-            .borrow_mut()
-            .push_steps(&clauses, ProofStepType::TheoryClause(Theory::Boolean));
+        // The instantiated body must only be asserted when the quantifier holds,
+        // i.e. `quantifier => body`. Mirror the skolemization path: emit the guard
+        // implication and gate every Tseitin/theory clause with `-nnf_term_literal`.
+        // Without this guard the body is asserted unconditionally, which is unsound
+        // (e.g. `(=> A (forall x. P x))` would force `P` even when `A` is false).
+        let inst_imp = vec![-quantifier_dimacs_literal, nnf_term_literal];
+        let mut clauses = vec![inst_imp];
+
+        for clause in raw_clauses {
+            let mut c = clause;
+            if push_literal_if_not_tautology(&mut c, -nnf_term_literal) {
+                proof_tracer
+                    .borrow_mut()
+                    .add_theory_clause(&c, Theory::Boolean);
+                clauses.push(c);
+            }
+        }
 
         let additional_constraints =
             check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
-        proof_tracer.borrow_mut().push_steps(
-            &additional_constraints,
-            ProofStepType::TheoryClause(Theory::Background),
-        );
-        clauses.extend(additional_constraints);
+        for clause in additional_constraints {
+            let mut c = clause;
+            if push_literal_if_not_tautology(&mut c, -nnf_term_literal) {
+                proof_tracer
+                    .borrow_mut()
+                    .add_theory_clause(&c, Theory::Background);
+                clauses.push(c);
+            }
+        }
 
         results.push(QuantifierInstance::Instantiation { clauses });
     }
