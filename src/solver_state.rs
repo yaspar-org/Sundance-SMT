@@ -70,9 +70,11 @@ fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
                         }
                     }
                     (inner_term, patterns)
-                } else if let Forall(..) = term.repr() {
-                    panic!("Unannotated forall quantifier (no triggers): {term}")
                 } else {
+                    // Unannotated quantifier: no explicit pattern subterms.
+                    // For foralls, triggers are inferred at registration time
+                    // (see register_arithmetic_and_quantifier); here we only need
+                    // the body, so return it with no pattern subterms.
                     (middle_term, vec![])
                 };
             let mut subterms = vec![inner_term];
@@ -519,23 +521,57 @@ impl SolverState {
 
         // Quantifier registration
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
-            let (inner_term, trigger_ids) = if let Annotated(inner_term, attrs) = middle_term.repr()
-            {
-                let mut trigger_ids = vec![];
-                for attr in attrs.iter() {
-                    if let Attribute::Pattern(s_exprs) = attr {
+            let is_forall = matches!(term.repr(), Forall(..));
+
+            // Collect any explicit `:pattern` triggers and the de-annotated body.
+            let (inner_term, mut trigger_ids) =
+                if let Annotated(inner_term, attrs) = middle_term.repr() {
+                    let mut trigger_ids = vec![];
+                    for attr in attrs.iter() {
+                        if let Attribute::Pattern(s_exprs) = attr {
+                            let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
+                                s_exprs.iter().map(|p| self.build_pattern(p)).collect();
+                            trigger_ids.push(pattern_ids);
+                        }
+                    }
+                    (inner_term.clone(), trigger_ids)
+                } else {
+                    (middle_term.clone(), vec![])
+                };
+
+            // Universally-quantified formulas are instantiated by e-matching, so
+            // they need at least one trigger. Boogie/Dafny and F* emit many
+            // axioms with no `:pattern` (they rely on Z3's auto-trigger inference
+            // + MBQI). When a forall arrives without triggers, infer them using
+            // the Simplify/Z3 algorithm rather than failing. Existentials are
+            // skolemized instead, so they need no triggers.
+            if is_forall && trigger_ids.is_empty() {
+                let bound_names: Vec<String> =
+                    sorted_vars.iter().map(|x| x.0.get().clone()).collect();
+                if let Some(multipatterns) =
+                    crate::quantifiers::trigger_inference::infer_triggers(&inner_term, &bound_names)
+                {
+                    for mp in multipatterns {
                         let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
-                            s_exprs.iter().map(|p| self.build_pattern(p)).collect();
-                        trigger_ids.push(pattern_ids);
+                            mp.iter().map(|p| self.build_pattern(p)).collect();
+                        if !pattern_ids.is_empty() {
+                            trigger_ids.push(pattern_ids);
+                        }
                     }
                 }
-                (inner_term, trigger_ids)
-            } else if let Forall(..) = term.repr() {
-                panic!("Unannotated forall quantifier (no triggers): {term}")
-            } else {
-                // Unannotated existential (no triggers) — will be skolemized on assignment
-                (middle_term, vec![])
-            };
+                // If inference found nothing, `trigger_ids` stays empty: the
+                // quantifier simply won't be instantiated (sound for unsat,
+                // incomplete otherwise). The instantiation loop already handles
+                // the empty-trigger case gracefully.
+                if trigger_ids.is_empty() {
+                    debug_println!(
+                        0,
+                        0,
+                        "Warning: could not infer a trigger for forall {term}; \
+                         it will not be instantiated"
+                    );
+                }
+            }
 
             // Store quantifier body in terms_list (needed for substitution during instantiation)
             let body_uid = inner_term.uid();
