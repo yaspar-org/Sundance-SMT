@@ -559,16 +559,13 @@ impl SolverState {
                         }
                     }
                 }
-                // If inference found nothing, `trigger_ids` stays empty: the
-                // quantifier simply won't be instantiated (sound for unsat,
-                // incomplete otherwise). The instantiation loop already handles
-                // the empty-trigger case gracefully.
+                // If inference still yields no usable trigger, we cannot
+                // instantiate this quantifier by e-matching. Rather than
+                // silently dropping it (which would risk an unsound/incomplete
+                // answer), fail loudly so the case is surfaced.
                 if trigger_ids.is_empty() {
-                    debug_println!(
-                        0,
-                        0,
-                        "Warning: could not infer a trigger for forall {term}; \
-                         it will not be instantiated"
+                    panic!(
+                        "Could not infer a trigger for untriggered forall: {term}"
                     );
                 }
             }
