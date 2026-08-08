@@ -165,6 +165,12 @@ impl SMTProofTracer {
         }
     }
 
+    pub fn push_steps(&mut self, clauses: &Vec<Vec<i32>>, typ: ProofStepType) {
+        for clause in clauses {
+            self.push_step(clause, typ.clone());
+        }
+    }
+
     pub fn add_original_clause(&mut self, clause: &Vec<i32>) {
         self.push_step(clause, ProofStepType::OriginalClause);
     }
