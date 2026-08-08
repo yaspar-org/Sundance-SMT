@@ -334,7 +334,7 @@ fn process_deferred_instantiations(
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
 
-        let mut clauses: Vec<_> = cnf_term
+        let mut raw_clauses: Vec<Vec<i32>> = cnf_term
             .into_iter()
             .map(|x| x.into_iter().collect::<Vec<_>>())
             .collect();
@@ -359,9 +359,24 @@ fn process_deferred_instantiations(
                 ProofStepType::Instantiation,
             );
 
+        // Assert the body only when the quantifier holds (`quantifier => body`).
+        // `cnf_tseitin` appends, as its final clause, a unit clause asserting the
+        // top literal unconditionally; guarding just that clause (turning it into
+        // the implication `-quantifier \/ top`) is enough for soundness. The
+        // remaining clauses only define fresh Tseitin variables and are valid
+        // regardless of the quantifier, so they stay ungated. Gating every clause
+        // instead (as the skolemization path does) suppresses all propagation of
+        // the body's structure until the top literal is decided, which badly
+        // hurts search.
+        let top = raw_clauses
+            .pop()
+            .expect("cnf_tseitin always emits the top-level clause");
+        debug_assert_eq!(top, vec![nnf_term_literal]);
+        raw_clauses.push(vec![-quantifier_dimacs_literal, nnf_term_literal]);
+
         proof_tracer
             .borrow_mut()
-            .push_steps(&clauses, ProofStepType::TheoryClause(Theory::Boolean));
+            .push_steps(&raw_clauses, ProofStepType::TheoryClause(Theory::Boolean));
 
         let additional_constraints =
             check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
@@ -369,6 +384,8 @@ fn process_deferred_instantiations(
             &additional_constraints,
             ProofStepType::TheoryClause(Theory::Background),
         );
+
+        let mut clauses = raw_clauses;
         clauses.extend(additional_constraints);
 
         results.push(QuantifierInstance::Instantiation { clauses });

@@ -210,6 +210,14 @@ impl<'a> CustomExternalPropagator<'a> {
                 }
             }
         }
+        // Materializing an instance can enqueue arithmetic merges (via
+        // `insert_predecessor`'s congruence closure). Drain them so the queue is
+        // empty before control returns to CaDiCaL, as `notify_new_decision_level`
+        // requires.
+        #[cfg(feature = "z3-solver")]
+        if let Some(z3) = self.z3_incremental.as_mut() {
+            z3.drain_merge_queue(self.solver_state);
+        }
         self.sync_new_vars();
     }
 }

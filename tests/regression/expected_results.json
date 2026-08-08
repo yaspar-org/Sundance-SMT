@@ -171,6 +171,7 @@
     "edge_cases_quantifiers/quantifier_backtrack13.smt2": "unsat",
     "edge_cases_quantifiers/quantifier_backtrack14.smt2": "unsat",
     "edge_cases_quantifiers/quantifier_backtrack15.smt2": "unsat",
+    "edge_cases_quantifiers/quantifier-guardbug.smt2": "unknown",
     "skolemization/skolem-simple.smt2" : "unknown",
     "skolemization/skolem-verus1.smt2" : "unsat",
     "skolemization/skolem-verus2.smt2" : "unsat",

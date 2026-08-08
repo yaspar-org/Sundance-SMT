@@ -32,8 +32,12 @@ impl Default for SolverConfig {
             // will return UNKNOWN when the limit is hit.
             max_lra_solve_calls: None,
             // Branch-and-bound runs on an explicit heap stack, so this is no longer capped by
-            // the thread stack.
-            max_branch_depth: Some(1 << 18),
+            // the thread stack. Keep this ceiling very high: a lower limit makes hard-but-
+            // solvable instances (e.g. subtraction_copy.smt2) flip between UNKNOWN and TIMEOUT
+            // depending on the runner/platform, since the search returns UNKNOWN the moment the
+            // depth is hit. At 2^32 we effectively never bail early — a real runaway search hits
+            // the wall-clock timeout instead, which is deterministic across platforms.
+            max_branch_depth: Some(1 << 32),
         }
     }
 }
