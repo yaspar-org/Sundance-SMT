@@ -131,6 +131,24 @@ impl<V: Zero + Clone + fmt::Debug> Matrix<V> {
         self.cols.get(col).map_or(0, |c| c.len())
     }
 
+    /// Append an empty row to the matrix, returning its index (= the old `nrows`).
+    ///
+    /// Used to grow the tableau incrementally when a new relation (slack row) is added
+    /// to a live simplex solver. Insert entries afterwards with [`Self::update_or_insert`].
+    pub fn add_row(&mut self) -> usize {
+        self.rows.push(FxHashMap::default());
+        self.rows.len() - 1
+    }
+
+    /// Append an empty column to the matrix, returning its index (= the old `ncols`).
+    ///
+    /// Used to grow the tableau incrementally when a relation introduces a variable the
+    /// solver has not seen before. Insert entries afterwards with [`Self::update_or_insert`].
+    pub fn add_col(&mut self) -> usize {
+        self.cols.push(FxHashMap::default());
+        self.cols.len() - 1
+    }
+
     /// Perform a pivot operation on the NxM matrix at the specified row and column.
     ///
     /// The pivot transforms matrix elements according to:
