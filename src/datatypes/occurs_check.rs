@@ -104,16 +104,18 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
                     path[cycle_start + 1..].iter().map(|(_, e)| *e).collect();
                 cycle_edges.push(edge);
                 let conflict_clause = build_conflict_clause(solver_state, &cycle_edges);
-                let clause_terms: Vec<String> = conflict_clause
-                    .iter()
-                    .map(|&lit| format!("{}", solver_state.get_term_from_lit(lit)))
-                    .collect();
-                crate::debug_println!(
-                    25,
-                    10,
-                    "OCCURS CHECK AXIOM (conflict clause): (or {})",
-                    clause_terms.join(" ")
-                );
+                if crate::log::is_important(25) {
+                    let clause_terms: Vec<String> = conflict_clause
+                        .iter()
+                        .map(|&lit| format!("{}", solver_state.get_term_from_lit(lit)))
+                        .collect();
+                    crate::debug_println!(
+                        25,
+                        10,
+                        "OCCURS CHECK AXIOM (conflict clause): (or {})",
+                        clause_terms.join(" ")
+                    );
+                }
                 return Some(conflict_clause);
             }
 
