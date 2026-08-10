@@ -71,10 +71,8 @@ fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
                     }
                     (inner_term, patterns)
                 } else {
-                    // Unannotated quantifier: no explicit pattern subterms.
-                    // For foralls, triggers are inferred at registration time
-                    // (see register_arithmetic_and_quantifier); here we only need
-                    // the body, so return it with no pattern subterms.
+                    // Unannotated quantifier: body only; triggers are inferred
+                    // at registration (see register_arithmetic_and_quantifier).
                     (middle_term, vec![])
                 };
             let mut subterms = vec![inner_term];
@@ -539,12 +537,9 @@ impl SolverState {
                     (middle_term.clone(), vec![])
                 };
 
-            // Universally-quantified formulas are instantiated by e-matching, so
-            // they need at least one trigger. Boogie/Dafny and F* emit many
-            // axioms with no `:pattern` (they rely on Z3's auto-trigger inference
-            // + MBQI). When a forall arrives without triggers, infer them using
-            // the Simplify/Z3 algorithm rather than failing. Existentials are
-            // skolemized instead, so they need no triggers.
+            // Foralls are instantiated by e-matching and need a trigger;
+            // infer one when none was given (see `trigger_inference`).
+            // Existentials are skolemized, so they need none.
             if is_forall && trigger_ids.is_empty() {
                 let bound_names: Vec<String> =
                     sorted_vars.iter().map(|x| x.0.get().clone()).collect();
@@ -559,10 +554,8 @@ impl SolverState {
                         }
                     }
                 }
-                // If inference still yields no usable trigger, we cannot
-                // instantiate this quantifier by e-matching. Rather than
-                // silently dropping it (which would risk an unsound/incomplete
-                // answer), fail loudly so the case is surfaced.
+                // No inferable trigger: fail loudly rather than silently drop
+                // the axiom (which could give an unsound/incomplete answer).
                 if trigger_ids.is_empty() {
                     panic!("Could not infer a trigger for untriggered forall: {term}");
                 }

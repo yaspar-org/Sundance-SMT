@@ -1,17 +1,11 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Automatic trigger (pattern) inference for quantifiers that carry no
-//! `:pattern` annotation.
+//! Automatic trigger (pattern) inference for quantifiers with no `:pattern`.
 //!
-//! Boogie/Dafny and F* emit many quantified axioms without explicit triggers
-//! and rely on the solver to infer them (Z3/Simplify) or to fall back to MBQI.
-//! Sundance only does pattern-based (e-matching) instantiation, so without a
-//! trigger such a quantifier cannot be instantiated at all — historically we
-//! `panic!`ed on it.
-//!
-//! This module implements the classic Simplify/Z3 auto-trigger algorithm
-//! (Detlefs, Nelson & Saxe 2005, §5; see also Leino & Pit-Claudel, CAV 2016):
+//! Sundance only instantiates by e-matching, so an untriggered `forall` needs
+//! an inferred trigger. This implements the Simplify/Z3 auto-trigger algorithm
+//! (Detlefs, Nelson & Saxe 2005, §5):
 //!
 //!   1. Collect *candidate* subterms of the body: applications whose head is an
 //!      **uninterpreted** function/predicate and that contain at least one bound
@@ -24,8 +18,7 @@
 //!   3. Otherwise greedily assemble a **multi-pattern**: a minimal set of
 //!      candidates whose covered-variable sets union to all bound variables.
 //!   4. If some bound variable never appears under any uninterpreted symbol, no
-//!      valid trigger exists; we return `None` and the caller decides the
-//!      fallback (skip the quantifier — sound for unsat, incomplete otherwise).
+//!      valid trigger exists and we return `None`.
 
 use std::collections::BTreeSet;
 
