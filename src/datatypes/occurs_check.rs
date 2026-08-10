@@ -12,14 +12,10 @@ use crate::solver_types::TermOption;
 use crate::utils::DeterministicHashMap;
 
 /// An edge in the constructor graph: (parent_eid, child_eid, parent_tester_lit).
-/// parent_eid is the egraph ID of the constructor term,
-/// child_eid is the egraph ID of its recursive child (selector application),
-/// parent_tester_lit is the SAT literal for `(_ is Ctor) parent` — the reason
-/// the parent is treated as this constructor. The cycle only exists while every
-/// node on it is committed to its constructor, so the conflict clause must be
-/// guarded by the negation of each parent's tester. `None` when no tester
-/// literal has been allocated yet (the constructor status is not yet a SAT
-/// decision), in which case there is nothing to guard against.
+/// parent_eid/child_eid are the egraph IDs of the constructor term and its
+/// recursive child. parent_tester_lit is the `(_ is Ctor) parent` literal that
+/// makes the parent this constructor; the conflict clause must be guarded by its
+/// negation. `None` if no tester literal exists yet (nothing to guard).
 type Edge = (u32, u32, Option<i32>);
 
 /// Performs the occurs check for inductive datatypes.
@@ -45,9 +41,8 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
             _ => continue,
         };
 
-        // The reason this term is treated as this constructor is its tester
-        // literal. The occurs-check cycle only holds while that tester is true,
-        // so the conflict clause must be guarded by its negation.
+        // The cycle only holds while this tester is true, so the conflict
+        // clause is guarded by its negation.
         let tester_lit = solver_state.get_lit_from_term_safe(tester_term);
 
         let Some(&term_eid) = solver_state.id_map.get_by_left(&uid) else {
@@ -135,16 +130,10 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
 
 /// Build a conflict clause from the edges forming a cycle.
 ///
-/// Each edge (parent_eid, child_eid, parent_tester_lit) represents a
-/// constructor-to-child step. Consecutive edges are linked: edge_i.child_eid
-/// and edge_{i+1}.parent_eid are in the same e-class.
-///
-/// The cycle is a contradiction only under the assignment that produced it:
-/// each parent must be committed to its constructor (its tester holds) and the
-/// linking equalities must hold. The conflict clause is therefore the negation
-/// of that conjunction — the negated tester of every parent on the cycle plus
-/// the negated linking equalities. Omitting the testers would wrongly assert
-/// the equalities can never hold, even when the parents are other constructors.
+/// The cycle only contradicts under the assignment that produced it: every
+/// parent's tester holds and the linking equalities (edge_i.child_eid ==
+/// edge_{i+1}.parent_eid) hold. The clause negates that conjunction. Omitting
+/// the testers would wrongly forbid the equalities even for other constructors.
 fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[Edge]) -> Vec<i32> {
     let mut clause: Vec<i32> = Vec::new();
     let n = cycle_edges.len();
@@ -168,8 +157,7 @@ fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[Edge]) -
         }
     }
 
-    // The same tester or equality literal can appear on multiple edges; keep the
-    // clause a proper set of literals.
+    // Dedup: the same literal can appear on multiple edges.
     clause.sort_unstable();
     clause.dedup();
 
