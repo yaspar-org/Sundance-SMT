@@ -11,12 +11,19 @@ use crate::solver_types::ConstructorType;
 use crate::solver_types::TermOption;
 use crate::utils::DeterministicHashMap;
 
-/// An edge in the constructor graph: (parent_eid, child_eid, parent_tester_lit).
-/// parent_eid/child_eid are the egraph IDs of the constructor term and its
-/// recursive child. parent_tester_lit is the `(_ is Ctor) parent` literal that
-/// makes the parent this constructor; the conflict clause must be guarded by its
-/// negation. `None` if no tester literal exists yet (nothing to guard).
-type Edge = (u32, u32, Option<i32>);
+/// An edge in the constructor graph, from a constructor term to one of its
+/// recursive children.
+#[derive(Clone, Copy)]
+struct Edge {
+    /// Egraph ID of the constructor (parent) term.
+    parent_eid: u32,
+    /// Egraph ID of the recursive child (selector application).
+    child_eid: u32,
+    /// The `(_ is Ctor) parent` literal that makes the parent this constructor.
+    /// The conflict clause must be guarded by its negation. `None` if no tester
+    /// literal exists yet (nothing to guard).
+    parent_tester_lit: Option<i32>,
+}
 
 /// Performs the occurs check for inductive datatypes.
 ///
@@ -55,10 +62,14 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
                 continue;
             };
             let child_canonical = solver_state.egraph.find(child_eid);
-            graph
-                .entry(parent_canonical)
-                .or_default()
-                .push((child_canonical, (term_eid, child_eid, tester_lit)));
+            graph.entry(parent_canonical).or_default().push((
+                child_canonical,
+                Edge {
+                    parent_eid: term_eid,
+                    child_eid,
+                    parent_tester_lit: tester_lit,
+                },
+            ));
         }
     }
 
@@ -73,7 +84,12 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
         let mut on_path: HashSet<u32> = HashSet::from([start]);
         // path[i] = (canonical_node, edge that brought us here)
         // The first entry has a dummy edge since nothing "brought us" to start.
-        let mut path: Vec<(u32, Edge)> = vec![(start, (0, 0, None))];
+        let dummy_edge = Edge {
+            parent_eid: 0,
+            child_eid: 0,
+            parent_tester_lit: None,
+        };
+        let mut path: Vec<(u32, Edge)> = vec![(start, dummy_edge)];
         let mut stack: Vec<(u32, usize)> = vec![(start, 0)];
 
         while let Some((node, idx)) = stack.last_mut() {
@@ -142,12 +158,12 @@ fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[Edge]) -
 
     for i in 0..n {
         // Guard: the parent is only this constructor while its tester is true.
-        if let Some(tester_lit) = cycle_edges[i].2 {
+        if let Some(tester_lit) = cycle_edges[i].parent_tester_lit {
             clause.push(-tester_lit);
         }
 
-        let this_child = cycle_edges[i].1;
-        let next_parent = cycle_edges[(i + 1) % n].0;
+        let this_child = cycle_edges[i].child_eid;
+        let next_parent = cycle_edges[(i + 1) % n].parent_eid;
 
         if let Some(equalities) = solver_state
             .egraph
