@@ -9,18 +9,13 @@ use cadical_sys::ProofTracer;
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
-    fn add_original_clause(
-        &mut self,
-        _id: u64,
-        _redundant: bool,
-        _clause: &[i32],
-        _restored: bool,
-    ) {
-        // Previously, this function added original formula clauses and theory clauses to the proof here.
-        // However, because this function could only see the clause itself and whether Sundance was
-        // still processing original formula clauses, it couldn't determine
-        // which theory was responsible for the clause (which eDRAT now requires).
-        // Thus, Sundance directly adds original and theory clauses elsewhere.
+    fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], restored: bool) {
+        if restored || self.consume_expected_original_clause(clause) {
+            return;
+        }
+
+        // Unmatched original-clause callbacks come from the external propagator.
+        self.add_theory_clause(&clause.to_vec(), crate::proof::Theory::Background);
     }
 
     fn add_derived_clause(
@@ -66,8 +61,9 @@ impl ProofTracer for SMTProofTracer {
         panic!("Do not currently support assumptions")
     }
 
-    fn add_constraint(&mut self, _clause: &[i32]) {
-        // Optional: Adding constraints
+    fn add_constraint(&mut self, clause: &[i32]) {
+        // Clauses supplied by the external propagator are theory lemmas.
+        self.add_theory_clause(&clause.to_vec(), crate::proof::Theory::Background);
     }
 
     fn reset_assumptions(&mut self) {
@@ -86,4 +82,32 @@ impl ProofTracer for SMTProofTracer {
     fn conclude_unsat(&mut self, _conclusion_type: i32, _clause_ids: &[u64]) {}
 
     fn conclude_unknown(&mut self, _trail: &[i32]) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn tracer() -> SMTProofTracer {
+        SMTProofTracer::new(HashMap::new(), HashMap::new())
+    }
+
+    #[test]
+    fn classifies_original_clause_callbacks() {
+        let mut startup = tracer();
+        startup.add_original_clause(&vec![]);
+        startup.expect_original_clause_callback(&[]);
+        ProofTracer::add_original_clause(&mut startup, 1, false, &[], false);
+        startup.clear_expected_original_clause_callback();
+        assert_eq!(startup.generate_edrat(), "a 0\n");
+
+        let mut external = tracer();
+        ProofTracer::add_original_clause(&mut external, 1, false, &[], false);
+        assert_eq!(external.generate_edrat(), "t bg 0\n");
+
+        let mut constraint = tracer();
+        ProofTracer::add_constraint(&mut constraint, &[]);
+        assert_eq!(constraint.generate_edrat(), "t bg 0\n");
+    }
 }

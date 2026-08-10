@@ -250,7 +250,13 @@ fn add_clause_to_solver_and_to_proof(
         proof_tracer.borrow_mut().add_original_clause(clause);
     }
 
+    proof_tracer
+        .borrow_mut()
+        .expect_original_clause_callback(clause);
     solver.clause6(clause); // TODO `clause1()`, `clause2()`, etc. might be more efficient
+    proof_tracer
+        .borrow_mut()
+        .clear_expected_original_clause_callback();
 }
 
 fn solve(solver: &mut CaDiCal) -> Status {

@@ -8,9 +8,13 @@ use crate::proof::{ProofStep, ProofStepType, Theory};
 use core::panic;
 use std::cmp::Eq;
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::hash::Hash;
 use std::ops::Neg;
-use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, Term};
+use yaspar_ir::ast::{
+    ATerm::*, Attribute, DatatypeFunction, FunctionMeta, QualifiedIdentifier, Repr, Sig, Sort,
+    SortDef, Str, SymbolQuote, Term,
+};
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
 /// to generate an eDRAT proof.
@@ -20,6 +24,7 @@ pub struct SMTProofTracer {
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     instantiations_for_smt2: Vec<(Term, Vec<(Term, bool)>)>,
+    expected_original_clause: Option<Vec<i32>>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
 }
@@ -107,7 +112,11 @@ fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> String {
 }
 
 /// Format a function signature as a declare-fun command
-fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) -> String {
+fn format_function_declaration(
+    symbol_name: &Str,
+    sigs: &[(Sig, FunctionMeta)],
+    symbol_table: &HashMap<Str, Vec<(Sig, FunctionMeta)>>,
+) -> String {
     // overloading is only possible for generated functions; we skip them.
     if sigs.len() != 1 {
         return String::new();
@@ -132,9 +141,236 @@ fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) 
             if !meta.rec_deps.is_empty() {
                 panic!("We do not handle recursive function definitions!");
             }
-            format!("(define-fun {})", meta.def)
+            let variables = meta
+                .def
+                .vars
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(
+                "(define-fun {} ({}) {} {})\n",
+                meta.def.name.sym_quote(),
+                variables,
+                meta.def.out_sort,
+                SmtTerm {
+                    term: &meta.def.body,
+                    symbol_table,
+                }
+            )
         }
         _ => String::new(),
+    }
+}
+
+// Yaspar's generic Display omits inferred sort ascriptions. Parametric
+// datatype constructors need those ascriptions to remain valid SMT-LIB.
+struct SmtTerm<'a> {
+    term: &'a Term,
+    symbol_table: &'a HashMap<Str, Vec<(Sig, FunctionMeta)>>,
+}
+
+impl SmtTerm<'_> {
+    fn is_parametric_constructor(&self, qid: &QualifiedIdentifier) -> bool {
+        self.symbol_table.get(&qid.0.symbol).is_some_and(|sigs| {
+            sigs.iter().any(|(sig, meta)| {
+                matches!(sig, Sig::ParFunc(_, params, _, _) if !params.is_empty())
+                    && matches!(
+                        meta,
+                        FunctionMeta::Datatype {
+                            kind: DatatypeFunction::Constructor,
+                            ..
+                        }
+                    )
+            })
+        })
+    }
+
+    fn fmt_identifier(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        qid: &QualifiedIdentifier,
+        inferred_sort: Option<&Sort>,
+    ) -> fmt::Result {
+        if qid.1.is_none()
+            && self.is_parametric_constructor(qid)
+            && let Some(sort) = inferred_sort
+        {
+            return write!(f, "(as {} {})", qid.0, sort);
+        }
+        write!(f, "{qid}")
+    }
+
+    fn fmt_terms(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        terms: &[Term],
+        separator: &str,
+    ) -> fmt::Result {
+        for (index, term) in terms.iter().enumerate() {
+            if index > 0 {
+                f.write_str(separator)?;
+            }
+            write!(
+                f,
+                "{}",
+                SmtTerm {
+                    term,
+                    symbol_table: self.symbol_table,
+                }
+            )?;
+        }
+        Ok(())
+    }
+
+    fn fmt_application(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        operator: &str,
+        terms: &[Term],
+    ) -> fmt::Result {
+        write!(f, "({operator}")?;
+        if !terms.is_empty() {
+            f.write_str(" ")?;
+            self.fmt_terms(f, terms, " ")?;
+        }
+        f.write_str(")")
+    }
+}
+
+impl fmt::Display for SmtTerm<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.term.repr() {
+            Constant(constant, _) => write!(f, "{constant}"),
+            Global(qid, sort) => self.fmt_identifier(f, qid, sort.as_ref()),
+            Local(local) => write!(f, "{}", local.symbol.sym_quote()),
+            App(qid, terms, sort) => {
+                f.write_str("(")?;
+                self.fmt_identifier(f, qid, sort.as_ref())?;
+                if !terms.is_empty() {
+                    f.write_str(" ")?;
+                    self.fmt_terms(f, terms, " ")?;
+                }
+                f.write_str(")")
+            }
+            Let(bindings, body) => {
+                f.write_str("(let (")?;
+                for (index, binding) in bindings.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(
+                        f,
+                        "({} {})",
+                        binding.0.sym_quote(),
+                        SmtTerm {
+                            term: &binding.2,
+                            symbol_table: self.symbol_table,
+                        }
+                    )?;
+                }
+                write!(
+                    f,
+                    ") {})",
+                    SmtTerm {
+                        term: body,
+                        symbol_table: self.symbol_table,
+                    }
+                )
+            }
+            Exists(bindings, body) | Forall(bindings, body) => {
+                let binder = if matches!(self.term.repr(), Exists(..)) {
+                    "exists"
+                } else {
+                    "forall"
+                };
+                write!(f, "({binder} (")?;
+                for (index, binding) in bindings.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(f, "{binding}")?;
+                }
+                write!(
+                    f,
+                    ") {})",
+                    SmtTerm {
+                        term: body,
+                        symbol_table: self.symbol_table,
+                    }
+                )
+            }
+            Matching(scrutinee, arms) => {
+                write!(
+                    f,
+                    "(match {} (",
+                    SmtTerm {
+                        term: scrutinee,
+                        symbol_table: self.symbol_table,
+                    }
+                )?;
+                for (index, arm) in arms.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(" ")?;
+                    }
+                    write!(
+                        f,
+                        "({} {})",
+                        arm.pattern,
+                        SmtTerm {
+                            term: &arm.body,
+                            symbol_table: self.symbol_table,
+                        }
+                    )?;
+                }
+                f.write_str("))")
+            }
+            Annotated(term, attributes) => {
+                write!(
+                    f,
+                    "(! {}",
+                    SmtTerm {
+                        term,
+                        symbol_table: self.symbol_table,
+                    }
+                )?;
+                for attribute in attributes {
+                    f.write_str(" ")?;
+                    match attribute {
+                        Attribute::Pattern(terms) => {
+                            f.write_str(":pattern (")?;
+                            self.fmt_terms(f, terms, " ")?;
+                            f.write_str(")")?;
+                        }
+                        _ => write!(f, "{attribute}")?,
+                    }
+                }
+                f.write_str(")")
+            }
+            Eq(left, right) => self.fmt_application(f, "=", &[left.clone(), right.clone()]),
+            Distinct(terms) => self.fmt_application(f, "distinct", terms),
+            And(terms) => self.fmt_application(f, "and", terms),
+            Or(terms) => self.fmt_application(f, "or", terms),
+            Xor(terms) => self.fmt_application(f, "xor", terms),
+            Implies(premises, conclusion) => {
+                f.write_str("(=> ")?;
+                self.fmt_terms(f, premises, " ")?;
+                write!(
+                    f,
+                    " {})",
+                    SmtTerm {
+                        term: conclusion,
+                        symbol_table: self.symbol_table,
+                    }
+                )
+            }
+            Not(term) => self.fmt_application(f, "not", std::slice::from_ref(term)),
+            Ite(condition, then_term, else_term) => self.fmt_application(
+                f,
+                "ite",
+                &[condition.clone(), then_term.clone(), else_term.clone()],
+            ),
+        }
     }
 }
 
@@ -150,6 +386,7 @@ impl SMTProofTracer {
             sorts,
             symbol_table,
             instantiations_for_smt2: Vec::new(),
+            expected_original_clause: None,
             deleted_clauses: 0,
         }
     }
@@ -185,6 +422,24 @@ impl SMTProofTracer {
 
     pub fn add_theory_clause(&mut self, clause: &Vec<i32>, theory: Theory) {
         self.push_step(clause, ProofStepType::TheoryClause(theory));
+    }
+
+    pub fn expect_original_clause_callback(&mut self, clause: &[i32]) {
+        assert!(self.expected_original_clause.is_none());
+        self.expected_original_clause = Some(clause.to_vec());
+    }
+
+    pub fn consume_expected_original_clause(&mut self, clause: &[i32]) -> bool {
+        if self.expected_original_clause.as_deref() == Some(clause) {
+            self.expected_original_clause = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn clear_expected_original_clause_callback(&mut self) {
+        self.expected_original_clause = None;
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -240,7 +495,14 @@ impl SMTProofTracer {
                 );
 
                 if !literals_defined.contains(&lit) {
-                    temp_output.push_str(&format!("(edrat-literal {} {})\n", lit, polarized_term));
+                    temp_output.push_str(&format!(
+                        "(edrat-literal {} {})\n",
+                        lit,
+                        SmtTerm {
+                            term: &polarized_term,
+                            symbol_table: &self.symbol_table,
+                        }
+                    ));
                     literals_defined.insert(lit);
                 }
             } else {
@@ -332,7 +594,11 @@ impl SMTProofTracer {
         output.push_str(&datatype_string);
 
         for (symbol, sigs) in &self.symbol_table {
-            output.push_str(&format_function_declaration(symbol, sigs));
+            output.push_str(&format_function_declaration(
+                symbol,
+                sigs,
+                &self.symbol_table,
+            ));
         }
 
         // Depending on the proof step, introduce new eDRAT literals
@@ -376,5 +642,46 @@ impl SMTProofTracer {
             }
         }
         output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yaspar_ir::ast::{ACommand, Context, Typecheck};
+    use yaspar_ir::untyped::UntypedAst;
+
+    #[test]
+    fn ascribes_polymorphic_datatype_constructors() {
+        let script = "\
+(declare-sort Val 0)
+(declare-datatypes ((Option 1)) ((par (T) ((None) (Some (value T))))))
+(define-fun empty () (Option Val) (as None (Option Val)))
+(assert ((_ is None) (as None (Option Val))))
+";
+        let mut context = Context::new();
+        let commands = UntypedAst
+            .parse_script_str(script)
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+        let term = commands
+            .iter()
+            .find_map(|command| match command.repr() {
+                ACommand::Assert(term) => Some(term.clone()),
+                _ => None,
+            })
+            .unwrap();
+
+        let mut tracer = SMTProofTracer::new(
+            context.expose_sorts().clone(),
+            context.expose_symbol_table().clone(),
+        );
+        tracer.register_term(1, &term, true);
+        tracer.add_original_clause(&vec![1]);
+
+        let proof = tracer.generate_edrat();
+        assert!(proof.contains("(define-fun empty () (Option Val) (as None (Option Val)))"));
+        assert!(proof.contains("((_ is None) (as None (Option Val)))"));
     }
 }
