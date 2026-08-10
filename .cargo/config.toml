@@ -1,5 +1,8 @@
 [env]
 Z3_SYS_BUNDLED_DIR_OVERRIDE = { value = "z3", relative = true }
 
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=native"]
+# Do NOT set `-C target-cpu=native` here. GitHub CI caches `target/` across jobs
+# (Swatinem/rust-cache), and the cache key does not include the runner's CPU model.
+# A cache built on a runner with AVX-512 then restored onto an older runner yields
+# SIGILL (illegal instruction) at test time. For a local speedup, opt in per-shell
+# instead: `RUSTFLAGS="-C target-cpu=native" cargo build --release`.
