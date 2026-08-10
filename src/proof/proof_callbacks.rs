@@ -10,7 +10,8 @@ use cadical_sys::ProofTracer;
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
     fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], restored: bool) {
-        if restored || self.consume_expected_original_clause(clause) {
+        let expected = self.consume_expected_original_clause(clause);
+        if restored || expected {
             return;
         }
 
@@ -129,6 +130,16 @@ mod tests {
 
         ProofTracer::add_original_clause(&mut tracer, 3, false, &[], false);
         assert_eq!(tracer.generate_edrat(), "t bg 0\n");
+    }
+
+    #[test]
+    fn restored_callbacks_consume_matching_expectations() {
+        let mut tracer = tracer();
+        tracer.expect_original_clause_callback(&[1]);
+        ProofTracer::add_original_clause(&mut tracer, 1, false, &[1], true);
+
+        assert!(!tracer.consume_expected_original_clause(&[1]));
+        assert_eq!(tracer.generate_edrat(), "");
     }
 
     #[test]

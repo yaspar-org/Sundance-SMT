@@ -362,6 +362,53 @@ impl SmtTerm<'_> {
         }
         f.write_str(")")
     }
+
+    fn fmt_binary_application(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        operator: &str,
+        left: &Term,
+        right: &Term,
+    ) -> fmt::Result {
+        write!(
+            f,
+            "({operator} {} {})",
+            SmtTerm {
+                term: left,
+                symbol_table: self.symbol_table,
+            },
+            SmtTerm {
+                term: right,
+                symbol_table: self.symbol_table,
+            }
+        )
+    }
+
+    fn fmt_ternary_application(
+        &self,
+        f: &mut fmt::Formatter<'_>,
+        operator: &str,
+        first: &Term,
+        second: &Term,
+        third: &Term,
+    ) -> fmt::Result {
+        write!(
+            f,
+            "({operator} {} {} {})",
+            SmtTerm {
+                term: first,
+                symbol_table: self.symbol_table,
+            },
+            SmtTerm {
+                term: second,
+                symbol_table: self.symbol_table,
+            },
+            SmtTerm {
+                term: third,
+                symbol_table: self.symbol_table,
+            }
+        )
+    }
 }
 
 impl fmt::Display for SmtTerm<'_> {
@@ -473,7 +520,7 @@ impl fmt::Display for SmtTerm<'_> {
                 }
                 f.write_str(")")
             }
-            Eq(left, right) => self.fmt_application(f, "=", &[left.clone(), right.clone()]),
+            Eq(left, right) => self.fmt_binary_application(f, "=", left, right),
             Distinct(terms) => self.fmt_application(f, "distinct", terms),
             And(terms) => self.fmt_application(f, "and", terms),
             Or(terms) => self.fmt_application(f, "or", terms),
@@ -491,11 +538,9 @@ impl fmt::Display for SmtTerm<'_> {
                 )
             }
             Not(term) => self.fmt_application(f, "not", std::slice::from_ref(term)),
-            Ite(condition, then_term, else_term) => self.fmt_application(
-                f,
-                "ite",
-                &[condition.clone(), then_term.clone(), else_term.clone()],
-            ),
+            Ite(condition, then_term, else_term) => {
+                self.fmt_ternary_application(f, "ite", condition, then_term, else_term)
+            }
         }
     }
 }
