@@ -244,19 +244,20 @@ fn add_clause_to_solver_and_to_proof(
     proof_tracer: Rc<RefCell<SMTProofTracer>>,
     theory: Option<Theory>,
 ) {
-    if let Some(theory) = theory {
-        proof_tracer.borrow_mut().add_theory_clause(clause, theory);
-    } else {
-        proof_tracer.borrow_mut().add_original_clause(clause);
+    {
+        let mut proof_tracer = proof_tracer.borrow_mut();
+        if let Some(theory) = theory {
+            proof_tracer.add_theory_clause(clause, theory);
+        } else {
+            proof_tracer.add_original_clause(clause);
+        }
+        proof_tracer.expect_original_clause_callback(clause);
     }
 
-    proof_tracer
-        .borrow_mut()
-        .expect_original_clause_callback(clause);
     solver.clause6(clause); // TODO `clause1()`, `clause2()`, etc. might be more efficient
     proof_tracer
         .borrow_mut()
-        .clear_expected_original_clause_callback();
+        .cancel_expected_original_clause_callback(clause);
 }
 
 fn solve(solver: &mut CaDiCal) -> Status {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::debug_println;
-use crate::proof::proof_tracer::SMTProofTracer;
+use crate::proof::{Theory, proof_tracer::SMTProofTracer};
 use cadical_sys::ProofTracer;
 
 /// An implementation of the cadical-sys `ProofTracer` trait,
@@ -15,7 +15,7 @@ impl ProofTracer for SMTProofTracer {
         }
 
         // Unmatched original-clause callbacks come from the external propagator.
-        self.add_theory_clause(&clause.to_vec(), crate::proof::Theory::Background);
+        self.add_theory_clause(&clause.to_vec(), Theory::Background);
     }
 
     fn add_derived_clause(
@@ -63,7 +63,7 @@ impl ProofTracer for SMTProofTracer {
 
     fn add_constraint(&mut self, clause: &[i32]) {
         // Clauses supplied by the external propagator are theory lemmas.
-        self.add_theory_clause(&clause.to_vec(), crate::proof::Theory::Background);
+        self.add_theory_clause(&clause.to_vec(), Theory::Background);
     }
 
     fn reset_assumptions(&mut self) {
@@ -99,7 +99,7 @@ mod tests {
         startup.add_original_clause(&vec![]);
         startup.expect_original_clause_callback(&[]);
         ProofTracer::add_original_clause(&mut startup, 1, false, &[], false);
-        startup.clear_expected_original_clause_callback();
+        startup.cancel_expected_original_clause_callback(&[]);
         assert_eq!(startup.generate_edrat(), "a 0\n");
 
         let mut external = tracer();
@@ -109,5 +109,33 @@ mod tests {
         let mut constraint = tracer();
         ProofTracer::add_constraint(&mut constraint, &[]);
         assert_eq!(constraint.generate_edrat(), "t bg 0\n");
+    }
+
+    #[test]
+    fn expected_original_clause_callbacks_ignore_order_and_count_duplicates() {
+        let mut tracer = tracer();
+        tracer.expect_original_clause_callback(&[2, -1]);
+        assert!(tracer.consume_expected_original_clause(&[-1, 2]));
+        assert!(!tracer.consume_expected_original_clause(&[2, -1]));
+
+        tracer.expect_original_clause_callback(&[]);
+        tracer.expect_original_clause_callback(&[]);
+        ProofTracer::add_original_clause(&mut tracer, 1, false, &[], false);
+        ProofTracer::add_original_clause(&mut tracer, 2, false, &[], false);
+        assert_eq!(tracer.generate_edrat(), "");
+
+        ProofTracer::add_original_clause(&mut tracer, 3, false, &[], false);
+        assert_eq!(tracer.generate_edrat(), "t bg 0\n");
+    }
+
+    #[test]
+    fn canceling_one_expected_callback_preserves_others() {
+        let mut tracer = tracer();
+        tracer.expect_original_clause_callback(&[1]);
+        tracer.expect_original_clause_callback(&[2]);
+        tracer.cancel_expected_original_clause_callback(&[1]);
+
+        assert!(tracer.consume_expected_original_clause(&[2]));
+        assert!(!tracer.consume_expected_original_clause(&[1]));
     }
 }

@@ -196,18 +196,18 @@ impl<'a> CustomExternalPropagator<'a> {
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
     ) {
         for inst in instances {
-            match inst {
+            let clauses = match inst {
                 Instantiation { clauses } => {
-                    for clause in clauses {
-                        self.disequalities.borrow_mut().push(clause.clone());
-                    }
                     self.stats.instantiations += 1;
+                    clauses
                 }
-                Skolemization { clauses } => {
-                    for clause in clauses {
-                        self.disequalities.borrow_mut().push(clause.clone());
-                    }
-                }
+                Skolemization { clauses } => clauses,
+            };
+            for clause in clauses {
+                self.proof_tracer
+                    .borrow_mut()
+                    .expect_original_clause_callback(clause);
+                self.disequalities.borrow_mut().push(clause.clone());
             }
         }
         // Materializing an instance can enqueue arithmetic merges (via
@@ -333,9 +333,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     );
 
                     // CC TODO: Are these congruence closure/EUF atoms? Comment just below this one suggests so.
-                    self.proof_tracer
-                        .borrow_mut()
-                        .add_theory_clause(&shrunk_constraint, Theory::Background);
+                    {
+                        let mut proof_tracer = self.proof_tracer.borrow_mut();
+                        proof_tracer.add_theory_clause(&shrunk_constraint, Theory::Background);
+                        proof_tracer.expect_original_clause_callback(&shrunk_constraint);
+                    }
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
                     self.disequalities.borrow_mut().push(shrunk_constraint);

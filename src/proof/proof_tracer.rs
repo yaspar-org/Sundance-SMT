@@ -24,7 +24,7 @@ pub struct SMTProofTracer {
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     instantiations_for_smt2: Vec<(Term, Vec<(Term, bool)>)>,
-    expected_original_clause: Option<Vec<i32>>,
+    expected_original_clauses: HashMap<Vec<i32>, usize>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
 }
@@ -56,6 +56,13 @@ where
         seen.insert(lit);
     }
     false
+}
+
+fn normalized_clause(clause: &[i32]) -> Vec<i32> {
+    let mut normalized = clause.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
 }
 
 /// Format a sort definition as a declare-sort command
@@ -161,6 +168,125 @@ fn format_function_declaration(
         }
         _ => String::new(),
     }
+}
+
+fn collect_global_symbols(term: &Term, symbols: &mut HashSet<Str>) {
+    match term.repr() {
+        Constant(..) | Local(..) => {}
+        Global(qid, ..) => {
+            symbols.insert(qid.0.symbol.clone());
+        }
+        App(qid, terms, ..) => {
+            symbols.insert(qid.0.symbol.clone());
+            for term in terms {
+                collect_global_symbols(term, symbols);
+            }
+        }
+        Let(bindings, body) => {
+            for binding in bindings {
+                collect_global_symbols(&binding.2, symbols);
+            }
+            collect_global_symbols(body, symbols);
+        }
+        Exists(_, body) | Forall(_, body) | Not(body) => {
+            collect_global_symbols(body, symbols);
+        }
+        Matching(scrutinee, arms) => {
+            collect_global_symbols(scrutinee, symbols);
+            for arm in arms {
+                collect_global_symbols(&arm.body, symbols);
+            }
+        }
+        Annotated(term, attributes) => {
+            collect_global_symbols(term, symbols);
+            for attribute in attributes {
+                if let Attribute::Pattern(terms) = attribute {
+                    for term in terms {
+                        collect_global_symbols(term, symbols);
+                    }
+                }
+            }
+        }
+        Eq(left, right) => {
+            collect_global_symbols(left, symbols);
+            collect_global_symbols(right, symbols);
+        }
+        Distinct(terms) | And(terms) | Or(terms) | Xor(terms) => {
+            for term in terms {
+                collect_global_symbols(term, symbols);
+            }
+        }
+        Implies(premises, conclusion) => {
+            for premise in premises {
+                collect_global_symbols(premise, symbols);
+            }
+            collect_global_symbols(conclusion, symbols);
+        }
+        Ite(condition, then_term, else_term) => {
+            collect_global_symbols(condition, symbols);
+            collect_global_symbols(then_term, symbols);
+            collect_global_symbols(else_term, symbols);
+        }
+    }
+}
+
+fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMeta)>>) -> String {
+    let mut symbols = symbol_table.keys().collect::<Vec<_>>();
+    symbols.sort_by_key(|symbol| symbol.to_string());
+
+    let mut output = String::new();
+    let mut definitions = Vec::new();
+    for symbol in symbols {
+        if matches!(
+            symbol_table.get(symbol).map(Vec::as_slice),
+            Some([(Sig::ParFunc(..), FunctionMeta::Defined(_))])
+        ) {
+            definitions.push(symbol);
+        } else {
+            output.push_str(&format_function_declaration(
+                symbol,
+                &symbol_table[symbol],
+                symbol_table,
+            ));
+        }
+    }
+
+    let defined_symbols = definitions
+        .iter()
+        .map(|symbol| (*symbol).clone())
+        .collect::<HashSet<_>>();
+    let dependencies = definitions
+        .iter()
+        .map(|symbol| {
+            let symbol = *symbol;
+            let [(_, FunctionMeta::Defined(meta))] = symbol_table[symbol].as_slice() else {
+                unreachable!();
+            };
+            let mut dependencies = HashSet::new();
+            collect_global_symbols(&meta.def.body, &mut dependencies);
+            (symbol.clone(), dependencies)
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut emitted = HashSet::new();
+    while !definitions.is_empty() {
+        let Some(index) = definitions.iter().position(|symbol| {
+            dependencies[*symbol].iter().all(|dependency| {
+                !defined_symbols.contains(dependency) || emitted.contains(dependency)
+            })
+        }) else {
+            panic!("We do not handle recursive function definitions!");
+        };
+        let symbol = definitions.remove(index);
+        output.push_str(&format_function_declaration(
+            symbol,
+            &symbol_table[symbol],
+            symbol_table,
+        ));
+        emitted.insert(symbol.clone());
+    }
+
+    output
 }
 
 // Yaspar's generic Display omits inferred sort ascriptions. Parametric
@@ -386,7 +512,7 @@ impl SMTProofTracer {
             sorts,
             symbol_table,
             instantiations_for_smt2: Vec::new(),
-            expected_original_clause: None,
+            expected_original_clauses: HashMap::new(),
             deleted_clauses: 0,
         }
     }
@@ -425,21 +551,27 @@ impl SMTProofTracer {
     }
 
     pub fn expect_original_clause_callback(&mut self, clause: &[i32]) {
-        assert!(self.expected_original_clause.is_none());
-        self.expected_original_clause = Some(clause.to_vec());
+        let clause = normalized_clause(clause);
+        *self.expected_original_clauses.entry(clause).or_default() += 1;
     }
 
     pub fn consume_expected_original_clause(&mut self, clause: &[i32]) -> bool {
-        if self.expected_original_clause.as_deref() == Some(clause) {
-            self.expected_original_clause = None;
-            true
-        } else {
-            false
+        let clause = normalized_clause(clause);
+        match self.expected_original_clauses.get_mut(&clause) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                true
+            }
+            Some(_) => {
+                self.expected_original_clauses.remove(&clause);
+                true
+            }
+            None => false,
         }
     }
 
-    pub fn clear_expected_original_clause_callback(&mut self) {
-        self.expected_original_clause = None;
+    pub fn cancel_expected_original_clause_callback(&mut self, clause: &[i32]) {
+        self.consume_expected_original_clause(clause);
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -593,13 +725,7 @@ impl SMTProofTracer {
         let datatype_string = format_datatype_declaration(&self.sorts);
         output.push_str(&datatype_string);
 
-        for (symbol, sigs) in &self.symbol_table {
-            output.push_str(&format_function_declaration(
-                symbol,
-                sigs,
-                &self.symbol_table,
-            ));
-        }
+        output.push_str(&format_function_declarations(&self.symbol_table));
 
         // Depending on the proof step, introduce new eDRAT literals
         for step in &self.proof_steps {
@@ -621,6 +747,13 @@ impl SMTProofTracer {
                         "The skolem vars for clause {:?}: {:?}",
                         clause,
                         skolem_vars
+                    );
+                    // The declaration refers to the parent eDRAT literal, while
+                    // the child literal may refer to the fresh Skolem symbols.
+                    self.introduce_literals(
+                        &mut literals_defined,
+                        &vec![*parent_term],
+                        &mut output,
                     );
                     for (i, var) in skolem_vars.iter().enumerate() {
                         // CC TODO think about negated parent term, if (negated forall)
@@ -648,6 +781,7 @@ impl SMTProofTracer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quantifiers::skolem::skolemize;
     use yaspar_ir::ast::{ACommand, Context, Typecheck};
     use yaspar_ir::untyped::UntypedAst;
 
@@ -683,5 +817,89 @@ mod tests {
         let proof = tracer.generate_edrat();
         assert!(proof.contains("(define-fun empty () (Option Val) (as None (Option Val)))"));
         assert!(proof.contains("((_ is None) (as None (Option Val)))"));
+    }
+
+    #[test]
+    fn orders_defined_functions_by_dependency() {
+        let script = "\
+(declare-fun a () Int)
+(define-fun f ((x Int)) Int (+ x a))
+(define-fun g ((x Int)) Int (f (f x)))
+(assert (= (g 0) 2))
+";
+        let mut context = Context::new();
+        let commands = UntypedAst
+            .parse_script_str(script)
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+        let term = commands
+            .iter()
+            .find_map(|command| match command.repr() {
+                ACommand::Assert(term) => Some(term.clone()),
+                _ => None,
+            })
+            .unwrap();
+
+        let mut tracer = SMTProofTracer::new(
+            context.expose_sorts().clone(),
+            context.expose_symbol_table().clone(),
+        );
+        tracer.register_term(1, &term, true);
+        tracer.add_original_clause(&vec![1]);
+
+        let proof = tracer.generate_edrat();
+        let declaration = proof.find("(declare-fun a () Int)").unwrap();
+        let f_definition = proof.find("(define-fun f ").unwrap();
+        let g_definition = proof.find("(define-fun g ").unwrap();
+        assert!(declaration < f_definition);
+        assert!(f_definition < g_definition);
+    }
+
+    #[test]
+    fn introduces_skolem_parent_before_declaration_and_child_after() {
+        let script = "(assert (exists ((x Int)) (> x 0)))";
+        let mut context = Context::new();
+        let commands = UntypedAst
+            .parse_script_str(script)
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+        let parent = commands
+            .iter()
+            .find_map(|command| match command.repr() {
+                ACommand::Assert(term) => Some(term.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let (child, skolem_vars) = skolemize(&parent, &mut context, true);
+        let skolem_name = skolem_vars[0].0.to_string();
+
+        let mut tracer = SMTProofTracer::new(
+            context.expose_sorts().clone(),
+            context.expose_symbol_table().clone(),
+        );
+        tracer.register_term(1, &parent, true);
+        tracer.register_term(2, &child, true);
+        tracer.push_step(
+            &vec![-1, 2],
+            ProofStepType::Skolemization {
+                parent_term: 1,
+                skolem_vars,
+            },
+        );
+
+        let proof = tracer.generate_edrat();
+        let parent_definition = proof.find("(edrat-literal 1 ").unwrap();
+        let declaration = proof
+            .find(&format!("(declare-skolem 1 0 {} Int)", skolem_name))
+            .unwrap();
+        let child_definition = proof.find("(edrat-literal 2 ").unwrap();
+        let skolem_step = proof.find("s -1 2 0").unwrap();
+
+        assert!(parent_definition < declaration);
+        assert!(declaration < child_definition);
+        assert!(child_definition < skolem_step);
+        assert_eq!(proof.matches("(edrat-literal 1 ").count(), 1);
     }
 }
