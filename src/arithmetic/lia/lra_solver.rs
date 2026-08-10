@@ -13,6 +13,7 @@ use std::fmt;
 
 use crate::arithmetic::lia::bounds::Bounds;
 use crate::arithmetic::lia::context::ConvContext;
+use crate::arithmetic::lia::linear_system::Rel;
 use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::solver_result::{
     Assignment, Conflict, SolverDecision, SolverError, SolverResult, SolverReturn,
@@ -243,6 +244,116 @@ impl LRASolver {
         Ok(())
     }
 
+    /// Incrementally extend a live, already-solved tableau with a new relation
+    /// `Σ aᵢ xᵢ ⋈ c`, represented by the fresh slack variable `slack`.
+    ///
+    /// The tableau only ever grows: rows are never removed, only relaxed on backtrack.
+    /// The slack is introduced as a **basic** variable owning a brand-new row, so it appears
+    /// only in that row and disturbs no existing non-basic variable's in-bounds status. Only the
+    /// homogeneous terms `Σ aᵢ xᵢ` are used to build the row; the slack is added **unbounded**.
+    /// The bound implied by `rel`'s constant/constraint type is applied separately by the caller
+    /// via [`Self::assert_lower`]/[`Self::assert_upper`].
+    ///
+    /// Because `rel` may mention variables that are currently basic (and rows must be expressed
+    /// over non-basic columns only), each basic variable `xᵢ` owning row `r` is substituted using
+    /// its own row: `xᵢ = Σ_c tableau[r][c]·nonbasicₖ`, so its contribution `aᵢ·xᵢ` adds
+    /// `aᵢ·tableau[r][c]` to column `c`. Non-basic variables contribute their coefficient directly.
+    /// Variables the solver has never seen are first introduced as unbounded non-basic columns.
+    ///
+    /// After this call the check-invariant holds (non-basics are in bounds; the new basic slack's
+    /// row is satisfied by construction and the slack is unbounded), so [`Self::is_valid`] is true
+    /// and feasibility of any subsequently asserted bound must be (re)checked via [`Self::solve`].
+    ///
+    /// `add_relation` does not touch the bound trail or backtrack level: the row persists across
+    /// all backtracks. The slack starts unbounded, so the first `assert_*` on it records the old
+    /// bound (`None`), and a later `backtrack` restores it to unbounded automatically.
+    pub fn add_relation(&mut self, rel: Rel<Rational>, slack: Var) -> SolverResult<()> {
+        if self.var_to_idx.contains_key(&slack) {
+            return Err(SolverError(format!(
+                "add_relation: slack variable {slack:?} already exists"
+            )));
+        }
+
+        // The slack must be fresh with respect to `rel` too: if `rel` mentioned `slack`, Step 1
+        // would introduce it as a non-basic column and Step 5 would then register it again as a
+        // basic variable, producing duplicate `VarInfo`s and corrupting `var_to_idx`/basis. Callers
+        // constructing slacks via the incremental frontend never hit this, but guard explicitly.
+        if rel.terms_ref().iter().any(|term| term.var() == slack) {
+            return Err(SolverError(format!(
+                "add_relation: slack variable {slack:?} occurs in the relation's terms"
+            )));
+        }
+
+        // Step 1: register any brand-new problem variables as unbounded non-basic columns.
+        for term in rel.terms_ref() {
+            let v = term.var();
+            if !self.var_to_idx.contains_key(&v) {
+                let new_col = self.tableau.add_col().map_err(|e| {
+                    SolverError(format!("add_relation: failed to grow tableau column: {e}"))
+                })?;
+                let new_idx = self.variables.len();
+                self.variables
+                    .push(VarInfo::new(v, Owner::NonBasic(new_col)));
+                self.non_basic.push(new_idx);
+                self.var_to_idx.insert(v, new_idx);
+            }
+        }
+
+        // Step 2: build the new row over the current non-basic columns, substituting out any
+        // basic variables. Accumulate with `+=` so duplicate/uncombined terms are handled.
+        let ncols = self.non_basic.len();
+        let mut row = vec![Rational::ZERO; ncols];
+        for term in rel.terms_ref() {
+            let a = term.coeff_ref();
+            let idx = *self.var_to_idx.get(&term.var()).unwrap();
+            match self.variables[idx].owner {
+                Owner::NonBasic(c) => {
+                    row[c] += a;
+                }
+                Owner::Basic(r) => {
+                    for (c, entry) in row.iter_mut().enumerate() {
+                        let t = self.tableau.get(r, c)?;
+                        if !t.is_zero() {
+                            *entry += a * t;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 3: grow the tableau by one row and write the non-zero coefficients.
+        let new_row = self
+            .tableau
+            .add_row()
+            .map_err(|e| SolverError(format!("add_relation: failed to grow tableau row: {e}")))?;
+        debug_assert_eq!(new_row, self.basic.len());
+        for (c, coeff) in row.iter().enumerate() {
+            if !coeff.is_zero() {
+                self.tableau.set_entry(new_row, c, coeff.clone())?;
+            }
+        }
+
+        // Step 4: compute β(slack) = Σ_c row[c]·β(nonbasic_c), so the new row is satisfied.
+        let mut beta = QDelta::ZERO;
+        for (c, coeff) in row.iter().enumerate() {
+            if !coeff.is_zero() {
+                beta += &(&self.variables[self.non_basic[c]].val * coeff);
+            }
+        }
+
+        // Step 5: register the slack as a new basic variable owning `new_row`.
+        let new_idx = self.variables.len();
+        let mut vinfo = VarInfo::new(slack, Owner::Basic(new_row));
+        vinfo.update_assignment(beta);
+        self.variables.push(vinfo);
+        self.basic.push(new_idx);
+        self.var_to_idx.insert(slack, new_idx);
+
+        // Feasibility of the extended system must be re-established by solve().
+        self.state = LRASolverState::Unknown;
+        Ok(())
+    }
+
     /// Assert a new lower bound for `x`
     ///
     /// Three possible returns:
@@ -341,16 +452,35 @@ impl LRASolver {
         self.old_assignment = Some(model);
     }
 
-    /// Restore a previous assignment when backtracking
+    /// Restore a previous assignment when backtracking.
+    ///
+    /// Restores each **non-basic** variable's value from the snapshot, then recomputes every
+    /// **basic** variable's value from the current tableau structure so the row equations hold by
+    /// construction. This is pivot-invariant: recomputing basics from the restored non-basics
+    /// reproduces the snapshot point exactly on the unchanged-structure case (so it is
+    /// behavior-preserving for the existing branch-and-bound usage), while also remaining correct
+    /// when rows/columns were added since the snapshot was taken (`add_relation`). Variables that
+    /// post-date the snapshot are absent from the map and default to zero; their basic slack rows
+    /// are then made consistent by the recomputation step.
     fn restore_assignment(&mut self) {
+        // Take the snapshot out of `self` so the loops below can mutably borrow `self` without
+        // cloning the map; it is put back at the end so repeated backtracks to the same level
+        // still see it.
         let previous_model = self
             .old_assignment
-            .as_ref()
+            .take()
             .expect("cannot restore assignment: no previous assignment exists");
-        for (var, ass) in previous_model.iter() {
-            let var_info_idx = self.var_to_idx.get(var).unwrap(); // if var isn't a key, it's is a bug
-            self.variables[*var_info_idx].val = ass.clone();
+        // Non-basics: take the snapshot value, or zero for variables added after the snapshot.
+        for &idx in self.non_basic.iter() {
+            let var = self.variables[idx].var;
+            self.variables[idx].val = previous_model.get(&var).cloned().unwrap_or(QDelta::ZERO);
         }
+        // Basics: recompute from the (possibly re-pivoted / grown) tableau so equations hold.
+        for row in 0..self.basic.len() {
+            let val = self.calculate_assignment(row);
+            self.variables[self.basic[row]].val = val;
+        }
+        self.old_assignment = Some(previous_model);
     }
 
     /// Set a backtrack point and return the new backtrack level
@@ -385,6 +515,20 @@ impl LRASolver {
             self.variables[*var_info_idx].bounds.upper = bound;
         }
         self.restore_assignment();
+    }
+
+    /// Clear a terminal `Unsat` state back to `Unknown`, so the solver can be reused after a
+    /// conflicting [`Self::solve`] — e.g. by an incremental frontend that re-checks feasibility
+    /// once the SAT layer has backtracked and relaxed bounds. Does nothing unless the solver is
+    /// currently `Unsat`.
+    ///
+    /// This is deliberately *not* folded into [`Self::backtrack`]: the branch-and-bound layer
+    /// relies on [`Self::set_backtrack`] being a no-op while `Unsat`, so [`Self::backtrack`] must
+    /// leave that state intact. Callers that want the state cleared opt in explicitly.
+    pub fn clear_unsat_state(&mut self) {
+        if matches!(self.state, LRASolverState::Unsat) {
+            self.state = LRASolverState::Unknown;
+        }
     }
 
     /// Restore the tableau structure (basis, non-basis, coefficients, and variable owners)
@@ -1067,7 +1211,6 @@ impl LRASolver {
 
     /// Calculate the assignment to a basic variable at `row` required in order to make its
     /// corresponding row equation true.
-    #[allow(dead_code)]
     fn calculate_assignment(&self, row: usize) -> QDelta {
         let mut rhs = QDelta::ZERO;
         for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
@@ -1205,6 +1348,7 @@ mod tests {
     use super::*;
     use crate::arithmetic::lia::bounds::Bounds;
     use crate::arithmetic::lia::context::ConvContext;
+    use crate::arithmetic::lia::linear_system::Mon;
     use crate::arithmetic::lia::tableau::TableauKind;
     use crate::arithmetic::lia::tableau_dense::TableauDense;
     use crate::arithmetic::lia::variables::{Var, VarInfo};
@@ -2009,6 +2153,340 @@ mod tests {
             lhs2
         );
 
+        assert!(solver.is_valid());
+    }
+
+    // ─── incremental add_relation tests (sparse tableau) ─────────────────────────
+    //
+    // These exercise extending a live, solved tableau with a new slack row, then
+    // relaxing the slack's bounds to unbounded on backtrack rather than physically
+    // removing the row.
+
+    /// Build a small feasible sparse system with two unbounded non-basic variables and
+    /// one bounded slack:
+    ///
+    ///    |  x  y
+    /// ---+-------
+    /// s1 |  1  1     2 <= s1        (i.e. x + y >= 2)
+    ///
+    /// x = Var::real(10), y = Var::real(11), s1 = Var::real(1).
+    fn ex_sum_sparse() -> LRASolver {
+        let basic =
+            vec![VarInfo::new(Var::real(1), Owner::Basic(0)).with_bounds(Bounds::above_of(2))];
+        let non_basic = vec![
+            VarInfo::new(Var::real(10), Owner::NonBasic(0)), // x, unbounded
+            VarInfo::new(Var::real(11), Owner::NonBasic(1)), // y, unbounded
+        ];
+        let equations = vec![vec![rbig!(1), rbig!(1)]];
+        let ctx = ConvContext::default();
+        LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Sparse).unwrap()
+    }
+
+    #[test]
+    fn add_relation_grows_sparse_tableau() {
+        let mut solver = ex_sum_sparse();
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+
+        let nrows_before = solver.tableau.nrows();
+        let ncols_before = solver.tableau.ncols();
+
+        // Add s_new = x + y (a second slack over the same, existing, non-basic variables).
+        let slack = Var::real(2);
+        let rel = Rel::mk_ge(
+            vec![Mon::new(1, Var::real(10)), Mon::new(1, Var::real(11))],
+            0,
+        );
+        solver.add_relation(rel, slack).unwrap();
+
+        // One new row, no new columns (x, y already present).
+        assert_eq!(solver.tableau.nrows(), nrows_before + 1);
+        assert_eq!(solver.tableau.ncols(), ncols_before);
+
+        // Slack is basic and owns the new row.
+        let idx = *solver.var_to_idx.get(&slack).unwrap();
+        let new_row = solver.variables[idx]
+            .is_basic()
+            .expect("slack should be basic");
+        assert_eq!(new_row, nrows_before);
+
+        // β(slack) == β(x) + β(y).
+        let x_val = solver.variables[solver.non_basic[0]].val.clone();
+        let y_val = solver.variables[solver.non_basic[1]].val.clone();
+        assert_eq!(solver.variables[idx].val, &x_val + &y_val);
+
+        // Slack is unbounded and the check-invariant holds immediately after add.
+        assert!(solver.variables[idx].is_totally_unbounded());
+        assert!(solver.is_valid());
+    }
+
+    #[test]
+    fn add_relation_substitutes_basic_var() {
+        // Use the ex_5_6 system with an extensible tableau, then pivot so an original
+        // variable (x) becomes basic.
+        let basic = vec![
+            VarInfo::new(Var::real(1), Owner::Basic(0)).with_bounds(Bounds::above_of(2)),
+            VarInfo::new(Var::real(2), Owner::Basic(1)).with_bounds(Bounds::above_of(0)),
+            VarInfo::new(Var::real(3), Owner::Basic(2)).with_bounds(Bounds::above_of(1)),
+        ];
+        let non_basic = vec![
+            VarInfo::new(Var::real(4), Owner::NonBasic(0)), // x
+            VarInfo::new(Var::real(5), Owner::NonBasic(1)), // y
+        ];
+        let equations = vec![
+            vec![rbig!(1), rbig!(1)],
+            vec![rbig!(2), rbig!(-1)],
+            vec![rbig!(-1), rbig!(2)],
+        ];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Sparse).unwrap();
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+
+        // Ensure x (Var::real(4)) is basic: if not already, pivot s1(row 0) with x(col of x).
+        let x_idx = *solver.var_to_idx.get(&Var::real(4)).unwrap();
+        if let Some(col) = solver.variables[x_idx].is_non_basic() {
+            // pivot the first basic row against x's column (coeff is nonzero in row 0)
+            let val = solver.variables[solver.non_basic[col]].val.clone();
+            solver.pivot_and_update(0, col, &val).unwrap();
+        }
+        assert!(
+            solver.variables[x_idx].is_basic().is_some(),
+            "x should be basic for this test"
+        );
+
+        // Add a relation referencing the now-basic x: s_new = x. This exercises the
+        // Owner::Basic(r) substitution branch (x is replaced by its row over non-basics).
+        let slack = Var::real(6);
+        let rel = Rel::mk_ge(vec![Mon::new(1, Var::real(4))], 0);
+        solver.add_relation(rel, slack).unwrap();
+
+        // The written row must equal x's row (since s_new = x = <x's row over non-basics>).
+        let x_row = solver.variables[x_idx].is_basic().unwrap();
+        let slack_idx = *solver.var_to_idx.get(&slack).unwrap();
+        let slack_row = solver.variables[slack_idx].is_basic().unwrap();
+        for c in 0..solver.non_basic.len() {
+            assert_eq!(
+                solver.tableau.get(slack_row, c).unwrap(),
+                solver.tableau.get(x_row, c).unwrap(),
+                "substituted row must match x's row at column {c}"
+            );
+        }
+        // β(slack) == β(x).
+        assert_eq!(solver.variables[slack_idx].val, solver.variables[x_idx].val);
+        assert!(solver.is_valid());
+    }
+
+    #[test]
+    fn add_relation_new_variable() {
+        let mut solver = ex_sum_sparse();
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+        let ncols_before = solver.tableau.ncols();
+
+        // Add s_new = x + z, where z (Var::real(20)) is brand new.
+        let z = Var::real(20);
+        let slack = Var::real(2);
+        let rel = Rel::mk_ge(vec![Mon::new(1, Var::real(10)), Mon::new(1, z)], 0);
+        solver.add_relation(rel, slack).unwrap();
+
+        // One new column for z.
+        assert_eq!(solver.tableau.ncols(), ncols_before + 1);
+        let z_idx = *solver.var_to_idx.get(&z).unwrap();
+        assert!(
+            solver.variables[z_idx].is_non_basic().is_some(),
+            "z should be a new non-basic variable"
+        );
+        assert!(solver.variables[z_idx].is_totally_unbounded());
+        assert!(solver.is_valid());
+    }
+
+    #[test]
+    fn add_relation_all_zero_row() {
+        let mut solver = ex_sum_sparse();
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+
+        // s_new = x - x, which cancels to the all-zero row.
+        let slack = Var::real(2);
+        let rel = Rel::mk_ge(
+            vec![Mon::new(1, Var::real(10)), Mon::new(-1, Var::real(10))],
+            0,
+        );
+        solver.add_relation(rel, slack).unwrap();
+
+        // The new row is all zero and β(slack) == 0.
+        let slack_idx = *solver.var_to_idx.get(&slack).unwrap();
+        let slack_row = solver.variables[slack_idx].is_basic().unwrap();
+        for c in 0..solver.non_basic.len() {
+            assert!(solver.tableau.get(slack_row, c).unwrap().is_zero());
+        }
+        assert_eq!(solver.variables[slack_idx].val, QDelta::ZERO);
+        assert!(solver.is_valid());
+
+        // Asserting slack >= 1 makes the (stuck-at-0) slack infeasible with no valid pivot.
+        assert_eq!(solver.assert_lower(&slack, &1i32.into()).unwrap(), None);
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::INFEASIBLE(_)
+        ));
+    }
+
+    #[test]
+    fn add_relation_all_zero_row_feasible_bounds() {
+        let mut solver = ex_sum_sparse();
+        solver.solve().unwrap();
+        let slack = Var::real(2);
+        let rel = Rel::mk_ge(
+            vec![Mon::new(1, Var::real(10)), Mon::new(-1, Var::real(10))],
+            0,
+        );
+        solver.add_relation(rel, slack).unwrap();
+
+        // Bounds [-1, 5] contain 0, so the stuck slack is trivially feasible.
+        assert_eq!(
+            solver.assert_lower(&slack, &(-1i32).into()).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            solver.assert_upper(&slack, &5i32.into()).unwrap(),
+            Some(true)
+        );
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+    }
+
+    /// Assert a bound on a freshly added slack, let simplex pivot the slack out of the
+    /// basis, then backtrack — the slack's bounds must relax to (−∞, +∞) with no
+    /// linear-algebra work, and the solver must land in a valid state even though the
+    /// slack is now non-basic.
+    #[test]
+    fn add_relation_pivot_then_backtrack_relaxes_slack() {
+        let mut solver = ex_sum_sparse();
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+
+        // Add s_new = x + y and register it, then take the backtrack snapshot AFTER the add
+        // (the intended DPLL(T) order: the snapshot includes the slack).
+        let slack = Var::real(2);
+        let rel = Rel::mk_ge(
+            vec![Mon::new(1, Var::real(10)), Mon::new(1, Var::real(11))],
+            0,
+        );
+        solver.add_relation(rel, slack).unwrap();
+        assert!(solver.is_valid());
+        let slack_idx = *solver.var_to_idx.get(&slack).unwrap();
+        assert!(solver.variables[slack_idx].is_basic().is_some());
+
+        let level = solver.set_backtrack();
+
+        // Assert slack >= 5. The slack starts basic at β = β(x)+β(y) = 0 < 5, so simplex must
+        // pivot it against an unbounded non-basic (x or y) to satisfy the bound.
+        assert_eq!(solver.assert_lower(&slack, &5i32.into()).unwrap(), None);
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+        assert!(
+            solver.variables[slack_idx].is_non_basic().is_some(),
+            "slack should have drifted to non-basic via the feasibility pivot"
+        );
+
+        // Backtrack: the slack's lower bound (previously None) is restored, i.e. relaxed to -inf.
+        solver.backtrack(level);
+        assert!(
+            solver.variables[slack_idx].is_totally_unbounded(),
+            "backtrack must relax the popped slack to (-inf, +inf)"
+        );
+        // Pivots are NOT undone — the slack is still non-basic.
+        assert!(solver.variables[slack_idx].is_non_basic().is_some());
+        // ...yet the check-invariant holds, with zero linear algebra on the backtrack path.
+        assert!(solver.is_valid());
+    }
+
+    /// Regression guard for the `restore_assignment` robustness fix: set the backtrack point
+    /// BEFORE `add_relation`, then assert / solve (pivot) / backtrack past the add. The snapshot
+    /// does not contain the slack, but recomputing basics from restored non-basics keeps the
+    /// solver valid.
+    #[test]
+    fn add_relation_before_backtrack_gap() {
+        let mut solver = ex_sum_sparse();
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+
+        // Snapshot BEFORE adding the relation.
+        let level = solver.set_backtrack();
+
+        let slack = Var::real(2);
+        let rel = Rel::mk_ge(
+            vec![Mon::new(1, Var::real(10)), Mon::new(1, Var::real(11))],
+            0,
+        );
+        solver.add_relation(rel, slack).unwrap();
+        assert_eq!(solver.assert_lower(&slack, &5i32.into()).unwrap(), None);
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+
+        // Backtrack past the add. The slack post-dates the snapshot; restore_assignment must
+        // still leave the solver in a consistent state.
+        solver.backtrack(level);
+        assert!(solver.is_valid());
+    }
+
+    /// A feasible system is checked, then a new relation is added whose asserted bound makes
+    /// the system infeasible; backtracking over the assertion must return the solver to a
+    /// feasible state.
+    #[test]
+    fn add_relation_infeasible_then_backtrack_feasible() {
+        // ex_sum_sparse: s1 = x + y with s1 >= 2, x/y unbounded.
+        let mut solver = ex_sum_sparse();
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+
+        // Add s_new = x + y (the same combination as s1), then snapshot.
+        let slack = Var::real(2);
+        let rel = Rel::mk_le(
+            vec![Mon::new(1, Var::real(10)), Mon::new(1, Var::real(11))],
+            0,
+        );
+        solver.add_relation(rel, slack).unwrap();
+        assert!(solver.is_valid());
+
+        let level = solver.set_backtrack();
+
+        // Assert s_new <= 1. Since s_new = x + y = s1 and s1 >= 2, this is infeasible.
+        assert_eq!(solver.assert_upper(&slack, &1i32.into()).unwrap(), None);
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::INFEASIBLE(_)
+        ));
+
+        // Backtracking relaxes the s_new bound; the system is feasible again.
+        solver.backtrack(level);
+        assert!(solver.variables[*solver.var_to_idx.get(&slack).unwrap()].is_totally_unbounded());
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
         assert!(solver.is_valid());
     }
 }
