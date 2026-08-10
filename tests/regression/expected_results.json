@@ -114,6 +114,8 @@
     "edge_cases_quantifiers/eclass_merge_after_backtrack11.smt2": "unsat",
     "edge_cases_quantifiers/eclass_merge_after_backtrack12.smt2": "unsat",
     "edge_cases_quantifiers/quantifier_ite_true_union_false.smt2": "unsat",
+    "edge_cases_quantifiers/no_pattern_excludes_trigger.smt2": "unsat",
+    "edge_cases_quantifiers/inferred_trigger_untriggered_forall.smt2": "unsat",
     "edge_cases_quantifiers/multipattern.smt2": "unsat",
     "edge_cases_quantifiers/multipattern2.smt2": "unsat",
     "edge_cases_quantifiers/multipattern3.smt2": "unsat",

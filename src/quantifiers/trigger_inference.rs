@@ -186,13 +186,19 @@ fn term_depth(term: &Term) -> usize {
 /// Infer a set of triggers (multi-patterns) for a quantifier body.
 ///
 /// `body` is the (de-annotated) body term; `bound_names` are the names of the
-/// quantifier's bound variables. Returns a list of multi-patterns, where each
-/// multi-pattern is a conjunctive list of trigger terms (matching the
-/// `Vec<Vec<_>>` shape used by the rest of the solver): the outer list is
-/// disjunctive (any multi-pattern may fire), the inner list conjunctive.
+/// quantifier's bound variables. `excluded` holds the terms named by any
+/// `:no-pattern` annotations — anti-trigger hints that must never be used as a
+/// trigger. Returns a list of multi-patterns, where each multi-pattern is a
+/// conjunctive list of trigger terms (matching the `Vec<Vec<_>>` shape used by
+/// the rest of the solver): the outer list is disjunctive (any multi-pattern
+/// may fire), the inner list conjunctive.
 ///
 /// Returns `None` if no admissible trigger set covers all bound variables.
-pub fn infer_triggers(body: &Term, bound_names: &[String]) -> Option<Vec<Vec<Term>>> {
+pub fn infer_triggers(
+    body: &Term,
+    bound_names: &[String],
+    excluded: &[Term],
+) -> Option<Vec<Vec<Term>>> {
     let bound: BTreeSet<String> = bound_names.iter().cloned().collect();
     if bound.is_empty() {
         // Ground body under a (degenerate) quantifier: nothing to instantiate on.
@@ -201,6 +207,12 @@ pub fn infer_triggers(body: &Term, bound_names: &[String]) -> Option<Vec<Vec<Ter
 
     let mut candidates: Vec<Candidate> = Vec::new();
     collect_candidates(body, &bound, &mut candidates);
+
+    // Drop `:no-pattern` terms: they are explicitly forbidden as triggers.
+    if !excluded.is_empty() {
+        let excluded: BTreeSet<String> = excluded.iter().map(|t| t.to_string()).collect();
+        candidates.retain(|c| !excluded.contains(&c.term.to_string()));
+    }
 
     if candidates.is_empty() {
         return None;

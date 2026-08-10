@@ -521,15 +521,23 @@ impl SolverState {
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
             let is_forall = matches!(term.repr(), Forall(..));
 
-            // Collect any explicit `:pattern` triggers and the de-annotated body.
+            // Collect explicit `:pattern` triggers, `:no-pattern` exclusions,
+            // and the de-annotated body.
+            let mut no_pattern_terms: Vec<Term> = vec![];
             let (inner_term, mut trigger_ids) =
                 if let Annotated(inner_term, attrs) = middle_term.repr() {
                     let mut trigger_ids = vec![];
                     for attr in attrs.iter() {
-                        if let Attribute::Pattern(s_exprs) = attr {
-                            let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
-                                s_exprs.iter().map(|p| self.build_pattern(p)).collect();
-                            trigger_ids.push(pattern_ids);
+                        match attr {
+                            Attribute::Pattern(s_exprs) => {
+                                let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
+                                    s_exprs.iter().map(|p| self.build_pattern(p)).collect();
+                                trigger_ids.push(pattern_ids);
+                            }
+                            Attribute::NoPattern(s_exprs) => {
+                                no_pattern_terms.extend(s_exprs.iter().cloned());
+                            }
+                            _ => {}
                         }
                     }
                     (inner_term.clone(), trigger_ids)
@@ -538,13 +546,18 @@ impl SolverState {
                 };
 
             // Foralls are instantiated by e-matching and need a trigger;
-            // infer one when none was given (see `trigger_inference`).
-            // Existentials are skolemized, so they need none.
+            // infer one when none was given, honoring any `:no-pattern`
+            // exclusions (see `trigger_inference`). Existentials are
+            // skolemized, so they need none.
             if is_forall && trigger_ids.is_empty() {
                 let bound_names: Vec<String> =
                     sorted_vars.iter().map(|x| x.0.get().clone()).collect();
                 if let Some(multipatterns) =
-                    crate::quantifiers::trigger_inference::infer_triggers(&inner_term, &bound_names)
+                    crate::quantifiers::trigger_inference::infer_triggers(
+                        &inner_term,
+                        &bound_names,
+                        &no_pattern_terms,
+                    )
                 {
                     for mp in multipatterns {
                         let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
