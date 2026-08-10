@@ -14,7 +14,9 @@ impl ProofTracer for SMTProofTracer {
             return;
         }
 
-        // Unmatched original-clause callbacks come from the external propagator.
+        // TODO(#186): Known external-clause producers should record their
+        // specific theory before queuing the clause. Keep Background as a
+        // fallback for callbacks whose provenance was not retained.
         self.add_theory_clause(&clause.to_vec(), Theory::Background);
     }
 
@@ -62,7 +64,8 @@ impl ProofTracer for SMTProofTracer {
     }
 
     fn add_constraint(&mut self, clause: &[i32]) {
-        // Clauses supplied by the external propagator are theory lemmas.
+        // TODO(#186): CaDiCaL does not include theory provenance in this
+        // callback, so constraints remain Background until recorded at source.
         self.add_theory_clause(&clause.to_vec(), Theory::Background);
     }
 
