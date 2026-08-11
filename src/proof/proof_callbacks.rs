@@ -15,9 +15,7 @@ impl ProofTracer for SMTProofTracer {
             return;
         }
 
-        // TODO: Known external-clause producers should record their
-        // specific theory before queuing the clause. Keep Background as a
-        // fallback for callbacks whose provenance was not retained.
+        // TODO: Tag known external clauses with their source theory.
         self.add_theory_clause(&clause.to_vec(), Theory::Background);
     }
 
@@ -65,8 +63,7 @@ impl ProofTracer for SMTProofTracer {
     }
 
     fn add_constraint(&mut self, clause: &[i32]) {
-        // TODO: CaDiCaL does not include theory provenance in this
-        // callback, so constraints remain Background until recorded at source.
+        // TODO: Preserve theory provenance for CaDiCaL constraints.
         self.add_theory_clause(&clause.to_vec(), Theory::Background);
     }
 
@@ -103,7 +100,6 @@ mod tests {
         startup.add_original_clause(&vec![]);
         startup.expect_original_clause_callback(&[]);
         ProofTracer::add_original_clause(&mut startup, 1, false, &[], false);
-        startup.cancel_expected_original_clause_callback(&[]);
         assert_eq!(startup.generate_edrat(), "a 0\n");
 
         let mut external = tracer();
@@ -140,16 +136,5 @@ mod tests {
 
         assert!(!tracer.consume_expected_original_clause(&[1]));
         assert_eq!(tracer.generate_edrat(), "");
-    }
-
-    #[test]
-    fn canceling_one_expected_callback_preserves_others() {
-        let mut tracer = tracer();
-        tracer.expect_original_clause_callback(&[1]);
-        tracer.expect_original_clause_callback(&[2]);
-        tracer.cancel_expected_original_clause_callback(&[1]);
-
-        assert!(tracer.consume_expected_original_clause(&[2]));
-        assert!(!tracer.consume_expected_original_clause(&[1]));
     }
 }

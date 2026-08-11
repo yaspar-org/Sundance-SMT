@@ -172,61 +172,13 @@ fn format_function_declaration(
 
 fn collect_global_symbols(term: &Term, symbols: &mut HashSet<Str>) {
     match term.repr() {
-        Constant(..) | Local(..) => {}
-        Global(qid, ..) => {
+        Global(qid, ..) | App(qid, ..) => {
             symbols.insert(qid.0.symbol.clone());
         }
-        App(qid, terms, ..) => {
-            symbols.insert(qid.0.symbol.clone());
-            for term in terms {
-                collect_global_symbols(term, symbols);
-            }
-        }
-        Let(bindings, body) => {
-            for binding in bindings {
-                collect_global_symbols(&binding.2, symbols);
-            }
-            collect_global_symbols(body, symbols);
-        }
-        Exists(_, body) | Forall(_, body) | Not(body) => {
-            collect_global_symbols(body, symbols);
-        }
-        Matching(scrutinee, arms) => {
-            collect_global_symbols(scrutinee, symbols);
-            for arm in arms {
-                collect_global_symbols(&arm.body, symbols);
-            }
-        }
-        Annotated(term, attributes) => {
-            collect_global_symbols(term, symbols);
-            for attribute in attributes {
-                if let Attribute::Pattern(terms) = attribute {
-                    for term in terms {
-                        collect_global_symbols(term, symbols);
-                    }
-                }
-            }
-        }
-        Eq(left, right) => {
-            collect_global_symbols(left, symbols);
-            collect_global_symbols(right, symbols);
-        }
-        Distinct(terms) | And(terms) | Or(terms) | Xor(terms) => {
-            for term in terms {
-                collect_global_symbols(term, symbols);
-            }
-        }
-        Implies(premises, conclusion) => {
-            for premise in premises {
-                collect_global_symbols(premise, symbols);
-            }
-            collect_global_symbols(conclusion, symbols);
-        }
-        Ite(condition, then_term, else_term) => {
-            collect_global_symbols(condition, symbols);
-            collect_global_symbols(then_term, symbols);
-            collect_global_symbols(else_term, symbols);
-        }
+        _ => {}
+    }
+    for subterm in term.repr().sub_terms() {
+        collect_global_symbols(subterm, symbols);
     }
 }
 
@@ -289,8 +241,7 @@ fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMe
     output
 }
 
-// Yaspar's generic Display omits inferred sort ascriptions. Parametric
-// datatype constructors need those ascriptions to remain valid SMT-LIB.
+// Print inferred sorts for parametric constructors, which Yaspar omits.
 struct SmtTerm<'a> {
     term: &'a Term,
     symbol_table: &'a HashMap<Str, Vec<(Sig, FunctionMeta)>>,
@@ -327,87 +278,38 @@ impl SmtTerm<'_> {
         write!(f, "{qid}")
     }
 
-    fn fmt_terms(
+    fn child<'a>(&'a self, term: &'a Term) -> SmtTerm<'a> {
+        SmtTerm {
+            term,
+            symbol_table: self.symbol_table,
+        }
+    }
+
+    fn fmt_terms<'a>(
         &self,
         f: &mut fmt::Formatter<'_>,
-        terms: &[Term],
-        separator: &str,
+        terms: impl IntoIterator<Item = &'a Term>,
     ) -> fmt::Result {
-        for (index, term) in terms.iter().enumerate() {
+        for (index, term) in terms.into_iter().enumerate() {
             if index > 0 {
-                f.write_str(separator)?;
+                f.write_str(" ")?;
             }
-            write!(
-                f,
-                "{}",
-                SmtTerm {
-                    term,
-                    symbol_table: self.symbol_table,
-                }
-            )?;
+            write!(f, "{}", self.child(term))?;
         }
         Ok(())
     }
 
-    fn fmt_application(
+    fn fmt_application<'a>(
         &self,
         f: &mut fmt::Formatter<'_>,
         operator: &str,
-        terms: &[Term],
+        terms: impl IntoIterator<Item = &'a Term>,
     ) -> fmt::Result {
         write!(f, "({operator}")?;
-        if !terms.is_empty() {
-            f.write_str(" ")?;
-            self.fmt_terms(f, terms, " ")?;
+        for term in terms {
+            write!(f, " {}", self.child(term))?;
         }
         f.write_str(")")
-    }
-
-    fn fmt_binary_application(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        operator: &str,
-        left: &Term,
-        right: &Term,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "({operator} {} {})",
-            SmtTerm {
-                term: left,
-                symbol_table: self.symbol_table,
-            },
-            SmtTerm {
-                term: right,
-                symbol_table: self.symbol_table,
-            }
-        )
-    }
-
-    fn fmt_ternary_application(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        operator: &str,
-        first: &Term,
-        second: &Term,
-        third: &Term,
-    ) -> fmt::Result {
-        write!(
-            f,
-            "({operator} {} {} {})",
-            SmtTerm {
-                term: first,
-                symbol_table: self.symbol_table,
-            },
-            SmtTerm {
-                term: second,
-                symbol_table: self.symbol_table,
-            },
-            SmtTerm {
-                term: third,
-                symbol_table: self.symbol_table,
-            }
-        )
     }
 }
 
@@ -420,9 +322,8 @@ impl fmt::Display for SmtTerm<'_> {
             App(qid, terms, sort) => {
                 f.write_str("(")?;
                 self.fmt_identifier(f, qid, sort.as_ref())?;
-                if !terms.is_empty() {
-                    f.write_str(" ")?;
-                    self.fmt_terms(f, terms, " ")?;
+                for term in terms {
+                    write!(f, " {}", self.child(term))?;
                 }
                 f.write_str(")")
             }
@@ -432,24 +333,9 @@ impl fmt::Display for SmtTerm<'_> {
                     if index > 0 {
                         f.write_str(" ")?;
                     }
-                    write!(
-                        f,
-                        "({} {})",
-                        binding.0.sym_quote(),
-                        SmtTerm {
-                            term: &binding.2,
-                            symbol_table: self.symbol_table,
-                        }
-                    )?;
+                    write!(f, "({} {})", binding.0.sym_quote(), self.child(&binding.2))?;
                 }
-                write!(
-                    f,
-                    ") {})",
-                    SmtTerm {
-                        term: body,
-                        symbol_table: self.symbol_table,
-                    }
-                )
+                write!(f, ") {})", self.child(body))
             }
             Exists(bindings, body) | Forall(bindings, body) => {
                 let binder = if matches!(self.term.repr(), Exists(..)) {
@@ -464,55 +350,26 @@ impl fmt::Display for SmtTerm<'_> {
                     }
                     write!(f, "{binding}")?;
                 }
-                write!(
-                    f,
-                    ") {})",
-                    SmtTerm {
-                        term: body,
-                        symbol_table: self.symbol_table,
-                    }
-                )
+                write!(f, ") {})", self.child(body))
             }
             Matching(scrutinee, arms) => {
-                write!(
-                    f,
-                    "(match {} (",
-                    SmtTerm {
-                        term: scrutinee,
-                        symbol_table: self.symbol_table,
-                    }
-                )?;
+                write!(f, "(match {} (", self.child(scrutinee))?;
                 for (index, arm) in arms.iter().enumerate() {
                     if index > 0 {
                         f.write_str(" ")?;
                     }
-                    write!(
-                        f,
-                        "({} {})",
-                        arm.pattern,
-                        SmtTerm {
-                            term: &arm.body,
-                            symbol_table: self.symbol_table,
-                        }
-                    )?;
+                    write!(f, "({} {})", arm.pattern, self.child(&arm.body))?;
                 }
                 f.write_str("))")
             }
             Annotated(term, attributes) => {
-                write!(
-                    f,
-                    "(! {}",
-                    SmtTerm {
-                        term,
-                        symbol_table: self.symbol_table,
-                    }
-                )?;
+                write!(f, "(! {}", self.child(term))?;
                 for attribute in attributes {
                     f.write_str(" ")?;
                     match attribute {
                         Attribute::Pattern(terms) => {
                             f.write_str(":pattern (")?;
-                            self.fmt_terms(f, terms, " ")?;
+                            self.fmt_terms(f, terms)?;
                             f.write_str(")")?;
                         }
                         _ => write!(f, "{attribute}")?,
@@ -520,26 +377,17 @@ impl fmt::Display for SmtTerm<'_> {
                 }
                 f.write_str(")")
             }
-            Eq(left, right) => self.fmt_binary_application(f, "=", left, right),
+            Eq(left, right) => self.fmt_application(f, "=", [left, right]),
             Distinct(terms) => self.fmt_application(f, "distinct", terms),
             And(terms) => self.fmt_application(f, "and", terms),
             Or(terms) => self.fmt_application(f, "or", terms),
             Xor(terms) => self.fmt_application(f, "xor", terms),
             Implies(premises, conclusion) => {
-                f.write_str("(=> ")?;
-                self.fmt_terms(f, premises, " ")?;
-                write!(
-                    f,
-                    " {})",
-                    SmtTerm {
-                        term: conclusion,
-                        symbol_table: self.symbol_table,
-                    }
-                )
+                self.fmt_application(f, "=>", premises.iter().chain(std::iter::once(conclusion)))
             }
-            Not(term) => self.fmt_application(f, "not", std::slice::from_ref(term)),
+            Not(term) => self.fmt_application(f, "not", [term]),
             Ite(condition, then_term, else_term) => {
-                self.fmt_ternary_application(f, "ite", condition, then_term, else_term)
+                self.fmt_application(f, "ite", [condition, then_term, else_term])
             }
         }
     }
@@ -615,10 +463,6 @@ impl SMTProofTracer {
         }
     }
 
-    pub fn cancel_expected_original_clause_callback(&mut self, clause: &[i32]) {
-        self.consume_expected_original_clause(clause);
-    }
-
     ////////////////////////////////////////////////////////////////////////////
 
     // TODO: If each literal is only needed once, then they can be removed from the hashmap
@@ -647,12 +491,11 @@ impl SMTProofTracer {
         self.get_lit_info(literal).is_some() || self.get_lit_info(-literal).is_some()
     }
 
-    /// Pushes literal definitions
-    /// If one of the literals is not in terms list, then this clause is useless and we return false
+    /// Emits definitions for the literals in `clause`.
     fn introduce_literals(
         &self,
         literals_defined: &mut HashSet<i32>,
-        clause: &Vec<i32>,
+        clause: &[i32],
         out: &mut String,
     ) {
         let mut temp_output = String::new();
@@ -793,11 +636,10 @@ impl SMTProofTracer {
                         clause,
                         skolem_vars
                     );
-                    // The declaration refers to the parent eDRAT literal, while
-                    // the child literal may refer to the fresh Skolem symbols.
+                    // Introduce the parent before declaring symbols used by the child.
                     self.introduce_literals(
                         &mut literals_defined,
-                        &vec![*parent_term],
+                        std::slice::from_ref(parent_term),
                         &mut output,
                     );
                     for (i, var) in skolem_vars.iter().enumerate() {
@@ -830,6 +672,23 @@ mod tests {
     use yaspar_ir::ast::{ACommand, Context, Typecheck};
     use yaspar_ir::untyped::UntypedAst;
 
+    fn parse_assertion(script: &str) -> (Context, Term) {
+        let mut context = Context::new();
+        let commands = UntypedAst
+            .parse_script_str(script)
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+        let assertion = commands
+            .iter()
+            .find_map(|command| match command.repr() {
+                ACommand::Assert(term) => Some(term.clone()),
+                _ => None,
+            })
+            .unwrap();
+        (context, assertion)
+    }
+
     #[test]
     fn ascribes_polymorphic_datatype_constructors() {
         let script = "\
@@ -838,19 +697,7 @@ mod tests {
 (define-fun empty () (Option Val) (as None (Option Val)))
 (assert ((_ is None) (as None (Option Val))))
 ";
-        let mut context = Context::new();
-        let commands = UntypedAst
-            .parse_script_str(script)
-            .unwrap()
-            .type_check(&mut context)
-            .unwrap();
-        let term = commands
-            .iter()
-            .find_map(|command| match command.repr() {
-                ACommand::Assert(term) => Some(term.clone()),
-                _ => None,
-            })
-            .unwrap();
+        let (context, term) = parse_assertion(script);
 
         let mut tracer = SMTProofTracer::new(
             context.expose_sorts().clone(),
@@ -867,56 +714,34 @@ mod tests {
     #[test]
     fn orders_defined_functions_by_dependency() {
         let script = "\
-(declare-fun a () Int)
-(define-fun f ((x Int)) Int (+ x a))
-(define-fun g ((x Int)) Int (f (f x)))
-(assert (= (g 0) 2))
+(declare-fun base () Int)
+(define-fun z ((x Int)) Int (+ x base))
+(define-fun a ((x Int)) Int (z (z x)))
 ";
         let mut context = Context::new();
-        let commands = UntypedAst
+        UntypedAst
             .parse_script_str(script)
             .unwrap()
             .type_check(&mut context)
-            .unwrap();
-        let term = commands
-            .iter()
-            .find_map(|command| match command.repr() {
-                ACommand::Assert(term) => Some(term.clone()),
-                _ => None,
-            })
             .unwrap();
 
         let mut tracer = SMTProofTracer::new(
             context.expose_sorts().clone(),
             context.expose_symbol_table().clone(),
         );
-        tracer.register_term(1, &term, true);
-        tracer.add_original_clause(&vec![1]);
 
         let proof = tracer.generate_edrat();
-        let declaration = proof.find("(declare-fun a () Int)").unwrap();
-        let f_definition = proof.find("(define-fun f ").unwrap();
-        let g_definition = proof.find("(define-fun g ").unwrap();
-        assert!(declaration < f_definition);
-        assert!(f_definition < g_definition);
+        let declaration = proof.find("(declare-fun base () Int)").unwrap();
+        let dependency = proof.find("(define-fun z ").unwrap();
+        let dependent = proof.find("(define-fun a ").unwrap();
+        assert!(declaration < dependency);
+        assert!(dependency < dependent);
     }
 
     #[test]
     fn introduces_skolem_parent_before_declaration_and_child_after() {
         let script = "(assert (exists ((x Int)) (> x 0)))";
-        let mut context = Context::new();
-        let commands = UntypedAst
-            .parse_script_str(script)
-            .unwrap()
-            .type_check(&mut context)
-            .unwrap();
-        let parent = commands
-            .iter()
-            .find_map(|command| match command.repr() {
-                ACommand::Assert(term) => Some(term.clone()),
-                _ => None,
-            })
-            .unwrap();
+        let (mut context, parent) = parse_assertion(script);
         let (child, skolem_vars) = skolemize(&parent, &mut context, true);
         let skolem_name = skolem_vars[0].0.to_string();
 
