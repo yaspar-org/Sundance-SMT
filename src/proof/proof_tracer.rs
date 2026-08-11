@@ -8,13 +8,9 @@ use crate::proof::{ProofStep, ProofStepType, Theory};
 use core::panic;
 use std::cmp::Eq;
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::hash::Hash;
 use std::ops::Neg;
-use yaspar_ir::ast::{
-    ATerm::*, Attribute, DatatypeFunction, FunctionMeta, QualifiedIdentifier, Repr, Sig, Sort,
-    SortDef, Str, SymbolQuote, Term,
-};
+use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, SymbolQuote, Term};
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
 /// to generate an eDRAT proof.
@@ -119,11 +115,7 @@ fn format_datatype_declaration(sorts: &HashMap<Str, SortDef>) -> String {
 }
 
 /// Format a function signature as a declare-fun command
-fn format_function_declaration(
-    symbol_name: &Str,
-    sigs: &[(Sig, FunctionMeta)],
-    symbol_table: &HashMap<Str, Vec<(Sig, FunctionMeta)>>,
-) -> String {
+fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) -> String {
     // overloading is only possible for generated functions; we skip them.
     if sigs.len() != 1 {
         return String::new();
@@ -160,10 +152,7 @@ fn format_function_declaration(
                 meta.def.name.sym_quote(),
                 variables,
                 meta.def.out_sort,
-                SmtTerm {
-                    term: &meta.def.body,
-                    symbol_table,
-                }
+                meta.def.body
             )
         }
         _ => String::new(),
@@ -195,11 +184,7 @@ fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMe
         ) {
             definitions.push(symbol);
         } else {
-            output.push_str(&format_function_declaration(
-                symbol,
-                &symbol_table[symbol],
-                symbol_table,
-            ));
+            output.push_str(&format_function_declaration(symbol, &symbol_table[symbol]));
         }
     }
 
@@ -226,167 +211,11 @@ fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMe
             panic!("We do not handle recursive function definitions!");
         };
         let symbol = definitions.remove(index);
-        output.push_str(&format_function_declaration(
-            symbol,
-            &symbol_table[symbol],
-            symbol_table,
-        ));
+        output.push_str(&format_function_declaration(symbol, &symbol_table[symbol]));
         emitted.insert(symbol.clone());
     }
 
     output
-}
-
-// Print inferred sorts for parametric constructors, which Yaspar omits.
-struct SmtTerm<'a> {
-    term: &'a Term,
-    symbol_table: &'a HashMap<Str, Vec<(Sig, FunctionMeta)>>,
-}
-
-impl SmtTerm<'_> {
-    fn is_parametric_constructor(&self, qid: &QualifiedIdentifier) -> bool {
-        self.symbol_table.get(&qid.0.symbol).is_some_and(|sigs| {
-            sigs.iter().any(|(sig, meta)| {
-                matches!(sig, Sig::ParFunc(_, params, _, _) if !params.is_empty())
-                    && matches!(
-                        meta,
-                        FunctionMeta::Datatype {
-                            kind: DatatypeFunction::Constructor,
-                            ..
-                        }
-                    )
-            })
-        })
-    }
-
-    fn fmt_identifier(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        qid: &QualifiedIdentifier,
-        inferred_sort: Option<&Sort>,
-    ) -> fmt::Result {
-        if qid.1.is_none()
-            && self.is_parametric_constructor(qid)
-            && let Some(sort) = inferred_sort
-        {
-            return write!(f, "(as {} {})", qid.0, sort);
-        }
-        write!(f, "{qid}")
-    }
-
-    fn child<'a>(&'a self, term: &'a Term) -> SmtTerm<'a> {
-        SmtTerm {
-            term,
-            symbol_table: self.symbol_table,
-        }
-    }
-
-    fn fmt_terms<'a>(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        terms: impl IntoIterator<Item = &'a Term>,
-    ) -> fmt::Result {
-        for (index, term) in terms.into_iter().enumerate() {
-            if index > 0 {
-                f.write_str(" ")?;
-            }
-            write!(f, "{}", self.child(term))?;
-        }
-        Ok(())
-    }
-
-    fn fmt_application<'a>(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        operator: &str,
-        terms: impl IntoIterator<Item = &'a Term>,
-    ) -> fmt::Result {
-        write!(f, "({operator}")?;
-        for term in terms {
-            write!(f, " {}", self.child(term))?;
-        }
-        f.write_str(")")
-    }
-}
-
-impl fmt::Display for SmtTerm<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.term.repr() {
-            Constant(constant, _) => write!(f, "{constant}"),
-            Global(qid, sort) => self.fmt_identifier(f, qid, sort.as_ref()),
-            Local(local) => write!(f, "{}", local.symbol.sym_quote()),
-            App(qid, terms, sort) => {
-                f.write_str("(")?;
-                self.fmt_identifier(f, qid, sort.as_ref())?;
-                for term in terms {
-                    write!(f, " {}", self.child(term))?;
-                }
-                f.write_str(")")
-            }
-            Let(bindings, body) => {
-                f.write_str("(let (")?;
-                for (index, binding) in bindings.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str(" ")?;
-                    }
-                    write!(f, "({} {})", binding.0.sym_quote(), self.child(&binding.2))?;
-                }
-                write!(f, ") {})", self.child(body))
-            }
-            Exists(bindings, body) | Forall(bindings, body) => {
-                let binder = if matches!(self.term.repr(), Exists(..)) {
-                    "exists"
-                } else {
-                    "forall"
-                };
-                write!(f, "({binder} (")?;
-                for (index, binding) in bindings.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str(" ")?;
-                    }
-                    write!(f, "{binding}")?;
-                }
-                write!(f, ") {})", self.child(body))
-            }
-            Matching(scrutinee, arms) => {
-                write!(f, "(match {} (", self.child(scrutinee))?;
-                for (index, arm) in arms.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str(" ")?;
-                    }
-                    write!(f, "({} {})", arm.pattern, self.child(&arm.body))?;
-                }
-                f.write_str("))")
-            }
-            Annotated(term, attributes) => {
-                write!(f, "(! {}", self.child(term))?;
-                for attribute in attributes {
-                    f.write_str(" ")?;
-                    match attribute {
-                        Attribute::Pattern(terms) => {
-                            f.write_str(":pattern (")?;
-                            self.fmt_terms(f, terms)?;
-                            f.write_str(")")?;
-                        }
-                        _ => write!(f, "{attribute}")?,
-                    }
-                }
-                f.write_str(")")
-            }
-            Eq(left, right) => self.fmt_application(f, "=", [left, right]),
-            Distinct(terms) => self.fmt_application(f, "distinct", terms),
-            And(terms) => self.fmt_application(f, "and", terms),
-            Or(terms) => self.fmt_application(f, "or", terms),
-            Xor(terms) => self.fmt_application(f, "xor", terms),
-            Implies(premises, conclusion) => {
-                self.fmt_application(f, "=>", premises.iter().chain(std::iter::once(conclusion)))
-            }
-            Not(term) => self.fmt_application(f, "not", [term]),
-            Ite(condition, then_term, else_term) => {
-                self.fmt_application(f, "ite", [condition, then_term, else_term])
-            }
-        }
-    }
 }
 
 impl SMTProofTracer {
@@ -510,14 +339,7 @@ impl SMTProofTracer {
                 );
 
                 if !literals_defined.contains(&lit) {
-                    out.push_str(&format!(
-                        "(edrat-literal {} {})\n",
-                        lit,
-                        SmtTerm {
-                            term: &polarized_term,
-                            symbol_table: &self.symbol_table,
-                        }
-                    ));
+                    out.push_str(&format!("(edrat-literal {} {})\n", lit, polarized_term));
                     literals_defined.insert(lit);
                 }
             } else {
@@ -681,28 +503,6 @@ mod tests {
             })
             .unwrap();
         (context, assertion)
-    }
-
-    #[test]
-    fn ascribes_polymorphic_datatype_constructors() {
-        let script = "\
-(declare-sort Val 0)
-(declare-datatypes ((Option 1)) ((par (T) ((None) (Some (value T))))))
-(define-fun empty () (Option Val) (as None (Option Val)))
-(assert ((_ is None) (as None (Option Val))))
-";
-        let (context, term) = parse_assertion(script);
-
-        let mut tracer = SMTProofTracer::new(
-            context.expose_sorts().clone(),
-            context.expose_symbol_table().clone(),
-        );
-        tracer.register_term(1, &term, true);
-        tracer.add_original_clause(&[1]);
-
-        let proof = tracer.generate_edrat();
-        assert!(proof.contains("(define-fun empty () (Option Val) (as None (Option Val)))"));
-        assert!(proof.contains("((_ is None) (as None (Option Val)))"));
     }
 
     #[test]
