@@ -190,8 +190,8 @@ fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMe
     let mut definitions = Vec::new();
     for symbol in symbols {
         if matches!(
-            symbol_table.get(symbol).map(Vec::as_slice),
-            Some([(Sig::ParFunc(..), FunctionMeta::Defined(_))])
+            symbol_table[symbol].as_slice(),
+            [(Sig::ParFunc(..), FunctionMeta::Defined(_))]
         ) {
             definitions.push(symbol);
         } else {
@@ -203,10 +203,6 @@ fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMe
         }
     }
 
-    let defined_symbols = definitions
-        .iter()
-        .map(|symbol| (*symbol).clone())
-        .collect::<HashSet<_>>();
     let dependencies = definitions
         .iter()
         .map(|symbol| {
@@ -224,7 +220,7 @@ fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMe
     while !definitions.is_empty() {
         let Some(index) = definitions.iter().position(|symbol| {
             dependencies[*symbol].iter().all(|dependency| {
-                !defined_symbols.contains(dependency) || emitted.contains(dependency)
+                !dependencies.contains_key(dependency) || emitted.contains(dependency)
             })
         }) else {
             panic!("We do not handle recursive function definitions!");
@@ -412,34 +408,34 @@ impl SMTProofTracer {
 
     ////////////////////////////////////////////////////////////////////////////
 
-    pub fn push_step(&mut self, clause: &Vec<i32>, typ: ProofStepType) {
+    pub fn push_step(&mut self, clause: &[i32], typ: ProofStepType) {
         if !is_tautology(clause) {
             self.proof_steps.push(ProofStep {
-                clause: clause.clone(),
+                clause: clause.to_vec(),
                 typ,
             })
         }
     }
 
-    pub fn push_steps(&mut self, clauses: &Vec<Vec<i32>>, typ: ProofStepType) {
+    pub fn push_steps(&mut self, clauses: &[Vec<i32>], typ: ProofStepType) {
         for clause in clauses {
             self.push_step(clause, typ.clone());
         }
     }
 
-    pub fn add_original_clause(&mut self, clause: &Vec<i32>) {
+    pub fn add_original_clause(&mut self, clause: &[i32]) {
         self.push_step(clause, ProofStepType::OriginalClause);
     }
 
-    pub fn add_sat_clause(&mut self, clause: &Vec<i32>) {
+    pub fn add_sat_clause(&mut self, clause: &[i32]) {
         self.push_step(clause, ProofStepType::SATClause);
     }
 
-    pub fn record_deletion(&mut self, clause: &Vec<i32>) {
+    pub fn record_deletion(&mut self, clause: &[i32]) {
         self.push_step(clause, ProofStepType::Deletion);
     }
 
-    pub fn add_theory_clause(&mut self, clause: &Vec<i32>, theory: Theory) {
+    pub fn add_theory_clause(&mut self, clause: &[i32], theory: Theory) {
         self.push_step(clause, ProofStepType::TheoryClause(theory));
     }
 
@@ -498,7 +494,6 @@ impl SMTProofTracer {
         clause: &[i32],
         out: &mut String,
     ) {
-        let mut temp_output = String::new();
         for &lit in clause {
             debug_println!(12, 2, "Introducing the literal {}", lit);
             if let Some((lit, _id, term, polarity)) = self.get_lit_info(lit) {
@@ -515,7 +510,7 @@ impl SMTProofTracer {
                 );
 
                 if !literals_defined.contains(&lit) {
-                    temp_output.push_str(&format!(
+                    out.push_str(&format!(
                         "(edrat-literal {} {})\n",
                         lit,
                         SmtTerm {
@@ -532,7 +527,6 @@ impl SMTProofTracer {
                 );
             }
         }
-        out.push_str(&temp_output);
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -704,7 +698,7 @@ mod tests {
             context.expose_symbol_table().clone(),
         );
         tracer.register_term(1, &term, true);
-        tracer.add_original_clause(&vec![1]);
+        tracer.add_original_clause(&[1]);
 
         let proof = tracer.generate_edrat();
         assert!(proof.contains("(define-fun empty () (Option Val) (as None (Option Val)))"));
@@ -752,7 +746,7 @@ mod tests {
         tracer.register_term(1, &parent, true);
         tracer.register_term(2, &child, true);
         tracer.push_step(
-            &vec![-1, 2],
+            &[-1, 2],
             ProofStepType::Skolemization {
                 parent_term: 1,
                 skolem_vars,

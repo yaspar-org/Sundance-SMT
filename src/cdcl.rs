@@ -224,7 +224,7 @@ fn write_partial_proof(path: &std::path::Path, result: Status, edrat_proof: &str
 /// Records a clause before CaDiCaL can synchronously simplify or delete it.
 /// A missing `theory` denotes an original CNF clause.
 fn add_clause_to_proof_and_solver(
-    clause: &Vec<i32>,
+    clause: &[i32],
     solver: &mut CaDiCal,
     proof_tracer: &RefCell<SMTProofTracer>,
     theory: Option<Theory>,

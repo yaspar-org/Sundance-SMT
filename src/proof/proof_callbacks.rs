@@ -16,7 +16,7 @@ impl ProofTracer for SMTProofTracer {
         }
 
         // TODO: Tag known external clauses with their source theory.
-        self.add_theory_clause(&clause.to_vec(), Theory::Background);
+        self.add_theory_clause(clause, Theory::Background);
     }
 
     fn add_derived_clause(
@@ -32,12 +32,12 @@ impl ProofTracer for SMTProofTracer {
         debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
-        self.add_sat_clause(&clause.to_vec());
+        self.add_sat_clause(clause);
     }
 
     fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {
         self.deleted_clauses += 1;
-        self.record_deletion(&clause.to_vec());
+        self.record_deletion(clause);
     }
 
     fn weaken_minus(&mut self, _id: u64, _clause: &[i32]) {
@@ -64,7 +64,7 @@ impl ProofTracer for SMTProofTracer {
 
     fn add_constraint(&mut self, clause: &[i32]) {
         // TODO: Preserve theory provenance for CaDiCaL constraints.
-        self.add_theory_clause(&clause.to_vec(), Theory::Background);
+        self.add_theory_clause(clause, Theory::Background);
     }
 
     fn reset_assumptions(&mut self) {
@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn classifies_original_clause_callbacks() {
         let mut startup = tracer();
-        startup.add_original_clause(&vec![]);
+        startup.add_original_clause(&[]);
         startup.expect_original_clause_callback(&[]);
         ProofTracer::add_original_clause(&mut startup, 1, false, &[], false);
         assert_eq!(startup.generate_edrat(), "a 0\n");
