@@ -10,12 +10,13 @@ use cadical_sys::ProofTracer;
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
     fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], restored: bool) {
-        let expected = self.consume_expected_original_clause(clause);
-        if restored || expected {
+        let registered = self.consume_clause_callback_registration(clause);
+        if restored || registered {
             return;
         }
 
-        // TODO: Tag known external clauses with their source theory.
+        // Known external-clause producers register callbacks at their source.
+        // Preserve Background only as a fallback for untracked provenance.
         self.add_theory_clause(clause, Theory::Background);
     }
 
@@ -62,9 +63,11 @@ impl ProofTracer for SMTProofTracer {
         panic!("Do not currently support assumptions")
     }
 
-    fn add_constraint(&mut self, clause: &[i32]) {
-        // TODO: Preserve theory provenance for CaDiCaL constraints.
-        self.add_theory_clause(clause, Theory::Background);
+    fn add_constraint(&mut self, _clause: &[i32]) {
+        // This callback reports temporary clauses supplied through CaDiCaL's
+        // `constrain` API, not clauses derived by CaDiCaL or a Sundance theory.
+        // Sundance does not use that API and cannot soundly tag such a clause.
+        panic!("CaDiCaL constraints are not supported in eDRAT proofs");
     }
 
     fn reset_assumptions(&mut self) {
@@ -98,28 +101,30 @@ mod tests {
     fn classifies_original_clause_callbacks() {
         let mut startup = tracer();
         startup.add_original_clause(&[]);
-        startup.expect_original_clause_callback(&[]);
+        startup.register_clause_for_cadical_callback(&[]);
         ProofTracer::add_original_clause(&mut startup, 1, false, &[], false);
         assert_eq!(startup.generate_edrat(), "a 0\n");
 
         let mut external = tracer();
         ProofTracer::add_original_clause(&mut external, 1, false, &[], false);
         assert_eq!(external.generate_edrat(), "t bg 0\n");
-
-        let mut constraint = tracer();
-        ProofTracer::add_constraint(&mut constraint, &[]);
-        assert_eq!(constraint.generate_edrat(), "t bg 0\n");
     }
 
     #[test]
-    fn expected_original_clause_callbacks_ignore_order_and_count_duplicates() {
-        let mut tracer = tracer();
-        tracer.expect_original_clause_callback(&[2, -1]);
-        assert!(tracer.consume_expected_original_clause(&[-1, 2]));
-        assert!(!tracer.consume_expected_original_clause(&[2, -1]));
+    #[should_panic(expected = "CaDiCaL constraints are not supported in eDRAT proofs")]
+    fn rejects_cadical_constraints() {
+        ProofTracer::add_constraint(&mut tracer(), &[]);
+    }
 
-        tracer.expect_original_clause_callback(&[]);
-        tracer.expect_original_clause_callback(&[]);
+    #[test]
+    fn registered_clause_callbacks_ignore_order_and_count_duplicates() {
+        let mut tracer = tracer();
+        tracer.register_clause_for_cadical_callback(&[2, -1]);
+        assert!(tracer.consume_clause_callback_registration(&[-1, 2]));
+        assert!(!tracer.consume_clause_callback_registration(&[2, -1]));
+
+        tracer.register_clause_for_cadical_callback(&[]);
+        tracer.register_clause_for_cadical_callback(&[]);
         ProofTracer::add_original_clause(&mut tracer, 1, false, &[], false);
         ProofTracer::add_original_clause(&mut tracer, 2, false, &[], false);
         assert_eq!(tracer.generate_edrat(), "");
@@ -129,12 +134,12 @@ mod tests {
     }
 
     #[test]
-    fn restored_callbacks_consume_matching_expectations() {
+    fn restored_callbacks_consume_matching_registrations() {
         let mut tracer = tracer();
-        tracer.expect_original_clause_callback(&[1]);
+        tracer.register_clause_for_cadical_callback(&[1]);
         ProofTracer::add_original_clause(&mut tracer, 1, false, &[1], true);
 
-        assert!(!tracer.consume_expected_original_clause(&[1]));
+        assert!(!tracer.consume_clause_callback_registration(&[1]));
         assert_eq!(tracer.generate_edrat(), "");
     }
 }

@@ -7,6 +7,7 @@ use crate::debug_println;
 use crate::proof::{ProofStep, ProofStepType, Theory};
 use core::panic;
 use std::cmp::Eq;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::Neg;
@@ -20,7 +21,7 @@ pub struct SMTProofTracer {
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     instantiations_for_smt2: Vec<(Term, Vec<(Term, bool)>)>,
-    expected_original_clauses: HashMap<Vec<i32>, usize>,
+    registered_clause_callbacks: HashMap<Vec<i32>, usize>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
 }
@@ -54,7 +55,7 @@ where
     false
 }
 
-fn normalized_clause(clause: &[i32]) -> Vec<i32> {
+fn normalize_clause(clause: &[i32]) -> Vec<i32> {
     let mut normalized = clause.to_vec();
     normalized.sort_unstable();
     normalized.dedup();
@@ -230,7 +231,7 @@ impl SMTProofTracer {
             sorts,
             symbol_table,
             instantiations_for_smt2: Vec::new(),
-            expected_original_clauses: HashMap::new(),
+            registered_clause_callbacks: HashMap::new(),
             deleted_clauses: 0,
         }
     }
@@ -268,23 +269,25 @@ impl SMTProofTracer {
         self.push_step(clause, ProofStepType::TheoryClause(theory));
     }
 
-    pub fn expect_original_clause_callback(&mut self, clause: &[i32]) {
-        let clause = normalized_clause(clause);
-        *self.expected_original_clauses.entry(clause).or_default() += 1;
+    pub fn register_clause_for_cadical_callback(&mut self, clause: &[i32]) {
+        let clause = normalize_clause(clause);
+        *self.registered_clause_callbacks.entry(clause).or_default() += 1;
     }
 
-    pub fn consume_expected_original_clause(&mut self, clause: &[i32]) -> bool {
-        let clause = normalized_clause(clause);
-        match self.expected_original_clauses.get_mut(&clause) {
-            Some(count) if *count > 1 => {
-                *count -= 1;
+    pub fn consume_clause_callback_registration(&mut self, clause: &[i32]) -> bool {
+        match self
+            .registered_clause_callbacks
+            .entry(normalize_clause(clause))
+        {
+            Entry::Occupied(mut entry) => {
+                if *entry.get() == 1 {
+                    entry.remove();
+                } else {
+                    *entry.get_mut() -= 1;
+                }
                 true
             }
-            Some(_) => {
-                self.expected_original_clauses.remove(&clause);
-                true
-            }
-            None => false,
+            Entry::Vacant(_) => false,
         }
     }
 

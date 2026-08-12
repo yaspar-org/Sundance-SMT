@@ -236,7 +236,7 @@ fn add_clause_to_proof_and_solver(
         } else {
             proof_tracer.add_original_clause(clause);
         }
-        proof_tracer.expect_original_clause_callback(clause);
+        proof_tracer.register_clause_for_cadical_callback(clause);
     }
 
     solver.clause6(clause); // TODO `clause1()`, `clause2()`, etc. might be more efficient
