@@ -2,25 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::debug_println;
-use crate::proof::proof_tracer::SMTProofTracer;
+use crate::proof::{Theory, proof_tracer::SMTProofTracer};
 use cadical_sys::ProofTracer;
 
 /// An implementation of the cadical-sys `ProofTracer` trait,
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
-    fn add_original_clause(
-        &mut self,
-        _id: u64,
-        _redundant: bool,
-        _clause: &[i32],
-        _restored: bool,
-    ) {
-        // Previously, this function added original formula clauses and theory clauses to the proof here.
-        // However, because this function could only see the clause itself and whether Sundance was
-        // still processing original formula clauses, it couldn't determine
-        // which theory was responsible for the clause (which eDRAT now requires).
-        // Thus, Sundance directly adds original and theory clauses elsewhere.
+    fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], restored: bool) {
+        let registered = self.consume_clause_callback_registration(clause);
+        if restored || registered {
+            return;
+        }
+
+        // Known external-clause producers register callbacks at their source.
+        // Preserve Background only as a fallback for untracked provenance.
+        self.add_theory_clause(clause, Theory::Background);
     }
 
     fn add_derived_clause(
@@ -36,12 +33,12 @@ impl ProofTracer for SMTProofTracer {
         debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
-        self.add_sat_clause(&clause.to_vec());
+        self.add_sat_clause(clause);
     }
 
     fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {
         self.deleted_clauses += 1;
-        self.record_deletion(&clause.to_vec());
+        self.record_deletion(clause);
     }
 
     fn weaken_minus(&mut self, _id: u64, _clause: &[i32]) {
@@ -67,7 +64,10 @@ impl ProofTracer for SMTProofTracer {
     }
 
     fn add_constraint(&mut self, _clause: &[i32]) {
-        // Optional: Adding constraints
+        // This callback reports temporary clauses supplied through CaDiCaL's
+        // `constrain` API, not clauses derived by CaDiCaL or a Sundance theory.
+        // Sundance does not use that API and cannot soundly tag such a clause.
+        panic!("CaDiCaL constraints are not supported in eDRAT proofs");
     }
 
     fn reset_assumptions(&mut self) {
@@ -86,4 +86,60 @@ impl ProofTracer for SMTProofTracer {
     fn conclude_unsat(&mut self, _conclusion_type: i32, _clause_ids: &[u64]) {}
 
     fn conclude_unknown(&mut self, _trail: &[i32]) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn tracer() -> SMTProofTracer {
+        SMTProofTracer::new(HashMap::new(), HashMap::new())
+    }
+
+    #[test]
+    fn classifies_original_clause_callbacks() {
+        let mut startup = tracer();
+        startup.add_original_clause(&[]);
+        startup.register_clause_for_cadical_callback(&[]);
+        ProofTracer::add_original_clause(&mut startup, 1, false, &[], false);
+        assert_eq!(startup.generate_edrat(), "a 0\n");
+
+        let mut external = tracer();
+        ProofTracer::add_original_clause(&mut external, 1, false, &[], false);
+        assert_eq!(external.generate_edrat(), "t bg 0\n");
+    }
+
+    #[test]
+    #[should_panic(expected = "CaDiCaL constraints are not supported in eDRAT proofs")]
+    fn rejects_cadical_constraints() {
+        ProofTracer::add_constraint(&mut tracer(), &[]);
+    }
+
+    #[test]
+    fn registered_clause_callbacks_ignore_order_and_count_duplicates() {
+        let mut tracer = tracer();
+        tracer.register_clause_for_cadical_callback(&[2, -1]);
+        assert!(tracer.consume_clause_callback_registration(&[-1, 2]));
+        assert!(!tracer.consume_clause_callback_registration(&[2, -1]));
+
+        tracer.register_clause_for_cadical_callback(&[]);
+        tracer.register_clause_for_cadical_callback(&[]);
+        ProofTracer::add_original_clause(&mut tracer, 1, false, &[], false);
+        ProofTracer::add_original_clause(&mut tracer, 2, false, &[], false);
+        assert_eq!(tracer.generate_edrat(), "");
+
+        ProofTracer::add_original_clause(&mut tracer, 3, false, &[], false);
+        assert_eq!(tracer.generate_edrat(), "t bg 0\n");
+    }
+
+    #[test]
+    fn restored_callbacks_consume_matching_registrations() {
+        let mut tracer = tracer();
+        tracer.register_clause_for_cadical_callback(&[1]);
+        ProofTracer::add_original_clause(&mut tracer, 1, false, &[1], true);
+
+        assert!(!tracer.consume_clause_callback_registration(&[1]));
+        assert_eq!(tracer.generate_edrat(), "");
+    }
 }
