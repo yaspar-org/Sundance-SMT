@@ -509,7 +509,20 @@ impl SolverState {
         let num = term.uid();
 
         // Arithmetic term tracking
-        if term.get_sort(self.context.arena()).to_string() == "Int" {
+        let sort = term.get_sort(self.context.arena()).to_string();
+        // TODO: Real arithmetic is not yet plumbed through the arithmetic
+        // backends (they allocate integer variables and bucket Nelson-Oppen
+        // model values as integers). Registering Real terms as integer
+        // arithmetic is unsound, so panic instead of returning a wrong answer.
+        // Real support is planned; this guard is a stopgap until then.
+        if sort == "Real" {
+            panic!(
+                "Real arithmetic is not yet supported (term: {term}); \
+                 support for Reals is planned. For now the arithmetic \
+                 backends only handle Int."
+            );
+        }
+        if sort == "Int" {
             if !self.arithmetic_terms.contains(&num) {
                 self.arithmetic_terms.push(num);
             }

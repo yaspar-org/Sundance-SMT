@@ -121,17 +121,12 @@ pub fn cdcl_decision_procedure(
     // Add all clauses to the solver
     for (i, clause) in clauses.iter().enumerate() {
         debug_println!(11, 2, "Adding clause #{}: {:?}", i + 1, clause);
-        add_clause_to_solver_and_to_proof(clause, &mut solver, proof_tracer.clone(), None);
+        add_clause_to_proof_and_solver(clause, &mut solver, &proof_tracer, None);
     }
 
     // adding this into disequalities instead so that it appears as a theory lemma
     for clause in &boolean_dt_constraints {
-        add_clause_to_solver_and_to_proof(
-            clause,
-            &mut solver,
-            proof_tracer.clone(),
-            Some(Theory::Datatypes),
-        );
+        add_clause_to_proof_and_solver(clause, &mut solver, &proof_tracer, Some(Theory::Datatypes));
     }
 
     // Observe all known CNF variables at startup
@@ -226,28 +221,22 @@ fn write_partial_proof(path: &std::path::Path, result: Status, edrat_proof: &str
     }
 }
 
-/// Adds the clause to the eDRAT proof and gives it to the CaDiCaL solver.
-/// Notably, the clause is added to the proof *before* it is given to CaDiCaL.
-/// If `theory` is `None`, the clause is treated as an original CNF clause.
-///
-/// During the development of eDRAT proof production in summer 2026,
-/// we found that calling `.clause6()` causes CaDiCaL to immediately process
-/// the clause. In some cases, CaDiCaL immediately deletes the clause
-/// (such as when the clause is a tautology or when it is subsumed by some other
-/// clause already in the solver), and this deletion leads to CaDiCaL invoking
-/// its callback in `proof_tracer.rs`. As a result, the eDRAT proof would try
-/// to delete a clause before it is introduced. This function adds the clause
-/// to the proof before it is given to CaDiCaL to avoid this scenario.
-fn add_clause_to_solver_and_to_proof(
-    clause: &Vec<i32>,
+/// Records a clause before CaDiCaL can synchronously simplify or delete it.
+/// A missing `theory` denotes an original CNF clause.
+fn add_clause_to_proof_and_solver(
+    clause: &[i32],
     solver: &mut CaDiCal,
-    proof_tracer: Rc<RefCell<SMTProofTracer>>,
+    proof_tracer: &RefCell<SMTProofTracer>,
     theory: Option<Theory>,
 ) {
-    if let Some(theory) = theory {
-        proof_tracer.borrow_mut().add_theory_clause(clause, theory);
-    } else {
-        proof_tracer.borrow_mut().add_original_clause(clause);
+    {
+        let mut proof_tracer = proof_tracer.borrow_mut();
+        if let Some(theory) = theory {
+            proof_tracer.add_theory_clause(clause, theory);
+        } else {
+            proof_tracer.add_original_clause(clause);
+        }
+        proof_tracer.register_clause_for_cadical_callback(clause);
     }
 
     solver.clause6(clause); // TODO `clause1()`, `clause2()`, etc. might be more efficient

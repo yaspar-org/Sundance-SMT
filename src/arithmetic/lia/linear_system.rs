@@ -607,7 +607,7 @@ impl Rel<Rational> {
     ///
     /// Replacing bounds for strict constraint types with non-strict bounds is done, as well as simply
     /// injecting rational bounds for already non-strict constraint types.
-    fn to_qdelta_bounds(&self) -> Bounds<QDelta> {
+    pub(crate) fn to_qdelta_bounds(&self) -> Bounds<QDelta> {
         let constant = self.constant.clone();
         match self.constraint_type {
             // non-strict relations are not adjusted by δ
