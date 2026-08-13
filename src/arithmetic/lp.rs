@@ -202,19 +202,22 @@ fn extract_constraint_from_term(
 
     match term.repr() {
         App(identifier, args, _) if !polarity => {
-            if args.len() != 2 {
-                return None;
-            }
-            match identifier.0.symbol.as_str() {
-                "<=" | ">=" | "<" | ">" => {}
-                _ => return None,
-            }
             debug_println!(
                 2,
                 0,
                 "[ARITH CHECK] Extracting linear constraint for NOT APP term {}",
                 term
             );
+            if args.len() != 2 {
+                return None;
+            }
+            // Only arithmetic comparisons are linearizable. Bail out before
+            // extracting the operands so we don't try to linearize (and reject)
+            // the arguments of a non-arithmetic predicate.
+            match identifier.0.symbol.as_str() {
+                "<=" | ">=" | "<" | ">" => {}
+                _ => return None,
+            }
             let (left_expr, additional_constraint_l) =
                 extract_linear_expression(args[0].uid(), solver_state);
             let (right_expr, additional_constraint_r) =
@@ -222,6 +225,7 @@ fn extract_constraint_from_term(
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
+            // Handle comparison operators: <=, >=, <, >, =
             match identifier.0.symbol.as_str() {
                 "<=" => {
                     // ~ (a <= b) -> a > b
@@ -259,23 +263,26 @@ fn extract_constraint_from_term(
                         additional_constraint,
                     ))
                 }
-                _ => unreachable!(),
+                _ => None,
             }
         }
         App(identifier, args, _) if polarity => {
-            if args.len() != 2 {
-                return None;
-            }
-            match identifier.0.symbol.as_str() {
-                "<=" | ">=" | "<" | ">" => {}
-                _ => return None,
-            }
             debug_println!(
                 2,
                 0,
                 "[ARITH CHECK] Extracting linear constraint for APP term {}",
                 term
             );
+            if args.len() != 2 {
+                return None;
+            }
+            // Only arithmetic comparisons are linearizable. Bail out before
+            // extracting the operands so we don't try to linearize (and reject)
+            // the arguments of a non-arithmetic predicate.
+            match identifier.0.symbol.as_str() {
+                "<=" | ">=" | "<" | ">" => {}
+                _ => return None,
+            }
             let (left_expr, additional_constraint_l) =
                 extract_linear_expression(args[0].uid(), solver_state);
             let (right_expr, additional_constraint_r) =
@@ -283,6 +290,7 @@ fn extract_constraint_from_term(
             let mut additional_constraint = vec![];
             additional_constraint.extend(additional_constraint_l);
             additional_constraint.extend(additional_constraint_r);
+            // Handle comparison operators: <=, >=, <, >, =
             match identifier.0.symbol.as_str() {
                 "<=" => Some(LinearConstraint::new(
                     left_expr,
@@ -308,7 +316,7 @@ fn extract_constraint_from_term(
                     FunctionType::Lt,
                     additional_constraint,
                 )),
-                _ => unreachable!(),
+                _ => None,
             }
         }
         Eq(a, b) if polarity => {
@@ -358,6 +366,8 @@ pub fn extract_linear_expression(
     let mut additional_constraints = vec![];
     match term.repr() {
         ATerm::Constant(c, _) => {
+            // Only integer numerals are supported. Reject anything else instead
+            // of silently treating it as 0, which would be unsound.
             if let Constant::Numeral(num) = c {
                 let value = num
                     .to_string()
@@ -372,151 +382,163 @@ pub fn extract_linear_expression(
             }
         }
         Global(..) => {
+            // TODO: consider whether we need egraph.find() here for correctness when variables are merged
             expr.insert(
                 Coefficient::Term(solver_state.to_egraph_id(term_id)),
                 IBig::from(1),
             );
         }
-        App(identifier, args, _) => match identifier.0.symbol.as_str() {
-            "+" => {
-                for arg_id in args.iter() {
-                    let (arg_expr, additional_const) =
-                        extract_linear_expression(arg_id.uid(), solver_state);
-                    additional_constraints.extend(additional_const);
-                    for (var, coeff) in arg_expr {
-                        if var != Coefficient::Constant {
-                            *expr.entry(var).or_insert(IBig::from(0)) += coeff;
-                        } else {
-                            *expr.get_mut(&Coefficient::Constant).unwrap() += coeff;
-                        }
-                    }
-                }
-            }
-            "*" => {
-                assert!(
-                    args.len() == 2,
-                    "expected multiplication to have exactly 2 arguments, got {}",
-                    args.len()
-                );
-                let (left_expr, additional_const_l) =
-                    extract_linear_expression(args[0].uid(), solver_state);
-                let (right_expr, additional_const_r) =
-                    extract_linear_expression(args[1].uid(), solver_state);
-
-                additional_constraints.extend(additional_const_l);
-                additional_constraints.extend(additional_const_r);
-
-                let left_is_const =
-                    left_expr.len() == 1 && left_expr.contains_key(&Coefficient::Constant);
-                let right_is_const =
-                    right_expr.len() == 1 && right_expr.contains_key(&Coefficient::Constant);
-
-                if left_is_const {
-                    let constant = &left_expr[&Coefficient::Constant];
-                    for (var, coeff) in right_expr {
-                        expr.insert(var, constant * coeff);
-                    }
-                } else if right_is_const {
-                    let constant = &right_expr[&Coefficient::Constant];
-                    for (var, coeff) in left_expr {
-                        expr.insert(var, constant * coeff);
-                    }
-                } else {
-                    panic!(
-                        "non-linear multiplication is not supported: (* {} {})",
-                        solver_state.get_term(args[0].uid()),
-                        solver_state.get_term(args[1].uid()),
-                    );
-                }
-            }
-            "-" => {
-                assert!(!args.is_empty(), "expected subtraction to have arguments");
-                if args.len() == 1 {
-                    let (arg_expr, additional_const) =
-                        extract_linear_expression(args[0].uid(), solver_state);
-                    additional_constraints.extend(additional_const);
-                    for (var, coeff) in arg_expr {
-                        expr.insert(var, -coeff);
-                    }
-                } else {
-                    let (first_expr, additional_const_first) =
-                        extract_linear_expression(args[0].uid(), solver_state);
-                    additional_constraints.extend(additional_const_first);
-                    for (var, coeff) in first_expr {
-                        *expr.entry(var).or_insert(IBig::from(0)) += coeff;
-                    }
-                    for arg in args.iter().skip(1) {
+        App(identifier, args, _) => {
+            // Handle arithmetic operations
+            match identifier.0.symbol.as_str() {
+                "+" => {
+                    // Addition: sum all arguments
+                    for arg_id in args.iter() {
                         let (arg_expr, additional_const) =
-                            extract_linear_expression(arg.uid(), solver_state);
+                            extract_linear_expression(arg_id.uid(), solver_state);
                         additional_constraints.extend(additional_const);
                         for (var, coeff) in arg_expr {
-                            *expr.entry(var).or_insert(IBig::from(0)) -= coeff;
+                            if var != Coefficient::Constant {
+                                *expr.entry(var).or_insert(IBig::from(0)) += coeff;
+                            } else {
+                                *expr.get_mut(&Coefficient::Constant).unwrap() += coeff;
+                            }
                         }
                     }
                 }
-            }
-            "div" => {
-                assert!(args.len() == 2, "div requires exactly 2 arguments");
-                let raw_numerator_id = solver_state.to_egraph_id(args[0].uid());
-                let numerator_id = solver_state.egraph.find(raw_numerator_id);
-                if let Some(negated_model) = solver_state
-                    .egraph
-                    .explain_equality(numerator_id, raw_numerator_id)
-                {
-                    let model_terms: Vec<i32> = negated_model
-                        .into_iter()
-                        .map(|x| -solver_state.make_eq(x.0, x.1))
-                        .collect();
-                    additional_constraints.extend(model_terms);
+                "*" => {
+                    // Multiplication: handle simple cases like c * x or x * c
+                    if args.len() == 2 {
+                        let (left_expr, additional_const_l) =
+                            extract_linear_expression(args[0].uid(), solver_state);
+                        let (right_expr, additional_const_r) =
+                            extract_linear_expression(args[1].uid(), solver_state);
+
+                        additional_constraints.extend(additional_const_l);
+                        additional_constraints.extend(additional_const_r);
+                        // Check if one is a constant and the other is a variable
+                        if left_expr.len() == 1 && left_expr.contains_key(&Coefficient::Constant) {
+                            // c * expr
+                            let constant = &left_expr[&Coefficient::Constant];
+                            for (var, coeff) in right_expr {
+                                expr.insert(var, constant * coeff);
+                            }
+                        } else if right_expr.len() == 1
+                            && right_expr.contains_key(&Coefficient::Constant)
+                        {
+                            // expr * c
+                            let constant = &right_expr[&Coefficient::Constant];
+                            for (var, coeff) in left_expr {
+                                expr.insert(var, constant * coeff);
+                            }
+                        } else {
+                            // Neither operand is a constant: this is non-linear.
+                            // Reject instead of silently collapsing to 0.
+                            panic!(
+                                "non-linear multiplication is not supported: (* {} {})",
+                                solver_state.get_term(args[0].uid()),
+                                solver_state.get_term(args[1].uid()),
+                            );
+                        }
+                    }
                 }
-                let denominator_id = solver_state.to_egraph_id(args[1].uid());
-                expr.insert(
-                    Coefficient::Div(numerator_id, denominator_id),
-                    IBig::from(1),
-                );
-            }
-            "mod" => {
-                assert!(args.len() == 2, "mod requires exactly 2 arguments");
-                let raw_numerator_id = solver_state.to_egraph_id(args[0].uid());
-                let numerator_id = solver_state.egraph.find(raw_numerator_id);
-                if let Some(negated_model) = solver_state
-                    .egraph
-                    .explain_equality(numerator_id, raw_numerator_id)
-                {
-                    let model_terms: Vec<i32> = negated_model
-                        .into_iter()
-                        .map(|x| -solver_state.make_eq(x.0, x.1))
-                        .collect();
-                    additional_constraints.extend(model_terms);
+                "-" => {
+                    // Subtraction: (- a) = -a, (- a b c ...) = a - b - c - ...
+                    debug_assert!(!args.is_empty(), "expected subtraction to have arguments");
+                    if args.len() == 1 {
+                        // Unary minus: -expr
+                        let (arg_expr, additional_const) =
+                            extract_linear_expression(args[0].uid(), solver_state);
+                        additional_constraints.extend(additional_const);
+                        for (var, coeff) in arg_expr {
+                            expr.insert(var, -coeff);
+                        }
+                    } else {
+                        // Left-associative: (- a b c ...) = a - b - c - ...
+                        let (first_expr, additional_const_first) =
+                            extract_linear_expression(args[0].uid(), solver_state);
+                        additional_constraints.extend(additional_const_first);
+                        for (var, coeff) in first_expr {
+                            *expr.entry(var).or_insert(IBig::from(0)) += coeff;
+                        }
+                        for arg in args.iter().skip(1) {
+                            let (arg_expr, additional_const) =
+                                extract_linear_expression(arg.uid(), solver_state);
+                            additional_constraints.extend(additional_const);
+                            for (var, coeff) in arg_expr {
+                                *expr.entry(var).or_insert(IBig::from(0)) -= coeff;
+                            }
+                        }
+                    }
                 }
-                let denominator_id = solver_state.to_egraph_id(args[1].uid());
-                expr.insert(
-                    Coefficient::Mod(numerator_id, denominator_id),
-                    IBig::from(1),
-                );
-            }
-            _ => {
-                let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
-                if let Some(negated_model) = solver_state
-                    .egraph
-                    .explain_equality(root_id, solver_state.to_egraph_id(term_id))
-                {
-                    let model_terms: Vec<i32> = negated_model
-                        .into_iter()
-                        .map(|x| -solver_state.make_eq(x.0, x.1))
-                        .collect();
-                    additional_constraints.extend(model_terms);
+                "div" => {
+                    debug_assert!(args.len() == 2, "div requires exactly 2 arguments");
+                    let raw_numerator_id = solver_state.to_egraph_id(args[0].uid());
+                    let numerator_id = solver_state.egraph.find(raw_numerator_id);
+                    if let Some(negated_model) = solver_state
+                        .egraph
+                        .explain_equality(numerator_id, raw_numerator_id)
+                    {
+                        let model_terms: Vec<i32> = negated_model
+                            .into_iter()
+                            .map(|x| -solver_state.make_eq(x.0, x.1))
+                            .collect();
+                        additional_constraints.extend(model_terms);
+                    }
+                    let denominator_id = solver_state.to_egraph_id(args[1].uid());
+                    expr.insert(
+                        Coefficient::Div(numerator_id, denominator_id),
+                        IBig::from(1),
+                    );
                 }
-                debug_println!(
-                    21,
-                    10,
-                    "[ARITH CHECK] Uninterpreted expr: var_{} for term {}",
-                    root_id,
-                    term
-                );
-                expr.insert(Coefficient::Term(root_id), IBig::from(1));
+                "mod" => {
+                    debug_assert!(args.len() == 2, "mod requires exactly 2 arguments");
+                    let raw_numerator_id = solver_state.to_egraph_id(args[0].uid());
+                    let numerator_id = solver_state.egraph.find(raw_numerator_id);
+                    if let Some(negated_model) = solver_state
+                        .egraph
+                        .explain_equality(numerator_id, raw_numerator_id)
+                    {
+                        let model_terms: Vec<i32> = negated_model
+                            .into_iter()
+                            .map(|x| -solver_state.make_eq(x.0, x.1))
+                            .collect();
+                        additional_constraints.extend(model_terms);
+                    }
+                    let denominator_id = solver_state.to_egraph_id(args[1].uid());
+                    expr.insert(
+                        Coefficient::Mod(numerator_id, denominator_id),
+                        IBig::from(1),
+                    );
+                }
+                _ => {
+                    let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
+
+                    if let Some(negated_model) = solver_state
+                        .egraph
+                        .explain_equality(root_id, solver_state.to_egraph_id(term_id))
+                    {
+                        let model_terms: Vec<i32> = negated_model
+                            .into_iter()
+                            .map(|x| -solver_state.make_eq(x.0, x.1))
+                            .collect();
+
+                        debug_println!(
+                            21,
+                            10,
+                            "[ARITH CHECK] Uninterpreted expr: var_{} for term {}",
+                            root_id,
+                            term
+                        );
+                        additional_constraints.extend(model_terms);
+                    }
+                    // Always represent the uninterpreted term as a fresh variable,
+                    // even when there is no equality explanation, so it is never
+                    // silently collapsed to 0.
+                    expr.insert(Coefficient::Term(root_id), IBig::from(1));
+                }
             }
-        },
+        }
         _ => {
             let root_id = solver_state.egraph.find(solver_state.to_egraph_id(term_id));
             if let Some(negated_model) = solver_state
@@ -527,15 +549,19 @@ pub fn extract_linear_expression(
                     .into_iter()
                     .map(|x| -solver_state.make_eq(x.0, x.1))
                     .collect();
+
+                debug_println!(
+                    21,
+                    10,
+                    "[ARITH CHECK] Uninterpreted expr: var_{} for term {}",
+                    root_id,
+                    term
+                );
                 additional_constraints.extend(model_terms);
             }
-            debug_println!(
-                21,
-                10,
-                "[ARITH CHECK] Uninterpreted expr: var_{} for term {}",
-                root_id,
-                term
-            );
+            // Always represent the uninterpreted term as a fresh variable, even
+            // when there is no equality explanation, so it is never silently
+            // collapsed to 0.
             expr.insert(Coefficient::Term(root_id), IBig::from(1));
         }
     }
