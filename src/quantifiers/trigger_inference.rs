@@ -65,16 +65,15 @@ fn is_interpreted_head(name: &str) -> bool {
     )
 }
 
-/// Recursively collect candidate trigger subterms of `body`.
+/// Recursively collect candidate trigger subterms of `term` (the quantifier
+/// body at the top-level call).
 ///
 /// `bound` is the set of bound-variable names of the quantifier. A subterm is a
-/// candidate iff it is an application with an uninterpreted head and it contains
-/// at least one bound variable. We collect candidates from every level so that
-/// step 2/3 can prefer the shallowest covering terms.
+/// candidate iff it is an application with an uninterpreted head, contains at
+/// least one bound variable, and is safe to compile as a pattern (see
+/// [`is_pattern_safe`]). We collect candidates from every level so that step
+/// 2/3 can prefer the shallowest covering terms.
 fn collect_candidates(term: &Term, bound: &BTreeSet<String>, out: &mut Vec<Candidate>) {
-    // Compute the bound variables occurring in `term` and recurse into children.
-    let vars = free_bound_vars(term, bound);
-
     match term.repr() {
         App(func, args, _) => {
             let name = func.id_str().get().clone();
@@ -82,12 +81,18 @@ fn collect_candidates(term: &Term, bound: &BTreeSet<String>, out: &mut Vec<Candi
             for a in args.iter() {
                 collect_candidates(a, bound, out);
             }
-            if !is_interpreted_head(&name) && !vars.is_empty() {
-                out.push(Candidate {
-                    term: term.clone(),
-                    vars,
-                    depth: term_depth(term),
-                });
+            // Only uninterpreted heads are admissible; compute coverage lazily
+            // (only here, not for every node) and skip terms that pattern
+            // compilation cannot handle.
+            if !is_interpreted_head(&name) {
+                let vars = free_bound_vars(term, bound);
+                if !vars.is_empty() && is_pattern_safe(term) {
+                    out.push(Candidate {
+                        term: term.clone(),
+                        vars,
+                        depth: term_depth(term),
+                    });
+                }
             }
         }
         // Interpreted logical/relational connectives: never candidates
@@ -119,6 +124,26 @@ fn collect_candidates(term: &Term, bound: &BTreeSet<String>, out: &mut Vec<Candi
         Annotated(inner, _) => collect_candidates(inner, bound, out),
         Let(..) => {} // Lets are inlined before registration.
         _ => {}
+    }
+}
+
+/// Whether `term` can be compiled into an e-matching pattern without panicking.
+///
+/// Pattern compilation (`SolverState::build_pattern`/`extract_op`) only handles
+/// applications, equality, boolean connectives, `ite`, constants, and variables.
+/// A candidate whose subtree contains a binder, `let`, `match`, annotation, or
+/// `xor` would panic during compilation, so such candidates are rejected here.
+fn is_pattern_safe(term: &Term) -> bool {
+    match term.repr() {
+        Constant(..) | Global(..) | Local(..) => true,
+        App(_, args, _) => args.iter().all(is_pattern_safe),
+        Eq(l, r) => is_pattern_safe(l) && is_pattern_safe(r),
+        Not(t) => is_pattern_safe(t),
+        Ite(a, b, c) => is_pattern_safe(a) && is_pattern_safe(b) && is_pattern_safe(c),
+        And(items) | Or(items) | Distinct(items) => items.iter().all(is_pattern_safe),
+        Implies(ante, cons) => ante.iter().all(is_pattern_safe) && is_pattern_safe(cons),
+        // Xor, Forall, Exists, Let, Matching, Annotated: unsupported by extract_op.
+        _ => false,
     }
 }
 
