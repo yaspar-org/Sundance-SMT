@@ -175,8 +175,23 @@ impl<'a> CustomExternalPropagator<'a> {
             let eq_lit = self.solver_state.get_or_allocate_lit_for_term(&eq_term);
             let clause = vec![lt_lit, gt_lit, eq_lit];
             self.sync_new_vars();
-            self.disequalities.borrow_mut().push(clause);
+            self.queue_theory_clause(clause, Theory::QfLia);
         }
+    }
+
+    /// Queues a clause whose proof step has already been recorded.
+    fn queue_external_clause(&self, clause: Vec<i32>) {
+        self.proof_tracer
+            .borrow_mut()
+            .register_clause_for_cadical_callback(&clause);
+        self.disequalities.borrow_mut().push(clause);
+    }
+
+    fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
+        self.proof_tracer
+            .borrow_mut()
+            .add_theory_clause(&clause, theory);
+        self.queue_external_clause(clause);
     }
 
     pub fn sync_external_stats(&mut self) {
@@ -193,19 +208,24 @@ impl<'a> CustomExternalPropagator<'a> {
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
     ) {
         for inst in instances {
-            match inst {
+            let clauses = match inst {
                 Instantiation { clauses } => {
-                    for clause in clauses {
-                        self.disequalities.borrow_mut().push(clause.clone());
-                    }
                     self.stats.instantiations += 1;
+                    clauses
                 }
-                Skolemization { clauses } => {
-                    for clause in clauses {
-                        self.disequalities.borrow_mut().push(clause.clone());
-                    }
-                }
+                Skolemization { clauses } => clauses,
+            };
+            for clause in clauses {
+                self.queue_external_clause(clause.clone());
             }
+        }
+        // Materializing an instance can enqueue arithmetic merges (via
+        // `insert_predecessor`'s congruence closure). Drain them so the queue is
+        // empty before control returns to CaDiCaL, as `notify_new_decision_level`
+        // requires.
+        #[cfg(feature = "z3-solver")]
+        if let Some(z3) = self.z3_incremental.as_mut() {
+            z3.drain_merge_queue(self.solver_state);
         }
         self.sync_new_vars();
     }
@@ -322,13 +342,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         self.disequalities.borrow()
                     );
 
-                    // CC TODO: Are these congruence closure/EUF atoms? Comment just below this one suggests so.
-                    self.proof_tracer
-                        .borrow_mut()
-                        .add_theory_clause(&shrunk_constraint, Theory::Background);
-
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
-                    self.disequalities.borrow_mut().push(shrunk_constraint);
+                    self.queue_theory_clause(shrunk_constraint, Theory::Background);
                     debug_println!(
                         14 - 3,
                         0,
@@ -510,7 +525,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         "PROPAGATOR: Arithmetic inconsistency detected: {:?}",
                         arithmetic_literals
                     );
-                    self.disequalities.borrow_mut().push(arithmetic_literals);
+                    self.queue_theory_clause(arithmetic_literals, Theory::QfLia);
                     self.stats.conflicts += 1;
                     return false;
                 }
@@ -605,7 +620,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         conflict_clause.push(-lit);
                     }
 
-                    self.disequalities.borrow_mut().push(conflict_clause);
+                    self.queue_theory_clause(conflict_clause, Theory::Background);
                 }
                 self.sync_new_vars();
 
@@ -638,7 +653,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             if let Some(conflict_clause) =
                 crate::datatypes::occurs_check::datatype_occurs_check(self.solver_state)
             {
-                self.disequalities.borrow_mut().push(conflict_clause);
+                self.queue_theory_clause(conflict_clause, Theory::Datatypes);
                 self.stats.conflicts += 1;
                 return false;
             }
@@ -647,7 +662,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let new_clauses =
                 crate::datatypes::occurs_check::generate_deferred_tester_clauses(self.solver_state);
             if !new_clauses.is_empty() {
-                self.disequalities.borrow_mut().extend(new_clauses);
+                for clause in new_clauses {
+                    self.queue_theory_clause(clause, Theory::Datatypes);
+                }
                 self.sync_new_vars();
                 self.stats.conflicts += 1;
                 return false;
