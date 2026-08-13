@@ -454,14 +454,15 @@ impl LRASolver {
 
     /// Restore a previous assignment when backtracking.
     ///
-    /// Restores each **non-basic** variable's value from the snapshot, then recomputes every
+    /// Restores each **non-basic** variable's value from a snapshot, then recomputes every
     /// **basic** variable's value from the current tableau structure so the row equations hold by
-    /// construction. This is pivot-invariant: recomputing basics from the restored non-basics
-    /// reproduces the snapshot point exactly on the unchanged-structure case (so it is
-    /// behavior-preserving for the existing branch-and-bound usage), while also remaining correct
-    /// when rows/columns were added since the snapshot was taken (`add_relation`). Variables that
-    /// post-date the snapshot are absent from the map and default to zero; their basic slack rows
-    /// are then made consistent by the recomputation step.
+    /// construction.
+    ///
+    /// [`Self::solve`] relies on the invariant that every *non-basic* variable is within its
+    /// bounds. A snapshot value is only known to respect that invariant for variables that were
+    /// non-basic *at snapshot time*: a variable that was **basic** then may since have been pivoted
+    /// to non-basic. Restoring its stale basic value verbatim would seat an out-of-bounds value in
+    /// a non-basic column.
     fn restore_assignment(&mut self) {
         // Take the snapshot out of `self` so the loops below can mutably borrow `self` without
         // cloning the map; it is put back at the end so repeated backtracks to the same level
@@ -470,10 +471,22 @@ impl LRASolver {
             .old_assignment
             .take()
             .expect("cannot restore assignment: no previous assignment exists");
-        // Non-basics: take the snapshot value, or zero for variables added after the snapshot.
+        // Non-basics: take the snapshot value, or zero for variables added after the snapshot,
+        // clamped into the (already-restored) bounds to preserve the non-basic-in-bounds invariant.
         for &idx in self.non_basic.iter() {
             let var = self.variables[idx].var;
-            self.variables[idx].val = previous_model.get(&var).cloned().unwrap_or(QDelta::ZERO);
+            let mut val = previous_model.get(&var).cloned().unwrap_or(QDelta::ZERO);
+            let bounds = &self.variables[idx].bounds;
+            if let Some(lower) = bounds.lower.as_ref()
+                && val < *lower
+            {
+                val = lower.clone();
+            } else if let Some(upper) = bounds.upper.as_ref()
+                && val > *upper
+            {
+                val = upper.clone();
+            }
+            self.variables[idx].val = val;
         }
         // Basics: recompute from the (possibly re-pivoted / grown) tableau so equations hold.
         for row in 0..self.basic.len() {
@@ -1065,7 +1078,14 @@ impl LRASolver {
     pub fn try_unit_cube_test(&mut self) -> SolverResult<Option<Assignment<Var>>> {
         let level = self.set_backtrack();
 
-        // Save tableau structure since solve() performs pivots that backtrack() does not undo
+        // Save tableau structure since solve() performs pivots that backtrack() does not undo.
+        //
+        // Note on ordering: every exit path below restores this structure *before* calling
+        // `backtrack`. [`Self::restore_assignment`] clamps restored non-basic values against
+        // whichever variables are non-basic when it runs, so it must see the basis that
+        // survives — clamping against the post-solve basis and then reverting to this one
+        // would leave a clamped value in a column it was never checked for, breaking the
+        // row equations and the non-basic-in-bounds invariant.
         let saved_tableau = self.tableau.clone();
         let saved_basic = self.basic.clone();
         let saved_non_basic = self.non_basic.clone();
@@ -1110,13 +1130,13 @@ impl LRASolver {
 
         if trivially_infeasible {
             self.state = LRASolverState::Unknown;
-            self.backtrack(level);
             self.restore_tableau(
                 &saved_tableau,
                 &saved_basic,
                 &saved_non_basic,
                 &saved_owners,
             );
+            self.backtrack(level);
             return Ok(None);
         }
 
@@ -1148,36 +1168,36 @@ impl LRASolver {
                     let rounded_qdelta = QDelta::from(rounded_val.clone());
                     if !v.bounds.in_bounds(&rounded_qdelta) {
                         self.state = LRASolverState::Unknown;
-                        self.backtrack(level);
                         self.restore_tableau(
                             &saved_tableau,
                             &saved_basic,
                             &saved_non_basic,
                             &saved_owners,
                         );
+                        self.backtrack(level);
                         return Ok(None);
                     }
                 }
 
                 self.state = LRASolverState::Sat;
-                self.backtrack(level);
                 self.restore_tableau(
                     &saved_tableau,
                     &saved_basic,
                     &saved_non_basic,
                     &saved_owners,
                 );
+                self.backtrack(level);
                 Ok(Some(Assignment::new(rounded_assignments)))
             }
             _ => {
                 self.state = LRASolverState::Unknown;
-                self.backtrack(level);
                 self.restore_tableau(
                     &saved_tableau,
                     &saved_basic,
                     &saved_non_basic,
                     &saved_owners,
                 );
+                self.backtrack(level);
                 Ok(None)
             }
         }
@@ -2156,6 +2176,64 @@ mod tests {
         assert!(solver.is_valid());
     }
 
+    /// Regression guard for the interaction between the non-basic clamp in
+    /// [`LRASolver::restore_assignment`] and [`LRASolver::try_unit_cube_test`].
+    ///
+    /// `try_unit_cube_test` is the only caller that restores the *basis* separately from the
+    /// *assignment*: `solve` pivots freely, so it reverts the tableau structure by hand via
+    /// [`LRASolver::restore_tableau`]. The clamp applies to whichever variables are non-basic
+    /// when `restore_assignment` runs, so the structure must be restored *first*. Clamping
+    /// against the post-solve basis and only then reverting to the snapshot basis seats a
+    /// clamped value in a column it was never checked against, breaking both tableau
+    /// invariants — and `solve` would then certify a point violating a recorded bound.
+    ///
+    /// Here `x ∈ [0, 1]` and `y ∈ [0, 3]` are non-basic with a *bounded* range (which is what
+    /// makes the clamp bite; the other `try_unit_cube_test` tests use non-basics for which it
+    /// is a no-op), and `s = x + y` is pinned to `[5, 20]`. Since `max(x + y) = 4 < 5` the
+    /// system is genuinely infeasible, so the cube test must fail and leave the solver both
+    /// valid and still infeasible.
+    #[test]
+    fn unit_cube_test_restores_tableau_before_clamping_assignment() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(1).into()))),
+            VarInfo::new(Var::int(1), Owner::NonBasic(1))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(3).into()))),
+        ];
+        let basic = vec![
+            VarInfo::new(Var::int(2), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(5).into()), Some(rbig!(20).into()))),
+        ];
+        // s = x + y
+        let equations = vec![vec![rbig!(1), rbig!(1)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        assert!(
+            solver.try_unit_cube_test().unwrap().is_none(),
+            "x + y <= 4 cannot reach the pinned s >= 5, so the cube test must fail"
+        );
+
+        // Both invariants must survive the restore. Checked separately from `is_valid` so a
+        // failure says which one broke.
+        assert!(
+            solver.assert_non_basic_in_bounds(),
+            "a restored non-basic value must be in bounds for the basis that survives"
+        );
+        assert!(
+            solver.assert_basic_assignments(),
+            "clamping against a discarded basis would leave the row equations unsatisfied"
+        );
+
+        // The invariants matter because `solve` trusts them: it must not certify a point
+        // violating a bound it still has recorded.
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::INFEASIBLE(_)
+        ));
+    }
+
     // ─── incremental add_relation tests (sparse tableau) ─────────────────────────
     //
     // These exercise extending a live, solved tableau with a new slack row, then
@@ -2448,6 +2526,92 @@ mod tests {
         // still leave the solver in a consistent state.
         solver.backtrack(level);
         assert!(solver.is_valid());
+    }
+
+    /// Regression guard for the non-basic clamp in [`LRASolver::restore_assignment`].
+    ///
+    /// A slack that was **basic** at snapshot time (where an out-of-bounds value is normal, and
+    /// is what `solve` repairs) can be pivoted to **non-basic** by a later solve. Restoring its
+    /// stale basic value verbatim would seat an out-of-bounds value in a non-basic column, which
+    /// nothing repairs — `step_simplex` only scans basics — so `solve` would then report
+    /// `Feasible` on a point violating the bound still recorded for that slack.
+    ///
+    /// Here the slack for `s = x + y` is pinned to `[5, 5]` and starts basic at β = 0 (out of
+    /// bounds, awaiting repair). The snapshot is taken at that point; the solve then pivots it
+    /// non-basic. After backtracking to the snapshot the pin is still in force, so the restored
+    /// point must respect it rather than sitting at the stale β = 0.
+    #[test]
+    fn backtrack_clamps_restored_nonbasic_into_bounds() {
+        let mut solver = ex_sum_sparse();
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+
+        // Add `slack = x + y` and pin it to exactly 5 at the *base* level, so the pin survives
+        // every backtrack below.
+        let slack = Var::real(2);
+        let rel = Rel::mk_ge(
+            vec![Mon::new(1, Var::real(10)), Mon::new(1, Var::real(11))],
+            0,
+        );
+        solver.add_relation(rel, slack).unwrap();
+        let slack_idx = *solver.var_to_idx.get(&slack).unwrap();
+        assert!(
+            solver.variables[slack_idx].is_basic().is_some(),
+            "a freshly added slack owns its own row"
+        );
+        // β(slack) = β(x) + β(y) = 0, so the lower bound is violated (None = "unknown, must
+        // solve") while the upper bound is already satisfied by that value (Some(true)).
+        assert_eq!(solver.assert_lower(&slack, &5i32.into()).unwrap(), None);
+        assert_eq!(
+            solver.assert_upper(&slack, &5i32.into()).unwrap(),
+            Some(true)
+        );
+
+        // Snapshot while the slack is still basic and out of bounds (β = β(x)+β(y) = 0 ≠ 5).
+        assert!(
+            !solver.variables[slack_idx].in_bounds(),
+            "slack should be basic-and-violated at snapshot time"
+        );
+        let level = solver.set_backtrack();
+
+        // Solving repairs the violation by pivoting the slack out of the basis.
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+        assert!(
+            solver.variables[slack_idx].is_non_basic().is_some(),
+            "the feasibility pivot should have moved the slack to non-basic"
+        );
+
+        // Backtrack to the snapshot. The `[5, 5]` pin predates it and is still in force, so the
+        // restored non-basic value must be clamped to it rather than to the stale basic β = 0.
+        solver.backtrack(level);
+        assert!(
+            solver.is_valid(),
+            "restoring a stale basic value into a non-basic column must not break the \
+             non-basic-in-bounds invariant"
+        );
+
+        // The invariant matters because `solve` trusts it: it must not certify a point that
+        // violates the pin.
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+        let model = solver.get_rational_model().expect("feasible model");
+        assert_eq!(
+            model[&slack],
+            Rational::from(5),
+            "slack is pinned to 5, so any feasible model must assign it 5"
+        );
+        assert_eq!(
+            &model[&Var::real(10)] + &model[&Var::real(11)],
+            Rational::from(5),
+            "the row equation slack = x + y must hold in the reported model"
+        );
     }
 
     /// A feasible system is checked, then a new relation is added whose asserted bound makes
