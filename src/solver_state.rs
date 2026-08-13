@@ -324,6 +324,15 @@ impl SolverState {
             .unwrap_or_else(|| panic!("to_egraph_id: no egraph ID for solver uid {}", solver_uid))
     }
 
+    /// Like [`Self::to_egraph_id`] but returns `None` instead of panicking when
+    /// the term has no egraph ID. Some literals — e.g. the pre-NNF form of an
+    /// instantiated/skolemized quantifier body — get a SAT variable (via
+    /// [`Self::get_or_allocate_lit_for_term`]) as a Boolean bridge without being
+    /// registered in the egraph; their NNF form carries the theory content.
+    pub fn to_egraph_id_opt(&self, solver_uid: u64) -> Option<u32> {
+        self.id_map.get_by_left(&solver_uid).copied()
+    }
+
     /// Convert an egraph term ID to the corresponding solver UID.
     pub fn to_solver_uid(&self, egraph_id: u32) -> u64 {
         *self
@@ -659,8 +668,9 @@ pub fn process_assignment(
     let true_egraph_id = solver_state.to_egraph_id(solver_state.true_uid);
     let false_egraph_id = solver_state.to_egraph_id(solver_state.false_uid);
 
-    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&lit) {
-        let egraph_t = solver_state.to_egraph_id(*t);
+    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&lit).copied()
+        && let Some(egraph_t) = solver_state.to_egraph_id_opt(t)
+    {
         debug_println!(
             16,
             0,
@@ -683,8 +693,9 @@ pub fn process_assignment(
         }
     }
 
-    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&-lit) {
-        let egraph_t = solver_state.to_egraph_id(*t);
+    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&-lit).copied()
+        && let Some(egraph_t) = solver_state.to_egraph_id_opt(t)
+    {
         debug_println!(
             16,
             0,
