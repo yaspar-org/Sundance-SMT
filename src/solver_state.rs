@@ -534,8 +534,8 @@ impl SolverState {
                                     s_exprs.iter().map(|p| self.build_pattern(p)).collect();
                                 trigger_ids.push(pattern_ids);
                             }
-                            Attribute::NoPattern(s_exprs) => {
-                                no_pattern_terms.extend(s_exprs.iter().cloned());
+                            Attribute::NoPattern(t) => {
+                                no_pattern_terms.push(t.clone());
                             }
                             _ => {}
                         }
