@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check:
     name: Check
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     permissions:
       contents: read
     steps:
@@ -30,7 +30,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: brew update && brew install cmake
 
       - name: Setup Z3
         uses: ./.github/actions/setup-z3
@@ -82,7 +82,7 @@ jobs:
 
   lints:
     name: Lints
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     permissions:
       contents: read
     steps:
@@ -99,7 +99,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: brew update && brew install cmake
 
       - name: Setup Z3
         uses: ./.github/actions/setup-z3
@@ -117,7 +117,7 @@ jobs:
 
   docs:
     name: Documentation
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     permissions:
       contents: read
     steps:
@@ -131,7 +131,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake
+        run: brew update && brew install cmake
 
       - name: Setup Z3
         uses: ./.github/actions/setup-z3

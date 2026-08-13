@@ -66,6 +66,9 @@ pub fn find_datatype_axioms(
     {
         let tester_apps =
             learn_exactly_one_tester_clause(solver_state, term, &dt_dec, from_quantifier);
+        if !tester_apps.is_empty() {
+            solver_state.stat_dt_constructor_ax += 1;
+        }
         vector.extend(tester_apps);
     }
 
@@ -74,6 +77,9 @@ pub fn find_datatype_axioms(
     if !lazy_dt {
         let ctor_selector_clauses =
             learn_ctors_selector_clauses(solver_state, term, sort, &dt_dec, ddsmt, lazy_dt);
+        if !ctor_selector_clauses.is_empty() {
+            solver_state.stat_dt_accessor_ax += 1;
+        }
         vector.extend(ctor_selector_clauses);
     }
 
@@ -87,6 +93,9 @@ pub fn find_datatype_axioms(
     {
         let tester_clause =
             learn_tester_for_ctor_app(solver_state, term, f.id_str(), from_quantifier);
+        if !tester_clause.is_empty() {
+            solver_state.stat_dt_constructor_ax += 1;
+        }
         vector.extend(tester_clause);
 
         let selector_ctor_clauses = learn_selector_ctor_clause(
@@ -97,6 +106,9 @@ pub fn find_datatype_axioms(
             &dt_dec,
             from_quantifier,
         );
+        if !selector_ctor_clauses.is_empty() {
+            solver_state.stat_dt_accessor_ax += 1;
+        }
         vector.extend(selector_ctor_clauses);
     }
     vector

@@ -18,7 +18,7 @@ bundled-z3 = ["z3-solver", "z3/bundled"]
 local-z3 = ["z3-solver"]
 
 [dependencies]
-yaspar-ir = "=2.7.2"
+yaspar-ir = "=2.7.5"
 sat-interface = "0.1.1"
 # Pin the elevate fork until upstream cadical-sys exposes CaDiCaL's elevate option.
 cadical-sys = { git = "https://github.com/amarshah1/cadical-sys.git", rev = "2f234ec95dd36ca74057691cf2fd4e8766a3c40f" }
@@ -28,7 +28,6 @@ clap = { version = "4.5.40", features = ["derive"] }
 dashu = { version = "^0.4", features = ["num-traits"] }
 num-traits = "^0.2"
 serde_json = "1.0"
-slotmap = "^1.0"
 z3 = { version = "0.19.8", optional = true }
 num = "0.4.3"
 rustc-hash = "2.0"
@@ -44,8 +43,9 @@ harness = true
 
 [profile.release]
 debug = true
-lto = "fat"
-codegen-units = 1
+# causes GitHub CI to fail when older CPU runners are selected
+# lto = "fat"
+# codegen-units = 1
 
 [lib]
 name = "sundance_smt"

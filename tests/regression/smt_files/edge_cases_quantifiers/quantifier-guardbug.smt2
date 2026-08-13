@@ -1,0 +1,8 @@
+(set-logic ALL)
+(declare-sort S 0)
+(declare-fun A () Bool)
+(declare-fun P (S) Bool)
+(assert (=> A (forall ((x S)) (! (P x) :pattern ((P x))))))
+(declare-fun l () S)
+(assert (not (P l)))
+(check-sat)

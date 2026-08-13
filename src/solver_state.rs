@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
-    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Monomorphization, Repr, Term,
-    TermAllocator,
+    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization, Repr,
+    Term, TermAllocator,
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -119,7 +119,7 @@ pub struct SolverState {
     pub quantifiers: Vec<Quantifier>,
 
     /// Tracks quantifier instantiations to avoid duplicates.
-    pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<String, Term>>>,
+    pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
 
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
@@ -150,6 +150,14 @@ pub struct SolverState {
 
     /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
     pub base_case_tester_lits: Vec<i32>,
+
+    // --- Stats counters (harvested into SolverStats at end of solve) ---
+    /// Number of datatype accessor axioms generated (selector projection axioms)
+    pub stat_dt_accessor_ax: u64,
+    /// Number of datatype constructor axioms generated (tester/exhaustiveness clauses)
+    pub stat_dt_constructor_ax: u64,
+    /// Number of datatype case splits (deferred tester clauses)
+    pub stat_dt_splits: u64,
 }
 
 impl SolverState {
@@ -181,6 +189,9 @@ impl SolverState {
             eager_skolem,
             egraph,
             base_case_tester_lits: vec![],
+            stat_dt_accessor_ax: 0,
+            stat_dt_constructor_ax: 0,
+            stat_dt_splits: 0,
         }
     }
 
@@ -370,7 +381,7 @@ impl SolverState {
             }
             Global(qid, _) => Op::App(qid.id_str().get().to_string()),
             Constant(c, _) => Op::Constant(format!("{:?}", c)),
-            Local(local) => Op::Local(local.symbol.to_string()),
+            Local(local) => Op::Local(local.clone()),
             _ => panic!("extract_op: unsupported term type {:?}", term.repr()),
         }
     }
@@ -449,7 +460,7 @@ impl SolverState {
 
         let op = Self::extract_op(term);
         match &op {
-            Op::Local(name) => Pattern::Var(name.clone()),
+            Op::Local(local) => Pattern::Var(local.clone()),
             Op::Constant(_)
             | Op::App(_)
             | Op::Eq
@@ -498,7 +509,20 @@ impl SolverState {
         let num = term.uid();
 
         // Arithmetic term tracking
-        if term.get_sort(self.context.arena()).to_string() == "Int" {
+        let sort = term.get_sort(self.context.arena()).to_string();
+        // TODO: Real arithmetic is not yet plumbed through the arithmetic
+        // backends (they allocate integer variables and bucket Nelson-Oppen
+        // model values as integers). Registering Real terms as integer
+        // arithmetic is unsound, so panic instead of returning a wrong answer.
+        // Real support is planned; this guard is a stopgap until then.
+        if sort == "Real" {
+            panic!(
+                "Real arithmetic is not yet supported (term: {term}); \
+                 support for Reals is planned. For now the arithmetic \
+                 backends only handle Int."
+            );
+        }
+        if sort == "Int" {
             if !self.arithmetic_terms.contains(&num) {
                 self.arithmetic_terms.push(num);
             }
@@ -846,35 +870,15 @@ pub fn find_if_eq_diseq<'a>(
 ) -> Assertion {
     let hash = solver_state.current_hash;
     match term.repr() {
-        App(f, t, _)
-            if (matches!(f.get_kind(), Some(IdentifierKind::Is(_)))
-                || (f.get_kind().is_none() && f.id_str().get().starts_with("is-")))
-                && t.len() == 1
-                && sign =>
-        {
-            let ctor_name = if let Some(IdentifierKind::Is(sym)) = f.get_kind() {
-                Some(sym.clone())
-            } else {
-                let name = &f.id_str().get()[3..];
-                solver_state
-                    .datatype_info
-                    .constructors
-                    .keys()
-                    .find(|k| *k.get() == *name)
-                    .cloned()
-            };
-            if let Some(ctor_name) = ctor_name {
-                let inner_term = t[0].clone();
-                Assertion::Tester {
-                    ctor_name,
-                    inner_term,
-                    term: term.clone(),
-                }
-            } else {
-                Assertion::Other
+        App(f, t, _) if sign && let Some(IdentifierKind::Is(ctor_name)) = f.get_kind() => {
+            assert_eq!(t.len(), 1);
+            let inner_term = t[0].clone();
+            Assertion::Tester {
+                ctor_name,
+                inner_term,
+                term: term.clone(),
             }
         }
-
         Eq(left, right) => {
             if sign {
                 debug_println!(1, 2, "Creating equality assertion");

@@ -7,10 +7,11 @@ use crate::debug_println;
 use crate::proof::{ProofStep, ProofStepType, Theory};
 use core::panic;
 use std::cmp::Eq;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::ops::Neg;
-use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, Term};
+use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, SymbolQuote, Term};
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
 /// to generate an eDRAT proof.
@@ -20,6 +21,9 @@ pub struct SMTProofTracer {
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     instantiations_for_smt2: Vec<(Term, Vec<(Term, bool)>)>,
+    registered_clause_callbacks: HashMap<Vec<i32>, usize>,
+    /// Number of clauses deleted by CaDiCaL (for stats)
+    pub(crate) deleted_clauses: u64,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -49,6 +53,13 @@ where
         seen.insert(lit);
     }
     false
+}
+
+fn normalize_clause(clause: &[i32]) -> Vec<i32> {
+    let mut normalized = clause.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+    normalized
 }
 
 /// Format a sort definition as a declare-sort command
@@ -130,10 +141,82 @@ fn format_function_declaration(symbol_name: &Str, sigs: &[(Sig, FunctionMeta)]) 
             if !meta.rec_deps.is_empty() {
                 panic!("We do not handle recursive function definitions!");
             }
-            format!("(define-fun {})", meta.def)
+            let variables = meta
+                .def
+                .vars
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(
+                "(define-fun {} ({}) {} {})\n",
+                meta.def.name.sym_quote(),
+                variables,
+                meta.def.out_sort,
+                meta.def.body
+            )
         }
         _ => String::new(),
     }
+}
+
+fn collect_global_symbols(term: &Term, symbols: &mut HashSet<Str>) {
+    match term.repr() {
+        Global(qid, ..) | App(qid, ..) => {
+            symbols.insert(qid.0.symbol.clone());
+        }
+        _ => {}
+    }
+    for subterm in term.repr().sub_terms() {
+        collect_global_symbols(subterm, symbols);
+    }
+}
+
+fn format_function_declarations(symbol_table: &HashMap<Str, Vec<(Sig, FunctionMeta)>>) -> String {
+    let mut symbols = symbol_table.keys().collect::<Vec<_>>();
+    symbols.sort_by_key(|symbol| symbol.to_string());
+
+    let mut output = String::new();
+    let mut definitions = Vec::new();
+    for symbol in symbols {
+        if matches!(
+            symbol_table[symbol].as_slice(),
+            [(Sig::ParFunc(..), FunctionMeta::Defined(_))]
+        ) {
+            definitions.push(symbol);
+        } else {
+            output.push_str(&format_function_declaration(symbol, &symbol_table[symbol]));
+        }
+    }
+
+    let dependencies = definitions
+        .iter()
+        .map(|symbol| {
+            let symbol = *symbol;
+            let [(_, FunctionMeta::Defined(meta))] = symbol_table[symbol].as_slice() else {
+                unreachable!();
+            };
+            let mut dependencies = HashSet::new();
+            collect_global_symbols(&meta.def.body, &mut dependencies);
+            (symbol.clone(), dependencies)
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut emitted = HashSet::new();
+    while !definitions.is_empty() {
+        let Some(index) = definitions.iter().position(|symbol| {
+            dependencies[*symbol].iter().all(|dependency| {
+                !dependencies.contains_key(dependency) || emitted.contains(dependency)
+            })
+        }) else {
+            panic!("We do not handle recursive function definitions!");
+        };
+        let symbol = definitions.remove(index);
+        output.push_str(&format_function_declaration(symbol, &symbol_table[symbol]));
+        emitted.insert(symbol.clone());
+    }
+
+    output
 }
 
 impl SMTProofTracer {
@@ -148,40 +231,64 @@ impl SMTProofTracer {
             sorts,
             symbol_table,
             instantiations_for_smt2: Vec::new(),
+            registered_clause_callbacks: HashMap::new(),
+            deleted_clauses: 0,
         }
     }
 
     ////////////////////////////////////////////////////////////////////////////
 
-    pub fn push_step(&mut self, clause: &Vec<i32>, typ: ProofStepType) {
+    pub fn push_step(&mut self, clause: &[i32], typ: ProofStepType) {
         if !is_tautology(clause) {
             self.proof_steps.push(ProofStep {
-                clause: clause.clone(),
+                clause: clause.to_vec(),
                 typ,
             })
         }
     }
 
-    pub fn push_steps(&mut self, clauses: &Vec<Vec<i32>>, typ: ProofStepType) {
+    pub fn push_steps(&mut self, clauses: &[Vec<i32>], typ: ProofStepType) {
         for clause in clauses {
             self.push_step(clause, typ.clone());
         }
     }
 
-    pub fn add_original_clause(&mut self, clause: &Vec<i32>) {
+    pub fn add_original_clause(&mut self, clause: &[i32]) {
         self.push_step(clause, ProofStepType::OriginalClause);
     }
 
-    pub fn add_sat_clause(&mut self, clause: &Vec<i32>) {
+    pub fn add_sat_clause(&mut self, clause: &[i32]) {
         self.push_step(clause, ProofStepType::SATClause);
     }
 
-    pub fn record_deletion(&mut self, clause: &Vec<i32>) {
+    pub fn record_deletion(&mut self, clause: &[i32]) {
         self.push_step(clause, ProofStepType::Deletion);
     }
 
-    pub fn add_theory_clause(&mut self, clause: &Vec<i32>, theory: Theory) {
+    pub fn add_theory_clause(&mut self, clause: &[i32], theory: Theory) {
         self.push_step(clause, ProofStepType::TheoryClause(theory));
+    }
+
+    pub fn register_clause_for_cadical_callback(&mut self, clause: &[i32]) {
+        let clause = normalize_clause(clause);
+        *self.registered_clause_callbacks.entry(clause).or_default() += 1;
+    }
+
+    pub fn consume_clause_callback_registration(&mut self, clause: &[i32]) -> bool {
+        match self
+            .registered_clause_callbacks
+            .entry(normalize_clause(clause))
+        {
+            Entry::Occupied(mut entry) => {
+                if *entry.get() == 1 {
+                    entry.remove();
+                } else {
+                    *entry.get_mut() -= 1;
+                }
+                true
+            }
+            Entry::Vacant(_) => false,
+        }
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -212,15 +319,13 @@ impl SMTProofTracer {
         self.get_lit_info(literal).is_some() || self.get_lit_info(-literal).is_some()
     }
 
-    /// Pushes literal definitions
-    /// If one of the literals is not in terms list, then this clause is useless and we return false
+    /// Emits definitions for the literals in `clause`.
     fn introduce_literals(
         &self,
         literals_defined: &mut HashSet<i32>,
-        clause: &Vec<i32>,
+        clause: &[i32],
         out: &mut String,
     ) {
-        let mut temp_output = String::new();
         for &lit in clause {
             debug_println!(12, 2, "Introducing the literal {}", lit);
             if let Some((lit, _id, term, polarity)) = self.get_lit_info(lit) {
@@ -237,7 +342,7 @@ impl SMTProofTracer {
                 );
 
                 if !literals_defined.contains(&lit) {
-                    temp_output.push_str(&format!("(edrat-literal {} {})\n", lit, polarized_term));
+                    out.push_str(&format!("(edrat-literal {} {})\n", lit, polarized_term));
                     literals_defined.insert(lit);
                 }
             } else {
@@ -247,7 +352,6 @@ impl SMTProofTracer {
                 );
             }
         }
-        out.push_str(&temp_output);
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -328,9 +432,7 @@ impl SMTProofTracer {
         let datatype_string = format_datatype_declaration(&self.sorts);
         output.push_str(&datatype_string);
 
-        for (symbol, sigs) in &self.symbol_table {
-            output.push_str(&format_function_declaration(symbol, sigs));
-        }
+        output.push_str(&format_function_declarations(&self.symbol_table));
 
         // Depending on the proof step, introduce new eDRAT literals
         for step in &self.proof_steps {
@@ -353,6 +455,12 @@ impl SMTProofTracer {
                         clause,
                         skolem_vars
                     );
+                    // Introduce the parent before declaring symbols used by the child.
+                    self.introduce_literals(
+                        &mut literals_defined,
+                        std::slice::from_ref(parent_term),
+                        &mut output,
+                    );
                     for (i, var) in skolem_vars.iter().enumerate() {
                         // CC TODO think about negated parent term, if (negated forall)
                         output.push_str(&format!(
@@ -373,5 +481,92 @@ impl SMTProofTracer {
             }
         }
         output
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quantifiers::skolem::skolemize;
+    use yaspar_ir::ast::{ACommand, Context, Typecheck};
+    use yaspar_ir::untyped::UntypedAst;
+
+    fn parse_assertion(script: &str) -> (Context, Term) {
+        let mut context = Context::new();
+        let commands = UntypedAst
+            .parse_script_str(script)
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+        let assertion = commands
+            .iter()
+            .find_map(|command| match command.repr() {
+                ACommand::Assert(term) => Some(term.clone()),
+                _ => None,
+            })
+            .unwrap();
+        (context, assertion)
+    }
+
+    #[test]
+    fn orders_defined_functions_by_dependency() {
+        let script = "\
+(declare-fun base () Int)
+(define-fun z ((x Int)) Int (+ x base))
+(define-fun a ((x Int)) Int (z (z x)))
+";
+        let mut context = Context::new();
+        UntypedAst
+            .parse_script_str(script)
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+
+        let mut tracer = SMTProofTracer::new(
+            context.expose_sorts().clone(),
+            context.expose_symbol_table().clone(),
+        );
+
+        let proof = tracer.generate_edrat();
+        let declaration = proof.find("(declare-fun base () Int)").unwrap();
+        let dependency = proof.find("(define-fun z ").unwrap();
+        let dependent = proof.find("(define-fun a ").unwrap();
+        assert!(declaration < dependency);
+        assert!(dependency < dependent);
+    }
+
+    #[test]
+    fn introduces_skolem_parent_before_declaration_and_child_after() {
+        let script = "(assert (exists ((x Int)) (> x 0)))";
+        let (mut context, parent) = parse_assertion(script);
+        let (child, skolem_vars) = skolemize(&parent, &mut context, true);
+        let skolem_name = skolem_vars[0].0.to_string();
+
+        let mut tracer = SMTProofTracer::new(
+            context.expose_sorts().clone(),
+            context.expose_symbol_table().clone(),
+        );
+        tracer.register_term(1, &parent, true);
+        tracer.register_term(2, &child, true);
+        tracer.push_step(
+            &[-1, 2],
+            ProofStepType::Skolemization {
+                parent_term: 1,
+                skolem_vars,
+            },
+        );
+
+        let proof = tracer.generate_edrat();
+        let parent_definition = proof.find("(edrat-literal 1 ").unwrap();
+        let declaration = proof
+            .find(&format!("(declare-skolem 1 0 {} Int)", skolem_name))
+            .unwrap();
+        let child_definition = proof.find("(edrat-literal 2 ").unwrap();
+        let skolem_step = proof.find("s -1 2 0").unwrap();
+
+        assert!(parent_definition < declaration);
+        assert!(declaration < child_definition);
+        assert!(child_definition < skolem_step);
+        assert_eq!(proof.matches("(edrat-literal 1 ").count(), 1);
     }
 }

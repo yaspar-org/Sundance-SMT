@@ -20,6 +20,12 @@ pub struct Args {
     /// Enable eDRAT proof production and write to specified file
     #[arg(long)]
     pub proof: Option<PathBuf>,
+    /// Dump the eDRAT proof forest at termination for any result; complete on unsat, else a prefix. Mutually exclusive with --proof
+    #[arg(long, conflicts_with = "proof")]
+    pub partial_proof: Option<PathBuf>,
+    /// Log each refuted propositional model to this file. Line-tagged format, streamed as the search runs: `t <signed lits>` per refuted model, then `m <var> <atom>` map lines appended at the end
+    #[arg(long)]
+    pub trail_out: Option<PathBuf>,
     // /// Set the maximum activation depth for quantifier instantiations
     // #[arg(long, default_value_t = 5)]
     // pub max_activation_depth: usize,
@@ -50,4 +56,8 @@ pub struct Args {
     /// Max arithmetic-model conflicts collected per model-check (usize::MAX = uncapped).
     #[arg(long, default_value_t = usize::MAX)]
     pub max_arith_conflicts_per_round: usize,
+    /// Max pending quantifier materialization steps per complete-model check (instantiations + skolemizations).
+    /// 0 = unbounded (materialize all pending).
+    #[arg(long, default_value_t = 85)]
+    pub batch_cap: usize,
 }

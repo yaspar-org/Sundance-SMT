@@ -11,10 +11,19 @@ use crate::solver_types::ConstructorType;
 use crate::solver_types::TermOption;
 use crate::utils::DeterministicHashMap;
 
-/// An edge in the constructor graph: (parent_eid, child_eid).
-/// parent_eid is the egraph ID of the constructor term,
-/// child_eid is the egraph ID of its recursive child (selector application).
-type Edge = (u32, u32);
+/// An edge in the constructor graph, from a constructor term to one of its
+/// recursive children.
+#[derive(Clone, Copy)]
+struct Edge {
+    /// Egraph ID of the constructor (parent) term.
+    parent_eid: u32,
+    /// Egraph ID of the recursive child (selector application).
+    child_eid: u32,
+    /// The `(_ is Ctor) parent` literal that makes the parent this constructor.
+    /// The conflict clause must be guarded by its negation. `None` if no tester
+    /// literal exists yet (nothing to guard).
+    parent_tester_lit: Option<i32>,
+}
 
 /// Performs the occurs check for inductive datatypes.
 ///
@@ -26,15 +35,22 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
     let mut graph: DeterministicHashMap<u32, Vec<(u32, Edge)>> = Default::default();
 
     for (&uid, ctor_type) in solver_state.term_constructors.iter() {
-        let children = match ctor_type {
+        let (children, tester_term) = match ctor_type {
             ConstructorType::Constructor {
                 children,
+                tester_term,
                 hash,
                 level,
                 ..
-            } if !children.is_empty() && solver_state.is_valid_hash(*hash, *level) => children,
+            } if !children.is_empty() && solver_state.is_valid_hash(*hash, *level) => {
+                (children, tester_term)
+            }
             _ => continue,
         };
+
+        // The cycle only holds while this tester is true, so the conflict
+        // clause is guarded by its negation.
+        let tester_lit = solver_state.get_lit_from_term_safe(tester_term);
 
         let Some(&term_eid) = solver_state.id_map.get_by_left(&uid) else {
             continue;
@@ -46,10 +62,14 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
                 continue;
             };
             let child_canonical = solver_state.egraph.find(child_eid);
-            graph
-                .entry(parent_canonical)
-                .or_default()
-                .push((child_canonical, (term_eid, child_eid)));
+            graph.entry(parent_canonical).or_default().push((
+                child_canonical,
+                Edge {
+                    parent_eid: term_eid,
+                    child_eid,
+                    parent_tester_lit: tester_lit,
+                },
+            ));
         }
     }
 
@@ -64,7 +84,12 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
         let mut on_path: HashSet<u32> = HashSet::from([start]);
         // path[i] = (canonical_node, edge that brought us here)
         // The first entry has a dummy edge since nothing "brought us" to start.
-        let mut path: Vec<(u32, Edge)> = vec![(start, (0, 0))];
+        let dummy_edge = Edge {
+            parent_eid: 0,
+            child_eid: 0,
+            parent_tester_lit: None,
+        };
+        let mut path: Vec<(u32, Edge)> = vec![(start, dummy_edge)];
         let mut stack: Vec<(u32, usize)> = vec![(start, 0)];
 
         while let Some((node, idx)) = stack.last_mut() {
@@ -94,7 +119,20 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
                 let mut cycle_edges: Vec<Edge> =
                     path[cycle_start + 1..].iter().map(|(_, e)| *e).collect();
                 cycle_edges.push(edge);
-                return Some(build_conflict_clause(solver_state, &cycle_edges));
+                let conflict_clause = build_conflict_clause(solver_state, &cycle_edges);
+                if crate::log::is_important(25) {
+                    let clause_terms: Vec<String> = conflict_clause
+                        .iter()
+                        .map(|&lit| format!("{}", solver_state.get_term_from_lit(lit)))
+                        .collect();
+                    crate::debug_println!(
+                        25,
+                        10,
+                        "OCCURS CHECK AXIOM (conflict clause): (or {})",
+                        clause_terms.join(" ")
+                    );
+                }
+                return Some(conflict_clause);
             }
 
             if !visited.contains(&child_canonical) {
@@ -110,16 +148,22 @@ pub fn datatype_occurs_check(solver_state: &mut SolverState) -> Option<Vec<i32>>
 
 /// Build a conflict clause from the edges forming a cycle.
 ///
-/// Each edge (parent_eid, child_eid) represents a constructor-to-child step.
-/// Consecutive edges are linked: edge_i.child_eid and edge_{i+1}.parent_eid
-/// are in the same e-class. The conflict clause negates these equalities.
+/// The cycle only contradicts under the assignment that produced it: every
+/// parent's tester holds and the linking equalities (edge_i.child_eid ==
+/// edge_{i+1}.parent_eid) hold. The clause negates that conjunction. Omitting
+/// the testers would wrongly forbid the equalities even for other constructors.
 fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[Edge]) -> Vec<i32> {
     let mut clause: Vec<i32> = Vec::new();
     let n = cycle_edges.len();
 
     for i in 0..n {
-        let this_child = cycle_edges[i].1;
-        let next_parent = cycle_edges[(i + 1) % n].0;
+        // Guard: the parent is only this constructor while its tester is true.
+        if let Some(tester_lit) = cycle_edges[i].parent_tester_lit {
+            clause.push(-tester_lit);
+        }
+
+        let this_child = cycle_edges[i].child_eid;
+        let next_parent = cycle_edges[(i + 1) % n].parent_eid;
 
         if let Some(equalities) = solver_state
             .egraph
@@ -130,6 +174,10 @@ fn build_conflict_clause(solver_state: &mut SolverState, cycle_edges: &[Edge]) -
             }
         }
     }
+
+    // Dedup: the same literal can appear on multiple edges.
+    clause.sort_unstable();
+    clause.dedup();
 
     clause
 }
@@ -175,6 +223,9 @@ pub fn generate_deferred_tester_clauses(solver_state: &mut SolverState) -> Vec<V
         };
 
         let clauses = learn_exactly_one_tester_clause(solver_state, &term, &dt_dec, false);
+        if !clauses.is_empty() {
+            solver_state.stat_dt_splits += 1;
+        }
         all_clauses.extend(clauses);
     }
 

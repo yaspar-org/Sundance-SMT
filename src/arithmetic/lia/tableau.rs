@@ -78,6 +78,36 @@ where
             .filter(|r| self.get(*r, col).is_ok_and(|v| !v.is_zero()))
             .count()
     }
+
+    /// Append an empty row, returning its index (= the old `nrows`).
+    ///
+    /// Supports incremental extension of a live tableau. The default implementation
+    /// errors; backends that support growth (currently only the sparse tableau) override it.
+    fn add_row(&mut self) -> TableauResult<usize> {
+        Err(TableauError(
+            "add_row is not supported by this tableau backend".to_string(),
+        ))
+    }
+
+    /// Append an empty column, returning its index (= the old `ncols`).
+    ///
+    /// Supports incremental extension of a live tableau. The default implementation
+    /// errors; backends that support growth (currently only the sparse tableau) override it.
+    fn add_col(&mut self) -> TableauResult<usize> {
+        Err(TableauError(
+            "add_col is not supported by this tableau backend".to_string(),
+        ))
+    }
+
+    /// Set a single entry (insert/update, or remove when `val` is zero).
+    ///
+    /// Used together with [`Self::add_row`]/[`Self::add_col`] to write the coefficients of a
+    /// newly added row. The default implementation errors; growth-capable backends override it.
+    fn set_entry(&mut self, _row: usize, _col: usize, _val: Rational) -> TableauResult<()> {
+        Err(TableauError(
+            "set_entry is not supported by this tableau backend".to_string(),
+        ))
+    }
 }
 
 /// Enum-dispatched tableau that selects between dense and sparse at runtime.
@@ -149,6 +179,34 @@ impl Tableau for TableauImpl {
         match self {
             TableauImpl::Dense(t) => t.col_nnz(col),
             TableauImpl::Sparse(t) => t.col_nnz(col),
+        }
+    }
+
+    fn add_row(&mut self) -> TableauResult<usize> {
+        match self {
+            // Dense growth is unsupported (Array2D is fixed-size); use the erroring default.
+            TableauImpl::Dense(_) => Err(TableauError(
+                "add_row is not supported by the dense tableau backend".to_string(),
+            )),
+            TableauImpl::Sparse(t) => Tableau::add_row(t),
+        }
+    }
+
+    fn add_col(&mut self) -> TableauResult<usize> {
+        match self {
+            TableauImpl::Dense(_) => Err(TableauError(
+                "add_col is not supported by the dense tableau backend".to_string(),
+            )),
+            TableauImpl::Sparse(t) => Tableau::add_col(t),
+        }
+    }
+
+    fn set_entry(&mut self, row: usize, col: usize, val: Rational) -> TableauResult<()> {
+        match self {
+            TableauImpl::Dense(_) => Err(TableauError(
+                "set_entry is not supported by the dense tableau backend".to_string(),
+            )),
+            TableauImpl::Sparse(t) => Tableau::set_entry(t, row, col, val),
         }
     }
 }

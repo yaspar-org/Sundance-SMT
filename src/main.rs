@@ -18,6 +18,18 @@ use yaspar_ir::untyped::UntypedAst;
 fn main() -> Result<(), String> {
     let args = Args::parse();
 
+    // --proof and --partial-proof both write an eDRAT dump; using them together
+    // is ambiguous (and with the same path the second write silently truncates
+    // the first, replacing a checkable refutation with a header-prefixed
+    // prefix, or vice versa). Reject the combination outright.
+    assert!(
+        !(args.proof.is_some() && args.partial_proof.is_some()),
+        "--proof and --partial-proof are mutually exclusive: both write an eDRAT \
+         dump, and pointing them at the same file would overwrite one with the \
+         other. Pass only one (--proof for a checkable refutation on unsat, \
+         --partial-proof for a dump on any result)."
+    );
+
     // Parse debug flag and level
     if args.debug > 0 {
         log::set_debug_level(args.debug);
@@ -76,7 +88,6 @@ fn main() -> Result<(), String> {
 
     solver_state.register_bool_constants(&true_term, &false_term);
 
-    let global_names = solver_state.context.all_defined_symbols();
     let mut nnf_terms = vec![];
     for assert in assertions {
         debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
@@ -84,7 +95,7 @@ fn main() -> Result<(), String> {
         // inline the let bindings
         let expanded_term = assert
             .let_elim(&mut solver_state.context)
-            .gsubst(global_names.clone(), &mut solver_state.context);
+            .gsubst_all(&mut solver_state.context);
         debug_println!(10, 0, "Expanded form: {}", expanded_term);
 
         let skolemized_term = expanded_term;
@@ -142,24 +153,13 @@ fn main() -> Result<(), String> {
         boolean_dt_constraints.extend(additional_constraints);
     }
 
-    // filtering prop_skeleton to get rid of -l l terms
-    let prop_skeleton_filtered = prop_skeleton
-        .iter()
-        .filter(|list| !(list.len() == 2 && list[0] == -list[1]))
-        .collect::<Vec<_>>();
-
-    debug_println!(
-        22,
-        0,
-        "We have the prop_skeleton {:?}",
-        prop_skeleton_filtered
-    );
+    debug_println!(22, 0, "We have the prop_skeleton {:?}", prop_skeleton);
 
     debug_println!(
         24,
         0,
         "We have the prop_skeleton in terms: {:?}",
-        prop_skeleton_filtered
+        prop_skeleton
             .iter()
             .map(|x| x
                 .iter()
@@ -175,12 +175,15 @@ fn main() -> Result<(), String> {
         prop_skeleton,
         boolean_dt_constraints,
         args.proof,
+        args.partial_proof,
+        args.trail_out,
         sorts,
         symbol_table,
         args.arithmetic,
         args.timeout,
         args.elevate,
         args.max_arith_conflicts_per_round,
+        args.batch_cap,
     );
 
     match return_value {
