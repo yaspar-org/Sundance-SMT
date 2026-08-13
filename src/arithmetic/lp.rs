@@ -532,9 +532,9 @@ pub fn extract_linear_expression(
                         );
                         additional_constraints.extend(model_terms);
                     }
-                    // Always represent the uninterpreted term as a fresh variable,
-                    // even when there is no equality explanation, so it is never
-                    // silently collapsed to 0.
+                    // Always represent the uninterpreted term as its own
+                    // variable, even when there is no equality explanation, so
+                    // it is never silently collapsed to 0.
                     expr.insert(Coefficient::Term(root_id), IBig::from(1));
                 }
             }
@@ -559,7 +559,7 @@ pub fn extract_linear_expression(
                 );
                 additional_constraints.extend(model_terms);
             }
-            // Always represent the uninterpreted term as a fresh variable, even
+            // Always represent the uninterpreted term as its own variable, even
             // when there is no equality explanation, so it is never silently
             // collapsed to 0.
             expr.insert(Coefficient::Term(root_id), IBig::from(1));
