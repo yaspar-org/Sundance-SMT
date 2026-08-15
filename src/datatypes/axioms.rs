@@ -330,12 +330,31 @@ pub fn learn_ctor_selector_clauses(
             .collect();
     }
 
-    // have the simple_sorted id for the global case and the simple id for the app case
-    let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
+    // A nullary constructor of a *parametric* datatype (e.g. `None : (Option Val)`) is a
+    // polymorphic identifier: printing it as a bare symbol produces SMT-LIB that fails to
+    // re-typecheck, because a polymorphic nullary identifier requires an explicit sort
+    // ascription. The ascription has to live *inside* the qualified identifier so that
+    // `Term::Global`'s printer emits `(as None (Option Val))` -- yaspar-ir does exactly this
+    // in its type checker (tc/app.rs tags the identifier via `with_sort` when the constructor
+    // needs non-trivial sort unification, i.e. when the datatype is parametric).
+    //
+    // A monomorphic nullary constructor (arity-0 result sort, e.g. an enum literal) needs no
+    // ascription, matching the type checker's empty-substitution case, so it keeps the simple
+    // identifier. Applied constructors and selectors are disambiguated by their arguments and
+    // likewise use the simple identifier.
     let ctor_app = if selector_apps.is_empty() {
+        let ctor_id = if sort.1.is_empty() {
+            QualifiedIdentifier::simple(ctor_name.clone())
+        } else {
+            QualifiedIdentifier::simple_sorted(ctor_name.clone(), sort.clone())
+        };
         solver_state.global(ctor_id, Some(sort.clone()))
     } else {
-        solver_state.app(ctor_id, selector_apps, Some(sort.clone()))
+        solver_state.app(
+            QualifiedIdentifier::simple(ctor_name.clone()),
+            selector_apps,
+            Some(sort.clone()),
+        )
     };
     let eq = solver_state.eq(term.clone(), ctor_app);
 
