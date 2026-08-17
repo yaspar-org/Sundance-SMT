@@ -9,7 +9,6 @@ use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
-use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, Status, Terminator};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -87,7 +86,6 @@ pub fn cdcl_decision_procedure(
         decision_level: 0,
         solver_state,
         disequalities: RefCell::new(vec![]),
-        fixed_literals: DeterministicHashSet::default(),
         proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference
         assignments: vec![0, 0],
         solver: &mut solver as *mut CaDiCal,

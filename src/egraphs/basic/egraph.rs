@@ -22,6 +22,15 @@ type SigKey = (CanonicalOp, Children);
 /// (level, key, term_id, was_inserted)
 type SigTrailEntry = (usize, SigKey, u32, bool);
 
+/// A Boolean value attached to an e-class and its SAT witness. Constants use zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BoolClassAssignment<T> {
+    term: T,
+    lit: Lit,
+    value: bool,
+    bool_constant: T,
+}
+
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== Egraph Summary ===")?;
@@ -241,6 +250,25 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Whether each term should be merged with true/false on SAT assignment.
+    merge_tf: Vec<bool>,
+    /// A marked-term witness for each root whose class contains a `merge_tf` term.
+    merge_tf_class: Vec<Option<u32>>,
+    /// Root-class updates introduced by backtrackable unions.
+    merge_tf_class_trail: Vec<(usize, u32, Option<u32>)>,
+    /// Nonzero-level upgrades that persist and need relocation after backtrack.
+    merge_tf_upgrades: Vec<(usize, u32)>,
+    /// Deferred `(term, bool_constant)` merges from APIs that return only a
+    /// term ID. Keyed on the pair so re-queuing the same merge dedups for free;
+    /// the value is the decision level at which it was queued (for backtracking).
+    pending_merges: DeterministicHashMap<(u32, u32), usize>,
+    /// Deferred conflicts from APIs that cannot return an `EgraphResult`, with
+    /// the decision level at which each was detected.
+    pending_conflicts: Vec<(usize, Conflict<u32>)>,
+    /// Boolean value and its SAT witness, stored only on e-class roots.
+    bool_assignments: Vec<Option<BoolClassAssignment<u32>>>,
+    /// Root-assignment changes to undo on SAT backtracking.
+    bool_assignment_trail: Vec<(usize, u32)>,
     /// Accumulated egraph statistics.
     pub(crate) stats: EgraphStats,
 }
@@ -283,6 +311,14 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
+            merge_tf: vec![false],
+            merge_tf_class: vec![None],
+            merge_tf_class_trail: Vec::new(),
+            merge_tf_upgrades: Vec::new(),
+            pending_merges: DeterministicHashMap::new(),
+            pending_conflicts: Vec::new(),
+            bool_assignments: vec![None],
+            bool_assignment_trail: Vec::new(),
             stats: EgraphStats::default(),
         }
     }
@@ -388,9 +424,13 @@ impl Egraph {
         // Insert into sig_table; if dynamic and sig already exists, merge via congruence.
         if let Some(sig) = self.compute_signature(id) {
             if let Some(&existing) = self.sig_table.get(&sig) {
-                if dynamic && self.find(existing) != self.find(id) {
-                    // TODO: propagate conflict — requires register_term_internal to return EgraphResult
-                    self.congruence_merge(existing, id, self.decision_level);
+                if dynamic
+                    && self.find(existing) != self.find(id)
+                    && let Some(conflict) = self
+                        .congruence_merge(existing, id, self.decision_level)
+                        .conflict
+                {
+                    self.pending_conflicts.push((self.decision_level, conflict));
                 }
             } else {
                 self.sig_table_insert(sig, id, self.decision_level);
@@ -424,6 +464,11 @@ impl Egraph {
                 self.predecessors.len() * 2,
                 FastDeterministicHashMap::default(),
             );
+            self.merge_tf.resize(self.merge_tf.len() * 2, false);
+            self.merge_tf_class
+                .resize(self.merge_tf_class.len() * 2, None);
+            self.bool_assignments
+                .resize(self.bool_assignments.len() * 2, None);
         }
     }
 
@@ -729,10 +774,29 @@ impl Egraph {
             self.display_term(u),
             self.display_term(v)
         );
-        self.leastcommonancestor_helper(u, v, 0)
+        let mut expanded_pairs = FastDeterministicHashSet::default();
+        let mut seen_equalities = FastDeterministicHashSet::default();
+        let mut equalities = Vec::new();
+        self.leastcommonancestor_helper(
+            u,
+            v,
+            0,
+            &mut expanded_pairs,
+            &mut seen_equalities,
+            &mut equalities,
+        )?;
+        Some(equalities)
     }
 
-    fn leastcommonancestor_helper(&self, u: u32, v: u32, indent: usize) -> Option<Vec<(u32, u32)>> {
+    fn leastcommonancestor_helper(
+        &self,
+        u: u32,
+        v: u32,
+        indent: usize,
+        expanded_pairs: &mut FastDeterministicHashSet<(u32, u32)>,
+        seen_equalities: &mut FastDeterministicHashSet<(u32, u32)>,
+        final_proof: &mut Vec<(u32, u32)>,
+    ) -> Option<()> {
         debug_println!(
             20,
             indent,
@@ -740,6 +804,14 @@ impl Egraph {
             self.display_term(u),
             self.display_term(v)
         );
+        if u == v {
+            return Some(());
+        }
+        let pair = if u < v { (u, v) } else { (v, u) };
+        if !expanded_pairs.insert(pair) {
+            return Some(());
+        }
+
         let mut visited = FastDeterministicHashSet::default();
 
         let mut path_from_u: Vec<u32> = vec![];
@@ -766,6 +838,7 @@ impl Egraph {
                 break;
             }
             if let ProofForestEdge::Root { .. } = self.proof_forest[curr as usize] {
+                expanded_pairs.remove(&pair);
                 return None;
             }
             path_from_v.push(curr);
@@ -775,7 +848,6 @@ impl Egraph {
 
         assert!(visited.contains(&curr));
 
-        let mut final_proof = vec![];
         let mut proof_congruences: Vec<&[(u32, u32)]> = vec![];
 
         let proof_nodes = path_from_u
@@ -818,7 +890,10 @@ impl Egraph {
                             self.display_term(t2),
                             t2
                         );
-                        final_proof.push((t1, t2));
+                        let equality = if t1 < t2 { (t1, t2) } else { (t2, t1) };
+                        if seen_equalities.insert(equality) {
+                            final_proof.push((t1, t2));
+                        }
                         debug_println!(
                             11,
                             1,
@@ -832,12 +907,17 @@ impl Egraph {
 
         for pairs in proof_congruences {
             for &(a, b) in pairs {
-                if let Some(subproof) = self.leastcommonancestor_helper(a, b, indent + 1) {
-                    final_proof.extend(subproof);
-                }
+                let _ = self.leastcommonancestor_helper(
+                    a,
+                    b,
+                    indent + 1,
+                    expanded_pairs,
+                    seen_equalities,
+                    final_proof,
+                );
             }
         }
-        Some(final_proof)
+        Some(())
     }
 
     /// Assert t1 = t2 at the current decision level.
@@ -868,6 +948,7 @@ impl Egraph {
                 equalities,
                 disequality: (t1, t2),
                 diseq_lit: None,
+                bool_lits: None,
             });
         }
         let hash = self.predecessor_hash;
@@ -886,6 +967,136 @@ impl Egraph {
             }
         }
         EgraphResult::ok()
+    }
+
+    fn assign_bool_value(
+        &mut self,
+        term: u32,
+        lit: Lit,
+        value: bool,
+        bool_constant: u32,
+    ) -> EgraphResult<u32> {
+        let root = self.find(term);
+        let assignment = BoolClassAssignment {
+            term,
+            lit,
+            value,
+            bool_constant,
+        };
+        let result = match self.bool_assignments[root as usize] {
+            None => {
+                self.bool_assignment_trail.push((self.decision_level, root));
+                self.bool_assignments[root as usize] = Some(assignment);
+                EgraphResult::ok()
+            }
+            Some(existing) if existing.value != value => {
+                let equalities = self
+                    .leastcommonancestor(existing.term, term)
+                    .expect("Boolean assignment witnesses must share an e-class");
+                EgraphResult::with_conflict(Conflict {
+                    equalities,
+                    disequality: (existing.term, term),
+                    diseq_lit: None,
+                    bool_lits: Some([existing.lit, assignment.lit]),
+                })
+            }
+            Some(_) => EgraphResult::ok(),
+        };
+        if result.conflict.is_none() {
+            self.queue_merge_tf_assignment(root, self.decision_level);
+        }
+        result
+    }
+
+    fn queue_merge_tf_assignment(&mut self, root: u32, level: usize) {
+        if self.merge_tf_class[root as usize].is_none() || self.is_constant(root) {
+            return;
+        }
+        let Some(assignment) = self.bool_assignments[root as usize] else {
+            return;
+        };
+        if assignment.lit == 0 {
+            return;
+        }
+        // Keying on the pair dedups re-queues of the same merge automatically.
+        self.pending_merges
+            .entry((assignment.term, assignment.bool_constant))
+            .or_insert(level);
+    }
+
+    fn set_merge_tf_class_witness(&mut self, root: u32, witness: u32, level: usize) {
+        if self.merge_tf_class[root as usize].is_some() {
+            return;
+        }
+        if level > 0 {
+            self.merge_tf_class_trail
+                .push((level, root, self.merge_tf_class[root as usize]));
+        }
+        self.merge_tf_class[root as usize] = Some(witness);
+    }
+
+    fn should_merge_tf(&self, term: u32) -> bool {
+        self.merge_tf_class[self.find(term) as usize].is_some()
+    }
+
+    /// Transfer the demoted root's Boolean value to the surviving root. Both
+    /// roots have already been checked for an opposite-value conflict.
+    fn merge_bool_assignments(&mut self, surviving_root: u32, demoted_root: u32, level: usize) {
+        let surviving = self.bool_assignments[surviving_root as usize];
+        let demoted = self.bool_assignments[demoted_root as usize];
+        match (surviving, demoted) {
+            (None, Some(assignment)) => {
+                self.bool_assignment_trail.push((level, surviving_root));
+                self.bool_assignments[surviving_root as usize] = Some(assignment);
+            }
+            (Some(first), Some(second)) => {
+                debug_assert_eq!(first.value, second.value);
+                debug_assert_eq!(first.bool_constant, second.bool_constant);
+            }
+            _ => {}
+        }
+        self.queue_merge_tf_assignment(surviving_root, level);
+    }
+
+    /// Explain the equality that would be introduced by a pending union,
+    /// without mutating the proof forest.
+    fn explain_pending_union(
+        &self,
+        left_witness: u32,
+        x: u32,
+        right_witness: u32,
+        y: u32,
+        proof_parent: &ProofForestEdge,
+    ) -> Vec<(u32, u32)> {
+        let mut equalities = Vec::new();
+        if left_witness != x {
+            equalities.extend(
+                self.leastcommonancestor(left_witness, x)
+                    .expect("left witness must be in x's class"),
+            );
+        }
+        match proof_parent {
+            ProofForestEdge::Equality {
+                term: Some((t1, t2)),
+                ..
+            } => equalities.push((*t1, *t2)),
+            ProofForestEdge::Congruence { pairs, .. } => {
+                for &(a, b) in pairs {
+                    equalities.extend(
+                        self.leastcommonancestor(a, b)
+                            .expect("congruence children must already be equal"),
+                    );
+                }
+            }
+            _ => {}
+        }
+        if right_witness != y {
+            equalities.extend(
+                self.leastcommonancestor(right_witness, y)
+                    .expect("right witness must be in y's class"),
+            );
+        }
+        equalities
     }
 
     /// Undo all egraph operations at levels strictly greater than `level`.
@@ -907,6 +1118,47 @@ impl Egraph {
             let (_, backtrack_equality, y, y_root) =
                 self.proof_forest_backtrack_stack.pop().unwrap();
             self.proof_forest_backtrack(backtrack_equality, y, y_root);
+        }
+
+        while let Some((entry_level, _, _)) = self.merge_tf_class_trail.last() {
+            if *entry_level <= level {
+                break;
+            }
+            let (_, root, previous) = self.merge_tf_class_trail.pop().unwrap();
+            self.merge_tf_class[root as usize] = previous;
+        }
+
+        while let Some((entry_level, _)) = self.bool_assignment_trail.last() {
+            if *entry_level <= level {
+                break;
+            }
+            let (_, root) = self.bool_assignment_trail.pop().unwrap();
+            self.bool_assignments[root as usize] = None;
+        }
+        self.pending_merges
+            .retain(|_, entry_level| *entry_level <= level);
+        self.pending_conflicts
+            .retain(|(entry_level, _)| *entry_level <= level);
+        let mut relocated_upgrades = Vec::new();
+        for (upgrade_level, term) in &mut self.merge_tf_upgrades {
+            if *upgrade_level > level {
+                *upgrade_level = level;
+                relocated_upgrades.push(*term);
+            }
+        }
+        let mut relocated_roots = FastDeterministicHashSet::default();
+        for term in relocated_upgrades {
+            let root = self.find(term);
+            self.set_merge_tf_class_witness(root, term, level);
+            relocated_roots.insert(root);
+        }
+        for root in relocated_roots {
+            self.queue_merge_tf_assignment(root, level);
+        }
+
+        if level == 0 {
+            self.merge_tf_class_trail.clear();
+            self.merge_tf_upgrades.clear();
         }
 
         // Replay sig_trail in reverse AFTER UF is restored.
@@ -961,8 +1213,12 @@ impl Egraph {
             }
             if let Some(sig) = self.compute_signature(term) {
                 if let Some(&existing) = self.sig_table.get(&sig) {
-                    if self.find(existing) != self.find(term) {
-                        self.congruence_merge(existing, term, self.decision_level);
+                    if self.find(existing) != self.find(term)
+                        && let Some(conflict) = self
+                            .congruence_merge(existing, term, self.decision_level)
+                            .conflict
+                    {
+                        self.pending_conflicts.push((self.decision_level, conflict));
                     }
                 } else {
                     self.sig_table_insert(sig, term, self.decision_level);
@@ -976,6 +1232,7 @@ impl Egraph {
             self.union_to_eclass = DeterministicHashMap::new();
             self.proof_forest_backtrack_stack = vec![];
             self.sig_trail.clear();
+            self.bool_assignment_trail.clear();
         }
     }
 
@@ -1141,17 +1398,14 @@ impl Egraph {
             {
                 equalities.extend(path);
             }
-            // Explain the current merge from the proof_parent edge
             match &proof_parent {
                 ProofForestEdge::Equality {
                     term: Some((t1, t2)),
                     ..
-                } => {
-                    equalities.push((*t1, *t2));
-                }
+                } => equalities.push((*t1, *t2)),
                 ProofForestEdge::Congruence { pairs, .. } => {
-                    for (a, b) in pairs {
-                        if let Some(path) = self.leastcommonancestor(*a, *b) {
+                    for &(a, b) in pairs {
+                        if let Some(path) = self.leastcommonancestor(a, b) {
                             equalities.extend(path);
                         }
                     }
@@ -1167,6 +1421,22 @@ impl Egraph {
                 equalities,
                 disequality: (x_root, y_root),
                 diseq_lit: None,
+                bool_lits: None,
+            });
+        }
+
+        if let (Some(first), Some(second)) = (
+            self.bool_assignments[x_root as usize],
+            self.bool_assignments[y_root as usize],
+        ) && first.value != second.value
+        {
+            let equalities =
+                self.explain_pending_union(first.term, x, second.term, y, &proof_parent);
+            return EgraphResult::with_conflict(Conflict {
+                equalities,
+                disequality: (first.term, second.term),
+                diseq_lit: None,
+                bool_lits: Some([first.lit, second.lit]),
             });
         }
 
@@ -1210,6 +1480,10 @@ impl Egraph {
             }
         }
 
+        if let Some(witness) = self.merge_tf_class[y_root as usize] {
+            self.set_merge_tf_class_witness(x_root, witness, level);
+        }
+
         // making x the parent of y ~> could also do this based on relative depth of x and y tree
         let proof_parent: ProofForestEdge =
             proof_parent.with_parent(x, y, level, self.predecessor_hash);
@@ -1243,6 +1517,7 @@ impl Egraph {
             self.display_term(y_root)
         );
         self.make_root(y, proof_parent);
+        self.merge_bool_assignments(x_root, y_root, level);
 
         // Early conflict check: x_root's existing disequalities may already be
         // violated now that y's class has been merged in.
@@ -1255,6 +1530,7 @@ impl Egraph {
                     equalities,
                     disequality: disequality.original_disequality,
                     diseq_lit: Some(disequality.diseq_lit),
+                    bool_lits: None,
                 });
             } else {
                 panic!(
@@ -1758,6 +2034,51 @@ impl EgraphTrait for Egraph {
 
     fn find(&self, term: Self::TermId) -> Self::TermId {
         self.find(term)
+    }
+
+    fn set_merge_tf(&mut self, term: Self::TermId) {
+        if !self.merge_tf[term as usize] {
+            self.merge_tf[term as usize] = true;
+            if self.decision_level > 0 {
+                self.merge_tf_upgrades.push((self.decision_level, term));
+            }
+            let root = self.find(term);
+            self.set_merge_tf_class_witness(root, term, self.decision_level);
+            self.queue_merge_tf_assignment(root, self.decision_level);
+        }
+    }
+
+    fn assign_bool(
+        &mut self,
+        term: Self::TermId,
+        lit: Lit,
+        value: bool,
+        bool_constant: Self::TermId,
+    ) -> EgraphResult<Self::TermId> {
+        if self.should_merge_tf(term) {
+            self.assert_equal(term, bool_constant)
+        } else {
+            self.assign_bool_value(term, lit, value, bool_constant)
+        }
+    }
+
+    fn rebuild(&mut self) -> EgraphResult<Self::TermId> {
+        let mut result = EgraphResult::ok();
+        // Surface conflicts first: each forces a backtrack, so any merge run
+        // beforehand would just be undone.
+        if let Some((_, conflict)) = self.pending_conflicts.pop() {
+            result.conflict = Some(conflict);
+            return result;
+        }
+        while let Some(((term, bool_constant), _)) = self.pending_merges.pop_first() {
+            let merge_result = self.assert_equal(term, bool_constant);
+            result.propagations.extend(merge_result.propagations);
+            if let Some(conflict) = merge_result.conflict {
+                result.conflict = Some(conflict);
+                return result;
+            }
+        }
+        result
     }
 
     fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool {

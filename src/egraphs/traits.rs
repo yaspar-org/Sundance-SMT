@@ -26,6 +26,8 @@ pub struct Conflict<T> {
     pub disequality: (T, T),
     /// The SAT literal that asserted the disequality (if one exists).
     pub diseq_lit: Option<Lit>,
+    /// SAT assignments that gave equal Boolean classes opposite values.
+    pub bool_lits: Option<[Lit; 2]>,
 }
 
 /// Result of a mutating egraph operation (assert_equal, assert_disequal, etc.).
@@ -140,6 +142,24 @@ pub trait EgraphTrait {
 
     /// Find the canonical representative of a term's equivalence class.
     fn find(&self, term: Self::TermId) -> Self::TermId;
+
+    /// Mark a term as requiring Boolean-constant congruence.
+    fn set_merge_tf(&mut self, term: Self::TermId);
+
+    /// Record a Boolean assignment, merging with `bool_constant` when required.
+    fn assign_bool(
+        &mut self,
+        term: Self::TermId,
+        lit: Lit,
+        value: bool,
+        bool_constant: Self::TermId,
+    ) -> EgraphResult<Self::TermId>;
+
+    /// Restore congruence closure after deferred work.
+    ///
+    /// A successful result means the egraph is up to date. A conflict may
+    /// leave additional work pending; call rebuild again after handling it.
+    fn rebuild(&mut self) -> EgraphResult<Self::TermId>;
 
     /// Check if two terms are in the same equivalence class.
     fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool;
