@@ -106,16 +106,28 @@ impl<'a> CustomExternalPropagator<'a> {
         self.queue_theory_clause(clause, Theory::Background);
     }
 
-    fn rebuild_egraph(&mut self) {
+    fn rebuild_egraph(&mut self) -> bool {
+        let mut found_conflict = false;
         loop {
             let result = self.solver_state.egraph.rebuild();
             // The basic backend never propagates literals, only conflicts.
             debug_assert!(result.propagations.is_empty());
             if let Some(conflict) = result.conflict {
+                found_conflict = true;
                 self.queue_egraph_conflict(&conflict);
             } else {
                 break;
             }
+        }
+        self.sync_new_vars();
+        found_conflict
+    }
+
+    fn rebuild_egraph_and_arithmetic(&mut self) {
+        self.rebuild_egraph();
+        #[cfg(feature = "z3-solver")]
+        if let Some(z3) = self.z3_incremental.as_mut() {
+            z3.drain_merge_queue(self.solver_state);
         }
         self.sync_new_vars();
     }
@@ -298,9 +310,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.queue_egraph_conflict(&conflict);
                 continue;
             }
+            if self.rebuild_egraph() {
+                continue;
+            }
 
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.solver_state, self.decision_level);
+            if self.rebuild_egraph() {
+                continue;
+            }
 
             // Drain merges triggered by this assignment, then push the lit
             // itself if it's arithmetic.
@@ -384,10 +402,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
             }
         }
-        self.rebuild_egraph();
+        self.rebuild_egraph_and_arithmetic();
     }
 
     fn notify_new_decision_level(&mut self) {
+        // Congruence merges must be stamped at the level where their causes
+        // were introduced, not at the level of the next SAT decision.
+        self.rebuild_egraph_and_arithmetic();
         self.stats.decisions += 1;
         debug_println!(
             11,
@@ -440,19 +461,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         self.decision_level = level;
 
-        // `backtrack_to` clears the arithmetic queue at entry then re-fires
-        // any congruence merges from `union_to_eclass` replay, so the queue
-        // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
 
         #[cfg(feature = "z3-solver")]
-        {
-            if let Some(z3) = self.z3_incremental.as_mut() {
-                z3.notify_backtrack(level);
-                z3.drain_merge_queue(self.solver_state);
-            }
+        if let Some(z3) = self.z3_incremental.as_mut() {
+            z3.notify_backtrack(level);
         }
-        self.sync_new_vars();
+        // Recompute congruence closure at the restored level before any
+        // client observes roots or arithmetic equalities.
+        self.rebuild_egraph_and_arithmetic();
 
         debug_println!(16, 0, "Ending backtracking at level {}", level);
         debug_println!(11, 0, "{}", self.solver_state.egraph);
@@ -472,7 +489,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.write_trail_line(model);
         }
 
-        self.rebuild_egraph();
+        self.rebuild_egraph_and_arithmetic();
         debug_println!(
             24,
             0,
@@ -604,17 +621,24 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         // merge can be undone individually if it conflicts.
                         self.solver_state.egraph.notify_new_decision_level();
                         probe_level += 1;
-                        let conflict = self
+                        let mut conflict = self
                             .solver_state
                             .egraph
                             .assert_equal(x_root, y_root)
                             .conflict;
+                        if conflict.is_none() {
+                            conflict = self.solver_state.egraph.rebuild().conflict;
+                        }
                         // Probe merges are speculative — discard queue entries
                         // so they don't leak into Z3IncrementalState.
                         let _ = self.solver_state.egraph.drain_arithmetic_equalities();
                         if let Some(c) = conflict {
                             self.solver_state.egraph.backtrack_to(probe_level - 1);
                             probe_level -= 1;
+                            let rebuild = self.solver_state.egraph.rebuild();
+                            debug_assert!(rebuild.conflict.is_none());
+                            debug_assert!(rebuild.propagations.is_empty());
+                            let _ = self.solver_state.egraph.drain_arithmetic_equalities();
                             conflicts.push(c);
                             if conflicts.len() >= self.max_arith_conflicts_per_round {
                                 break 'outer;
@@ -650,27 +674,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
                 self.sync_new_vars();
 
-                // Dynamic registration still cannot return conflicts directly.
-                // Materialize those while speculative equality proofs exist.
+                // Close terms registered while speculative equality proofs exist.
                 self.rebuild_egraph();
 
-                // Undo remaining probe merges. `backtrack_to` may repopulate
-                // the queue via `union_to_eclass` re-firing (e.g. from the
-                // trichotomy terms just registered); drain those into Z3.
+                // Undo remaining probe merges. Backtracking invalidates the
+                // signature cache; the next rebuild restores closure.
                 self.solver_state.egraph.backtrack_to(base_level);
-                #[cfg(feature = "z3-solver")]
-                {
-                    if let Some(z3) = self.z3_incremental.as_mut() {
-                        z3.drain_merge_queue(self.solver_state);
-                    } else {
-                        self.solver_state.egraph.drain_arithmetic_equalities();
-                    }
-                }
-                #[cfg(not(feature = "z3-solver"))]
-                {
-                    self.solver_state.egraph.drain_arithmetic_equalities();
-                }
-                self.sync_new_vars();
+                self.rebuild_egraph_and_arithmetic();
             }
             ArithResult::None => {}
         }
@@ -710,7 +720,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
 
         if pending.is_empty() {
-            self.rebuild_egraph();
+            self.rebuild_egraph_and_arithmetic();
             if !self.disequalities.borrow().is_empty() {
                 self.stats.conflicts += 1;
                 return false;
@@ -766,7 +776,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_propagate(&mut self) -> i32 {
-        self.rebuild_egraph();
+        self.rebuild_egraph_and_arithmetic();
         0
     }
 
