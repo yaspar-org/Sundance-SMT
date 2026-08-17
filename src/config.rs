@@ -60,4 +60,8 @@ pub struct Args {
     /// 0 = unbounded (materialize all pending).
     #[arg(long, default_value_t = 85)]
     pub batch_cap: usize,
+    /// Check the incremental arithmetic trail after this many new assertions.
+    /// 0 disables intermediate arithmetic checks.
+    #[arg(long, default_value_t = 32)]
+    pub partial_arithmetic_batch: usize,
 }

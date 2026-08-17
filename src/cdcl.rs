@@ -46,6 +46,7 @@ pub fn cdcl_decision_procedure(
     elevate: i32,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
+    partial_arithmetic_batch: usize,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -80,8 +81,9 @@ pub fn cdcl_decision_procedure(
         .incremental_arithmetic(using_z3_incremental);
 
     #[cfg(feature = "z3-solver")]
-    let z3_incremental =
-        using_z3_incremental.then(crate::arithmetic::z3incremental::Z3IncrementalState::new);
+    let z3_incremental = using_z3_incremental.then(|| {
+        crate::arithmetic::z3incremental::Z3IncrementalState::new(partial_arithmetic_batch)
+    });
 
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,

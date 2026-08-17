@@ -28,6 +28,12 @@ use z3::{
     ast::{Bool, Int},
 };
 
+pub enum PartialCheckResult {
+    Unchanged,
+    Sat,
+    Unsat(Vec<i32>),
+}
+
 fn ibig_to_bigint(n: &IBig) -> num::BigInt {
     num::BigInt::parse_bytes(n.to_string().as_bytes(), 10).unwrap()
 }
@@ -60,10 +66,15 @@ pub struct Z3IncrementalState {
     /// Egraph ids materialized per level; evicted from `var_map` on backtrack.
     vars_by_level: Vec<Vec<u32>>,
     current_level: usize,
+    /// Tracked arithmetic assertions added since the last arithmetic check.
+    pending_partial_assertions: usize,
+    /// Number of pending assertions that triggers an intermediate check.
+    /// Zero disables intermediate checks.
+    partial_check_assertion_batch: usize,
 }
 
 impl Z3IncrementalState {
-    pub fn new() -> Self {
+    pub fn new(partial_check_assertion_batch: usize) -> Self {
         Self {
             solver: Solver::new(),
             var_map: DeterministicHashMap::new(),
@@ -74,6 +85,8 @@ impl Z3IncrementalState {
             push_counts: vec![0],
             vars_by_level: vec![Vec::new()],
             current_level: 0,
+            pending_partial_assertions: 0,
+            partial_check_assertion_batch,
         }
     }
 
@@ -257,6 +270,9 @@ impl Z3IncrementalState {
         self.active_lits.insert(lit);
         self.lits_by_level[self.current_level].push(lit);
         self.solver.assert_and_track(ast, &tracker);
+        if self.partial_check_assertion_batch > 0 {
+            self.pending_partial_assertions += 1;
+        }
         debug_println!(
             21,
             0,
@@ -297,6 +313,9 @@ impl Z3IncrementalState {
             self.active_lits.insert(lit);
             self.lits_by_level[self.current_level].push(lit);
             self.solver.assert_and_track(Int::eq(&va, vb), &tracker);
+            if self.partial_check_assertion_batch > 0 {
+                self.pending_partial_assertions += 1;
+            }
             debug_println!(
                 21,
                 0,
@@ -308,6 +327,61 @@ impl Z3IncrementalState {
             );
         }
         new_lits
+    }
+
+    fn active_assumptions(&self) -> Vec<Bool> {
+        self.active_lits
+            .iter()
+            .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()).cloned())
+            .collect()
+    }
+
+    fn unsat_core_clause(&self) -> Vec<i32> {
+        let mut clause: Vec<i32> = self
+            .solver
+            .get_unsat_core()
+            .iter()
+            .filter_map(|ast| {
+                let raw = ast.to_string();
+                let abs_lit: i32 = raw.trim_matches('|').strip_prefix("lit_")?.parse().ok()?;
+                let signed = if self.active_lits.contains(&abs_lit) {
+                    abs_lit
+                } else {
+                    -abs_lit
+                };
+                Some(-signed)
+            })
+            .collect();
+        clause.sort_unstable();
+        clause.dedup();
+        assert!(
+            !clause.is_empty(),
+            "z3incremental: unsat core contained no tracked lits"
+        );
+        clause
+    }
+
+    /// Check only the current tracked arithmetic trail, without constructing
+    /// a model or inspecting any non-arithmetic query formula.
+    pub fn check_partial_trail(&mut self) -> PartialCheckResult {
+        if self.partial_check_assertion_batch == 0
+            || self.pending_partial_assertions < self.partial_check_assertion_batch
+        {
+            return PartialCheckResult::Unchanged;
+        }
+        self.pending_partial_assertions = 0;
+
+        debug_println!(
+            21,
+            0,
+            "[z3inc] partial check at level {}",
+            self.current_level
+        );
+        match self.solver.check_assumptions(&self.active_assumptions()) {
+            SatResult::Sat => PartialCheckResult::Sat,
+            SatResult::Unsat => PartialCheckResult::Unsat(self.unsat_core_clause()),
+            SatResult::Unknown => panic!("z3incremental: Z3 returned unknown"),
+        }
     }
 
     /// Run `check_assumptions` under the currently-active trackers. On SAT,
@@ -322,12 +396,8 @@ impl Z3IncrementalState {
             let egraph_id = solver_state.to_egraph_id(*term_id);
             let _ = self.var_for(egraph_id, solver_state);
         }
-        let assumptions: Vec<Bool> = self
-            .active_lits
-            .iter()
-            .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()).cloned())
-            .collect();
-        match self.solver.check_assumptions(&assumptions) {
+        self.pending_partial_assertions = 0;
+        match self.solver.check_assumptions(&self.active_assumptions()) {
             SatResult::Sat => {
                 let model = self.solver.get_model().unwrap();
                 let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
@@ -346,30 +416,7 @@ impl Z3IncrementalState {
                 debug_println!(21, 0, "[z3inc] SAT buckets={:?}", buckets);
                 ArithResult::Sat(buckets, LiaStats::new())
             }
-            SatResult::Unsat => {
-                let core = self.solver.get_unsat_core();
-                // Trackers are named `lit_{abs_lit}` (possibly `|...|`-quoted).
-                // Recover the signed lit via `active_lits`.
-                let lits: DeterministicHashSet<i32> = core
-                    .iter()
-                    .filter_map(|ast| {
-                        let raw = ast.to_string();
-                        let abs_lit: i32 =
-                            raw.trim_matches('|').strip_prefix("lit_")?.parse().ok()?;
-                        let signed = if self.active_lits.contains(&abs_lit) {
-                            abs_lit
-                        } else {
-                            -abs_lit
-                        };
-                        Some(-signed)
-                    })
-                    .collect();
-                assert!(
-                    !lits.is_empty(),
-                    "z3incremental: unsat core contained no tracked lits"
-                );
-                ArithResult::Unsat(lits.into_iter().collect(), LiaStats::new())
-            }
+            SatResult::Unsat => ArithResult::Unsat(self.unsat_core_clause(), LiaStats::new()),
             SatResult::Unknown => panic!("z3incremental: Z3 returned unknown"),
         }
     }
@@ -377,7 +424,7 @@ impl Z3IncrementalState {
 
 impl Default for Z3IncrementalState {
     fn default() -> Self {
-        Self::new()
+        Self::new(32)
     }
 }
 
