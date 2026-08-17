@@ -46,6 +46,41 @@ pub fn cdcl_decision_procedure(
     elevate: i32,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
+) -> (Status, SolverStats) {
+    cdcl_decision_procedure_with_partial_arithmetic_batch(
+        solver_state,
+        clauses,
+        boolean_dt_constraints,
+        proof_file,
+        partial_proof_file,
+        trail_file,
+        sorts,
+        symbol_table,
+        arithmetic,
+        timeout,
+        elevate,
+        max_arith_conflicts_per_round,
+        batch_cap,
+        32,
+    )
+}
+
+/// Main CDCL decision loop with a configurable intermediate arithmetic check batch.
+#[allow(clippy::too_many_arguments)]
+pub fn cdcl_decision_procedure_with_partial_arithmetic_batch(
+    solver_state: &mut SolverState,
+    clauses: Vec<Vec<i32>>,
+    boolean_dt_constraints: Vec<Vec<i32>>,
+    proof_file: Option<PathBuf>,
+    partial_proof_file: Option<PathBuf>,
+    trail_file: Option<PathBuf>,
+    sorts: HashMap<Str, SortDef>,
+    symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
+    arithmetic: ArithSolver,
+    timeout: u64,
+    elevate: i32,
+    max_arith_conflicts_per_round: usize,
+    batch_cap: usize,
     partial_arithmetic_batch: usize,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
@@ -76,13 +111,17 @@ pub fn cdcl_decision_procedure(
     let using_z3_incremental = matches!(arithmetic, ArithSolver::Z3Incremental);
     #[cfg(not(feature = "z3-solver"))]
     let using_z3_incremental = false;
+    #[cfg(not(feature = "z3-solver"))]
+    let _ = partial_arithmetic_batch;
     solver_state
         .egraph
         .incremental_arithmetic(using_z3_incremental);
 
     #[cfg(feature = "z3-solver")]
     let z3_incremental = using_z3_incremental.then(|| {
-        crate::arithmetic::z3incremental::Z3IncrementalState::new(partial_arithmetic_batch)
+        crate::arithmetic::z3incremental::Z3IncrementalState::with_partial_check_batch(
+            partial_arithmetic_batch,
+        )
     });
 
     let mut propagator = CustomExternalPropagator {

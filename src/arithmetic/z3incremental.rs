@@ -28,7 +28,7 @@ use z3::{
     ast::{Bool, Int},
 };
 
-pub enum PartialCheckResult {
+pub(crate) enum PartialCheckResult {
     Unchanged,
     Sat,
     Unsat(Vec<i32>),
@@ -74,7 +74,11 @@ pub struct Z3IncrementalState {
 }
 
 impl Z3IncrementalState {
-    pub fn new(partial_check_assertion_batch: usize) -> Self {
+    pub fn new() -> Self {
+        Self::with_partial_check_batch(32)
+    }
+
+    pub(crate) fn with_partial_check_batch(partial_check_assertion_batch: usize) -> Self {
         Self {
             solver: Solver::new(),
             var_map: DeterministicHashMap::new(),
@@ -271,7 +275,7 @@ impl Z3IncrementalState {
         self.lits_by_level[self.current_level].push(lit);
         self.solver.assert_and_track(ast, &tracker);
         if self.partial_check_assertion_batch > 0 {
-            self.pending_partial_assertions += 1;
+            self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
         }
         debug_println!(
             21,
@@ -314,7 +318,7 @@ impl Z3IncrementalState {
             self.lits_by_level[self.current_level].push(lit);
             self.solver.assert_and_track(Int::eq(&va, vb), &tracker);
             if self.partial_check_assertion_batch > 0 {
-                self.pending_partial_assertions += 1;
+                self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
             }
             debug_println!(
                 21,
@@ -337,7 +341,7 @@ impl Z3IncrementalState {
     }
 
     fn unsat_core_clause(&self) -> Vec<i32> {
-        let mut clause: Vec<i32> = self
+        let lits: DeterministicHashSet<i32> = self
             .solver
             .get_unsat_core()
             .iter()
@@ -352,18 +356,16 @@ impl Z3IncrementalState {
                 Some(-signed)
             })
             .collect();
-        clause.sort_unstable();
-        clause.dedup();
         assert!(
-            !clause.is_empty(),
+            !lits.is_empty(),
             "z3incremental: unsat core contained no tracked lits"
         );
-        clause
+        lits.into_iter().collect()
     }
 
     /// Check only the current tracked arithmetic trail, without constructing
     /// a model or inspecting any non-arithmetic query formula.
-    pub fn check_partial_trail(&mut self) -> PartialCheckResult {
+    pub(crate) fn check_partial_trail(&mut self) -> PartialCheckResult {
         if self.partial_check_assertion_batch == 0
             || self.pending_partial_assertions < self.partial_check_assertion_batch
         {
@@ -424,7 +426,7 @@ impl Z3IncrementalState {
 
 impl Default for Z3IncrementalState {
     fn default() -> Self {
-        Self::new(32)
+        Self::new()
     }
 }
 

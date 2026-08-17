@@ -4,7 +4,7 @@
 use cadical_sys::Status;
 use clap::Parser;
 use std::fs;
-use sundance_smt::cdcl::cdcl_decision_procedure;
+use sundance_smt::cdcl::cdcl_decision_procedure_with_partial_arithmetic_batch;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::preprocess::check_for_function_bool;
@@ -170,7 +170,7 @@ fn main() -> Result<(), String> {
 
     let quantifiers = !solver_state.quantifiers.is_empty();
 
-    let (return_value, stats) = cdcl_decision_procedure(
+    let (return_value, stats) = cdcl_decision_procedure_with_partial_arithmetic_batch(
         &mut solver_state,
         prop_skeleton,
         boolean_dt_constraints,
