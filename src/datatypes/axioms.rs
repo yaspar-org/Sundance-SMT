@@ -330,22 +330,20 @@ pub fn learn_ctor_selector_clauses(
             .collect();
     }
 
-    // A nullary constructor of a parametric datatype (e.g. `None : (Option Val)`) must carry
-    // its sort on the identifier, else it prints as bare `None` and fails to re-typecheck.
-    // Monomorphic constructors (arity-0 sort) stay bare; applied ones are fixed by their args.
+    // A constructor of a parametric datatype must carry its ground sort on the identifier,
+    // else it prints bare and fails to re-typecheck: a nullary constructor (e.g. `None`) has
+    // no arguments to pin down the type parameters, and even an applied constructor can't when
+    // a parameter is phantom (appears in no field). Constructors of a non-parametric datatype
+    // (a result sort with no sort parameters) stay bare.
+    let ctor_id = if sort.1.is_empty() {
+        QualifiedIdentifier::simple(ctor_name.clone())
+    } else {
+        QualifiedIdentifier::simple_sorted(ctor_name.clone(), sort.clone())
+    };
     let ctor_app = if selector_apps.is_empty() {
-        let ctor_id = if sort.1.is_empty() {
-            QualifiedIdentifier::simple(ctor_name.clone())
-        } else {
-            QualifiedIdentifier::simple_sorted(ctor_name.clone(), sort.clone())
-        };
         solver_state.global(ctor_id, Some(sort.clone()))
     } else {
-        solver_state.app(
-            QualifiedIdentifier::simple(ctor_name.clone()),
-            selector_apps,
-            Some(sort.clone()),
-        )
+        solver_state.app(ctor_id, selector_apps, Some(sort.clone()))
     };
     let eq = solver_state.eq(term.clone(), ctor_app);
 
