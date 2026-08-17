@@ -407,38 +407,58 @@ pub fn extract_linear_expression(
                     }
                 }
                 "*" => {
-                    // Multiplication: handle simple cases like c * x or x * c
-                    if args.len() == 2 {
-                        let (left_expr, additional_const_l) =
-                            extract_linear_expression(args[0].uid(), solver_state);
-                        let (right_expr, additional_const_r) =
-                            extract_linear_expression(args[1].uid(), solver_state);
+                    // Multiplication is linear only when at most one factor is
+                    // non-constant. Fold the (possibly n-ary) arguments
+                    // left-to-right, scaling by constant factors. Multiplying
+                    // two non-constant factors is non-linear and must be
+                    // rejected rather than silently collapsed to 0 (issue #52).
+                    // NB: the binary `if args.len() == 2` special-case handled
+                    // c*x and x*c but left n-ary `(* a b c)` collapsing to 0.
+                    let mut acc: DeterministicHashMap<Coefficient, Integer> =
+                        DeterministicHashMap::new();
+                    acc.insert(Coefficient::Constant, IBig::from(1));
+                    for arg_id in args.iter() {
+                        let (arg_expr, additional_const) =
+                            extract_linear_expression(arg_id.uid(), solver_state);
+                        additional_constraints.extend(additional_const);
 
-                        additional_constraints.extend(additional_const_l);
-                        additional_constraints.extend(additional_const_r);
-                        // Check if one is a constant and the other is a variable
-                        if left_expr.len() == 1 && left_expr.contains_key(&Coefficient::Constant) {
-                            // c * expr
-                            let constant = &left_expr[&Coefficient::Constant];
-                            for (var, coeff) in right_expr {
-                                expr.insert(var, constant * coeff);
-                            }
-                        } else if right_expr.len() == 1
-                            && right_expr.contains_key(&Coefficient::Constant)
-                        {
-                            // expr * c
-                            let constant = &right_expr[&Coefficient::Constant];
-                            for (var, coeff) in left_expr {
-                                expr.insert(var, constant * coeff);
-                            }
+                        // A map is a "pure constant" iff its only entry is the
+                        // Constant coefficient.
+                        let acc_constant = if acc.len() == 1 {
+                            acc.get(&Coefficient::Constant).cloned()
                         } else {
-                            // Neither operand is a constant: this is non-linear.
-                            // Reject instead of silently collapsing to 0.
+                            None
+                        };
+                        let arg_constant = if arg_expr.len() == 1 {
+                            arg_expr.get(&Coefficient::Constant).cloned()
+                        } else {
+                            None
+                        };
+
+                        acc = if let Some(scale) = acc_constant {
+                            // acc is a pure constant: result = scale * arg_expr.
+                            arg_expr
+                                .into_iter()
+                                .map(|(var, coeff)| (var, &scale * coeff))
+                                .collect()
+                        } else if let Some(scale) = arg_constant {
+                            // arg is a pure constant: scale every coefficient.
+                            acc.into_iter()
+                                .map(|(var, coeff)| (var, &scale * coeff))
+                                .collect()
+                        } else {
+                            // Two non-constant factors: non-linear.
                             panic!(
-                                "non-linear multiplication is not supported: (* {} {})",
-                                solver_state.get_term(args[0].uid()),
-                                solver_state.get_term(args[1].uid()),
+                                "non-linear multiplication is not supported: {}",
+                                solver_state.get_term(term_id),
                             );
+                        };
+                    }
+                    for (var, coeff) in acc {
+                        if var == Coefficient::Constant {
+                            *expr.get_mut(&Coefficient::Constant).unwrap() = coeff;
+                        } else {
+                            expr.insert(var, coeff);
                         }
                     }
                 }
