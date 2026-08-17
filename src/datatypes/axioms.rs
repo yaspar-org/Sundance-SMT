@@ -330,18 +330,9 @@ pub fn learn_ctor_selector_clauses(
             .collect();
     }
 
-    // A nullary constructor of a *parametric* datatype (e.g. `None : (Option Val)`) is a
-    // polymorphic identifier: printing it as a bare symbol produces SMT-LIB that fails to
-    // re-typecheck, because a polymorphic nullary identifier requires an explicit sort
-    // ascription. The ascription has to live *inside* the qualified identifier so that
-    // `Term::Global`'s printer emits `(as None (Option Val))` -- yaspar-ir does exactly this
-    // in its type checker (tc/app.rs tags the identifier via `with_sort` when the constructor
-    // needs non-trivial sort unification, i.e. when the datatype is parametric).
-    //
-    // A monomorphic nullary constructor (arity-0 result sort, e.g. an enum literal) needs no
-    // ascription, matching the type checker's empty-substitution case, so it keeps the simple
-    // identifier. Applied constructors and selectors are disambiguated by their arguments and
-    // likewise use the simple identifier.
+    // A nullary constructor of a parametric datatype (e.g. `None : (Option Val)`) must carry
+    // its sort on the identifier, else it prints as bare `None` and fails to re-typecheck.
+    // Monomorphic constructors (arity-0 sort) stay bare; applied ones are fixed by their args.
     let ctor_app = if selector_apps.is_empty() {
         let ctor_id = if sort.1.is_empty() {
             QualifiedIdentifier::simple(ctor_name.clone())
