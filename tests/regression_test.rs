@@ -9,6 +9,63 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 
+fn run_with_stats(query: &str, eager_qi: usize) -> (String, serde_json::Value) {
+    let output = Command::new(env!("CARGO_BIN_EXE_sundance-smt"))
+        .arg(query)
+        .arg("--stats")
+        .arg("--eager-qi")
+        .arg(eager_qi.to_string())
+        .output()
+        .expect("Failed to execute solver");
+
+    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stats = serde_json::from_slice(&output.stderr).expect("Failed to parse solver statistics");
+    (result, stats)
+}
+
+#[test]
+fn eager_instantiation_before_model_regression() {
+    let query =
+        "tests/regression/smt_files/edge_cases_quantifiers/eager-instantiation-before-model.smt2";
+
+    let (lazy_result, lazy_stats) = run_with_stats(query, 0);
+    assert_eq!(lazy_result, "unsat");
+    assert!(
+        lazy_stats["arith_checks"].as_u64().unwrap() > 0,
+        "an eager QI limit of zero must wait for a complete-model check"
+    );
+
+    let (eager_result, eager_stats) = run_with_stats(query, 1);
+    assert_eq!(eager_result, "unsat");
+    assert!(
+        eager_stats["instantiations"].as_u64().unwrap() > 0,
+        "the contradiction must use a quantifier instance"
+    );
+    assert_eq!(
+        eager_stats["arith_checks"].as_u64(),
+        Some(0),
+        "eager QI should refute this query before a complete-model check"
+    );
+}
+
+#[test]
+fn eager_instantiation_drains_round_before_refresh_regression() {
+    let query = "tests/regression/smt_files/edge_cases_quantifiers/eager-instantiation-queue.smt2";
+    let (result, stats) = run_with_stats(query, 1);
+
+    assert_eq!(result, "unsat");
+    assert_eq!(
+        stats["instantiations"].as_u64(),
+        Some(3),
+        "all three candidates from the first matching round must be materialized"
+    );
+    assert_eq!(
+        stats["instantiation_rounds"].as_u64(),
+        Some(1),
+        "pending candidates must be drained without refreshing trigger matches"
+    );
+}
+
 #[test]
 fn regression_test() {
     let smt_files_dir = Path::new("tests/regression/smt_files");

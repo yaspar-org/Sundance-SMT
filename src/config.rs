@@ -44,6 +44,10 @@ pub struct Args {
     /// Eagerly skolemize every quantifier
     #[arg(long, default_value_t = false)]
     pub eager_skolem: bool,
+    /// Max quantifier instantiations to add eagerly at each decision level.
+    /// 0 disables eager quantifier instantiation.
+    #[arg(long, default_value_t = 0)]
+    pub eager_qi: usize,
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,

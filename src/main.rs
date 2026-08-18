@@ -184,6 +184,7 @@ fn main() -> Result<(), String> {
         args.elevate,
         args.max_arith_conflicts_per_round,
         args.batch_cap,
+        args.eager_qi,
     );
 
     match return_value {

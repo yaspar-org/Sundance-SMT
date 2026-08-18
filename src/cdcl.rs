@@ -46,6 +46,7 @@ pub fn cdcl_decision_procedure(
     elevate: i32,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
+    eager_qi: usize,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -94,6 +95,9 @@ pub fn cdcl_decision_procedure(
         arithmetic,
         stats: SolverStats::new(),
         pending: None,
+        eager_qi,
+        eager_qi_remaining: eager_qi,
+        materializing_quantifiers: false,
         max_arith_conflicts_per_round,
         last_observed_var: 1,
         batch_cap,
