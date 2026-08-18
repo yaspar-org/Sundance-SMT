@@ -1,3 +1,4 @@
+; sundance-flags: --infer-triggers
 ; `:no-pattern (g x)` forbids (g x) as a trigger, so trigger inference must
 ; instead pick (f x); it fires on (f 7) and instantiates x := 7 -> unsat.
 (set-logic ALL)

@@ -94,12 +94,28 @@ fn regression_test() {
             // exercise every backend against the same test corpus).
             let arithmetic = env::var("SUNDANCE_ARITHMETIC").ok();
 
+            // Per-file solver flags: a `; sundance-flags: <args>` comment line
+            // in the .smt2 file is forwarded to the solver (whitespace-split).
+            // Used e.g. to enable `--infer-triggers` for the few tests that
+            // exercise trigger inference (off by default).
+            let file_flags: Vec<String> = fs::read_to_string(&path)
+                .ok()
+                .and_then(|contents| {
+                    contents.lines().find_map(|line| {
+                        line.trim_start()
+                            .strip_prefix("; sundance-flags:")
+                            .map(|rest| rest.split_whitespace().map(str::to_string).collect())
+                    })
+                })
+                .unwrap_or_default();
+
             // Run solver with timeout
             let mut cmd = Command::new("target/release/sundance-smt");
             cmd.arg(path.to_str().unwrap());
             if let Some(ref a) = arithmetic {
                 cmd.arg("--arithmetic").arg(a);
             }
+            cmd.args(&file_flags);
             let child = cmd
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
