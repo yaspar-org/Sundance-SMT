@@ -1,10 +1,12 @@
-; `:no-pattern (g x)` forbids (g x) as a trigger, so trigger inference must
-; instead pick (f x); it fires on (f 7) and instantiates x := 7 -> unsat.
+; Without the exclusion, the shallower/lexically-first (a x) would be selected,
+; but no ground (a A) exists. Excluding it forces (z x), which fires on (z A).
 (set-logic ALL)
-(declare-fun f (Int) Int)
-(declare-fun g (Int) Int)
-(declare-fun p (Int) Bool)
-(assert (forall ((x Int)) (! (=> (p (f x)) (= (g x) 0)) :no-pattern (g x))))
-(assert (p (f 7)))
-(assert (not (= (g 7) 0)))
+(declare-sort U 0)
+(declare-const A U)
+(declare-const B U)
+(declare-fun a (U) Bool)
+(declare-fun z (U) Bool)
+(assert (forall ((x U)) (! (=> (z x) (or (= x B) (and false (a x)))) :no-pattern (a x))))
+(assert (z A))
+(assert (distinct A B))
 (check-sat)
