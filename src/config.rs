@@ -45,9 +45,14 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub eager_skolem: bool,
     /// Max quantifier instantiations to add eagerly at each decision level.
-    /// 0 disables eager quantifier instantiation.
-    #[arg(long, default_value_t = 0)]
-    pub eager_qi: usize,
+    /// -1 exhausts one fresh matching round per level; 0 disables eager QI.
+    #[arg(
+        long,
+        default_value_t = 0,
+        allow_negative_numbers = true,
+        value_parser = clap::value_parser!(i64).range(-1..)
+    )]
+    pub eager_qi: i64,
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,

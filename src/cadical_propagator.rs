@@ -33,11 +33,13 @@ pub struct CustomExternalPropagator<'a> {
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
-    /// Max pending quantifier instances to materialize at each decision level.
-    /// Zero disables eager quantifier instantiation.
-    pub eager_qi: usize,
+    /// Eager QI mode: positive values bound materialization, -1 exhausts one
+    /// fresh matching round per level, and zero disables eager QI.
+    pub eager_qi: i64,
     /// Eager materialization budget remaining at the current decision level.
     pub eager_qi_remaining: usize,
+    /// Whether the -1 mode has started its fresh round at this level.
+    pub eager_qi_round_started_at_level: bool,
     /// Prevent nested QI while observing variables created by materialization.
     pub materializing_quantifiers: bool,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
@@ -287,16 +289,41 @@ impl<'a> CustomExternalPropagator<'a> {
         true
     }
 
-    /// Add a bounded number of instances from the current partial assignment.
-    /// Skolemization remains a complete-model operation.
+    fn reset_eager_qi_for_level(&mut self) {
+        self.eager_qi_remaining = self.eager_qi.try_into().unwrap_or(0);
+        self.eager_qi_round_started_at_level = false;
+    }
+
+    /// Add instances from the current partial assignment according to the
+    /// configured per-level eager mode. Skolemization remains a complete-model
+    /// operation.
     fn eagerly_instantiate_quantifiers(&mut self) {
-        if self.eager_qi_remaining == 0
+        if self.eager_qi == 0
             || self.materializing_quantifiers
             || !self.disequalities.borrow().is_empty()
         {
             return;
         }
 
+        if self.eager_qi == -1 {
+            if self.eager_qi_round_started_at_level {
+                return;
+            }
+            self.eager_qi_round_started_at_level = true;
+
+            // Work from an earlier matching round must not be discarded or
+            // mixed with the one fresh round for this level.
+            self.materialize_pending(0);
+            if self.start_quantifier_instantiation_round(false) {
+                self.materialize_pending(0);
+            }
+            return;
+        }
+
+        debug_assert!(self.eager_qi > 0);
+        if self.eager_qi_remaining == 0 {
+            return;
+        }
         if self.pending.is_none() && !self.start_quantifier_instantiation_round(false) {
             return;
         }
@@ -444,7 +471,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level + 1
         );
         self.decision_level += 1;
-        self.eager_qi_remaining = self.eager_qi;
+        self.reset_eager_qi_for_level();
         // Record solver hash at new level
         while self.decision_level >= self.solver_state.hash_at_level.len() {
             self.solver_state
@@ -487,7 +514,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         self.decision_level = level;
-        self.eager_qi_remaining = self.eager_qi;
+        self.reset_eager_qi_for_level();
 
         // `backtrack_to` clears the arithmetic queue at entry then re-fires
         // any congruence merges from `union_to_eclass` replay, so the queue
