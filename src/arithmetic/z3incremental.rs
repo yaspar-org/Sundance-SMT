@@ -34,6 +34,8 @@ pub(crate) enum PartialCheckResult {
     Unsat(Vec<i32>),
 }
 
+const PARTIAL_CHECK_ASSERTION_BATCH: usize = 32;
+
 fn ibig_to_bigint(n: &IBig) -> num::BigInt {
     num::BigInt::parse_bytes(n.to_string().as_bytes(), 10).unwrap()
 }
@@ -68,17 +70,10 @@ pub struct Z3IncrementalState {
     current_level: usize,
     /// Tracked arithmetic assertions added since the last arithmetic check.
     pending_partial_assertions: usize,
-    /// Number of pending assertions that triggers an intermediate check.
-    /// Zero disables intermediate checks.
-    partial_check_assertion_batch: usize,
 }
 
 impl Z3IncrementalState {
     pub fn new() -> Self {
-        Self::with_partial_check_batch(32)
-    }
-
-    pub(crate) fn with_partial_check_batch(partial_check_assertion_batch: usize) -> Self {
         Self {
             solver: Solver::new(),
             var_map: DeterministicHashMap::new(),
@@ -90,7 +85,6 @@ impl Z3IncrementalState {
             vars_by_level: vec![Vec::new()],
             current_level: 0,
             pending_partial_assertions: 0,
-            partial_check_assertion_batch,
         }
     }
 
@@ -274,9 +268,7 @@ impl Z3IncrementalState {
         self.active_lits.insert(lit);
         self.lits_by_level[self.current_level].push(lit);
         self.solver.assert_and_track(ast, &tracker);
-        if self.partial_check_assertion_batch > 0 {
-            self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
-        }
+        self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
         debug_println!(
             21,
             0,
@@ -317,9 +309,7 @@ impl Z3IncrementalState {
             self.active_lits.insert(lit);
             self.lits_by_level[self.current_level].push(lit);
             self.solver.assert_and_track(Int::eq(&va, vb), &tracker);
-            if self.partial_check_assertion_batch > 0 {
-                self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
-            }
+            self.pending_partial_assertions = self.pending_partial_assertions.saturating_add(1);
             debug_println!(
                 21,
                 0,
@@ -366,9 +356,7 @@ impl Z3IncrementalState {
     /// Check only the current tracked arithmetic trail, without constructing
     /// a model or inspecting any non-arithmetic query formula.
     pub(crate) fn check_partial_trail(&mut self) -> PartialCheckResult {
-        if self.partial_check_assertion_batch == 0
-            || self.pending_partial_assertions < self.partial_check_assertion_batch
-        {
+        if self.pending_partial_assertions < PARTIAL_CHECK_ASSERTION_BATCH {
             return PartialCheckResult::Unchanged;
         }
         self.pending_partial_assertions = 0;
