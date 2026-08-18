@@ -23,6 +23,7 @@
 use std::collections::BTreeSet;
 
 use yaspar_ir::ast::ATerm::*;
+use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{Repr, Term};
 
 /// A candidate trigger term together with the set of bound-variable names it
@@ -32,37 +33,6 @@ struct Candidate {
     term: Term,
     vars: BTreeSet<String>,
     depth: usize,
-}
-
-/// Returns `true` if `name` is an interpreted/theory symbol that must never be
-/// used as a pattern head. Uninterpreted-function heads (everything else) are
-/// admissible. Arithmetic operators appear as `App(name)` in this IR, so they
-/// are rejected here by name.
-fn is_interpreted_head(name: &str) -> bool {
-    matches!(
-        name,
-        "=" | "distinct"
-            | "and"
-            | "or"
-            | "not"
-            | "=>"
-            | "xor"
-            | "ite"
-            | "+"
-            | "-"
-            | "*"
-            | "/"
-            | "div"
-            | "mod"
-            | "rem"
-            | "abs"
-            | "<"
-            | "<="
-            | ">"
-            | ">="
-            | "true"
-            | "false"
-    )
 }
 
 /// Recursively collect candidate trigger subterms of `term` (the quantifier
@@ -76,15 +46,14 @@ fn is_interpreted_head(name: &str) -> bool {
 fn collect_candidates(term: &Term, bound: &BTreeSet<String>, out: &mut Vec<Candidate>) {
     match term.repr() {
         App(func, args, _) => {
-            let name = func.id_str().get().clone();
             // Recurse into arguments first (collect nested candidates too).
             for a in args.iter() {
                 collect_candidates(a, bound, out);
             }
-            // Only uninterpreted heads are admissible; compute coverage lazily
-            // (only here, not for every node) and skip terms that pattern
-            // compilation cannot handle.
-            if !is_interpreted_head(&name) {
+            // Built-in/theory identifiers have an IR kind; user-declared
+            // functions do not. Use that metadata rather than the symbol's
+            // spelling, since names such as `rem` are valid user functions.
+            if func.get_kind().is_none() {
                 let vars = free_bound_vars(term, bound);
                 if !vars.is_empty() && is_pattern_safe(term) {
                     out.push(Candidate {
@@ -263,11 +232,10 @@ pub fn infer_triggers(
         return Some(vec![vec![best.term.clone()]]);
     }
 
-    // Step 3: greedy minimal multi-pattern. Repeatedly pick the candidate that
-    // covers the most still-uncovered bound variables (ties broken by shallower
-    // depth), until all are covered or no progress can be made.
+    // Step 3: greedily cover all variables, then remove redundant candidates so
+    // the resulting multi-pattern is inclusion-minimal.
     let mut uncovered: BTreeSet<String> = bound.clone();
-    let mut chosen: Vec<Term> = Vec::new();
+    let mut chosen: Vec<&Candidate> = Vec::new();
     while !uncovered.is_empty() {
         let best = candidates
             .iter()
@@ -280,12 +248,32 @@ pub fn infer_triggers(
                 for v in &cand.vars {
                     uncovered.remove(v);
                 }
-                chosen.push(cand.term.clone());
+                chosen.push(cand);
             }
             // No candidate covers any remaining variable: uncoverable.
             None => return None,
         }
     }
 
-    Some(vec![chosen])
+    let mut idx = 0;
+    while idx < chosen.len() {
+        let covered_without_candidate: BTreeSet<String> = chosen
+            .iter()
+            .enumerate()
+            .filter(|(other_idx, _)| *other_idx != idx)
+            .flat_map(|(_, candidate)| candidate.vars.iter().cloned())
+            .collect();
+        if covered_without_candidate == bound {
+            chosen.remove(idx);
+        } else {
+            idx += 1;
+        }
+    }
+
+    Some(vec![
+        chosen
+            .into_iter()
+            .map(|candidate| candidate.term.clone())
+            .collect(),
+    ])
 }
