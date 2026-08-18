@@ -26,7 +26,6 @@ pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
     pub solver_state: &'a mut SolverState,
     pub disequalities: RefCell<Vec<Vec<i32>>>, // might be paying a bit of overhead for RefCell
-    pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
     pub solver: *mut CaDiCal,
@@ -87,6 +86,38 @@ impl<'a> CustomExternalPropagator<'a> {
         if let Err(e) = res {
             debug_println!(2, 0, "Failed to write trail atom map: {}", e);
         }
+    }
+
+    /// Whether the clause contains both a literal and its negation (`l ∨ ¬l`).
+    /// Assumes `clause` is sorted so the negation can be found by binary search.
+    fn is_tautological(clause: &[i32]) -> bool {
+        clause
+            .iter()
+            .any(|lit| clause.binary_search(&-*lit).is_ok())
+    }
+
+    fn queue_egraph_conflict(&mut self, conflict: &Conflict<u32>) {
+        let clause = self.solver_state.egraph_conflict_clause(conflict);
+        // A tautological conflict clause is always satisfied, so it rules out
+        // nothing; skip it. CaDiCaL would ignore it as an external clause anyway.
+        if Self::is_tautological(&clause) {
+            return;
+        }
+        self.queue_theory_clause(clause, Theory::Background);
+    }
+
+    fn rebuild_egraph(&mut self) {
+        loop {
+            let result = self.solver_state.egraph.rebuild();
+            // The basic backend never propagates literals, only conflicts.
+            debug_assert!(result.propagations.is_empty());
+            if let Some(conflict) = result.conflict {
+                self.queue_egraph_conflict(&conflict);
+            } else {
+                break;
+            }
+        }
+        self.sync_new_vars();
     }
 
     /// Register any new CNF variables created since the last sync.
@@ -263,12 +294,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.assignments[lit.unsigned_abs() as usize] =
                 ((self.decision_level + 1) as i32) * lit_sign;
 
-            if self.fixed_literals.contains(lit) {
-                debug_println!(6, 0, "Skipping literal {lit} because it is fixed");
+            if let Some(conflict) = self.solver_state.assign_bool_literal(*lit).conflict {
+                self.queue_egraph_conflict(&conflict);
                 continue;
             }
-
-            self.add_lit_to_proof_tracer(*lit);
 
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.solver_state, self.decision_level);
@@ -355,6 +384,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
             }
         }
+        self.rebuild_egraph();
     }
 
     fn notify_new_decision_level(&mut self) {
@@ -442,6 +472,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.write_trail_line(model);
         }
 
+        self.rebuild_egraph();
         debug_println!(
             24,
             0,
@@ -573,11 +604,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         // merge can be undone individually if it conflicts.
                         self.solver_state.egraph.notify_new_decision_level();
                         probe_level += 1;
-                        let result = self.solver_state.egraph.assert_equal(x_root, y_root);
+                        let conflict = self
+                            .solver_state
+                            .egraph
+                            .assert_equal(x_root, y_root)
+                            .conflict;
                         // Probe merges are speculative — discard queue entries
                         // so they don't leak into Z3IncrementalState.
                         let _ = self.solver_state.egraph.drain_arithmetic_equalities();
-                        if let Some(c) = result.conflict {
+                        if let Some(c) = conflict {
                             self.solver_state.egraph.backtrack_to(probe_level - 1);
                             probe_level -= 1;
                             conflicts.push(c);
@@ -610,18 +645,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         self.emit_trichotomy_for_pair(x_uid, y_uid);
                     }
 
-                    let mut conflict_clause: Vec<i32> = conflict
-                        .equalities
-                        .iter()
-                        .map(|(a, b)| -self.solver_state.make_eq(*a, *b))
-                        .collect();
-                    if let Some(lit) = conflict.diseq_lit {
-                        conflict_clause.push(-lit);
-                    }
-
+                    let conflict_clause = self.solver_state.egraph_conflict_clause(conflict);
                     self.queue_theory_clause(conflict_clause, Theory::Background);
                 }
                 self.sync_new_vars();
+
+                // Dynamic registration still cannot return conflicts directly.
+                // Materialize those while speculative equality proofs exist.
+                self.rebuild_egraph();
 
                 // Undo remaining probe merges. `backtrack_to` may repopulate
                 // the queue via `union_to_eclass` re-firing (e.g. from the
@@ -679,6 +710,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
 
         if pending.is_empty() {
+            self.rebuild_egraph();
+            if !self.disequalities.borrow().is_empty() {
+                self.stats.conflicts += 1;
+                return false;
+            }
             debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.disequalities.borrow().is_empty());
             return true;
@@ -730,21 +766,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_propagate(&mut self) -> i32 {
-        debug_println!(7, 0, "PROPAGATOR: Propagation callback invoked");
-        // For now, no propagation
-        // This could deduce new assignments
-        0
-    }
-
-    fn cb_add_reason_clause_lit(&mut self, _propagated_lit: i32) -> i32 {
-        debug_println!(
-            7,
-            0,
-            "PROPAGATOR: Adding reason clause for literal {}",
-            _propagated_lit
-        );
-        // For now, no reason clauses
-        // This could explain propagations
+        self.rebuild_egraph();
         0
     }
 

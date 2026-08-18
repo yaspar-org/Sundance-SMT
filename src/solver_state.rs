@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
-    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization, Repr,
-    Term, TermAllocator,
+    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization,
+    ObjectAllocatorExt, Repr, Term, TermAllocator,
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -22,12 +22,30 @@ use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_te
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
-use crate::egraphs::traits::EgraphTrait;
+use crate::egraphs::traits::{EgraphResult, EgraphTrait};
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
 
 use crate::utils::DeterministicHashMap;
+
+fn is_gate(term: &Term, context: &mut Context) -> bool {
+    match term.repr() {
+        And(_)
+        | Or(_)
+        | Not(_)
+        | Implies(_, _)
+        | Xor(_)
+        | Ite(_, _, _)
+        | Forall(_, _)
+        | Exists(_, _) => true,
+        Eq(a, _) => {
+            let sort = a.get_sort(&mut *context);
+            sort == context.bool_sort()
+        }
+        _ => false,
+    }
+}
 
 fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     match term.repr() {
@@ -308,6 +326,51 @@ impl SolverState {
         }
     }
 
+    pub fn egraph_conflict_clause(&mut self, conflict: &crate::egraphs::Conflict<u32>) -> Vec<i32> {
+        let mut clause: Vec<i32> = conflict
+            .equalities
+            .iter()
+            .map(|&(a, b)| -self.make_eq(a, b))
+            .collect();
+        if let Some(lit) = conflict.diseq_lit {
+            clause.push(-lit);
+        }
+        if let Some(bool_lits) = conflict.bool_lits {
+            for lit in bool_lits {
+                if lit != 0 {
+                    clause.push(-lit);
+                }
+            }
+        }
+        clause.sort_unstable();
+        clause.dedup();
+        clause
+    }
+
+    pub fn assign_bool_literal(&mut self, assigned_lit: i32) -> EgraphResult<u32> {
+        for term_lit in [assigned_lit, -assigned_lit] {
+            let Some(term_id) = self
+                .cnf_cache
+                .var_map_reverse
+                .get(&term_lit)
+                .and_then(|uid| self.id_map.get_by_left(uid))
+                .copied()
+            else {
+                continue;
+            };
+            let value = term_lit == assigned_lit;
+            let target_uid = if value { self.true_uid } else { self.false_uid };
+            let target = self.to_egraph_id(target_uid);
+            let result = self
+                .egraph
+                .assign_bool(term_id, assigned_lit, value, target);
+            if result.conflict.is_some() {
+                return result;
+            }
+        }
+        EgraphResult::ok()
+    }
+
     pub fn get_term(&self, num: u64) -> Term {
         self.terms_list[num as usize].clone().unwrap()
     }
@@ -367,6 +430,14 @@ impl SolverState {
         self.terms_list[false_uid as usize] = TermOption::Some(false_term.clone());
         self.id_map.insert(true_uid, true_egraph_id);
         self.id_map.insert(false_uid, false_egraph_id);
+        // Seed the true/false roots with their Boolean values. Cannot conflict:
+        // the roots are fresh and no opposite-value assignment exists yet.
+        let _ = self
+            .egraph
+            .assign_bool(true_egraph_id, 0, true, true_egraph_id);
+        let _ = self
+            .egraph
+            .assign_bool(false_egraph_id, 0, false, false_egraph_id);
     }
 
     /// Extract Op from a yaspar Term.
@@ -407,6 +478,24 @@ impl SolverState {
         guard: Option<u64>,
         from_quantifier: bool,
     ) -> u32 {
+        self.insert_predecessor_with_ctx(term, guard, from_quantifier, true)
+    }
+
+    /// Mark a term for merge-with-true/false unless it appears purely as a
+    /// propositional gate (z3 semantics: merge_tf = !gate_ctx).
+    fn mark_merge_tf(&mut self, eid: u32, gate_ctx: bool) {
+        if !gate_ctx {
+            self.egraph.set_merge_tf(eid);
+        }
+    }
+
+    fn insert_predecessor_with_ctx(
+        &mut self,
+        term: &Term,
+        guard: Option<u64>,
+        from_quantifier: bool,
+        gate_ctx: bool,
+    ) -> u32 {
         use crate::egraphs::repr::Op;
         let num = term.uid();
 
@@ -416,11 +505,15 @@ impl SolverState {
                 .resize(self.terms_list.len() * 2, TermOption::None);
         }
         if let TermOption::Some(_) = &self.terms_list[num as usize] {
-            return self.to_egraph_id(num);
+            let eid = self.to_egraph_id(num);
+            // Upgrade merge_tf if now appearing outside gate context
+            self.mark_merge_tf(eid, gate_ctx);
+            return eid;
         }
         // Reuse egraph ID if build_pattern already allocated one for this term
         if let Some(eid) = self.id_map.get_by_left(&num).copied() {
             self.terms_list[num as usize] = TermOption::Some(term.clone());
+            self.mark_merge_tf(eid, gate_ctx);
             self.register_arithmetic_and_quantifier(term, guard);
             return eid;
         }
@@ -432,15 +525,21 @@ impl SolverState {
         if let Exists(_, _) | Forall(_, _) = term.repr() {
             let egraph_id = self.egraph.register_opaque();
             self.id_map.insert(num, egraph_id);
+            self.mark_merge_tf(egraph_id, gate_ctx);
             self.register_arithmetic_and_quantifier(term, guard);
             return egraph_id;
         }
+
+        // Children are in gate context if this term is a gate
+        let child_gate_ctx = is_gate(term, &mut self.context);
 
         // Recurse into subterms first (bottom-up: children before parents)
         let (_, subterms) = get_subterms(term);
         let egraph_children: Vec<u32> = subterms
             .iter()
-            .map(|subterm| self.insert_predecessor(subterm, None, None, from_quantifier))
+            .map(|subterm| {
+                self.insert_predecessor_with_ctx(subterm, None, from_quantifier, child_gate_ctx)
+            })
             .collect();
 
         // Register this term in the egraph
@@ -452,6 +551,8 @@ impl SolverState {
                 .register_term(op, &egraph_children, from_quantifier)
         };
         self.id_map.insert(num, egraph_id);
+
+        self.mark_merge_tf(egraph_id, gate_ctx);
         self.register_arithmetic_and_quantifier(term, guard);
         egraph_id
     }
@@ -686,58 +787,6 @@ pub fn process_assignment(
     debug_println!(24, 1, "Term: {}", term);
     let assertion = find_if_eq_diseq(&term, sign, solver_state, level);
 
-    let true_egraph_id = solver_state.to_egraph_id(solver_state.true_uid);
-    let false_egraph_id = solver_state.to_egraph_id(solver_state.false_uid);
-
-    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&lit) {
-        let egraph_t = solver_state.to_egraph_id(*t);
-        debug_println!(
-            16,
-            0,
-            "We are in process_assignment, unioning with true for lit {} and t {} and true_term {}",
-            lit,
-            t,
-            true_egraph_id
-        );
-        let union_result = solver_state.egraph.assert_equal(egraph_t, true_egraph_id);
-        if let Some(conflict) = union_result.conflict {
-            let mut model_terms: Vec<i32> = conflict
-                .equalities
-                .iter()
-                .map(|(a, b)| -solver_state.make_eq(*a, *b))
-                .collect();
-            if let Some(lit) = conflict.diseq_lit {
-                model_terms.push(-lit);
-            }
-            return Some(vec![model_terms]);
-        }
-    }
-
-    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&-lit) {
-        let egraph_t = solver_state.to_egraph_id(*t);
-        debug_println!(
-            16,
-            0,
-            "We are in process_assignment, unioning with false for lit {} and t {} and false_term {}",
-            lit,
-            t,
-            false_egraph_id
-        );
-        let union_result = solver_state.egraph.assert_equal(egraph_t, false_egraph_id);
-        if let Some(conflict) = union_result.conflict {
-            let mut model_terms: Vec<i32> = conflict
-                .equalities
-                .iter()
-                .map(|(a, b)| -solver_state.make_eq(*a, *b))
-                .collect();
-            if let Some(lit) = conflict.diseq_lit {
-                model_terms.push(-lit);
-            }
-            return Some(vec![model_terms]);
-        };
-    }
-
-    debug_println!("Finished union to True/False");
     let additional_constraints = match assertion {
         Assertion::Tester {
             ctor_name,
@@ -837,16 +886,8 @@ pub fn process_assignment(
 
             let et1 = solver_state.to_egraph_id(t1);
             let et2 = solver_state.to_egraph_id(t2);
-            let union_result = solver_state.egraph.assert_equal(et1, et2);
-            if let Some(conflict) = union_result.conflict {
-                let mut model_terms: Vec<i32> = conflict
-                    .equalities
-                    .iter()
-                    .map(|(a, b)| -solver_state.make_eq(*a, *b))
-                    .collect();
-                if let Some(lit) = conflict.diseq_lit {
-                    model_terms.push(-lit);
-                }
+            if let Some(conflict) = solver_state.egraph.assert_equal(et1, et2).conflict {
+                let model_terms = solver_state.egraph_conflict_clause(&conflict);
                 Some(vec![model_terms])
             } else {
                 None
@@ -864,8 +905,7 @@ pub fn process_assignment(
 
             let et1 = solver_state.to_egraph_id(t1);
             let et2 = solver_state.to_egraph_id(t2);
-            let result = solver_state.egraph.assert_disequal(et1, et2, lit);
-            if let Some(conflict) = result.conflict {
+            if let Some(conflict) = solver_state.egraph.assert_disequal(et1, et2, lit).conflict {
                 let mut model_terms: Vec<i32> = conflict
                     .equalities
                     .into_iter()
@@ -891,8 +931,11 @@ pub fn process_assignment(
                 .iter()
                 .map(|t| solver_state.to_egraph_id(*t))
                 .collect();
-            let result = solver_state.egraph.assert_distinct(&egraph_terms, lit);
-            if let Some(conflict) = result.conflict {
+            if let Some(conflict) = solver_state
+                .egraph
+                .assert_distinct(&egraph_terms, lit)
+                .conflict
+            {
                 let mut model_terms: Vec<i32> = conflict
                     .equalities
                     .into_iter()
@@ -907,8 +950,13 @@ pub fn process_assignment(
         Assertion::Other => None,
     };
 
-    debug_assert!(
-        solver_state.egraph.find(true_egraph_id) != solver_state.egraph.find(false_egraph_id),
+    debug_assert_ne!(
+        solver_state
+            .egraph
+            .find(solver_state.to_egraph_id(solver_state.true_uid)),
+        solver_state
+            .egraph
+            .find(solver_state.to_egraph_id(solver_state.false_uid)),
         "true and false merged without conflict being detected"
     );
 

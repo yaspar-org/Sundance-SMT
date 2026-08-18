@@ -71,6 +71,7 @@
     "edge_cases_quantifiers/checkbool-quantifier5.smt2": "unsat",
     "edge_cases_quantifiers/checkbool-quantifier6.smt2": "unsat",
     "edge_cases_quantifiers/checkbool-quantifier7.smt2": "unsat",
+    "edge_cases_quantifiers/bool_class_conflict.smt2": "unsat",
     "edge_cases_quantifiers/checkmodel-wants-emptydisequalities": "unsat",
     "edge_cases_quantifiers/checkmodel-wants-emptydisequalities.smt2": "unsat",
     "edge_cases_quantifiers/relevancyfiltering.smt2": "unsat",
