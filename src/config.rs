@@ -53,6 +53,11 @@ pub struct Args {
         value_parser = clap::value_parser!(i64).range(-1..)
     )]
     pub eager_qi: i64,
+    /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
+    /// (Simplify/Z3-style auto-trigger inference). When off (default), an
+    /// untriggered `forall` panics instead.
+    #[arg(long, default_value_t = false)]
+    pub infer_triggers: bool,
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,

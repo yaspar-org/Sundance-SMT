@@ -84,7 +84,13 @@ fn main() -> Result<(), String> {
     assertions.push(true_term.clone());
     assertions.push(not_false_term);
 
-    let mut solver_state = SolverState::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
+    let mut solver_state = SolverState::new(
+        context,
+        args.lazy_dt,
+        args.ddsmt,
+        args.eager_skolem,
+        args.infer_triggers,
+    );
 
     solver_state.register_bool_constants(&true_term, &false_term);
 
