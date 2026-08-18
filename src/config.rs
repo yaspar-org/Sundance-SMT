@@ -44,6 +44,11 @@ pub struct Args {
     /// Eagerly skolemize every quantifier
     #[arg(long, default_value_t = false)]
     pub eager_skolem: bool,
+    /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
+    /// (Simplify/Z3-style auto-trigger inference). When off (default), an
+    /// untriggered `forall` panics instead.
+    #[arg(long, default_value_t = false)]
+    pub infer_triggers: bool,
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,
