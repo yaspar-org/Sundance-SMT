@@ -160,8 +160,6 @@
     "edge_cases_quantifiers/eclass_merge_multiple_predecessors2.smt2": "unsat",
     "edge_cases_quantifiers/eclass_merge_multiple_predecessors3.smt2": "unsat",
     "edge_cases_quantifiers/eclass_merge_multiple_predecessors4.smt2": "unsat",
-    "edge_cases_quantifiers/eager-instantiation-before-model.smt2": "unsat",
-    "edge_cases_quantifiers/eager-instantiation-queue.smt2": "unsat",
     "edge_cases_quantifiers/quantifier_backtrack.smt2": "unsat",
     "edge_cases_quantifiers/quantifier_backtrack2.smt2": "unsat",
     "edge_cases_quantifiers/quantifier_backtrack3.smt2": "unsat",
