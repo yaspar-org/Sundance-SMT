@@ -265,6 +265,7 @@
     "datatypes/poly_nested_adt_sat.smt2": "sat",
     "datatypes/poly_option_sat.smt2": "sat",
     "datatypes/poly_option_unsat.smt2": "unsat",
+    "datatypes/phantom_param_unsat.smt2": "unsat",
     "datatypes/backtracking_new_terms.smt2": "unsat",
     "datatypes/insert_pred_sel_apps.smt2": "unsat",
     "datatypes/insert_pred_sel_apps2.smt2": "unsat",
@@ -1110,5 +1111,6 @@
   "arithmetic/mod_constant_divisor_unsat.smt2": "unsat",
   "arithmetic/mod_negative_divisor_sat.smt2": "sat",
   "arithmetic/mod_negative_divisor_unsat.smt2": "unsat",
-  "arithmetic/mod_negative_numerator_unsat.smt2": "unsat"
+  "arithmetic/mod_negative_numerator_unsat.smt2": "unsat",
+  "arithmetic/bool_arg_in_function.smt2": "unsat"
 }

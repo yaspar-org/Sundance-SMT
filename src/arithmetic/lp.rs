@@ -211,6 +211,13 @@ fn extract_constraint_from_term(
             if args.len() != 2 {
                 return None;
             }
+            // Only arithmetic comparisons are linearizable. Bail out before
+            // extracting the operands so we don't try to linearize (and reject)
+            // the arguments of a non-arithmetic predicate.
+            match identifier.0.symbol.as_str() {
+                "<=" | ">=" | "<" | ">" => {}
+                _ => return None,
+            }
             let (left_expr, additional_constraint_l) =
                 extract_linear_expression(args[0].uid(), solver_state);
             let (right_expr, additional_constraint_r) =
@@ -268,6 +275,13 @@ fn extract_constraint_from_term(
             );
             if args.len() != 2 {
                 return None;
+            }
+            // Only arithmetic comparisons are linearizable. Bail out before
+            // extracting the operands so we don't try to linearize (and reject)
+            // the arguments of a non-arithmetic predicate.
+            match identifier.0.symbol.as_str() {
+                "<=" | ">=" | "<" | ">" => {}
+                _ => return None,
             }
             let (left_expr, additional_constraint_l) =
                 extract_linear_expression(args[0].uid(), solver_state);
@@ -352,12 +366,19 @@ pub fn extract_linear_expression(
     let mut additional_constraints = vec![];
     match term.repr() {
         ATerm::Constant(c, _) => {
-            // Handle numeric constants
-            if let Constant::Numeral(num) = c
-                && let Ok(value) = num.to_string().parse::<Integer>()
-            {
-                // println!("We have the constant {} from {}", num, c);
+            // Only integer numerals are supported. Reject anything else instead
+            // of silently treating it as 0, which would be unsound.
+            if let Constant::Numeral(num) = c {
+                let value = num
+                    .to_string()
+                    .parse::<Integer>()
+                    .unwrap_or_else(|e| panic!("failed to parse numeral {}: {}", num, e));
                 *expr.get_mut(&Coefficient::Constant).unwrap() = value;
+            } else {
+                panic!(
+                    "non-numeric constant in arithmetic expression: {}",
+                    solver_state.get_term(term_id),
+                );
             }
         }
         Global(..) => {
@@ -386,30 +407,58 @@ pub fn extract_linear_expression(
                     }
                 }
                 "*" => {
-                    // Multiplication: handle simple cases like c * x or x * c
-                    if args.len() == 2 {
-                        let (left_expr, additional_const_l) =
-                            extract_linear_expression(args[0].uid(), solver_state);
-                        let (right_expr, additional_const_r) =
-                            extract_linear_expression(args[1].uid(), solver_state);
+                    // Multiplication is linear only when at most one factor is
+                    // non-constant. Fold the (possibly n-ary) arguments
+                    // left-to-right, scaling by constant factors. Multiplying
+                    // two non-constant factors is non-linear and must be
+                    // rejected rather than silently collapsed to 0 (issue #52).
+                    // NB: the binary `if args.len() == 2` special-case handled
+                    // c*x and x*c but left n-ary `(* a b c)` collapsing to 0.
+                    let mut acc: DeterministicHashMap<Coefficient, Integer> =
+                        DeterministicHashMap::new();
+                    acc.insert(Coefficient::Constant, IBig::from(1));
+                    for arg_id in args.iter() {
+                        let (arg_expr, additional_const) =
+                            extract_linear_expression(arg_id.uid(), solver_state);
+                        additional_constraints.extend(additional_const);
 
-                        additional_constraints.extend(additional_const_l);
-                        additional_constraints.extend(additional_const_r);
-                        // Check if one is a constant and the other is a variable
-                        if left_expr.len() == 1 && left_expr.contains_key(&Coefficient::Constant) {
-                            // c * expr
-                            let constant = &left_expr[&Coefficient::Constant];
-                            for (var, coeff) in right_expr {
-                                expr.insert(var, constant * coeff);
-                            }
-                        } else if right_expr.len() == 1
-                            && right_expr.contains_key(&Coefficient::Constant)
-                        {
-                            // expr * c
-                            let constant = &right_expr[&Coefficient::Constant];
-                            for (var, coeff) in left_expr {
-                                expr.insert(var, constant * coeff);
-                            }
+                        // A map is a "pure constant" iff its only entry is the
+                        // Constant coefficient.
+                        let acc_constant = if acc.len() == 1 {
+                            acc.get(&Coefficient::Constant).cloned()
+                        } else {
+                            None
+                        };
+                        let arg_constant = if arg_expr.len() == 1 {
+                            arg_expr.get(&Coefficient::Constant).cloned()
+                        } else {
+                            None
+                        };
+
+                        acc = if let Some(scale) = acc_constant {
+                            // acc is a pure constant: result = scale * arg_expr.
+                            arg_expr
+                                .into_iter()
+                                .map(|(var, coeff)| (var, &scale * coeff))
+                                .collect()
+                        } else if let Some(scale) = arg_constant {
+                            // arg is a pure constant: scale every coefficient.
+                            acc.into_iter()
+                                .map(|(var, coeff)| (var, &scale * coeff))
+                                .collect()
+                        } else {
+                            // Two non-constant factors: non-linear.
+                            panic!(
+                                "non-linear multiplication is not supported: {}",
+                                solver_state.get_term(term_id),
+                            );
+                        };
+                    }
+                    for (var, coeff) in acc {
+                        if var == Coefficient::Constant {
+                            *expr.get_mut(&Coefficient::Constant).unwrap() = coeff;
+                        } else {
+                            expr.insert(var, coeff);
                         }
                     }
                 }
@@ -502,8 +551,11 @@ pub fn extract_linear_expression(
                             term
                         );
                         additional_constraints.extend(model_terms);
-                        expr.insert(Coefficient::Term(root_id), IBig::from(1));
                     }
+                    // Always represent the uninterpreted term as its own
+                    // variable, even when there is no equality explanation, so
+                    // it is never silently collapsed to 0.
+                    expr.insert(Coefficient::Term(root_id), IBig::from(1));
                 }
             }
         }
@@ -526,8 +578,11 @@ pub fn extract_linear_expression(
                     term
                 );
                 additional_constraints.extend(model_terms);
-                expr.insert(Coefficient::Term(root_id), IBig::from(1));
             }
+            // Always represent the uninterpreted term as its own variable, even
+            // when there is no equality explanation, so it is never silently
+            // collapsed to 0.
+            expr.insert(Coefficient::Term(root_id), IBig::from(1));
         }
     }
 
