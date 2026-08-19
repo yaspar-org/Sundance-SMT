@@ -9,9 +9,12 @@ use cadical_sys::ProofTracer;
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
-    fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], restored: bool) {
-        let registered = self.consume_clause_callback_registration(clause);
-        if restored || registered {
+    fn add_original_clause(&mut self, id: u64, _redundant: bool, clause: &[i32], restored: bool) {
+        if let Some(registration) = self.consume_clause_registration(clause) {
+            self.associate_original_clause(id, registration);
+            return;
+        }
+        if restored {
             return;
         }
 
@@ -33,12 +36,18 @@ impl ProofTracer for SMTProofTracer {
         debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
-        self.add_sat_clause(clause);
+        self.record_derived_clause(id, clause, antecedents);
     }
 
-    fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {
+    fn delete_clause(&mut self, id: u64, _redundant: bool, clause: &[i32]) {
         self.deleted_clauses += 1;
-        self.record_deletion(clause);
+        self.forget_clause_id(id);
+        if !clause
+            .iter()
+            .any(|literal| self.is_activation_literal(*literal))
+        {
+            self.record_deletion(clause);
+        }
     }
 
     fn weaken_minus(&mut self, _id: u64, _clause: &[i32]) {
@@ -141,5 +150,74 @@ mod tests {
 
         assert!(!tracer.consume_clause_callback_registration(&[1]));
         assert_eq!(tracer.generate_edrat(), "");
+    }
+
+    #[test]
+    fn tracks_transitive_quantifier_dependencies() {
+        let mut tracer = tracer();
+        let instance = crate::quantifiers::quantifier::QiInstanceId {
+            quantifier_id: 11,
+            instance_term_id: 22,
+        };
+        tracer.register_activation_literal(9);
+        tracer.register_quantifier_clause(&[1, 2], instance);
+        ProofTracer::add_original_clause(&mut tracer, 10, true, &[2, 1], false);
+        ProofTracer::add_derived_clause(&mut tracer, 20, true, &[3, 9], &[10]);
+        ProofTracer::add_derived_clause(&mut tracer, 30, true, &[], &[20]);
+
+        let record = tracer.qi_derived_after(0).pop().unwrap();
+        assert!(record.dependencies.contains(&instance));
+        assert!(record.clause.is_empty());
+        assert_eq!(tracer.qi_derived_after(0).len(), 2);
+        assert!(!tracer.generate_edrat().contains(" 9 "));
+    }
+
+    #[test]
+    fn delays_qi_proof_until_the_learned_clause_is_selected() {
+        let mut tracer = tracer();
+        let instance = crate::quantifiers::quantifier::QiInstanceId {
+            quantifier_id: 11,
+            instance_term_id: 22,
+        };
+        tracer.register_qi_proof_bundle(instance, Vec::new());
+        tracer.register_activation_literal(9);
+        tracer.register_quantifier_clause(&[1, 9], instance);
+        ProofTracer::add_original_clause(&mut tracer, 10, true, &[1, 9], false);
+        ProofTracer::add_derived_clause(&mut tracer, 20, true, &[3, 9], &[10]);
+
+        assert_eq!(tracer.generate_edrat(), "");
+
+        let learned = tracer.qi_derived_after(0).pop().unwrap();
+        tracer.emit_qi_derived_clause(&learned);
+        assert_eq!(tracer.generate_edrat(), "3 0\n");
+    }
+
+    #[test]
+    fn omits_activation_only_sat_derivations() {
+        let mut tracer = tracer();
+        tracer.register_activation_literal(9);
+        ProofTracer::add_derived_clause(&mut tracer, 10, true, &[9], &[]);
+        assert_eq!(tracer.generate_edrat(), "");
+    }
+
+    #[test]
+    fn does_not_project_negative_activation_literals() {
+        let mut tracer = tracer();
+        let instance = crate::quantifiers::quantifier::QiInstanceId {
+            quantifier_id: 11,
+            instance_term_id: 22,
+        };
+        tracer.register_activation_literal(9);
+        tracer.register_quantifier_clause(&[1, 9], instance);
+        ProofTracer::add_original_clause(&mut tracer, 10, true, &[1, 9], false);
+        ProofTracer::add_derived_clause(&mut tracer, 20, true, &[-9, 3], &[10]);
+
+        assert!(tracer.qi_derived_after(0).is_empty());
+
+        ProofTracer::add_derived_clause(&mut tracer, 30, true, &[4], &[20]);
+        let record = tracer.qi_derived_after(0).pop().unwrap();
+        assert_eq!(record.clause, vec![4]);
+        assert!(record.dependencies.contains(&instance));
+        assert!(!tracer.generate_edrat().contains("-9"));
     }
 }

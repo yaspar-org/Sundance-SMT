@@ -243,6 +243,11 @@ pub struct Egraph {
     arithmetic_merge_queue: Vec<(u32, u32)>,
     /// Accumulated egraph statistics.
     pub(crate) stats: EgraphStats,
+    /// Terms introduced only by quantifier instantiation. The generation-aware
+    /// active/inactive lifecycle is added by QI GC; this set establishes
+    /// ownership without changing stable term IDs.
+    quantifier_terms: DeterministicHashMap<u32, u64>,
+    inactive_quantifier_terms: DeterministicHashSet<u32>,
 }
 
 /// Statistics accumulated by the egraph.
@@ -284,7 +289,157 @@ impl Egraph {
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
             stats: EgraphStats::default(),
+            quantifier_terms: DeterministicHashMap::default(),
+            inactive_quantifier_terms: DeterministicHashSet::default(),
         }
+    }
+
+    pub(crate) fn mark_quantifier_term(&mut self, term: u32, generation: u64) {
+        self.quantifier_terms.insert(term, generation);
+    }
+
+    fn term_closure(&self, roots: &[u32]) -> Vec<u32> {
+        let mut stack: Vec<_> = roots.iter().copied().map(|term| (term, false)).collect();
+        let mut seen = DeterministicHashSet::default();
+        let mut closure = Vec::new();
+        while let Some((current, expanded)) = stack.pop() {
+            if expanded {
+                closure.push(current);
+                continue;
+            }
+            if !seen.insert(current) {
+                continue;
+            }
+            stack.push((current, true));
+            if let TermSlot::Term(entry) = &self.terms[current as usize] {
+                for &child in entry.children.as_slice() {
+                    stack.push((child, false));
+                }
+            }
+        }
+        closure
+    }
+
+    pub(crate) fn promote_quantifier_term(&mut self, term: u32) {
+        for current in self.term_closure(&[term]) {
+            self.quantifier_terms.remove(&current);
+            if self.inactive_quantifier_terms.remove(&current) {
+                self.activate_term_in_indexes(current);
+            }
+        }
+    }
+
+    pub(crate) fn reactivate_quantifier_terms(&mut self, terms: &[u32], generation: u64) {
+        for term in self.term_closure(terms) {
+            if !self.quantifier_terms.contains_key(&term) {
+                continue;
+            }
+            self.quantifier_terms.insert(term, generation);
+            if !self.inactive_quantifier_terms.remove(&term) {
+                continue;
+            }
+            self.activate_term_in_indexes(term);
+        }
+    }
+
+    pub(crate) fn is_qi_term_active(&self, term: u32) -> bool {
+        !self.inactive_quantifier_terms.contains(&term)
+    }
+
+    fn activate_term_in_indexes(&mut self, term: u32) {
+        let TermSlot::Term(entry) = self.terms[term as usize].clone() else {
+            return;
+        };
+        let children = entry.children.as_slice().to_vec();
+        let func_key = entry.op.to_function_map_key();
+        if !func_key.is_empty() {
+            let applications = self.function_maps.entry(func_key).or_default();
+            if let Err(index) = applications.binary_search_by_key(&term, |(id, _)| *id) {
+                applications.insert(index, (term, children.clone()));
+            }
+        }
+
+        for &child in &children {
+            let predecessor = Predecessor {
+                level: 0,
+                hash: 0,
+                predecessor: term,
+                inner_term: child,
+            };
+            self.predecessors[child as usize].insert(term, predecessor);
+
+            let (root, level, hash) = self.find_with_level(child, 0, 0);
+            self.predecessors[root as usize].insert(
+                term,
+                Predecessor {
+                    level,
+                    hash,
+                    predecessor: term,
+                    inner_term: child,
+                },
+            );
+            self.predecessors_created_by_quantifiers
+                .entry(child)
+                .or_default()
+                .insert(term, self.decision_level);
+        }
+
+        if let Some(sig) = self.compute_signature(term) {
+            if let Some(&existing) = self.sig_table.get(&sig) {
+                if self.find(existing) != self.find(term) {
+                    self.congruence_merge(existing, term, self.decision_level);
+                }
+            } else {
+                self.sig_table_insert(sig, term, self.decision_level);
+            }
+        }
+        if !children.is_empty() {
+            self.union_to_eclass.insert(term, self.decision_level);
+        }
+    }
+
+    fn rebuild_active_signature_table(&mut self) {
+        self.sig_table.clear();
+        self.sig_trail.clear();
+        for term in 0..self.next_id {
+            if self.inactive_quantifier_terms.contains(&term) {
+                continue;
+            }
+            if let Some(signature) = self.compute_signature(term) {
+                self.sig_table.entry(signature).or_insert(term);
+            }
+        }
+    }
+
+    fn retire_quantifier_generation(&mut self, generation: u64) {
+        for (&term, &owner) in &self.quantifier_terms {
+            if owner == generation {
+                self.inactive_quantifier_terms.insert(term);
+            }
+        }
+
+        for applications in self.function_maps.values_mut() {
+            applications.retain(|(term, _)| !self.inactive_quantifier_terms.contains(term));
+        }
+        self.function_maps
+            .retain(|_, applications| !applications.is_empty());
+
+        for predecessors in &mut self.predecessors {
+            predecessors.retain(|parent, _| !self.inactive_quantifier_terms.contains(parent));
+        }
+        self.sig_table
+            .retain(|_, term| !self.inactive_quantifier_terms.contains(term));
+        self.predecessors_created_by_quantifiers
+            .retain(|term, parents| {
+                if self.inactive_quantifier_terms.contains(term) {
+                    return false;
+                }
+                parents.retain(|parent, _| !self.inactive_quantifier_terms.contains(parent));
+                !parents.is_empty()
+            });
+        self.union_to_eclass
+            .retain(|term, _| !self.inactive_quantifier_terms.contains(term));
+        self.rebuild_active_signature_table();
     }
 
     /// Returns the u32 corresponding to a given lit with the correct polarity
@@ -889,7 +1044,7 @@ impl Egraph {
     }
 
     /// Undo all egraph operations at levels strictly greater than `level`.
-    fn backtrack_to(&mut self, level: usize) {
+    fn backtrack_to_internal(&mut self, level: usize, retired_qi_generation: Option<u64>) {
         self.predecessor_hash += 1;
 
         for i in level + 1..self.decision_level + 1 {
@@ -925,13 +1080,23 @@ impl Egraph {
             }
         }
 
+        if let Some(generation) = retired_qi_generation {
+            self.retire_quantifier_generation(generation);
+        }
+
         // Re-add predecessors created by quantifiers at their new roots.
         // Skip entries added at or below `level`: their predecessor stamps are
         // still valid (predecessor_level only got bumped for levels > `level`)
         // and their roots didn't shift because of any pop above `level`.
         for (term, parents) in &self.predecessors_created_by_quantifiers.clone() {
+            if self.inactive_quantifier_terms.contains(term) {
+                continue;
+            }
             let current_ancestor = self.find(*term);
             for (parent, added_at) in parents {
+                if self.inactive_quantifier_terms.contains(parent) {
+                    continue;
+                }
                 if *added_at <= level {
                     continue;
                 }
@@ -956,6 +1121,9 @@ impl Egraph {
         // their signatures are stable under this backtrack.
         let union_to_eclass_info = self.union_to_eclass.clone();
         for (term, added_at) in union_to_eclass_info {
+            if self.inactive_quantifier_terms.contains(&term) {
+                continue;
+            }
             if added_at <= level {
                 continue;
             }
@@ -977,6 +1145,18 @@ impl Egraph {
             self.proof_forest_backtrack_stack = vec![];
             self.sig_trail.clear();
         }
+    }
+
+    fn backtrack_to(&mut self, level: usize) {
+        self.backtrack_to_internal(level, None);
+    }
+
+    pub(crate) fn backtrack_to_with_qi_gc(
+        &mut self,
+        level: usize,
+        retired_qi_generation: Option<u64>,
+    ) {
+        self.backtrack_to_internal(level, retired_qi_generation);
     }
 
     /// Undo a single union operation during backtracking.
@@ -1534,6 +1714,9 @@ impl Egraph {
         let ground_root = ground_hint.map(|t| self.find(t));
 
         for (i, subterms) in function_terms {
+            if self.inactive_quantifier_terms.contains(&i) {
+                continue;
+            }
             if subterms.len() != sub_patterns.len() {
                 continue;
             }
@@ -1605,6 +1788,9 @@ impl Egraph {
                 let mut considered = DeterministicHashSet::default();
 
                 for (i, subterms) in function_terms {
+                    if self.inactive_quantifier_terms.contains(&i) {
+                        continue;
+                    }
                     if subterms.len() != children.len() {
                         continue;
                     }
@@ -1790,5 +1976,116 @@ impl EgraphTrait for Egraph {
         t2: Self::TermId,
     ) -> Option<Vec<(Self::TermId, Self::TermId)>> {
         self.leastcommonancestor(t1, t2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn function_contains(egraph: &Egraph, name: &str, term: u32) -> bool {
+        egraph
+            .function_maps
+            .get(name)
+            .is_some_and(|applications| applications.iter().any(|(id, _)| *id == term))
+    }
+
+    #[test]
+    fn reactivating_qi_terms_preserves_function_registration_order() {
+        let mut egraph = Egraph::new();
+        let first_child = egraph.register_constant(Op::Constant("x".to_string()));
+        egraph.notify_new_decision_level();
+        let retired = egraph.register_term(Op::App("f".to_string()), &[first_child], true);
+        egraph.mark_quantifier_term(retired, 4);
+        let second_child = egraph.register_constant(Op::Constant("y".to_string()));
+        let permanent = egraph.register_term(Op::App("f".to_string()), &[second_child], false);
+
+        egraph.backtrack_to_with_qi_gc(0, Some(4));
+        egraph.notify_new_decision_level();
+        egraph.reactivate_quantifier_terms(&[retired], 5);
+
+        let ids: Vec<_> = egraph.function_maps["f"]
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(ids, vec![retired, permanent]);
+    }
+
+    #[test]
+    fn retiring_and_reactivating_qi_terms_updates_all_indexes() {
+        let mut egraph = Egraph::new();
+        let child = egraph.register_constant(Op::Constant("x".to_string()));
+        egraph.notify_new_decision_level();
+        let application = egraph.register_term(Op::App("f".to_string()), &[child], true);
+        egraph.mark_quantifier_term(application, 4);
+
+        assert!(function_contains(&egraph, "f", application));
+        assert!(egraph.predecessors[child as usize].contains_key(&application));
+        assert!(egraph.sig_table.values().any(|term| *term == application));
+        assert!(egraph.union_to_eclass.contains_key(&application));
+
+        egraph.backtrack_to_with_qi_gc(0, Some(4));
+
+        assert!(!egraph.is_qi_term_active(application));
+        assert!(!function_contains(&egraph, "f", application));
+        assert!(!egraph.predecessors[child as usize].contains_key(&application));
+        assert!(!egraph.sig_table.values().any(|term| *term == application));
+        assert!(!egraph.union_to_eclass.contains_key(&application));
+
+        egraph.notify_new_decision_level();
+        egraph.reactivate_quantifier_terms(&[application], 5);
+
+        assert!(egraph.is_qi_term_active(application));
+        assert!(function_contains(&egraph, "f", application));
+        assert!(egraph.predecessors[child as usize].contains_key(&application));
+        assert!(egraph.sig_table.values().any(|term| *term == application));
+        assert!(egraph.union_to_eclass.contains_key(&application));
+        assert_eq!(egraph.quantifier_terms.get(&application), Some(&5));
+    }
+
+    #[test]
+    fn promoting_qi_term_promotes_its_child_closure() {
+        let mut egraph = Egraph::new();
+        egraph.notify_new_decision_level();
+        let child = egraph.register_term(Op::App("child".to_string()), &[], true);
+        let parent = egraph.register_term(Op::App("parent".to_string()), &[child], true);
+        egraph.mark_quantifier_term(child, 8);
+        egraph.mark_quantifier_term(parent, 8);
+        egraph.backtrack_to_with_qi_gc(0, Some(8));
+
+        assert!(!egraph.is_qi_term_active(child));
+        assert!(!egraph.is_qi_term_active(parent));
+
+        egraph.promote_quantifier_term(parent);
+
+        assert!(egraph.is_qi_term_active(child));
+        assert!(egraph.is_qi_term_active(parent));
+        assert!(!egraph.quantifier_terms.contains_key(&child));
+        assert!(!egraph.quantifier_terms.contains_key(&parent));
+        assert!(function_contains(&egraph, "child", child));
+        assert!(function_contains(&egraph, "parent", parent));
+        assert!(egraph.predecessors[child as usize].contains_key(&parent));
+    }
+
+    #[test]
+    fn reactivating_qi_term_reactivates_its_child_closure() {
+        let mut egraph = Egraph::new();
+        egraph.notify_new_decision_level();
+        let child = egraph.register_term(Op::App("child".to_string()), &[], true);
+        let parent = egraph.register_term(Op::App("parent".to_string()), &[child], true);
+        egraph.mark_quantifier_term(child, 8);
+        egraph.mark_quantifier_term(parent, 8);
+        egraph.backtrack_to_with_qi_gc(0, Some(8));
+        egraph.notify_new_decision_level();
+
+        egraph.reactivate_quantifier_terms(&[parent], 9);
+
+        assert!(egraph.is_qi_term_active(child));
+        assert!(egraph.is_qi_term_active(parent));
+        assert_eq!(egraph.quantifier_terms.get(&child), Some(&9));
+        assert_eq!(egraph.quantifier_terms.get(&parent), Some(&9));
+        assert!(function_contains(&egraph, "child", child));
+        assert!(function_contains(&egraph, "parent", parent));
+        assert!(egraph.predecessors[child as usize].contains_key(&parent));
     }
 }

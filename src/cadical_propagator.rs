@@ -9,16 +9,17 @@ use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
 use crate::log::is_important;
-use crate::proof::{SMTProofTracer, Theory};
+use crate::proof::{DerivedClauseRecord, SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::{
-    PendingInstantiations, instantiate_quantifiers, materialize_next,
+    PendingInstantiations, QiInstanceId, instantiate_quantifiers, materialize_next,
 };
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 #[derive(Clone, Copy)]
@@ -75,11 +76,93 @@ impl EagerQiMode {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum ExternalClauseOrigin {
+    Theory,
+    Quantifier {
+        instance: QiInstanceId,
+        generation: u64,
+    },
+    ActivationRetirement,
+    ReplayedConflict,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExternalClause {
+    literals: Vec<i32>,
+    forgettable: bool,
+    origin: ExternalClauseOrigin,
+}
+
+#[derive(Debug)]
+struct QiGeneration {
+    id: u64,
+    activation_lit: i32,
+    materialized: HashSet<QiInstanceId>,
+    reactivation_pending: Vec<QiInstanceId>,
+    learned_clauses_pending: Vec<DerivedClauseRecord>,
+}
+
+#[derive(Debug)]
+struct PendingQiGc {
+    retired: QiGeneration,
+    derived_serial_at_backtrack: u64,
+    learned_clauses: Vec<DerivedClauseRecord>,
+    fallback: Option<SubmittedQiClause>,
+}
+
+#[derive(Debug, Clone)]
+struct SubmittedQiClause {
+    instance: QiInstanceId,
+    generation: u64,
+    logical_clause: Vec<i32>,
+}
+
+fn select_qi_gc_conflict(
+    learned: Option<DerivedClauseRecord>,
+    fallback: Option<SubmittedQiClause>,
+    serial: u64,
+) -> (Option<DerivedClauseRecord>, bool) {
+    if learned.is_some() {
+        return (learned, false);
+    }
+    let conflict = fallback.map(|fallback| DerivedClauseRecord {
+        clause_id: None,
+        serial,
+        clause: fallback.logical_clause,
+        dependencies: HashSet::from([fallback.instance]),
+        antecedents: Vec::new(),
+    });
+    let used_fallback = conflict.is_some();
+    (conflict, used_fallback)
+}
+
+#[derive(Debug)]
+pub(crate) struct QiGcState {
+    current: Option<QiGeneration>,
+    pending: Option<PendingQiGc>,
+    last_submitted_qi_clause: Option<SubmittedQiClause>,
+    next_generation: u64,
+    last_backtrack_derived_serial: u64,
+}
+
+impl QiGcState {
+    pub(crate) fn new() -> Self {
+        Self {
+            current: None,
+            pending: None,
+            last_submitted_qi_clause: None,
+            next_generation: 0,
+            last_backtrack_derived_serial: 0,
+        }
+    }
+}
+
 /// Our implementation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
     pub solver_state: &'a mut SolverState,
-    pub disequalities: RefCell<Vec<Vec<i32>>>, // might be paying a bit of overhead for RefCell
+    pub external_clauses: RefCell<Vec<ExternalClause>>,
     pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
@@ -88,6 +171,7 @@ pub struct CustomExternalPropagator<'a> {
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
     pub(crate) eager_qi: EagerQiMode,
+    pub(crate) qi_gc: Option<QiGcState>,
     /// Prevent nested QI while observing variables created by materialization.
     pub materializing_quantifiers: bool,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
@@ -216,6 +300,135 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
+    pub(crate) fn initialize_qi_gc(&mut self) {
+        if self.qi_gc.is_none()
+            || self
+                .qi_gc
+                .as_ref()
+                .is_some_and(|state| state.current.is_some())
+        {
+            return;
+        }
+        let generation = self.allocate_qi_generation();
+        self.qi_gc.as_mut().unwrap().current = Some(generation);
+    }
+
+    fn allocate_qi_generation(&mut self) -> QiGeneration {
+        let state = self.qi_gc.as_mut().expect("QI GC must be enabled");
+        let id = state.next_generation;
+        state.next_generation += 1;
+
+        let activation_lit = self.solver_state.cnf_cache.next_var;
+        assert!(activation_lit < i32::MAX, "too many SAT variables");
+        self.solver_state.cnf_cache.next_var += 1;
+        self.add_observed_variable(activation_lit);
+        self.proof_tracer
+            .borrow_mut()
+            .register_activation_literal(activation_lit);
+        while self.assignments.len() <= activation_lit as usize {
+            self.assignments.resize(self.assignments.len() * 2, 0);
+        }
+
+        QiGeneration {
+            id,
+            activation_lit,
+            materialized: HashSet::new(),
+            reactivation_pending: Vec::new(),
+            learned_clauses_pending: Vec::new(),
+        }
+    }
+
+    fn current_qi_generation(&self) -> Option<(u64, i32)> {
+        self.qi_gc
+            .as_ref()?
+            .current
+            .as_ref()
+            .map(|generation| (generation.id, generation.activation_lit))
+    }
+
+    fn qi_generation_is_active(&self) -> bool {
+        let Some((_, activation_lit)) = self.current_qi_generation() else {
+            return self.qi_gc.is_none();
+        };
+        self.assignments
+            .get(activation_lit as usize)
+            .is_some_and(|assignment| *assignment < 0)
+    }
+
+    fn is_activation_literal(&self, literal: i32) -> bool {
+        self.proof_tracer.borrow().is_activation_literal(literal)
+    }
+
+    fn remember_submitted_qi_clause(&mut self, clause: &ExternalClause) {
+        let ExternalClauseOrigin::Quantifier {
+            instance,
+            generation,
+        } = clause.origin
+        else {
+            return;
+        };
+        let logical_clause = self
+            .proof_tracer
+            .borrow()
+            .logical_clause(&clause.literals)
+            .expect("guarded QI clauses only contain positive activation literals");
+        debug_println!(
+            29,
+            0,
+            "QI-GC: submitting instance {:?} from generation {} as {:?}",
+            instance,
+            generation,
+            logical_clause
+        );
+        self.qi_gc
+            .as_mut()
+            .expect("QI clause submitted with GC disabled")
+            .last_submitted_qi_clause = Some(SubmittedQiClause {
+            instance,
+            generation,
+            logical_clause,
+        });
+    }
+
+    fn install_seeded_qi_generation(&mut self) {
+        let Some(state) = self.qi_gc.as_mut() else {
+            return;
+        };
+        let Some(generation) = state.current.as_mut() else {
+            return;
+        };
+        let instances = std::mem::take(&mut generation.reactivation_pending);
+        let learned_clauses = std::mem::take(&mut generation.learned_clauses_pending);
+        let generation_id = generation.id;
+        let activation_lit = generation.activation_lit;
+
+        for instance in &instances {
+            if let Some(cached) = self.solver_state.qi_instance_cache.get(&instance).cloned() {
+                self.solver_state
+                    .reactivate_cached_qi_terms(&cached.egraph_terms, Some(generation_id));
+            }
+        }
+
+        for learned in learned_clauses {
+            self.queue_replayed_conflict(learned);
+        }
+
+        for instance in instances {
+            if let Some(cached) = self.solver_state.qi_instance_cache.get(&instance).cloned() {
+                for mut clause in cached.clauses {
+                    clause.push(activation_lit);
+                    self.queue_qi_clause(instance, generation_id, clause);
+                }
+            }
+        }
+
+        #[cfg(feature = "z3-solver")]
+        if let Some(z3) = self.z3_incremental.as_mut() {
+            z3.drain_merge_queue(self.solver_state);
+        }
+        self.sync_new_vars();
+    }
+
     /// Emit `(x<y ∨ x>y ∨ x=y)` as a raw 3-literal clause (no Tseitin gate).
     /// No-op if this pair's trichotomy has already been emitted. The `true`
     /// on `insert_predecessor` is the `dynamic: true` flag — these atoms may
@@ -244,7 +457,53 @@ impl<'a> CustomExternalPropagator<'a> {
         self.proof_tracer
             .borrow_mut()
             .register_clause_for_cadical_callback(&clause);
-        self.disequalities.borrow_mut().push(clause);
+        self.external_clauses.borrow_mut().push(ExternalClause {
+            literals: clause,
+            forgettable: false,
+            origin: ExternalClauseOrigin::Theory,
+        });
+    }
+
+    fn queue_qi_clause(&self, instance: QiInstanceId, generation: u64, clause: Vec<i32>) {
+        self.proof_tracer
+            .borrow_mut()
+            .register_quantifier_clause(&clause, instance);
+        self.external_clauses.borrow_mut().push(ExternalClause {
+            literals: clause,
+            forgettable: true,
+            origin: ExternalClauseOrigin::Quantifier {
+                instance,
+                generation,
+            },
+        });
+    }
+
+    fn queue_activation_retirement(&self, activation_lit: i32) {
+        let clause = vec![activation_lit];
+        self.proof_tracer
+            .borrow_mut()
+            .register_operational_clause(&clause);
+        self.external_clauses.borrow_mut().push(ExternalClause {
+            literals: clause,
+            forgettable: false,
+            origin: ExternalClauseOrigin::ActivationRetirement,
+        });
+    }
+
+    /// Preserve a logical consequence from the retired generation. Without
+    /// these learned clauses, the fresh activation decision can reproduce the
+    /// same conflicts and root backtrack indefinitely.
+    fn queue_replayed_conflict(&self, learned: DerivedClauseRecord) {
+        let clause = learned.clause.clone();
+        let dependencies = learned.dependencies.clone();
+        let mut proof_tracer = self.proof_tracer.borrow_mut();
+        proof_tracer.emit_qi_derived_clause(&learned);
+        proof_tracer.register_dependency_clause(&clause, dependencies);
+        self.external_clauses.borrow_mut().push(ExternalClause {
+            literals: clause,
+            forgettable: true,
+            origin: ExternalClauseOrigin::ReplayedConflict,
+        });
     }
 
     fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
@@ -268,15 +527,35 @@ impl<'a> CustomExternalPropagator<'a> {
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
     ) {
         for inst in instances {
-            let clauses = match inst {
-                Instantiation { clauses } => {
+            let (id, clauses) = match inst {
+                Instantiation { id, clauses } => {
                     self.stats.instantiations += 1;
-                    clauses
+                    (Some(*id), clauses)
                 }
-                Skolemization { clauses } => clauses,
+                Skolemization { clauses } => (None, clauses),
             };
-            for clause in clauses {
-                self.queue_external_clause(clause.clone());
+
+            if let (Some(instance), Some((generation, activation_lit))) =
+                (id, self.current_qi_generation())
+            {
+                if let Some(current) = self.qi_gc.as_mut().and_then(|state| state.current.as_mut())
+                {
+                    current.materialized.insert(instance);
+                }
+                for clause in clauses {
+                    let mut guarded = clause.clone();
+                    guarded.push(activation_lit);
+                    self.queue_qi_clause(instance, generation, guarded);
+                }
+            } else {
+                if let Some(instance) = id {
+                    self.proof_tracer
+                        .borrow_mut()
+                        .emit_qi_proof_bundle(instance);
+                }
+                for clause in clauses {
+                    self.queue_external_clause(clause.clone());
+                }
             }
         }
         // Materializing an instance can enqueue arithmetic merges (via
@@ -301,8 +580,13 @@ impl<'a> CustomExternalPropagator<'a> {
 
         let mut count = 0;
         while (cap == 0 || count < cap)
-            && let Some(instances) =
-                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+            && let Some(instances) = materialize_next(
+                &mut pending,
+                self.solver_state,
+                &self.proof_tracer,
+                self.current_qi_generation()
+                    .map(|(generation, _)| generation),
+            )
         {
             self.apply_instances(&instances);
             count += 1;
@@ -324,8 +608,13 @@ impl<'a> CustomExternalPropagator<'a> {
     /// round has been materialized.
     fn start_quantifier_instantiation_round(&mut self, allow_skolemization: bool) -> bool {
         debug_assert!(self.pending.is_none());
-        let pending =
-            instantiate_quantifiers(self.solver_state, &self.assignments, allow_skolemization);
+        let pending = instantiate_quantifiers(
+            self.solver_state,
+            &self.assignments,
+            allow_skolemization,
+            self.current_qi_generation()
+                .map(|(generation, _)| generation),
+        );
         if pending.is_empty() {
             return false;
         }
@@ -345,7 +634,10 @@ impl<'a> CustomExternalPropagator<'a> {
     /// configured per-level eager mode. Skolemization remains a complete-model
     /// operation.
     fn eagerly_instantiate_quantifiers(&mut self) {
-        if self.materializing_quantifiers || !self.disequalities.borrow().is_empty() {
+        if self.materializing_quantifiers
+            || !self.external_clauses.borrow().is_empty()
+            || !self.qi_generation_is_active()
+        {
             return;
         }
 
@@ -368,10 +660,141 @@ impl<'a> CustomExternalPropagator<'a> {
             }
         }
     }
+
+    fn prepare_root_qi_gc(&mut self, old_level: usize, target_level: usize) -> Option<u64> {
+        let Some(state) = self.qi_gc.as_mut() else {
+            return None;
+        };
+
+        if target_level != 0
+            || old_level == 0
+            || state.pending.is_some()
+            || state
+                .current
+                .as_ref()
+                .is_none_or(|generation| generation.materialized.is_empty())
+        {
+            return None;
+        }
+
+        let derived_serial = self.proof_tracer.borrow().derived_serial();
+        let proof_tracer = self.proof_tracer.borrow();
+        let learned_clauses = proof_tracer.qi_derived_after(state.last_backtrack_derived_serial);
+        drop(proof_tracer);
+        state.last_backtrack_derived_serial = derived_serial;
+
+        let retired = state.current.take().unwrap();
+        let retired_id = retired.id;
+        let fallback = state
+            .last_submitted_qi_clause
+            .take()
+            .filter(|submitted| submitted.generation == retired_id);
+        debug_println!(
+            29,
+            0,
+            "QI-GC: retiring generation {} with {} instances; learned={:?}; fallback={:?}",
+            retired_id,
+            retired.materialized.len(),
+            learned_clauses,
+            fallback
+        );
+        self.stats.qi_gc_cycles += 1;
+        self.stats.qi_instances_retired += retired.materialized.len() as u64;
+        self.stats.qi_clauses_retired += retired
+            .materialized
+            .iter()
+            .filter_map(|instance| self.solver_state.qi_instance_cache.get(instance))
+            .map(|cached| cached.clauses.len() as u64)
+            .sum::<u64>();
+        state.pending = Some(PendingQiGc {
+            retired,
+            derived_serial_at_backtrack: derived_serial,
+            learned_clauses,
+            fallback,
+        });
+
+        self.pending = None;
+        self.materializing_quantifiers = false;
+        self.solver_state.added_instantiations.clear();
+        self.solver_state.active_qi_instances.clear();
+        self.external_clauses.borrow_mut().retain(|clause| {
+            !matches!(
+                clause.origin,
+                ExternalClauseOrigin::Quantifier { generation, .. }
+                    if generation == retired_id
+            )
+        });
+        Some(retired_id)
+    }
+
+    fn finish_pending_qi_gc(&mut self) {
+        let Some(mut pending) = self.qi_gc.as_mut().and_then(|state| state.pending.take()) else {
+            return;
+        };
+
+        let late_learned = self
+            .proof_tracer
+            .borrow()
+            .qi_derived_after(pending.derived_serial_at_backtrack);
+        pending.learned_clauses.extend(late_learned);
+        pending
+            .learned_clauses
+            .sort_unstable_by_key(|record| record.serial);
+        pending
+            .learned_clauses
+            .dedup_by_key(|record| record.clause_id);
+        if let Some(state) = self.qi_gc.as_mut() {
+            state.last_backtrack_derived_serial = self.proof_tracer.borrow().derived_serial();
+        }
+
+        let mut used_fallback = false;
+        if pending.learned_clauses.is_empty() {
+            let (fallback, fallback_used) =
+                select_qi_gc_conflict(None, pending.fallback, pending.derived_serial_at_backtrack);
+            pending.learned_clauses.extend(fallback);
+            used_fallback = fallback_used;
+        }
+        self.stats.qi_gc_fallbacks += u64::from(used_fallback);
+        debug_println!(
+            29,
+            0,
+            "QI-GC: finalizing generation {} with retained clauses {:?}",
+            pending.retired.id,
+            pending.learned_clauses
+        );
+
+        self.queue_activation_retirement(pending.retired.activation_lit);
+        let mut generation = self.allocate_qi_generation();
+
+        if !pending.learned_clauses.is_empty() {
+            let mut dependencies: Vec<_> = pending
+                .learned_clauses
+                .iter()
+                .flat_map(|learned| learned.dependencies.iter().copied())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            dependencies.sort_unstable();
+            for instance in dependencies {
+                if !self.solver_state.qi_instance_cache.contains_key(&instance) {
+                    continue;
+                }
+                generation.materialized.insert(instance);
+                generation.reactivation_pending.push(instance);
+                self.solver_state.active_qi_instances.insert(instance);
+                self.stats.qi_instances_retained += 1;
+            }
+            generation.learned_clauses_pending = pending.learned_clauses;
+        }
+
+        self.qi_gc.as_mut().unwrap().current = Some(generation);
+    }
 }
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn notify_assignment(&mut self, lits: &[i32]) {
+        self.finish_pending_qi_gc();
+        let mut saw_logical_assignment = false;
         debug_println!(
             22,
             0,
@@ -381,15 +804,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
         debug_println!(16, 0, "{}", self.solver_state.egraph);
         for lit in lits {
-            debug_println!(
-                7,
-                0,
-                "Assigning the literal {:?} (level {}) which is {}",
-                lit,
-                self.decision_level,
-                self.solver_state.get_term_from_lit(*lit)
-            );
-
             // adding the literal to the assignment
             // add with level (negatively if we learn its negation)
             while self.assignments.len() <= lit.unsigned_abs() as usize {
@@ -398,6 +812,44 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let lit_sign = if *lit > 0 { 1 } else { -1 };
             self.assignments[lit.unsigned_abs() as usize] =
                 ((self.decision_level + 1) as i32) * lit_sign;
+
+            if self.is_activation_literal(*lit) {
+                debug_println!(
+                    7,
+                    0,
+                    "Assigning QI activation literal {} at level {}",
+                    lit,
+                    self.decision_level
+                );
+                if *lit < 0
+                    && self
+                        .current_qi_generation()
+                        .is_some_and(|(_, activation)| activation == lit.abs())
+                {
+                    self.install_seeded_qi_generation();
+                }
+                continue;
+            }
+            if !self.solver_state.is_literal_theory_active(*lit) {
+                debug_println!(
+                    7,
+                    0,
+                    "Ignoring inactive QI literal {} at level {}",
+                    lit,
+                    self.decision_level
+                );
+                continue;
+            }
+            saw_logical_assignment = true;
+
+            debug_println!(
+                7,
+                0,
+                "Assigning the literal {:?} (level {}) which is {}",
+                lit,
+                self.decision_level,
+                self.solver_state.get_term_from_lit(*lit)
+            );
 
             if self.fixed_literals.contains(lit) {
                 debug_println!(6, 0, "Skipping literal {lit} because it is fixed");
@@ -477,7 +929,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         14 - 3,
                         0,
                         "In case 1 currently disequalities: {:?}",
-                        self.disequalities.borrow()
+                        self.external_clauses.borrow()
                     );
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
@@ -486,7 +938,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         14 - 3,
                         0,
                         "We have the following disequalities: {:?}",
-                        self.disequalities.borrow()
+                        self.external_clauses.borrow()
                     );
                 }
             }
@@ -495,7 +947,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // Trigger matching, like incremental arithmetic above, can use a
         // partial assignment. Existing pending work is always consumed before
         // another matching round is created.
-        self.eagerly_instantiate_quantifiers();
+        if saw_logical_assignment {
+            self.eagerly_instantiate_quantifiers();
+        }
     }
 
     fn notify_new_decision_level(&mut self) {
@@ -527,6 +981,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_backtrack(&mut self, level: usize) {
         self.stats.backtracks += 1;
+        let old_level = self.decision_level;
         debug_println!(
             23,
             0,
@@ -550,13 +1005,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
+        let retired_generation = self.prepare_root_qi_gc(old_level, level);
         self.decision_level = level;
         self.reset_eager_qi_for_level();
 
         // `backtrack_to` clears the arithmetic queue at entry then re-fires
         // any congruence merges from `union_to_eclass` replay, so the queue
         // on return holds exactly the merges that survive at `level`.
-        self.solver_state.egraph.backtrack_to(level);
+        self.solver_state
+            .egraph
+            .backtrack_to_with_qi_gc(level, retired_generation);
 
         #[cfg(feature = "z3-solver")]
         {
@@ -572,31 +1030,40 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        self.finish_pending_qi_gc();
+        let logical_model: Vec<i32> = model
+            .iter()
+            .copied()
+            .filter(|literal| {
+                !self.is_activation_literal(*literal)
+                    && self.solver_state.is_literal_theory_active(*literal)
+            })
+            .collect();
         // --trail-out: every model seen here in a non-SAT run is refuted;
         // note any new literals in the atom map and stream the trail line.
         if self.trail_writer.is_some() {
-            for &l in model {
+            for &l in &logical_model {
                 let id = l.unsigned_abs() as i32;
                 if !self.trail_atoms.contains_key(&id) {
                     let atom = format!("{}", self.solver_state.get_term_from_lit(id));
                     self.trail_atoms.insert(id, atom);
                 }
             }
-            self.write_trail_line(model);
+            self.write_trail_line(&logical_model);
         }
 
         debug_println!(
             24,
             0,
             "PROPAGATOR: Checking model: {:?} [{:?}]",
-            model,
-            model
+            logical_model,
+            logical_model
                 .iter()
                 .map(|x| self.solver_state.get_term_from_lit(*x))
                 .collect::<Vec<_>>(),
         );
 
-        if !self.disequalities.borrow_mut().is_empty() {
+        if !self.external_clauses.borrow().is_empty() {
             debug_println!(
                 24,
                 0,
@@ -613,7 +1080,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
-        for term in model {
+        for term in &logical_model {
             let (u64_val, polarity) = self.solver_state.get_u64_from_lit_with_polarity(*term);
             debug_println!(
                 24,
@@ -639,12 +1106,19 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             z3.drain_merge_queue(self.solver_state);
             z3.check(self.solver_state)
         } else {
-            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state)
+            check_integer_constraints_satisfiable(
+                &self.arithmetic,
+                &logical_model,
+                self.solver_state,
+            )
         };
         self.sync_new_vars();
         #[cfg(not(feature = "z3-solver"))]
-        let arith_result =
-            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state);
+        let arith_result = check_integer_constraints_satisfiable(
+            &self.arithmetic,
+            &logical_model,
+            self.solver_state,
+        );
 
         match arith_result {
             ArithResult::Unsat(arithmetic_literals, arith_stats) => {
@@ -776,7 +1250,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             ArithResult::None => {}
         }
 
-        if !self.disequalities.borrow().is_empty() {
+        if !self.external_clauses.borrow().is_empty() {
             self.stats.conflicts += 1;
             return false;
         }
@@ -807,7 +1281,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(11, 0, "Starting quantifier instantiations");
         if !self.start_quantifier_instantiation_round(true) {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
-            assert!(self.disequalities.borrow().is_empty());
+            assert!(self.external_clauses.borrow().is_empty());
             return true;
         }
 
@@ -822,7 +1296,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_decide(&mut self) -> i32 {
+        self.finish_pending_qi_gc();
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
+
+        if let Some((_, activation_lit)) = self.current_qi_generation()
+            && self.assignments[activation_lit as usize] == 0
+        {
+            return -activation_lit;
+        }
 
         // For recursive datatypes, prefer base-case constructors to avoid infinite expansion
         if self.solver_state.datatype_info.has_recursive_datatype() {
@@ -860,52 +1341,56 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_has_external_clause(&mut self, is_forgettable: &mut bool) -> bool {
+        self.finish_pending_qi_gc();
         debug_println!(
             7,
             0,
             "PROPAGATOR: Checking for external clauses (forgettable: {})",
             is_forgettable
         );
-        // For now, no external clauses
-        if (*self.disequalities.borrow_mut()).is_empty() {
-            false
-        } else {
-            // this is basically saying that the clause is not forgettable; cvc5 also does false
-            *is_forgettable = false;
-            let clause_len = self.disequalities.borrow().last().map_or(0, |c| c.len());
-            match clause_len {
-                0 | 1 => {} // don't count unit or empty clauses
-                2 => self.stats.binary_clauses += 1,
-                _ => self.stats.clauses += 1,
-            }
-            debug_println!(
-                4,
-                0,
-                "In cb_has_external_clause: We have the following disequalities: {:?}",
-                self.disequalities.borrow()[0]
-            );
-            true
+        let clause = {
+            let clauses = self.external_clauses.borrow();
+            clauses.last().cloned()
+        };
+        let Some(clause) = clause else {
+            return false;
+        };
+        self.remember_submitted_qi_clause(&clause);
+        *is_forgettable = clause.forgettable;
+        match clause.literals.len() {
+            0 | 1 => {}
+            2 => self.stats.binary_clauses += 1,
+            _ => self.stats.clauses += 1,
         }
+        debug_println!(
+            4,
+            0,
+            "In cb_has_external_clause: next clause is {:?} ({:?})",
+            clause.literals,
+            clause.origin
+        );
+        true
     }
 
     fn cb_add_external_clause_lit(&mut self) -> i32 {
-        // For now, no external clauses
-        let mut v = self.disequalities.borrow_mut();
-        assert!(!v.is_empty());
-        debug_println!(4, 0, "We start with the following disequalities: {:?}", v);
-        let last_index = v.len() - 1;
-        debug_println!(11, 0, "We have the next clause {:?}", v[last_index]);
-        let literal = if v[last_index].is_empty() {
-            v.pop();
-            0
-        } else {
-            v[last_index].pop().unwrap()
-        };
-        drop(v);
-        if literal != 0 {
+        let mut clauses = self.external_clauses.borrow_mut();
+        let next = clauses.last_mut().expect("external clause queue is empty");
+        let literal = next.literals.pop().unwrap_or(0);
+        if literal == 0 {
+            clauses.pop();
+        }
+        drop(clauses);
+        if literal != 0 && !self.is_activation_literal(literal) {
             self.add_lit_to_proof_tracer(literal);
         }
-        if let Some(term) = self.solver_state.get_term_from_lit_safe(literal) {
+        if self.is_activation_literal(literal) {
+            debug_println!(
+                11,
+                0,
+                "PROPAGATOR: Adding QI activation literal {}",
+                literal
+            );
+        } else if let Some(term) = self.solver_state.get_term_from_lit_safe(literal) {
             debug_println!(
                 11,
                 0,
@@ -919,5 +1404,61 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instance(quantifier_id: u64, instance_term_id: u64) -> QiInstanceId {
+        QiInstanceId {
+            quantifier_id,
+            instance_term_id,
+        }
+    }
+
+    #[test]
+    fn qi_gc_uses_submitted_clause_when_derived_callback_is_late() {
+        let fallback_instance = instance(7, 11);
+        let fallback = SubmittedQiClause {
+            instance: fallback_instance,
+            generation: 3,
+            logical_clause: vec![4, -9],
+        };
+
+        let (conflict, used_fallback) = select_qi_gc_conflict(None, Some(fallback), 17);
+        let conflict = conflict.unwrap();
+
+        assert!(used_fallback);
+        assert_eq!(conflict.serial, 17);
+        assert_eq!(conflict.clause, vec![4, -9]);
+        assert_eq!(conflict.dependencies, HashSet::from([fallback_instance]));
+    }
+
+    #[test]
+    fn qi_gc_prefers_cadicals_derived_conflict() {
+        let learned_instance = instance(1, 2);
+        let learned = DerivedClauseRecord {
+            clause_id: Some(19),
+            serial: 19,
+            clause: vec![-5],
+            dependencies: HashSet::from([learned_instance]),
+            antecedents: Vec::new(),
+        };
+        let fallback = SubmittedQiClause {
+            instance: instance(7, 11),
+            generation: 3,
+            logical_clause: vec![4, -9],
+        };
+
+        let (conflict, used_fallback) =
+            select_qi_gc_conflict(Some(learned.clone()), Some(fallback), 17);
+
+        assert!(!used_fallback);
+        let conflict = conflict.unwrap();
+        assert_eq!(conflict.serial, learned.serial);
+        assert_eq!(conflict.clause, learned.clause);
+        assert_eq!(conflict.dependencies, learned.dependencies);
     }
 }

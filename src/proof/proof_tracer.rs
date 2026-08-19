@@ -5,10 +5,11 @@
 //!
 use crate::debug_println;
 use crate::proof::{ProofStep, ProofStepType, Theory};
+use crate::quantifiers::quantifier::QiInstanceId;
 use core::panic;
 use std::cmp::Eq;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::ops::Neg;
 use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, SymbolQuote, Term};
@@ -21,9 +22,34 @@ pub struct SMTProofTracer {
     sorts: HashMap<Str, SortDef>,
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     instantiations_for_smt2: Vec<(Term, Vec<(Term, bool)>)>,
-    registered_clause_callbacks: HashMap<Vec<i32>, usize>,
+    registered_clause_callbacks: HashMap<Vec<i32>, VecDeque<ClauseRegistration>>,
+    qi_proof_bundles: HashMap<QiInstanceId, Vec<ProofStep>>,
+    emitted_qi_proofs: HashSet<QiInstanceId>,
+    clause_qi_dependencies: HashMap<u64, HashSet<QiInstanceId>>,
+    qi_derived_clauses: HashMap<u64, DerivedClauseRecord>,
+    emitted_qi_derived_clauses: HashSet<u64>,
+    activation_literals: HashSet<i32>,
+    derived_serial: u64,
+    qi_derived_history: Vec<DerivedClauseRecord>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ClauseRegistration {
+    Recorded,
+    Quantifier(QiInstanceId),
+    QuantifierDependencies(HashSet<QiInstanceId>),
+    Operational,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DerivedClauseRecord {
+    pub(crate) clause_id: Option<u64>,
+    pub(crate) serial: u64,
+    pub(crate) clause: Vec<i32>,
+    pub(crate) dependencies: HashSet<QiInstanceId>,
+    pub(crate) antecedents: Vec<u64>,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -232,6 +258,14 @@ impl SMTProofTracer {
             symbol_table,
             instantiations_for_smt2: Vec::new(),
             registered_clause_callbacks: HashMap::new(),
+            qi_proof_bundles: HashMap::new(),
+            emitted_qi_proofs: HashSet::new(),
+            clause_qi_dependencies: HashMap::new(),
+            qi_derived_clauses: HashMap::new(),
+            emitted_qi_derived_clauses: HashSet::new(),
+            activation_literals: HashSet::new(),
+            derived_serial: 0,
+            qi_derived_history: Vec::new(),
             deleted_clauses: 0,
         }
     }
@@ -253,6 +287,57 @@ impl SMTProofTracer {
         }
     }
 
+    pub(crate) fn proof_checkpoint(&self) -> usize {
+        self.proof_steps.len()
+    }
+
+    pub(crate) fn take_proof_steps_since(&mut self, checkpoint: usize) -> Vec<ProofStep> {
+        self.proof_steps.split_off(checkpoint)
+    }
+
+    pub(crate) fn register_qi_proof_bundle(&mut self, id: QiInstanceId, steps: Vec<ProofStep>) {
+        self.qi_proof_bundles.entry(id).or_insert(steps);
+    }
+
+    pub(crate) fn emit_qi_proof_bundle(&mut self, id: QiInstanceId) {
+        if !self.emitted_qi_proofs.insert(id) {
+            return;
+        }
+        if let Some(steps) = self.qi_proof_bundles.get(&id) {
+            self.proof_steps.extend(steps.iter().cloned());
+        }
+    }
+
+    fn emit_qi_derived_clause_id(&mut self, id: u64, visiting: &mut HashSet<u64>) {
+        if self.emitted_qi_derived_clauses.contains(&id) || !visiting.insert(id) {
+            return;
+        }
+        let Some(record) = self.qi_derived_clauses.get(&id).cloned() else {
+            visiting.remove(&id);
+            return;
+        };
+        for antecedent in &record.antecedents {
+            self.emit_qi_derived_clause_id(*antecedent, visiting);
+        }
+        for instance in record.dependencies.iter().copied() {
+            self.emit_qi_proof_bundle(instance);
+        }
+        self.add_sat_clause(&record.clause);
+        self.emitted_qi_derived_clauses.insert(id);
+        visiting.remove(&id);
+    }
+
+    pub(crate) fn emit_qi_derived_clause(&mut self, record: &DerivedClauseRecord) {
+        if let Some(id) = record.clause_id {
+            self.emit_qi_derived_clause_id(id, &mut HashSet::new());
+        } else {
+            for instance in record.dependencies.iter().copied() {
+                self.emit_qi_proof_bundle(instance);
+            }
+            self.add_sat_clause(&record.clause);
+        }
+    }
+
     pub fn add_original_clause(&mut self, clause: &[i32]) {
         self.push_step(clause, ProofStepType::OriginalClause);
     }
@@ -270,25 +355,160 @@ impl SMTProofTracer {
     }
 
     pub fn register_clause_for_cadical_callback(&mut self, clause: &[i32]) {
-        let clause = normalize_clause(clause);
-        *self.registered_clause_callbacks.entry(clause).or_default() += 1;
+        self.register_clause_with_provenance(clause, ClauseRegistration::Recorded);
     }
 
+    #[allow(dead_code)]
     pub fn consume_clause_callback_registration(&mut self, clause: &[i32]) -> bool {
+        self.consume_clause_registration(clause).is_some()
+    }
+
+    pub(crate) fn register_quantifier_clause(&mut self, clause: &[i32], id: QiInstanceId) {
+        self.register_clause_with_provenance(clause, ClauseRegistration::Quantifier(id));
+    }
+
+    pub(crate) fn register_dependency_clause(
+        &mut self,
+        clause: &[i32],
+        dependencies: HashSet<QiInstanceId>,
+    ) {
+        self.register_clause_with_provenance(
+            clause,
+            ClauseRegistration::QuantifierDependencies(dependencies),
+        );
+    }
+
+    pub(crate) fn register_operational_clause(&mut self, clause: &[i32]) {
+        self.register_clause_with_provenance(clause, ClauseRegistration::Operational);
+    }
+
+    fn register_clause_with_provenance(
+        &mut self,
+        clause: &[i32],
+        registration: ClauseRegistration,
+    ) {
+        self.registered_clause_callbacks
+            .entry(normalize_clause(clause))
+            .or_default()
+            .push_back(registration);
+    }
+
+    pub(crate) fn consume_clause_registration(
+        &mut self,
+        clause: &[i32],
+    ) -> Option<ClauseRegistration> {
         match self
             .registered_clause_callbacks
             .entry(normalize_clause(clause))
         {
             Entry::Occupied(mut entry) => {
-                if *entry.get() == 1 {
+                let registration = entry
+                    .get_mut()
+                    .pop_front()
+                    .expect("registered clause queue cannot be empty");
+                if entry.get().is_empty() {
                     entry.remove();
-                } else {
-                    *entry.get_mut() -= 1;
                 }
-                true
+                Some(registration)
             }
-            Entry::Vacant(_) => false,
+            Entry::Vacant(_) => None,
         }
+    }
+
+    pub(crate) fn register_activation_literal(&mut self, literal: i32) {
+        self.activation_literals.insert(literal.abs());
+    }
+
+    pub(crate) fn is_activation_literal(&self, literal: i32) -> bool {
+        self.activation_literals.contains(&literal.abs())
+    }
+
+    pub(crate) fn logical_clause(&self, clause: &[i32]) -> Option<Vec<i32>> {
+        if clause
+            .iter()
+            .any(|literal| *literal < 0 && self.is_activation_literal(*literal))
+        {
+            return None;
+        }
+        Some(
+            clause
+                .iter()
+                .copied()
+                .filter(|literal| !self.is_activation_literal(*literal))
+                .collect(),
+        )
+    }
+
+    pub(crate) fn derived_serial(&self) -> u64 {
+        self.derived_serial
+    }
+
+    pub(crate) fn qi_derived_after(&self, serial: u64) -> Vec<DerivedClauseRecord> {
+        self.qi_derived_history
+            .iter()
+            .filter(|record| record.serial > serial)
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn associate_original_clause(&mut self, id: u64, registration: ClauseRegistration) {
+        match registration {
+            ClauseRegistration::Quantifier(instance) => {
+                self.clause_qi_dependencies
+                    .insert(id, HashSet::from([instance]));
+            }
+            ClauseRegistration::QuantifierDependencies(dependencies) => {
+                self.clause_qi_dependencies.insert(id, dependencies);
+            }
+            ClauseRegistration::Recorded | ClauseRegistration::Operational => {}
+        }
+    }
+
+    pub(crate) fn record_derived_clause(&mut self, id: u64, clause: &[i32], antecedents: &[u64]) {
+        let dependencies: HashSet<QiInstanceId> = antecedents
+            .iter()
+            .filter_map(|antecedent| self.clause_qi_dependencies.get(antecedent))
+            .flat_map(|dependencies| dependencies.iter().copied())
+            .collect();
+
+        let has_activation_literal = clause
+            .iter()
+            .any(|literal| self.is_activation_literal(*literal));
+        let logical_clause = self.logical_clause(clause);
+        self.derived_serial += 1;
+
+        if !dependencies.is_empty() {
+            self.clause_qi_dependencies.insert(id, dependencies.clone());
+        }
+
+        if let Some(logical_clause) = logical_clause {
+            if has_activation_literal && dependencies.is_empty() {
+                return;
+            }
+
+            let record = DerivedClauseRecord {
+                clause_id: Some(id),
+                serial: self.derived_serial,
+                clause: logical_clause,
+                dependencies,
+                antecedents: antecedents.to_vec(),
+            };
+            if record.dependencies.is_empty() {
+                self.add_sat_clause(&record.clause);
+                return;
+            }
+
+            self.qi_derived_clauses.insert(id, record.clone());
+            self.qi_derived_history.push(record.clone());
+
+            if record.clause.is_empty() {
+                self.emit_qi_derived_clause(&record);
+            }
+        }
+    }
+
+    pub(crate) fn forget_clause_id(&mut self, id: u64) {
+        self.clause_qi_dependencies.remove(&id);
     }
 
     ////////////////////////////////////////////////////////////////////////////

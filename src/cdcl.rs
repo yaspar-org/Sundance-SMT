@@ -47,6 +47,7 @@ pub fn cdcl_decision_procedure(
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
     eager_qi: i32,
+    qi_gc: bool,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -87,7 +88,7 @@ pub fn cdcl_decision_procedure(
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
         solver_state,
-        disequalities: RefCell::new(vec![]),
+        external_clauses: RefCell::new(Vec::new()),
         fixed_literals: DeterministicHashSet::default(),
         proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference
         assignments: vec![0, 0],
@@ -96,6 +97,7 @@ pub fn cdcl_decision_procedure(
         stats: SolverStats::new(),
         pending: None,
         eager_qi: EagerQiMode::new(eager_qi),
+        qi_gc: qi_gc.then(crate::cadical_propagator::QiGcState::new),
         materializing_quantifiers: false,
         max_arith_conflicts_per_round,
         last_observed_var: 1,
@@ -115,6 +117,7 @@ pub fn cdcl_decision_procedure(
     };
 
     solver.connect_external_propagator(&mut propagator);
+    propagator.initialize_qi_gc();
     // note: not using a fixed listener anymore
     // solver.connect_fixed_listener(&mut propagator);
 

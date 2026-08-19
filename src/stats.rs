@@ -54,6 +54,17 @@ pub struct SolverStats {
     pub arith_checks: u64,
     /// Number of quantifier instantiations added as clauses to CaDiCaL
     pub instantiations: u64,
+    /// Number of root-level quantifier GC cycles.
+    pub qi_gc_cycles: u64,
+    /// Number of instance-generation memberships retired by QI GC.
+    pub qi_instances_retired: u64,
+    /// Number of conflict-relevant instances seeded into a new generation.
+    pub qi_instances_retained: u64,
+    /// Number of queued or installed QI clauses retired by generation.
+    pub qi_clauses_retired: u64,
+    /// Number of GC cycles seeded from a submitted QI clause because CaDiCaL
+    /// had not yet reported a derived conflict.
+    pub qi_gc_fallbacks: u64,
     /// Number of times the quantifier instantiation queue was refreshed
     /// (i.e., number of calls to `instantiate_quantifiers` that produced work)
     pub instantiation_rounds: u64,
@@ -106,6 +117,11 @@ impl SolverStats {
             backtracks: 0,
             arith_checks: 0,
             instantiations: 0,
+            qi_gc_cycles: 0,
+            qi_instances_retired: 0,
+            qi_instances_retained: 0,
+            qi_clauses_retired: 0,
+            qi_gc_fallbacks: 0,
             instantiation_rounds: 0,
             arith: ArithStats::default(),
             conflicts: 0,
@@ -212,6 +228,19 @@ impl fmt::Display for SolverStats {
         writeln!(f, "  \"conflicts\": {},", self.conflicts)?;
         writeln!(f, "  \"arith_checks\": {},", self.arith_checks)?;
         writeln!(f, "  \"instantiations\": {},", self.instantiations)?;
+        writeln!(f, "  \"qi_gc_cycles\": {},", self.qi_gc_cycles)?;
+        writeln!(
+            f,
+            "  \"qi_instances_retired\": {},",
+            self.qi_instances_retired
+        )?;
+        writeln!(
+            f,
+            "  \"qi_instances_retained\": {},",
+            self.qi_instances_retained
+        )?;
+        writeln!(f, "  \"qi_clauses_retired\": {},", self.qi_clauses_retired)?;
+        writeln!(f, "  \"qi_gc_fallbacks\": {},", self.qi_gc_fallbacks)?;
         writeln!(
             f,
             "  \"instantiation_rounds\": {},",

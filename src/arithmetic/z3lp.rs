@@ -25,15 +25,13 @@ pub fn check_integer_constraints_satisfiable_z3(
     solver_state: &mut SolverState,
 ) -> ArithResult {
     let (constraints, arithmetic_literals) = extract_linear_constraints(terms, solver_state);
+    let arithmetic_terms = solver_state.active_arithmetic_terms();
 
     // Even with no explicit inequality/equality constraints, arithmetic terms
     // carry definitional equalities (e.g. `(* 1 y) == y`) that, combined with
     // egraph disequalities, are refuted via Nelson-Oppen. Only short-circuit
     // when there is genuinely no arithmetic content to define.
-    if constraints.is_empty()
-        && arithmetic_literals.is_empty()
-        && solver_state.arithmetic_terms.is_empty()
-    {
+    if constraints.is_empty() && arithmetic_literals.is_empty() && arithmetic_terms.is_empty() {
         return ArithResult::None; // No arithmetic content means trivially satisfiable
     }
 
@@ -82,8 +80,7 @@ pub fn check_integer_constraints_satisfiable_z3(
     // also save the roots
     // todo: might be able to move this later
     let mut roots = vec![];
-    for idx in 0..solver_state.arithmetic_terms.len() {
-        let term_id = solver_state.arithmetic_terms[idx];
+    for term_id in arithmetic_terms {
         let egraph_id = solver_state.to_egraph_id(term_id);
         if solver_state.egraph.find(egraph_id) == egraph_id {
             let left_expr = var_map

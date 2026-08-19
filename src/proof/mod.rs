@@ -7,4 +7,5 @@ mod proof_tracer;
 
 pub(crate) use edrat_defs::ProofStep;
 pub use edrat_defs::{ProofStepType, Theory};
+pub(crate) use proof_tracer::DerivedClauseRecord;
 pub use proof_tracer::SMTProofTracer;

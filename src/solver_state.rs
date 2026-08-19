@@ -23,6 +23,7 @@ use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
+use crate::quantifiers::quantifier::{CachedInstantiation, QiInstanceId};
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
@@ -121,6 +122,14 @@ pub struct SolverState {
     /// Tracks quantifier instantiations to avoid duplicates.
     pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
 
+    /// Complete materializations, retained across GC generations so replaying an
+    /// instance does not lose Tseitin definitions to the global CNF cache.
+    pub(crate) qi_instance_cache: HashMap<QiInstanceId, CachedInstantiation>,
+    pub(crate) active_qi_instances: HashSet<QiInstanceId>,
+
+    /// Egraph term IDs touched while materializing one quantifier instance.
+    qi_term_capture: Option<(Option<u64>, Vec<u32>)>,
+
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
 
@@ -188,6 +197,9 @@ impl SolverState {
             assertions: vec![],
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
+            qi_instance_cache: HashMap::default(),
+            active_qi_instances: HashSet::default(),
+            qi_term_capture: None,
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
@@ -270,6 +282,50 @@ impl SolverState {
         } else {
             self.cnf_env().new_var_for_term(term)
         }
+    }
+
+    pub(crate) fn begin_qi_term_capture(&mut self, generation: Option<u64>) {
+        debug_assert!(self.qi_term_capture.is_none());
+        self.qi_term_capture = Some((generation, Vec::new()));
+    }
+
+    pub(crate) fn finish_qi_term_capture(&mut self) -> Vec<u32> {
+        self.qi_term_capture
+            .take()
+            .expect("QI term capture must be active")
+            .1
+    }
+
+    pub(crate) fn reactivate_cached_qi_terms(&mut self, terms: &[u32], generation: Option<u64>) {
+        if let Some(generation) = generation {
+            self.egraph.reactivate_quantifier_terms(terms, generation);
+        }
+    }
+
+    pub(crate) fn active_arithmetic_terms(&self) -> Vec<u64> {
+        self.arithmetic_terms
+            .iter()
+            .copied()
+            .filter(|term| {
+                let egraph_id = self.to_egraph_id(*term);
+                self.egraph.is_qi_term_active(egraph_id)
+            })
+            .collect()
+    }
+
+    pub(crate) fn is_literal_theory_active(&self, literal: i32) -> bool {
+        let term = self
+            .cnf_cache
+            .var_map_reverse
+            .get(&literal)
+            .or_else(|| self.cnf_cache.var_map_reverse.get(&-literal));
+        let Some(term) = term else {
+            return true;
+        };
+        let Some(egraph_id) = self.id_map.get_by_left(term) else {
+            return true;
+        };
+        self.egraph.is_qi_term_active(*egraph_id)
     }
 
     /// Convert an equality between two egraph IDs to a SAT literal.
@@ -416,11 +472,49 @@ impl SolverState {
                 .resize(self.terms_list.len() * 2, TermOption::None);
         }
         if let TermOption::Some(_) = &self.terms_list[num as usize] {
-            return self.to_egraph_id(num);
+            let egraph_id = self.to_egraph_id(num);
+            if from_quantifier {
+                if let Some(generation) = self
+                    .qi_term_capture
+                    .as_ref()
+                    .and_then(|(generation, _)| *generation)
+                {
+                    self.egraph
+                        .reactivate_quantifier_terms(&[egraph_id], generation);
+                    if let Some((_, capture)) = self.qi_term_capture.as_mut()
+                        && !capture.contains(&egraph_id)
+                    {
+                        capture.push(egraph_id);
+                    }
+                } else {
+                    self.egraph.promote_quantifier_term(egraph_id);
+                }
+            } else {
+                self.egraph.promote_quantifier_term(egraph_id);
+            }
+            return egraph_id;
         }
         // Reuse egraph ID if build_pattern already allocated one for this term
         if let Some(eid) = self.id_map.get_by_left(&num).copied() {
             self.terms_list[num as usize] = TermOption::Some(term.clone());
+            if from_quantifier {
+                if let Some(generation) = self
+                    .qi_term_capture
+                    .as_ref()
+                    .and_then(|(generation, _)| *generation)
+                {
+                    self.egraph.reactivate_quantifier_terms(&[eid], generation);
+                    if let Some((_, capture)) = self.qi_term_capture.as_mut()
+                        && !capture.contains(&eid)
+                    {
+                        capture.push(eid);
+                    }
+                } else {
+                    self.egraph.promote_quantifier_term(eid);
+                }
+            } else {
+                self.egraph.promote_quantifier_term(eid);
+            }
             self.register_arithmetic_and_quantifier(term, guard);
             return eid;
         }
@@ -432,6 +526,18 @@ impl SolverState {
         if let Exists(_, _) | Forall(_, _) = term.repr() {
             let egraph_id = self.egraph.register_opaque();
             self.id_map.insert(num, egraph_id);
+            if from_quantifier {
+                let generation = self
+                    .qi_term_capture
+                    .as_ref()
+                    .and_then(|(generation, _)| *generation);
+                if let Some(generation) = generation {
+                    self.egraph.mark_quantifier_term(egraph_id, generation);
+                }
+                if let Some((_, capture)) = self.qi_term_capture.as_mut() {
+                    capture.push(egraph_id);
+                }
+            }
             self.register_arithmetic_and_quantifier(term, guard);
             return egraph_id;
         }
@@ -452,6 +558,20 @@ impl SolverState {
                 .register_term(op, &egraph_children, from_quantifier)
         };
         self.id_map.insert(num, egraph_id);
+        if from_quantifier {
+            if let Some((generation, capture)) = self.qi_term_capture.as_mut()
+                && let Some(generation) = generation
+            {
+                self.egraph.mark_quantifier_term(egraph_id, *generation);
+                if !capture.contains(&egraph_id) {
+                    capture.push(egraph_id);
+                }
+            } else if let Some((_, capture)) = self.qi_term_capture.as_mut()
+                && !capture.contains(&egraph_id)
+            {
+                capture.push(egraph_id);
+            }
+        }
         self.register_arithmetic_and_quantifier(term, guard);
         egraph_id
     }

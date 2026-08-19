@@ -317,7 +317,7 @@ impl Z3IncrementalState {
     pub fn check(&mut self, solver_state: &mut SolverState) -> ArithResult {
         debug_println!(21, 0, "[z3inc] check() at level {}", self.current_level);
         // Materialize every arithmetic term's var + definition before checking.
-        let arithmetic_terms = solver_state.arithmetic_terms.clone();
+        let arithmetic_terms = solver_state.active_arithmetic_terms();
         for term_id in &arithmetic_terms {
             let egraph_id = solver_state.to_egraph_id(*term_id);
             let _ = self.var_for(egraph_id, solver_state);

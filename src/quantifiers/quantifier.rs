@@ -19,13 +19,31 @@ use crate::utils::DeterministicHashMap;
 use crate::debug_println;
 use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, TermAllocator};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct QiInstanceId {
+    pub(crate) quantifier_id: u64,
+    pub(crate) instance_term_id: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CachedInstantiation {
+    pub(crate) clauses: Vec<Vec<i32>>,
+    pub(crate) egraph_terms: Vec<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum QuantifierInstance {
-    Instantiation { clauses: Vec<Vec<i32>> },
-    Skolemization { clauses: Vec<Vec<i32>> },
+    Instantiation {
+        id: QiInstanceId,
+        clauses: Vec<Vec<i32>>,
+    },
+    Skolemization {
+        clauses: Vec<Vec<i32>>,
+    },
 }
 
 struct DeferredInstantiation {
+    id: QiInstanceId,
     substituted_term: Term,
     is_exists: bool,
     literal: i32,
@@ -61,6 +79,7 @@ pub(crate) fn instantiate_quantifiers(
     solver_state: &mut SolverState,
     assignments: &[i32],
     allow_skolemization: bool,
+    generation: Option<u64>,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
@@ -164,7 +183,15 @@ pub(crate) fn instantiate_quantifiers(
                 let term = solver_state.get_term(body);
                 let substitution = Substitution::new(subs);
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
+                let id = QiInstanceId {
+                    quantifier_id: quantifier.id,
+                    instance_term_id: substituted_term.uid(),
+                };
+                if generation.is_some() && !solver_state.active_qi_instances.insert(id) {
+                    continue;
+                }
                 deferred_instantiations.push_back(DeferredInstantiation {
+                    id,
                     substituted_term,
                     is_exists: quantifier_is_exists,
                     literal: quantifier_literal,
@@ -188,6 +215,7 @@ pub(crate) fn materialize_next(
     pending: &mut PendingInstantiations,
     solver_state: &mut SolverState,
     proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+    generation: Option<u64>,
 ) -> Option<Vec<QuantifierInstance>> {
     let ddsmt = solver_state.ddsmt;
     let lazy_dt = solver_state.lazy_dt;
@@ -212,6 +240,7 @@ pub(crate) fn materialize_next(
             proof_tracer,
             ddsmt,
             lazy_dt,
+            generation,
         );
         return Some(results);
     }
@@ -305,9 +334,11 @@ fn process_deferred_instantiations(
     proof_tracer: &Rc<RefCell<SMTProofTracer>>,
     ddsmt: bool,
     lazy_dt: bool,
+    generation: Option<u64>,
 ) -> Vec<QuantifierInstance> {
     let mut results = vec![];
     for DeferredInstantiation {
+        id,
         substituted_term,
         is_exists,
         literal,
@@ -334,6 +365,21 @@ fn process_deferred_instantiations(
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
+        if generation.is_some()
+            && let Some(cached) = solver_state.qi_instance_cache.get(&id).cloned()
+        {
+            solver_state.reactivate_cached_qi_terms(&cached.egraph_terms, generation);
+            results.push(QuantifierInstance::Instantiation {
+                id,
+                clauses: cached.clauses,
+            });
+            continue;
+        }
+
+        let proof_checkpoint = generation.map(|_| proof_tracer.borrow().proof_checkpoint());
+        if generation.is_some() {
+            solver_state.begin_qi_term_capture(generation);
+        }
         solver_state.insert_predecessor(&nnf_term, None, None, true);
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
@@ -392,7 +438,24 @@ fn process_deferred_instantiations(
         let mut clauses = raw_clauses;
         clauses.extend(additional_constraints);
 
-        results.push(QuantifierInstance::Instantiation { clauses });
+        if let Some(proof_checkpoint) = proof_checkpoint {
+            let egraph_terms = solver_state.finish_qi_term_capture();
+            let proof_steps = proof_tracer
+                .borrow_mut()
+                .take_proof_steps_since(proof_checkpoint);
+            proof_tracer
+                .borrow_mut()
+                .register_qi_proof_bundle(id, proof_steps);
+            solver_state.qi_instance_cache.insert(
+                id,
+                CachedInstantiation {
+                    clauses: clauses.clone(),
+                    egraph_terms,
+                },
+            );
+        }
+
+        results.push(QuantifierInstance::Instantiation { id, clauses });
     }
     results
 }
