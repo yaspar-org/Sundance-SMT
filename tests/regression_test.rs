@@ -100,6 +100,10 @@ fn regression_test() {
             if let Some(ref a) = arithmetic {
                 cmd.arg("--arithmetic").arg(a);
             }
+            // Trigger inference is off by default on the CLI; enable it for the
+            // regression corpus so untriggered `forall`s are handled rather than
+            // panicking.
+            cmd.arg("--infer-triggers");
             let child = cmd
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
