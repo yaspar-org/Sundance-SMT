@@ -71,9 +71,9 @@ fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
                         }
                     }
                     (inner_term, patterns)
-                } else if let Forall(..) = term.repr() {
-                    panic!("Unannotated forall quantifier (no triggers): {term}")
                 } else {
+                    // Unannotated quantifier: body only; triggers are inferred
+                    // at registration (see register_arithmetic_and_quantifier).
                     (middle_term, vec![])
                 };
             let mut subterms = vec![inner_term];
@@ -149,6 +149,10 @@ pub struct SolverState {
     /// Whether to skolemize eagerly.
     pub eager_skolem: bool,
 
+    /// Whether to infer triggers for `forall` quantifiers lacking a `:pattern`
+    /// annotation. When false, an untriggered `forall` panics.
+    pub infer_triggers: bool,
+
     /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
     pub base_case_tester_lits: Vec<i32>,
 
@@ -164,7 +168,13 @@ pub struct SolverState {
 impl SolverState {
     /// Create a new SolverState. Takes ownership of the Context and config flags,
     /// creates the inner Egraph using the existing constructor.
-    pub fn new(context: Context, lazy_dt: bool, ddsmt: bool, eager_skolem: bool) -> Self {
+    pub fn new(
+        context: Context,
+        lazy_dt: bool,
+        ddsmt: bool,
+        eager_skolem: bool,
+        infer_triggers: bool,
+    ) -> Self {
         let egraph = Egraph::new();
         let datatype_info = DatatypeInfo::from_context(&context);
 
@@ -188,6 +198,7 @@ impl SolverState {
             lazy_dt,
             ddsmt,
             eager_skolem,
+            infer_triggers,
             egraph,
             base_case_tester_lits: vec![],
             stat_dt_accessor_ax: 0,
@@ -533,23 +544,66 @@ impl SolverState {
 
         // Quantifier registration
         if let Exists(sorted_vars, middle_term) | Forall(sorted_vars, middle_term) = term.repr() {
-            let (inner_term, trigger_ids) = if let Annotated(inner_term, attrs) = middle_term.repr()
-            {
-                let mut trigger_ids = vec![];
-                for attr in attrs.iter() {
-                    if let Attribute::Pattern(s_exprs) = attr {
+            let is_forall = matches!(term.repr(), Forall(..));
+
+            // Collect explicit `:pattern` triggers, `:no-pattern` exclusions,
+            // and the de-annotated body.
+            let mut no_pattern_terms: Vec<Term> = vec![];
+            let (inner_term, mut trigger_ids) =
+                if let Annotated(inner_term, attrs) = middle_term.repr() {
+                    let mut trigger_ids = vec![];
+                    for attr in attrs.iter() {
+                        match attr {
+                            Attribute::Pattern(s_exprs) => {
+                                let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
+                                    s_exprs.iter().map(|p| self.build_pattern(p)).collect();
+                                trigger_ids.push(pattern_ids);
+                            }
+                            Attribute::NoPattern(t) => {
+                                no_pattern_terms.push(t.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    (inner_term.clone(), trigger_ids)
+                } else {
+                    (middle_term.clone(), vec![])
+                };
+
+            // Foralls are instantiated by e-matching and need a trigger.
+            // Existentials are skolemized, so they need none. When a forall
+            // has no `:pattern`, trigger inference is only attempted if it was
+            // explicitly enabled (`--infer-triggers`); otherwise we fail loudly
+            // rather than silently drop the axiom (unsound/incomplete answer).
+            if is_forall && trigger_ids.is_empty() {
+                if !self.infer_triggers {
+                    panic!(
+                        "forall without a :pattern trigger: {term}\n\
+                         Enable trigger inference with --infer-triggers to \
+                         instantiate such quantifiers."
+                    );
+                }
+                let bound_names: Vec<String> =
+                    sorted_vars.iter().map(|x| x.0.get().clone()).collect();
+                if let Some(multipatterns) = crate::quantifiers::trigger_inference::infer_triggers(
+                    &inner_term,
+                    &bound_names,
+                    &no_pattern_terms,
+                ) {
+                    for mp in multipatterns {
                         let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
-                            s_exprs.iter().map(|p| self.build_pattern(p)).collect();
-                        trigger_ids.push(pattern_ids);
+                            mp.iter().map(|p| self.build_pattern(p)).collect();
+                        if !pattern_ids.is_empty() {
+                            trigger_ids.push(pattern_ids);
+                        }
                     }
                 }
-                (inner_term, trigger_ids)
-            } else if let Forall(..) = term.repr() {
-                panic!("Unannotated forall quantifier (no triggers): {term}")
-            } else {
-                // Unannotated existential (no triggers) — will be skolemized on assignment
-                (middle_term, vec![])
-            };
+                // Inference enabled but no admissible trigger found: still fail
+                // loudly rather than silently drop the axiom.
+                if trigger_ids.is_empty() {
+                    panic!("Could not infer a trigger for untriggered forall: {term}");
+                }
+            }
 
             // Store quantifier body in terms_list (needed for substitution during instantiation)
             let body_uid = inner_term.uid();
