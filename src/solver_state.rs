@@ -18,12 +18,12 @@ use yaspar_ir::ast::{
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
-use crate::proof::Theory;
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
+use crate::proof::Theory;
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
@@ -724,7 +724,12 @@ pub fn process_assignment(
                             term.clone(),
                             true,
                         );
-                        Some(tester_cnf.into_iter().map(|c| (c, Theory::Datatypes)).collect())
+                        Some(
+                            tester_cnf
+                                .into_iter()
+                                .map(|c| (c, Theory::Datatypes))
+                                .collect(),
+                        )
                     }
                 }
                 _ => {
@@ -766,7 +771,12 @@ pub fn process_assignment(
                             ddsmt,
                             lazy_dt,
                         );
-                        Some(ctor_selector_clauses.into_iter().map(|c| (c, Theory::Datatypes)).collect())
+                        Some(
+                            ctor_selector_clauses
+                                .into_iter()
+                                .map(|c| (c, Theory::Datatypes))
+                                .collect(),
+                        )
                     } else {
                         None
                     }
