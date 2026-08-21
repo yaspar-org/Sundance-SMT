@@ -18,6 +18,7 @@ use yaspar_ir::ast::{
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
+use crate::proof::Theory;
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
@@ -621,7 +622,7 @@ pub fn process_assignment(
     lit: i32,
     solver_state: &mut SolverState,
     level: usize,
-) -> Option<Vec<Vec<i32>>> {
+) -> Option<Vec<(Vec<i32>, Theory)>> {
     use crate::egraphs::EgraphTrait;
     let lazy_dt = solver_state.lazy_dt;
     let ddsmt = solver_state.ddsmt;
@@ -655,7 +656,7 @@ pub fn process_assignment(
             if let Some(lit) = conflict.diseq_lit {
                 model_terms.push(-lit);
             }
-            return Some(vec![model_terms]);
+            return Some(vec![(model_terms, Theory::QfUf)]);
         }
     }
 
@@ -679,7 +680,7 @@ pub fn process_assignment(
             if let Some(lit) = conflict.diseq_lit {
                 model_terms.push(-lit);
             }
-            return Some(vec![model_terms]);
+            return Some(vec![(model_terms, Theory::QfUf)]);
         };
     }
 
@@ -723,7 +724,7 @@ pub fn process_assignment(
                             term.clone(),
                             true,
                         );
-                        Some(tester_cnf)
+                        Some(tester_cnf.into_iter().map(|c| (c, Theory::Datatypes)).collect())
                     }
                 }
                 _ => {
@@ -765,7 +766,7 @@ pub fn process_assignment(
                             ddsmt,
                             lazy_dt,
                         );
-                        Some(ctor_selector_clauses)
+                        Some(ctor_selector_clauses.into_iter().map(|c| (c, Theory::Datatypes)).collect())
                     } else {
                         None
                     }
@@ -793,7 +794,7 @@ pub fn process_assignment(
                 if let Some(lit) = conflict.diseq_lit {
                     model_terms.push(-lit);
                 }
-                Some(vec![model_terms])
+                Some(vec![(model_terms, Theory::QfUf)])
             } else {
                 None
             }
@@ -828,7 +829,7 @@ pub fn process_assignment(
                         .collect::<Vec<_>>(),
                     model_terms
                 );
-                return Some(vec![model_terms]);
+                return Some(vec![(model_terms, Theory::QfUf)]);
             }
             None
         }
@@ -846,7 +847,7 @@ pub fn process_assignment(
                     .collect();
                 model_terms.push(-lit);
                 debug_println!(16, 0, "Contradiction found in distinct: {:?}", model_terms);
-                return Some(vec![model_terms]);
+                return Some(vec![(model_terms, Theory::QfUf)]);
             }
             None
         }
