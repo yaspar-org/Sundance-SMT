@@ -35,9 +35,10 @@
 //!   integrality is *not* enforced: [`IncrementalLraSolver::check`] may report `Sat`
 //!   for a system that has no integer solution. Sound integer reasoning
 //!   (branch-and-bound) is a later increment.
-//! - **`div`/`mod` are unsupported.** An [`ArithExpr`] carrying `divs`/`mods` is
-//!   rejected with an error; Euclidean-constraint lowering is a later increment.
-//! - Model values are reported as [`IBig`] by truncating the rational assignment.
+//! - **`div`/`mod` require a constant divisor.** A `div`/`mod` term is converted to a fresh
+//!   quotient `q` plus the Euclidean rows `a − n·q ≥ 0` and `a − n·q ≤ |n| − 1`
+//!   (`mod(a, n) = a − n·q`), as in [`crate::arithmetic::lialp`]. The divisor `n` comes from
+//!   the denominator variable's constant definition; a non-constant or zero divisor errors.
 
 use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::linear_system::{Mon, Rel};
@@ -59,16 +60,17 @@ pub type VarId = u32;
 type RelMk = fn(Vec<Mon<Rational>>, Rational) -> Rel<Rational>;
 
 /// A linear expression: sum of `coeff * var` terms plus a constant, with optional
-/// `div`/`mod` terms (currently unsupported by this frontend).
+/// `div`/`mod` terms. The denominator must resolve to a constant (see
+/// [`IncrementalLraSolver::register_var`]).
 #[derive(Debug, Clone)]
 pub struct ArithExpr {
     /// `(var, coefficient)` pairs.
     pub terms: Vec<(VarId, IBig)>,
     /// Constant addend.
     pub constant: IBig,
-    /// `(numerator_var, denominator_var, coeff)` division terms. Unsupported.
+    /// `(numerator_var, denominator_var, coeff)` division terms.
     pub divs: Vec<(VarId, VarId, IBig)>,
-    /// `(numerator_var, denominator_var, coeff)` modulo terms. Unsupported.
+    /// `(numerator_var, denominator_var, coeff)` modulo terms.
     pub mods: Vec<(VarId, VarId, IBig)>,
 }
 
@@ -88,9 +90,10 @@ impl ArithExpr {
         Self::linear(Vec::new(), c.into())
     }
 
-    /// Return true if this expression uses div/mod terms (unsupported here).
-    fn has_div_mod(&self) -> bool {
-        !self.divs.is_empty() || !self.mods.is_empty()
+    /// If this expression is a bare constant (no terms, div, or mod), return it.
+    fn as_constant(&self) -> Option<&IBig> {
+        (self.terms.is_empty() && self.divs.is_empty() && self.mods.is_empty())
+            .then_some(&self.constant)
     }
 }
 
@@ -130,6 +133,11 @@ pub struct IncrementalLraSolver {
     next_var_id: VarId,
     /// `VarId` → internal solver [`Var`].
     var_of: DeterministicHashMap<VarId, Var>,
+    /// `VarId`s registered with a constant definition → `(constant, sat_level)`, where
+    /// `sat_level` is the decision level at which the defining equality was asserted. Used
+    /// to resolve `div`/`mod` divisors. Entries registered above a backtrack target are
+    /// invalidated by [`Self::notify_backtrack`], since their defining row is relaxed there.
+    const_of: DeterministicHashMap<VarId, (IBig, usize)>,
     /// `VarId`s to include in the model buckets on `check` SAT.
     model_vars: DeterministicHashSet<VarId>,
     /// Constraint slack [`Var`] → the (negated) SAT literals to cite if that slack
@@ -169,6 +177,7 @@ impl IncrementalLraSolver {
             next_internal_id: 2, // ids 0 and 1 reserved for the dummy seed
             next_var_id: 0,
             var_of: DeterministicHashMap::new(),
+            const_of: DeterministicHashMap::new(),
             model_vars: DeterministicHashSet::default(),
             slack_to_lits: DeterministicHashMap::new(),
             sat_level: 0,
@@ -183,13 +192,35 @@ impl IncrementalLraSolver {
         v
     }
 
+    /// Allocate a fresh [`VarId`] backed by an internal [`Var`], excluded from the model.
+    /// Used in particular for `div`/`mod` quotients.
+    fn fresh_hidden_var(&mut self) -> VarId {
+        let var_id = self.next_var_id;
+        self.next_var_id += 1;
+        let var = self.fresh_var();
+        self.var_of.insert(var_id, var);
+        var_id
+    }
+
+    /// Resolve a `div`/`mod` denominator to its constant, erroring if it is unknown or zero.
+    fn resolve_divisor(&self, denom: VarId) -> SolverResult<IBig> {
+        match self.const_of.get(&denom).map(|(n, _)| n) {
+            Some(n) if *n != IBig::ZERO => Ok(n.clone()),
+            Some(_) => Err(SolverError("div/mod by zero".to_string())),
+            None => Err(SolverError(format!(
+                "div/mod divisor VarId {denom} is not a registered constant"
+            ))),
+        }
+    }
+
     /// Register a fresh integer variable. If `definition` is `Some`, the equality
     /// `new_var == definition` is asserted at the current decision level. If
     /// `report_in_model` is true, the variable's value is included in the model
     /// buckets returned by [`Self::check`] on SAT.
     ///
-    /// Returns an error if `definition` uses unsupported `div`/`mod` terms or refers
-    /// to an unregistered variable.
+    /// A variable defined as a bare constant is recorded so it can serve as a `div`/`mod`
+    /// divisor. Returns an error if `definition` refers to an unregistered variable or a
+    /// non-constant/zero `div`/`mod` divisor.
     pub fn register_var(
         &mut self,
         definition: Option<ArithExpr>,
@@ -204,6 +235,11 @@ impl IncrementalLraSolver {
         }
 
         if let Some(def) = definition {
+            if let Some(c) = def.as_constant() {
+                // Record the level of the defining equality so it can be invalidated if a
+                // later backtrack relaxes that row (see `notify_backtrack`).
+                self.const_of.insert(var_id, (c.clone(), self.sat_level));
+            }
             // Assert `new_var == def`, i.e. `new_var - def == 0`, as a fresh row tracked with no
             // SAT literal, since `new_var` is fresh and this equality never constrains previously
             // registered variables on its own. This is sound only under the convention that UNSAT
@@ -252,14 +288,19 @@ impl IncrementalLraSolver {
         self.solver.backtrack(token);
         self.lra_tokens.truncate(level);
         self.sat_level = level;
+        // Invalidate constant definitions asserted above the backtrack target: their
+        // defining rows were just relaxed, so the variable is no longer pinned to that
+        // constant and must not continue to serve as a `div`/`mod` divisor.
+        self.const_of
+            .retain(|_, (_, def_level)| *def_level <= level);
         debug_println!(21, 0, "[lra-inc] backtrack to level {}", level);
     }
 
     /// Push a constraint tracked by SAT literal `lit`. On conflict, `lit` (negated)
     /// is citable in the unsat core.
     ///
-    /// Returns an error if either expression uses unsupported `div`/`mod` terms or
-    /// refers to an unregistered variable.
+    /// Returns an error if either expression refers to an unregistered variable or a
+    /// non-constant/zero `div`/`mod` divisor.
     pub fn push_constraint(&mut self, constraint: ArithConstraint, lit: i32) -> SolverResult<()> {
         self.push_relation(constraint, Some(lit))
     }
@@ -328,28 +369,75 @@ impl IncrementalLraSolver {
             .ok_or_else(|| SolverError(format!("unregistered VarId {var_id}")))
     }
 
-    /// Convert an [`ArithExpr`] to monomials with the given sign, erroring on
-    /// unsupported div/mod terms or unregistered variables.
+    /// `coeff` as a [`Rational`], negated when `negate` is set.
+    fn signed(coeff: &IBig, negate: bool) -> Rational {
+        let c = Rational::from(coeff.clone());
+        if negate { -c } else { c }
+    }
+
+    /// Convert an [`ArithExpr`] to monomials with the given sign, converting any `div`/`mod` terms
+    /// to a fresh quotient plus Euclidean rows tracked under `lit`. Errors on an unregistered
+    /// variable or a non-constant/zero divisor.
     fn expr_to_monomials(
-        &self,
+        &mut self,
         expr: &ArithExpr,
         negate: bool,
+        lit: Option<i32>,
     ) -> SolverResult<Vec<Mon<Rational>>> {
-        if expr.has_div_mod() {
-            return Err(SolverError(
-                "div/mod terms are not supported by the incremental LRA frontend".to_string(),
-            ));
-        }
         let mut monomials = Vec::with_capacity(expr.terms.len());
         for (var_id, coeff) in &expr.terms {
             let var = self.resolve(*var_id)?;
-            let mut c = Rational::from(coeff.clone());
-            if negate {
-                c = -c;
-            }
-            monomials.push(Mon::new(c, var));
+            monomials.push(Mon::new(Self::signed(coeff, negate), var));
+        }
+        for (a_id, b_id, coeff) in &expr.divs {
+            let n = self.resolve_divisor(*b_id)?;
+            let q = self.fresh_hidden_var();
+            self.push_euclidean(*a_id, q, &n, lit)?;
+            let q_var = self.resolve(q)?;
+            // div(a, n) = q
+            monomials.push(Mon::new(Self::signed(coeff, negate), q_var));
+        }
+        for (a_id, b_id, coeff) in &expr.mods {
+            let n = self.resolve_divisor(*b_id)?;
+            let q = self.fresh_hidden_var();
+            self.push_euclidean(*a_id, q, &n, lit)?;
+            let a_var = self.resolve(*a_id)?;
+            let q_var = self.resolve(q)?;
+            // mod(a, n) = a - n*q
+            let c = Self::signed(coeff, negate);
+            monomials.push(Mon::new(c.clone(), a_var));
+            monomials.push(Mon::new(-(&c * &Rational::from(n)), q_var));
         }
         Ok(monomials)
+    }
+
+    /// Push the Euclidean rows defining quotient `q` for `a / n` (constant `n`):
+    /// `a − n·q ≥ 0` and `a − n·q ≤ |n| − 1`, both tracked under `lit`.
+    fn push_euclidean(
+        &mut self,
+        a: VarId,
+        q: VarId,
+        n: &IBig,
+        lit: Option<i32>,
+    ) -> SolverResult<()> {
+        let zero = IBig::from(0);
+        let abs_n = if *n < zero { -n.clone() } else { n.clone() };
+        // n·q ≤ a  (⇔ a − n·q ≥ 0)
+        self.push_relation(
+            ArithConstraint::Leq(
+                ArithExpr::linear(vec![(q, n.clone())], zero.clone()),
+                ArithExpr::linear(vec![(a, IBig::from(1))], zero.clone()),
+            ),
+            lit,
+        )?;
+        // a − n·q ≤ |n| − 1
+        self.push_relation(
+            ArithConstraint::Leq(
+                ArithExpr::linear(vec![(a, IBig::from(1)), (q, -n.clone())], zero),
+                ArithExpr::constant(abs_n - IBig::from(1)),
+            ),
+            lit,
+        )
     }
 
     /// Core of `push_constraint`/`push_equality`/definitions: lower a constraint
@@ -363,8 +451,8 @@ impl IncrementalLraSolver {
             ArithConstraint::Eq(l, r) => (l, r, Rel::mk_eq),
         };
 
-        let mut terms = self.expr_to_monomials(lhs, false)?;
-        terms.extend(self.expr_to_monomials(rhs, true)?);
+        let mut terms = self.expr_to_monomials(lhs, false, lit)?;
+        terms.extend(self.expr_to_monomials(rhs, true, lit)?);
         let rel_constant =
             Rational::from(rhs.constant.clone()) - Rational::from(lhs.constant.clone());
         let rel = mk(terms, rel_constant);
@@ -406,6 +494,31 @@ mod tests {
     /// Helper: linear expr `coeff * var`.
     fn term(var: VarId, coeff: i32) -> ArithExpr {
         ArithExpr::linear(vec![(var, IBig::from(coeff))], IBig::from(0))
+    }
+
+    /// Helper: `coeff * div(a, b)`.
+    fn div_term(a: VarId, b: VarId, coeff: i32) -> ArithExpr {
+        ArithExpr {
+            terms: vec![],
+            constant: IBig::from(0),
+            divs: vec![(a, b, IBig::from(coeff))],
+            mods: vec![],
+        }
+    }
+
+    /// Helper: `coeff * mod(a, b)`.
+    fn mod_term(a: VarId, b: VarId, coeff: i32) -> ArithExpr {
+        ArithExpr {
+            terms: vec![],
+            constant: IBig::from(0),
+            divs: vec![],
+            mods: vec![(a, b, IBig::from(coeff))],
+        }
+    }
+
+    /// Register a hidden variable defined as the constant `c` (usable as a divisor).
+    fn const_var(s: &mut IncrementalLraSolver, c: i32) -> VarId {
+        s.register_var(Some(ArithExpr::constant(c)), false).unwrap()
     }
 
     fn is_sat(r: &ArithCheckResult) -> bool {
@@ -629,20 +742,353 @@ mod tests {
     }
 
     #[test]
-    fn div_mod_expr_is_rejected() {
+    fn div_floor_semantics_sat() {
+        // x = 3, div(x, 2) = 1: floor(3/2) = 1 holds under Euclidean division.
         let mut s = IncrementalLraSolver::new();
         let x = s.register_var(None, true).unwrap();
-        let d = s.register_var(None, false).unwrap();
-        let expr = ArithExpr {
-            terms: vec![],
-            constant: IBig::from(0),
-            divs: vec![(x, d, IBig::from(1))],
-            mods: vec![],
-        };
+        let two = const_var(&mut s, 2);
+        s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(3)), 10)
+            .unwrap();
+        s.push_constraint(
+            ArithConstraint::Eq(div_term(x, two, 1), ArithExpr::constant(1)),
+            20,
+        )
+        .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+    }
+
+    #[test]
+    fn div_constant_numerator_floor_sat() {
+        // r = div(7, 2), r = 3: Euclidean 7 = 2*3 + 1.
+        let mut s = IncrementalLraSolver::new();
+        let seven = const_var(&mut s, 7);
+        let two = const_var(&mut s, 2);
+        let r = s.register_var(None, true).unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(r, 1), div_term(seven, two, 1)), 10)
+            .unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(r, 1), ArithExpr::constant(3)), 20)
+            .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+    }
+
+    #[test]
+    fn div_wrong_quotient_unsat() {
+        // r = div(7, 2), r = 4: 2*4 = 8 > 7 violates the remainder bound.
+        let mut s = IncrementalLraSolver::new();
+        let seven = const_var(&mut s, 7);
+        let two = const_var(&mut s, 2);
+        let r = s.register_var(None, true).unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(r, 1), div_term(seven, two, 1)), 10)
+            .unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(r, 1), ArithExpr::constant(4)), 20)
+            .unwrap();
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
+    }
+
+    #[test]
+    fn div_negative_numerator_floors() {
+        // div(-1, 2) = -1 under Euclidean semantics (-1 = 2*(-1) + 1).
+        let mut s = IncrementalLraSolver::new();
+        let neg1 = const_var(&mut s, -1);
+        let two = const_var(&mut s, 2);
+        let r = s.register_var(None, true).unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(r, 1), div_term(neg1, two, 1)), 10)
+            .unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(r, 1), ArithExpr::constant(-1)), 20)
+            .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+    }
+
+    #[test]
+    fn div_negative_denominator_floors() {
+        // div(9, -2) = -4 under Euclidean semantics (9 = (-2)*(-4) + 1).
+        let mut s = IncrementalLraSolver::new();
+        let nine = const_var(&mut s, 9);
+        let neg2 = const_var(&mut s, -2);
+        let r = s.register_var(None, true).unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(r, 1), div_term(nine, neg2, 1)), 10)
+            .unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(r, 1), ArithExpr::constant(-4)), 20)
+            .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+    }
+
+    #[test]
+    fn mod_matches_euclidean_remainder() {
+        // x = 7, mod(x, 3) = 1 (7 = 3*2 + 1).
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        let three = const_var(&mut s, 3);
+        s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(7)), 10)
+            .unwrap();
+        s.push_constraint(
+            ArithConstraint::Eq(mod_term(x, three, 1), ArithExpr::constant(1)),
+            20,
+        )
+        .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+    }
+
+    #[test]
+    fn mod_out_of_range_unsat() {
+        // mod(x, 3) = 5 exceeds the remainder bound (0 <= r <= 2), infeasible even over the reals.
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        let three = const_var(&mut s, 3);
+        s.push_constraint(
+            ArithConstraint::Eq(mod_term(x, three, 1), ArithExpr::constant(5)),
+            10,
+        )
+        .unwrap();
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
+    }
+
+    #[test]
+    fn mod_lra_over_approximates_integrality() {
+        // x = 7, mod(x, 3) = 2 has no integer solution (7 mod 3 = 1), but the real quotient
+        // q = 5/3 satisfies the Euclidean rows, so this LRA-only frontend reports Sat.
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        let three = const_var(&mut s, 3);
+        s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(7)), 10)
+            .unwrap();
+        s.push_constraint(
+            ArithConstraint::Eq(mod_term(x, three, 1), ArithExpr::constant(2)),
+            20,
+        )
+        .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+    }
+
+    #[test]
+    fn div_constraint_backtracks() {
+        // L0: div(x, 2) = 5 forces 10 <= x <= 11. L1: x <= 3 conflicts; backtrack recovers.
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        let two = const_var(&mut s, 2);
+        s.push_constraint(
+            ArithConstraint::Eq(div_term(x, two, 1), ArithExpr::constant(5)),
+            10,
+        )
+        .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+
+        s.notify_new_decision_level();
+        s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(3)), 20)
+            .unwrap();
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
+
+        s.notify_backtrack(0);
+        assert!(is_sat(&s.check().unwrap()));
+    }
+
+    #[test]
+    fn non_constant_divisor_is_rejected() {
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        let d = s.register_var(None, false).unwrap(); // no constant definition
         assert!(
-            s.push_constraint(ArithConstraint::Leq(expr, ArithExpr::constant(0)), 10)
-                .is_err()
+            s.push_constraint(
+                ArithConstraint::Leq(div_term(x, d, 1), ArithExpr::constant(0)),
+                10
+            )
+            .is_err()
         );
+    }
+
+    #[test]
+    fn zero_divisor_is_rejected() {
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        let zero = const_var(&mut s, 0);
+        assert!(
+            s.push_constraint(
+                ArithConstraint::Leq(div_term(x, zero, 1), ArithExpr::constant(0)),
+                10
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn constant_divisor_invalidated_after_backtrack() {
+        // A constant divisor registered above the backtrack target has its defining
+        // equality relaxed on backtrack, so it must no longer resolve as a constant.
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+
+        // Level 1: register `two := 2`, usable as a constant divisor while its definition holds.
+        s.notify_new_decision_level();
+        let two = const_var(&mut s, 2);
+        s.push_constraint(
+            ArithConstraint::Eq(div_term(x, two, 1), ArithExpr::constant(5)),
+            10,
+        )
+        .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+
+        // Backtrack to level 0: `two`'s defining equality is relaxed, so it is no longer
+        // pinned to 2 and must be rejected as a divisor.
+        s.notify_backtrack(0);
+        assert!(
+            s.push_constraint(
+                ArithConstraint::Eq(div_term(x, two, 1), ArithExpr::constant(5)),
+                20,
+            )
+            .is_err(),
+            "divisor whose constant definition was relaxed must be rejected"
+        );
+    }
+
+    #[test]
+    fn constant_divisor_at_level_zero_survives_backtrack() {
+        // A constant registered at level 0 stays valid as a divisor across backtracking.
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        let two = const_var(&mut s, 2);
+
+        s.notify_new_decision_level();
+        s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(3)), 10)
+            .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+
+        // Backtrack to level 0: `two` was registered at level 0, so it survives and can
+        // still serve as a divisor.
+        s.notify_backtrack(0);
+        s.push_constraint(
+            ArithConstraint::Eq(div_term(x, two, 1), ArithExpr::constant(1)),
+            20,
+        )
+        .unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(3)), 30)
+            .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+    }
+
+    #[test]
+    fn definition_at_level_zero_survives_backtrack() {
+        // y := x + 3 registered at level 0. A level-1 assert of x is relaxed on backtrack,
+        // but the definition equality persists (asserted at level 0), so re-pinning x
+        // after backtracking still forces y = x + 3.
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        let y = s
+            .register_var(
+                Some(ArithExpr::linear(vec![(x, IBig::from(1))], IBig::from(3))),
+                true,
+            )
+            .unwrap();
+
+        // Level 1: x == 4 ⇒ y == 7.
+        s.notify_new_decision_level();
+        s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(4)), 10)
+            .unwrap();
+        match s.check().unwrap() {
+            ArithCheckResult::Sat(b) => {
+                assert!(b.get(&IBig::from(4)).unwrap().contains(&x));
+                assert!(b.get(&IBig::from(7)).unwrap().contains(&y));
+            }
+            ArithCheckResult::Unsat(_) => panic!("expected SAT"),
+        }
+
+        // Backtrack to level 0: x == 4 relaxed, but y := x + 3 still holds. Re-assert
+        // x == 100 ⇒ y == 103.
+        s.notify_backtrack(0);
+        s.push_constraint(
+            ArithConstraint::Eq(term(x, 1), ArithExpr::constant(100)),
+            20,
+        )
+        .unwrap();
+        match s.check().unwrap() {
+            ArithCheckResult::Sat(b) => {
+                assert!(b.get(&IBig::from(100)).unwrap().contains(&x));
+                assert!(b.get(&IBig::from(103)).unwrap().contains(&y));
+            }
+            ArithCheckResult::Unsat(_) => panic!("expected SAT"),
+        }
+    }
+
+    #[test]
+    fn definition_above_backtrack_level_is_relaxed() {
+        // A definition registered above the backtrack target is relaxed like any other
+        // constraint: its `VarId` stays valid, but the defined variable goes free.
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(4)), 10)
+            .unwrap();
+
+        // Level 1: introduce y := x + 3 ⇒ y == 7.
+        s.notify_new_decision_level();
+        let y = s
+            .register_var(
+                Some(ArithExpr::linear(vec![(x, IBig::from(1))], IBig::from(3))),
+                true,
+            )
+            .unwrap();
+        match s.check().unwrap() {
+            ArithCheckResult::Sat(b) => assert!(b.get(&IBig::from(7)).unwrap().contains(&y)),
+            ArithCheckResult::Unsat(_) => panic!("expected SAT"),
+        }
+
+        // Backtrack to level 0: y's definition is relaxed, so y is no longer tied to
+        // x + 3. Pinning y == 0 alongside the surviving x == 4 is now feasible.
+        s.notify_backtrack(0);
+        s.push_constraint(ArithConstraint::Eq(term(y, 1), ArithExpr::constant(0)), 20)
+            .unwrap();
+        match s.check().unwrap() {
+            ArithCheckResult::Sat(b) => {
+                assert!(b.get(&IBig::from(4)).unwrap().contains(&x));
+                assert!(b.get(&IBig::from(0)).unwrap().contains(&y));
+            }
+            ArithCheckResult::Unsat(_) => {
+                panic!("expected SAT: y should be free once its definition is relaxed")
+            }
+        }
+    }
+
+    #[test]
+    fn reasserted_definition_recouples_variable() {
+        // Full cycle: assert def → solve → backtrack (relaxing it) → solve → re-assert
+        // def → solve. Re-asserting the equality must re-establish the relation.
+        let mut s = IncrementalLraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(4)), 10)
+            .unwrap();
+
+        // Level 1: y := x + 3 ⇒ y == 7.
+        s.notify_new_decision_level();
+        let y = s
+            .register_var(
+                Some(ArithExpr::linear(vec![(x, IBig::from(1))], IBig::from(3))),
+                true,
+            )
+            .unwrap();
+        assert!(is_sat(&s.check().unwrap()));
+
+        // Backtrack to level 0: y's definition is relaxed and y is free.
+        s.notify_backtrack(0);
+        assert!(is_sat(&s.check().unwrap()));
+
+        // Re-assert y == x + 3 as an explicit constraint. With x == 4 still active this
+        // forces y == 7 again; pinning y == 0 must now conflict.
+        s.notify_new_decision_level();
+        s.push_constraint(
+            ArithConstraint::Eq(
+                term(y, 1),
+                ArithExpr::linear(vec![(x, IBig::from(1))], IBig::from(3)),
+            ),
+            20,
+        )
+        .unwrap();
+        match s.check().unwrap() {
+            ArithCheckResult::Sat(b) => assert!(b.get(&IBig::from(7)).unwrap().contains(&y)),
+            ArithCheckResult::Unsat(_) => panic!("expected SAT with y recoupled to x + 3"),
+        }
+
+        s.notify_new_decision_level();
+        s.push_constraint(ArithConstraint::Eq(term(y, 1), ArithExpr::constant(0)), 30)
+            .unwrap();
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
     }
 
     #[test]
