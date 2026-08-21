@@ -33,6 +33,20 @@ impl ProofTracer for SMTProofTracer {
         debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
+        // Check if any literal in the clause is a bare activation literal
+        for &lit in clause {
+            if self.get_lit_info(lit).is_none() {
+                debug_println!(
+                    30,
+                    0,
+                    "WARNING: Learned clause {:?} contains bare literal {} (activation lit?)",
+                    clause,
+                    lit
+                );
+                break;
+            }
+        }
+
         self.add_sat_clause(clause);
     }
 

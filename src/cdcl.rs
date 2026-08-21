@@ -112,11 +112,13 @@ pub fn cdcl_decision_procedure(
                 }
             }),
         trail_atoms: std::collections::HashMap::new(),
+        qi_generation: 0,
+        qi_activation_lits: vec![0], // index 0 unused (level 0 has no activation lit)
+        qi_forgettable_queue: RefCell::new(vec![]),
+        qi_reason_pending: 0,
     };
 
     solver.connect_external_propagator(&mut propagator);
-    // note: not using a fixed listener anymore
-    // solver.connect_fixed_listener(&mut propagator);
 
     debug_println!(2, 0, "CDCL: Starting CDCL solver");
     debug_println!(1, 1, "Adding {} clauses to solver", clauses.len());

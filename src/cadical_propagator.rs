@@ -104,6 +104,20 @@ pub struct CustomExternalPropagator<'a> {
     // at the end (only complete then, as new literals appear during the search).
     pub trail_writer: Option<std::io::BufWriter<std::fs::File>>,
     pub trail_atoms: std::collections::HashMap<i32, String>,
+    // --- QI garbage collection state ---
+    /// Current QI generation. Incremented on each GC (backtrack to level 0).
+    pub qi_generation: u32,
+    /// Per-level activation literals. Indexed by decision level; 0 means no
+    /// activation literal allocated for that level yet. Each level's QI clauses
+    /// are gated by `-qi_activation_lits[level]`.
+    pub qi_activation_lits: Vec<i32>,
+    /// Forgettable flag for the next clause to be delivered. Clauses in the
+    /// disequalities queue are paired with this to control CaDiCaL's GC.
+    pub qi_forgettable_queue: RefCell<Vec<bool>>,
+    /// Used by cb_add_reason_clause_lit: tracks which literal we're providing
+    /// a reason for. Equals the activation literal on first call (return it),
+    /// 0 on second call (return 0 to end clause).
+    pub qi_reason_pending: i32,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -175,6 +189,12 @@ impl<'a> CustomExternalPropagator<'a> {
             );
             return;
         }
+        // Activation literals (and other bare variables) have no term mapping.
+        if self.solver_state.cnf_cache.var_map_reverse.get(&lit).is_none()
+            && self.solver_state.cnf_cache.var_map_reverse.get(&-lit).is_none()
+        {
+            return;
+        }
         debug_println!(
             19,
             0,
@@ -203,7 +223,7 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     /// Add a literal as an observed variable to the solver
-    fn add_observed_variable(&mut self, lit: i32) {
+    pub(crate) fn add_observed_variable(&mut self, lit: i32) {
         let abs_lit = lit.abs();
         debug_println!(
             7,
@@ -241,10 +261,26 @@ impl<'a> CustomExternalPropagator<'a> {
 
     /// Queues a clause whose proof step has already been recorded.
     fn queue_external_clause(&self, clause: Vec<i32>) {
+        self.queue_external_clause_with_forgettable(clause, false);
+    }
+
+    fn queue_external_clause_with_forgettable(&self, clause: Vec<i32>, forgettable: bool) {
         self.proof_tracer
             .borrow_mut()
             .register_clause_for_cadical_callback(&clause);
         self.disequalities.borrow_mut().push(clause);
+        self.qi_forgettable_queue.borrow_mut().push(forgettable);
+    }
+
+    /// Queue a clause that contains bare literals (e.g. activation variables)
+    /// which have no term mapping. We register it for the CaDiCaL callback
+    /// (so the proof tracer consumes it silently) but don't add a proof step.
+    fn queue_bare_clause(&self, clause: Vec<i32>, forgettable: bool) {
+        self.proof_tracer
+            .borrow_mut()
+            .register_clause_for_cadical_callback(&clause);
+        self.disequalities.borrow_mut().push(clause);
+        self.qi_forgettable_queue.borrow_mut().push(forgettable);
     }
 
     fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
@@ -268,15 +304,33 @@ impl<'a> CustomExternalPropagator<'a> {
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
     ) {
         for inst in instances {
-            let clauses = match inst {
+            let (clauses, is_qi) = match inst {
                 Instantiation { clauses } => {
                     self.stats.instantiations += 1;
-                    clauses
+                    (clauses, true)
                 }
-                Skolemization { clauses } => clauses,
+                Skolemization { clauses } => (clauses, false),
             };
-            for clause in clauses {
-                self.queue_external_clause(clause.clone());
+            if is_qi && !clauses.is_empty() {
+                let act_lit = self.ensure_activation_lit_for_level(self.decision_level);
+                // Only gate the LAST clause (the quantifier implication) with the
+                // activation literal. Tseitin definition clauses (all others) are
+                // left ungated — they define the meaning of fresh variables that
+                // learned clauses may reference and must remain valid after GC.
+                let last_idx = clauses.len() - 1;
+                for (i, clause) in clauses.iter().enumerate() {
+                    if i == last_idx {
+                        let mut gated = clause.clone();
+                        gated.push(-act_lit);
+                        self.queue_bare_clause(gated, true);
+                    } else {
+                        self.queue_external_clause(clause.clone());
+                    }
+                }
+            } else {
+                for clause in clauses {
+                    self.queue_external_clause(clause.clone());
+                }
             }
         }
         // Materializing an instance can enqueue arithmetic merges (via
@@ -341,6 +395,51 @@ impl<'a> CustomExternalPropagator<'a> {
         self.eager_qi.reset();
     }
 
+    /// Allocate (or return existing) activation literal for a given decision level.
+    fn ensure_activation_lit_for_level(&mut self, level: usize) -> i32 {
+        while self.qi_activation_lits.len() <= level {
+            self.qi_activation_lits.push(0);
+        }
+        if self.qi_activation_lits[level] == 0 {
+            let lit = self.solver_state.cnf_cache.next_var;
+            self.solver_state.cnf_cache.next_var += 1;
+            self.qi_activation_lits[level] = lit;
+            self.add_observed_variable(lit);
+        }
+        self.qi_activation_lits[level]
+    }
+
+    /// Garbage-collect all QI activation literals. At level 0, all per-level
+    /// propagations have been undone. We add [-g_L] for each level's activation
+    /// literal to permanently deactivate them, then clear the dedup map.
+    fn gc_qi_generation(&mut self) {
+        debug_println!(
+            2,
+            0,
+            "PROPAGATOR: GC QI generation {}",
+            self.qi_generation,
+        );
+        self.stats.qi_gc_count += 1;
+
+        // Deactivate all per-level activation literals.
+        for &lit in &self.qi_activation_lits {
+            if lit != 0 {
+                self.queue_bare_clause(vec![-lit], false);
+            }
+        }
+        self.qi_activation_lits.clear();
+        self.qi_activation_lits.push(0); // index 0 unused
+
+        // Clear instantiation dedup so the same instances can be re-discovered.
+        self.solver_state.added_instantiations.clear();
+
+        // Drop any in-progress matching round.
+        self.pending = None;
+
+        self.qi_generation += 1;
+        self.qi_reason_pending = 0;
+    }
+
     /// Add instances from the current partial assignment according to the
     /// configured per-level eager mode. Skolemization remains a complete-model
     /// operation.
@@ -381,6 +480,29 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
         debug_println!(16, 0, "{}", self.solver_state.egraph);
         for lit in lits {
+            // Track assignment for all literals (including activation literals).
+            while self.assignments.len() <= lit.unsigned_abs() as usize {
+                self.assignments.resize(2 * self.assignments.len(), 0);
+            }
+            let lit_sign = if *lit > 0 { 1 } else { -1 };
+            self.assignments[lit.unsigned_abs() as usize] =
+                ((self.decision_level + 1) as i32) * lit_sign;
+
+            // Skip activation literals (current and old generations) — they
+            // have no term mapping and no egraph semantics.
+            if self.solver_state.cnf_cache.var_map_reverse.get(&(lit.unsigned_abs() as i32)).is_none()
+                && self.solver_state.cnf_cache.var_map_reverse.get(&-(lit.unsigned_abs() as i32)).is_none()
+            {
+                debug_println!(
+                    7,
+                    0,
+                    "Assigning bare literal {:?} (level {}), skipping (likely QI activation lit)",
+                    lit,
+                    self.decision_level,
+                );
+                continue;
+            }
+
             debug_println!(
                 7,
                 0,
@@ -389,15 +511,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.decision_level,
                 self.solver_state.get_term_from_lit(*lit)
             );
-
-            // adding the literal to the assignment
-            // add with level (negatively if we learn its negation)
-            while self.assignments.len() <= lit.unsigned_abs() as usize {
-                self.assignments.resize(2 * self.assignments.len(), 0);
-            }
-            let lit_sign = if *lit > 0 { 1 } else { -1 };
-            self.assignments[lit.unsigned_abs() as usize] =
-                ((self.decision_level + 1) as i32) * lit_sign;
 
             if self.fixed_literals.contains(lit) {
                 debug_println!(6, 0, "Skipping literal {lit} because it is fixed");
@@ -567,6 +680,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         self.sync_new_vars();
 
+        // QI garbage collection: on backtrack to level 0, deactivate the
+        // current generation's QI clauses and start fresh.
+        if level == 0 && self.qi_activation_lits.iter().any(|&lit| lit != 0) {
+            self.gc_qi_generation();
+        }
+
         debug_println!(16, 0, "Ending backtracking at level {}", level);
         debug_println!(11, 0, "{}", self.solver_state.egraph);
     }
@@ -578,8 +697,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             for &l in model {
                 let id = l.unsigned_abs() as i32;
                 if !self.trail_atoms.contains_key(&id) {
-                    let atom = format!("{}", self.solver_state.get_term_from_lit(id));
-                    self.trail_atoms.insert(id, atom);
+                    if let Some(term) = self.solver_state.get_term_from_lit_safe(id) {
+                        self.trail_atoms.insert(id, format!("{}", term));
+                    }
                 }
             }
             self.write_trail_line(model);
@@ -592,7 +712,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             model,
             model
                 .iter()
-                .map(|x| self.solver_state.get_term_from_lit(*x))
+                .filter_map(|x| self.solver_state.get_term_from_lit_safe(*x))
                 .collect::<Vec<_>>(),
         );
 
@@ -612,6 +732,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.stats.conflicts += 1;
             return false;
         }
+
+        // Filter out bare literals (QI activation variables) that have no term mapping.
+        let model_terms: Vec<i32> = model
+            .iter()
+            .copied()
+            .filter(|l| {
+                self.solver_state.cnf_cache.var_map_reverse.contains_key(&l.abs())
+                    || self.solver_state.cnf_cache.var_map_reverse.contains_key(&-l.abs())
+            })
+            .collect();
+        let model = model_terms.as_slice();
 
         for term in model {
             let (u64_val, polarity) = self.solver_state.get_u64_from_lit_with_polarity(*term);
@@ -842,21 +973,47 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn cb_propagate(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Propagation callback invoked");
-        // For now, no propagation
-        // This could deduce new assignments
+        // Propagate any unassigned activation literal at or below the current level.
+        if self.decision_level > 0 {
+            let max_level = self.decision_level.min(self.qi_activation_lits.len() - 1);
+            for level in 1..=max_level {
+                let lit = self.qi_activation_lits[level];
+                if lit != 0 {
+                    let var_idx = lit as usize;
+                    let assigned =
+                        var_idx < self.assignments.len() && self.assignments[var_idx] != 0;
+                    if !assigned {
+                        debug_println!(
+                            30,
+                            0,
+                            "PROPAGATOR: Propagating QI activation literal {} for level {} (at decision level {})",
+                            lit,
+                            level,
+                            self.decision_level
+                        );
+                        return lit;
+                    }
+                }
+            }
+        }
         0
     }
 
-    fn cb_add_reason_clause_lit(&mut self, _propagated_lit: i32) -> i32 {
-        debug_println!(
-            7,
-            0,
-            "PROPAGATOR: Adding reason clause for literal {}",
-            _propagated_lit
-        );
-        // For now, no reason clauses
-        // This could explain propagations
-        0
+    fn cb_add_reason_clause_lit(&mut self, propagated_lit: i32) -> i32 {
+        // Reason clause for an activation literal is [g] (unit clause).
+        // Protocol: first call returns g, second call returns 0 (end of clause).
+        // Resolution against [g] removes g from any learned clause.
+        if self.qi_reason_pending == propagated_lit {
+            // Second call: end the reason clause.
+            debug_println!(30, 0, "PROPAGATOR: reason_clause_lit({}) -> 0 (end)", propagated_lit);
+            self.qi_reason_pending = 0;
+            0
+        } else {
+            // First call: return the literal itself, mark as pending.
+            debug_println!(30, 0, "PROPAGATOR: reason_clause_lit({}) -> {} (literal)", propagated_lit, propagated_lit);
+            self.qi_reason_pending = propagated_lit;
+            propagated_lit
+        }
     }
 
     fn cb_has_external_clause(&mut self, is_forgettable: &mut bool) -> bool {
@@ -866,12 +1023,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "PROPAGATOR: Checking for external clauses (forgettable: {})",
             is_forgettable
         );
-        // For now, no external clauses
         if (*self.disequalities.borrow_mut()).is_empty() {
             false
         } else {
-            // this is basically saying that the clause is not forgettable; cvc5 also does false
-            *is_forgettable = false;
+            // Use per-clause forgettable flag: QI clauses are forgettable (CaDiCaL
+            // may GC them after deactivation), theory clauses are not.
+            *is_forgettable = self
+                .qi_forgettable_queue
+                .borrow()
+                .last()
+                .copied()
+                .unwrap_or(false);
             let clause_len = self.disequalities.borrow().last().map_or(0, |c| c.len());
             match clause_len {
                 0 | 1 => {} // don't count unit or empty clauses
@@ -889,7 +1051,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_add_external_clause_lit(&mut self) -> i32 {
-        // For now, no external clauses
         let mut v = self.disequalities.borrow_mut();
         assert!(!v.is_empty());
         debug_println!(4, 0, "We start with the following disequalities: {:?}", v);
@@ -897,6 +1058,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(11, 0, "We have the next clause {:?}", v[last_index]);
         let literal = if v[last_index].is_empty() {
             v.pop();
+            // Keep forgettable queue in sync: pop when the clause is fully consumed.
+            self.qi_forgettable_queue.borrow_mut().pop();
             0
         } else {
             v[last_index].pop().unwrap()
@@ -905,7 +1068,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         if literal != 0 {
             self.add_lit_to_proof_tracer(literal);
         }
-        if let Some(term) = self.solver_state.get_term_from_lit_safe(literal) {
+        if literal == 0 {
+            debug_println!(11, 0, "END OF CLAUSE");
+        } else if let Some(term) = self.solver_state.get_term_from_lit_safe(literal) {
             debug_println!(
                 11,
                 0,
@@ -914,8 +1079,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 term
             );
         } else {
-            debug_println!(11, 0, "END OF CLAUSE");
-            assert!(literal == 0);
+            debug_println!(11, 0, "PROPAGATOR: Adding bare literal {} (activation var)", literal);
         }
         debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal

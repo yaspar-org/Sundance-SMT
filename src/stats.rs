@@ -77,6 +77,8 @@ pub struct SolverStats {
     pub dt_constructor_ax: u64,
     /// Number of datatype case splits (deferred tester clauses)
     pub dt_splits: u64,
+    /// Number of QI generation garbage collections (backtracks to level 0)
+    pub qi_gc_count: u64,
     /// Number of check-sat calls
     pub num_checks: u64,
     /// Per-round statistics (one entry per QI round)
@@ -117,6 +119,7 @@ impl SolverStats {
             dt_accessor_ax: 0,
             dt_constructor_ax: 0,
             dt_splits: 0,
+            qi_gc_count: 0,
             num_checks: 1,
             per_round: Vec::new(),
             snapshot_decisions: 0,
@@ -225,6 +228,7 @@ impl fmt::Display for SolverStats {
         writeln!(f, "  \"dt_accessor_ax\": {},", self.dt_accessor_ax)?;
         writeln!(f, "  \"dt_constructor_ax\": {},", self.dt_constructor_ax)?;
         writeln!(f, "  \"dt_splits\": {},", self.dt_splits)?;
+        writeln!(f, "  \"qi_gc_count\": {},", self.qi_gc_count)?;
         writeln!(f, "  \"num_checks\": {},", self.num_checks)?;
         writeln!(f, "  \"arith\": {{")?;
         writeln!(

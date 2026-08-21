@@ -294,7 +294,7 @@ impl SMTProofTracer {
     ////////////////////////////////////////////////////////////////////////////
 
     // TODO: If each literal is only needed once, then they can be removed from the hashmap
-    fn get_lit_info(&self, lit: i32) -> Option<(i32, u64, Term, bool)> {
+    pub fn get_lit_info(&self, lit: i32) -> Option<(i32, u64, Term, bool)> {
         if let Some((id, term, polarity)) = self.terms_list.get(&lit) {
             Some((lit, *id, term.clone(), *polarity))
         } else if let Some((id, term, polarity)) = self.terms_list.get(&-lit) {
@@ -442,6 +442,12 @@ impl SMTProofTracer {
                 ProofStepType::OriginalClause
                 | ProofStepType::TheoryClause(..)
                 | ProofStepType::Instantiation => {
+                    debug_println!(
+                        29,
+                        2,
+                        "We have the clause: {:?}",
+                        clause
+                    );
                     self.introduce_literals(&mut literals_defined, clause, &mut output)
                 }
                 ProofStepType::Skolemization {
