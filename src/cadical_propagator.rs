@@ -1,10 +1,9 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::arithmetic::incremental_solver::translation::ArithTranslator;
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
-#[cfg(feature = "z3-solver")]
-use crate::arithmetic::z3incremental::Z3IncrementalState;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
@@ -34,14 +33,12 @@ pub struct CustomExternalPropagator<'a> {
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
-    /// Once reached, stop probing further pairs even if unprobed pairs remain.
     pub max_arith_conflicts_per_round: usize,
     pub last_observed_var: i32,
     /// Max instantiations to materialize per complete-model check. 0 = unbounded.
     pub batch_cap: usize,
-    /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
-    #[cfg(feature = "z3-solver")]
-    pub z3_incremental: Option<Z3IncrementalState>,
+    /// Incremental arithmetic translator+solver. None when using eager mode.
+    pub arith: Option<ArithTranslator>,
     // --trail-out logging (inert unless the writer is Some). Trails stream to
     // disk as they are refuted; the small |lit| -> atom map is held and flushed
     // at the end (only complete then, as new literals appear during the search).
@@ -275,11 +272,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             // Drain merges triggered by this assignment, then push the lit
             // itself if it's arithmetic.
-            #[cfg(feature = "z3-solver")]
-            {
-                if let Some(z3) = self.z3_incremental.as_mut() {
-                    z3.drain_merge_queue(self.solver_state);
-                    z3.on_literal_assignment(*lit, self.solver_state);
+            if let Some(arith) = self.arith.as_mut() {
+                let new_merge_lits = arith.drain_merges(self.solver_state);
+                arith.on_literal(*lit, self.solver_state);
+                for new_lit in new_merge_lits {
+                    self.add_observed_variable(new_lit);
+                    self.add_lit_to_proof_tracer(new_lit);
                 }
             }
             self.sync_new_vars();
@@ -377,9 +375,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         self.solver_state.egraph.notify_new_decision_level();
 
-        #[cfg(feature = "z3-solver")]
-        if let Some(z3) = self.z3_incremental.as_mut() {
-            z3.notify_new_decision_level();
+        if let Some(arith) = self.arith.as_mut() {
+            arith.notify_new_decision_level();
         }
     }
 
@@ -415,11 +412,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
 
-        #[cfg(feature = "z3-solver")]
-        {
-            if let Some(z3) = self.z3_incremental.as_mut() {
-                z3.notify_backtrack(level);
-                z3.drain_merge_queue(self.solver_state);
+        if let Some(arith) = self.arith.as_mut() {
+            arith.notify_backtrack(level);
+            let new_merge_lits = arith.drain_merges(self.solver_state);
+            for new_lit in new_merge_lits {
+                self.add_observed_variable(new_lit);
+                self.add_lit_to_proof_tracer(new_lit);
             }
         }
         self.sync_new_vars();
@@ -502,17 +500,20 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // The incremental backend already saw every atom via notify_assignment
         // — just flush any post-hoc merges and call check(). Otherwise use the
         // eager entry point.
-        #[cfg(feature = "z3-solver")]
-        let arith_result = if let Some(z3) = self.z3_incremental.as_mut() {
-            z3.drain_merge_queue(self.solver_state);
-            z3.check(self.solver_state)
+        let arith_result = if self.arith.is_some() {
+            let mut arith = self.arith.take().unwrap();
+            let new_lits = arith.drain_merges(self.solver_state);
+            for new_lit in new_lits {
+                self.add_observed_variable(new_lit);
+                self.add_lit_to_proof_tracer(new_lit);
+            }
+            let result = arith.check(self.solver_state);
+            self.arith = Some(arith);
+            result
         } else {
             check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state)
         };
         self.sync_new_vars();
-        #[cfg(not(feature = "z3-solver"))]
-        let arith_result =
-            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state);
 
         match arith_result {
             ArithResult::Unsat(arithmetic_literals, arith_stats) => {
@@ -625,18 +626,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
                 // Undo remaining probe merges. `backtrack_to` may repopulate
                 // the queue via `union_to_eclass` re-firing (e.g. from the
-                // trichotomy terms just registered); drain those into Z3.
+                // trichotomy terms just registered); drain those re-fired
+                // congruence merges.
                 self.solver_state.egraph.backtrack_to(base_level);
-                #[cfg(feature = "z3-solver")]
-                {
-                    if let Some(z3) = self.z3_incremental.as_mut() {
-                        z3.drain_merge_queue(self.solver_state);
-                    } else {
-                        self.solver_state.egraph.drain_arithmetic_equalities();
+                if let Some(arith) = self.arith.as_mut() {
+                    let new_merge_lits = arith.drain_merges(self.solver_state);
+                    for new_lit in new_merge_lits {
+                        self.add_observed_variable(new_lit);
+                        self.add_lit_to_proof_tracer(new_lit);
                     }
-                }
-                #[cfg(not(feature = "z3-solver"))]
-                {
+                } else {
                     self.solver_state.egraph.drain_arithmetic_equalities();
                 }
                 self.sync_new_vars();
