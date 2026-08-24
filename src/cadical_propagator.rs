@@ -4,7 +4,7 @@
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 #[cfg(feature = "z3-solver")]
-use crate::arithmetic::z3incremental::Z3IncrementalState;
+use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
@@ -50,6 +50,30 @@ pub struct CustomExternalPropagator<'a> {
 }
 
 impl<'a> CustomExternalPropagator<'a> {
+    #[cfg(feature = "z3-solver")]
+    fn check_partial_arithmetic_trail(&mut self) {
+        let Some(z3) = self.z3_incremental.as_mut() else {
+            return;
+        };
+        match z3.check_partial_trail() {
+            PartialCheckResult::Unchanged => {}
+            PartialCheckResult::Sat => {
+                self.stats.arith_checks += 1;
+            }
+            PartialCheckResult::Unsat(clause) => {
+                self.stats.arith_checks += 1;
+                debug_println!(
+                    21,
+                    0,
+                    "PROPAGATOR: Partial arithmetic inconsistency detected: {:?}",
+                    clause
+                );
+                self.queue_theory_clause(clause, Theory::QfLia);
+                self.stats.conflicts += 1;
+            }
+        }
+    }
+
     /// Stream one refuted model as a `t <signed lits>` line. A write error is
     /// reported once then the writer is dropped; it must never abort the solve.
     fn write_trail_line(&mut self, model: &[i32]) {
@@ -355,6 +379,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
             }
         }
+        #[cfg(feature = "z3-solver")]
+        self.check_partial_arithmetic_trail();
     }
 
     fn notify_new_decision_level(&mut self) {
