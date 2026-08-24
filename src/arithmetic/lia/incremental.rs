@@ -6,7 +6,7 @@
 //! This module exposes an incremental, push/pop-driven API over the internal
 //! [`LRASolver`], operating on an abstract [`VarId`] namespace rather than on
 //! egraph ids or [`crate::solver_state::SolverState`]. It is the internal-solver
-//! analogue of [`crate::arithmetic::z3incremental::Z3IncrementalState`]: a
+//! analogue of crate::arithmetic::z3incremental::Z3IncrementalState: a
 //! persistent solver kept in sync with the SAT trail via decision-level push and
 //! backtrack, with constraints tracked by SAT literal so they can be cited in an
 //! unsat core.
@@ -29,19 +29,23 @@
 //! - Decision levels are tracked by capturing an [`LRASolver::set_backtrack`] token
 //!   at each level boundary and replaying it via [`LRASolver::backtrack`].
 //!
-//! # Scope / limitations of this first frontend
+//! # Scope / limitations of this frontend
 //!
-//! - **LRA (Real) reasoning only.** Registered variables are integer-sorted, but
-//!   integrality is *not* enforced: [`IncrementalLraSolver::check`] may report `Sat`
-//!   for a system that has no integer solution. Sound integer reasoning
-//!   (branch-and-bound) is a later increment.
+//! - **Not currently wired up to the main solver**
+//! - **Integer reasoning is enforced** via the [`LIRASolver`]'s branch-and-bound, so
+//!   [`IncrementalLiraSolver::check`] reports `Sat` only for a system with an integer
+//!   solution. Each `check` starts from a fresh branch-and-bound state, since
+//!   [`LIRASolver::solve`] clears any residual `Unsat` and unwinds every speculative
+//!   branch bound before returning.
 //! - **`div`/`mod` require a constant divisor.** A `div`/`mod` term is converted to a fresh
 //!   quotient `q` plus the Euclidean rows `a − n·q ≥ 0` and `a − n·q ≤ |n| − 1`
 //!   (`mod(a, n) = a − n·q`), as in [`crate::arithmetic::lialp`]. The divisor `n` comes from
 //!   the denominator variable's constant definition; a non-constant or zero divisor errors.
 
+use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::linear_system::{Mon, Rel};
+use crate::arithmetic::lia::lira_solver::LIRASolver;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::solver_result::{SolverDecision, SolverError, SolverResult};
 use crate::arithmetic::lia::tableau::TableauKind;
@@ -52,7 +56,7 @@ use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use dashu::integer::IBig;
 
 /// Opaque variable handle assigned by the solver via
-/// [`IncrementalLraSolver::register_var`].
+/// [`IncrementalLiraSolver::register_var`].
 pub type VarId = u32;
 
 /// Constructor for a [`Rel`] from monomials and a constant (one of `Rel::mk_le`,
@@ -61,7 +65,7 @@ type RelMk = fn(Vec<Mon<Rational>>, Rational) -> Rel<Rational>;
 
 /// A linear expression: sum of `coeff * var` terms plus a constant, with optional
 /// `div`/`mod` terms. The denominator must resolve to a constant (see
-/// [`IncrementalLraSolver::register_var`]).
+/// [`IncrementalLiraSolver::register_var`]).
 #[derive(Debug, Clone)]
 pub struct ArithExpr {
     /// `(var, coefficient)` pairs.
@@ -108,7 +112,7 @@ pub enum ArithConstraint {
     Eq(ArithExpr, ArithExpr),
 }
 
-/// Result of [`IncrementalLraSolver::check`].
+/// Result of [`IncrementalLiraSolver::check`].
 #[derive(Debug)]
 pub enum ArithCheckResult {
     /// Conflict: the conflict clause (negated asserted SAT literals), matching the
@@ -119,14 +123,19 @@ pub enum ArithCheckResult {
     Sat(DeterministicHashMap<IBig, DeterministicHashSet<VarId>>),
 }
 
-/// Incremental LRA frontend: a persistent [`LRASolver`] driven by push/pop of
+/// Incremental LIA frontend: a persistent [`LIRASolver`] driven by push/pop of
 /// constraints keyed by SAT literal. See the module docs for the mapping onto the
 /// incremental solver and the current limitations.
+///
+/// Structural operations (`add_relation`, `assert_*`, `set_backtrack`, `backtrack`) go
+/// through the inner [`LRASolver`] via [`LIRASolver::lra_solver_mut`], while
+/// [`Self::check`] calls [`LIRASolver::solve`] so integrality is enforced by
+/// branch-and-bound.
 #[derive(Debug)]
-pub struct IncrementalLraSolver {
-    /// The persistent underlying solver. Seeded with one inert dummy row so the
-    /// (sparse) tableau always exists and can be grown via `add_relation`.
-    solver: LRASolver,
+pub struct IncrementalLiraSolver {
+    /// The persistent underlying solver. Its inner LRA solver is seeded with one inert
+    /// dummy row so the (sparse) tableau always exists and can be grown via `add_relation`.
+    solver: LIRASolver,
     /// Next fresh internal [`Var`] id (shared by registered vars and slacks).
     next_internal_id: usize,
     /// Next fresh [`VarId`] handed to callers.
@@ -150,9 +159,15 @@ pub struct IncrementalLraSolver {
     lra_tokens: Vec<usize>,
 }
 
-impl IncrementalLraSolver {
-    /// Create a fresh incremental solver.
+impl IncrementalLiraSolver {
+    /// Create a fresh incremental solver with the default [`SolverConfig`].
     pub fn new() -> Self {
+        Self::with_config(SolverConfig::default())
+    }
+
+    /// Create a fresh incremental solver, using `config` for the underlying
+    /// [`LIRASolver`] (e.g. to bound `max_branch_depth` / `max_lra_solve_calls`).
+    pub fn with_config(config: SolverConfig) -> Self {
         // Seed the solver with a single inert dummy relation `s = d` over two
         // unbounded variables, so the sparse tableau exists (a 0×0 tableau cannot be
         // constructed) and every real relation is added via `add_relation`. The dummy
@@ -163,7 +178,7 @@ impl IncrementalLraSolver {
         let basic = vec![VarInfo::new(dummy_slack, Owner::Basic(0))];
         let non_basic = vec![VarInfo::new(dummy_nonbasic, Owner::NonBasic(0))];
         let equations = vec![vec![Rational::ONE]];
-        let solver = LRASolver::from_eqs(
+        let lra_solver = LRASolver::from_eqs(
             basic,
             non_basic,
             equations,
@@ -171,6 +186,7 @@ impl IncrementalLraSolver {
             TableauKind::Sparse,
         )
         .expect("failed to build seed LRA solver");
+        let solver = LIRASolver::new(lra_solver, config);
 
         Self {
             solver,
@@ -266,10 +282,10 @@ impl IncrementalLraSolver {
     pub fn notify_new_decision_level(&mut self) {
         // If the previous `check` ended `Unsat`, clear it first: `set_backtrack` is a no-op
         // while `Unsat`, which would capture a stale token and skip the assignment backup.
-        self.solver.clear_unsat_state();
+        self.solver.lra_solver_mut().clear_unsat_state();
         // Capture a backtrack token for the level we are leaving so a later
         // `notify_backtrack` can relax everything asserted above it.
-        let token = self.solver.set_backtrack();
+        let token = self.solver.lra_solver_mut().set_backtrack();
         self.lra_tokens.push(token);
         self.sat_level += 1;
         debug_println!(21, 0, "[lra-inc] new decision level {}", self.sat_level);
@@ -285,7 +301,7 @@ impl IncrementalLraSolver {
         // `lra_tokens[level]` is the token captured at the `level → level+1` boundary;
         // replaying it relaxes all bounds asserted at levels > `level`.
         let token = self.lra_tokens[level];
-        self.solver.backtrack(token);
+        self.solver.lra_solver_mut().backtrack(token);
         self.lra_tokens.truncate(level);
         self.sat_level = level;
         // Invalidate constant definitions asserted above the backtrack target: their
@@ -344,10 +360,14 @@ impl IncrementalLraSolver {
                 Ok(ArithCheckResult::Unsat(lits.into_iter().collect()))
             }
             SolverDecision::UNKNOWN => {
-                // Pure LRA `solve` terminates in FEASIBLE/INFEASIBLE; treat an
-                // (unexpected) UNKNOWN conservatively as satisfiable, bucketing the
-                // current best-effort assignment.
-                let model = self.solver.get_rational_model().unwrap_or_default();
+                // `LIRASolver::solve` can return UNKNOWN if it hits its branch-and-bound
+                // resource limits (`max_branch_depth` / `max_lra_solve_calls`); treat that
+                // conservatively as satisfiable, bucketing the current best-effort assignment.
+                let model = self
+                    .solver
+                    .lra_solver()
+                    .get_rational_model()
+                    .unwrap_or_default();
                 let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<VarId>> =
                     DeterministicHashMap::new();
                 for var_id in self.model_vars.iter() {
@@ -462,13 +482,13 @@ impl IncrementalLraSolver {
         let bounds = rel.to_qdelta_bounds();
 
         let slack = self.fresh_var();
-        self.solver.add_relation(rel, slack)?;
+        self.solver.lra_solver_mut().add_relation(rel, slack)?;
 
         if let Some(lower) = bounds.lower {
-            self.solver.assert_lower(&slack, &lower)?;
+            self.solver.lra_solver_mut().assert_lower(&slack, &lower)?;
         }
         if let Some(upper) = bounds.upper {
-            self.solver.assert_upper(&slack, &upper)?;
+            self.solver.lra_solver_mut().assert_upper(&slack, &upper)?;
         }
 
         // Record the justification so the slack can be cited in a conflict. Constraints
@@ -481,7 +501,7 @@ impl IncrementalLraSolver {
     }
 }
 
-impl Default for IncrementalLraSolver {
+impl Default for IncrementalLiraSolver {
     fn default() -> Self {
         Self::new()
     }
@@ -517,7 +537,7 @@ mod tests {
     }
 
     /// Register a hidden variable defined as the constant `c` (usable as a divisor).
-    fn const_var(s: &mut IncrementalLraSolver, c: i32) -> VarId {
+    fn const_var(s: &mut IncrementalLiraSolver, c: i32) -> VarId {
         s.register_var(Some(ArithExpr::constant(c)), false).unwrap()
     }
 
@@ -527,13 +547,13 @@ mod tests {
 
     #[test]
     fn empty_system_is_sat() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         assert!(is_sat(&s.check().unwrap()));
     }
 
     #[test]
     fn single_feasible_constraint() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         // x <= 5
         s.push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(5)), 10)
@@ -543,7 +563,7 @@ mod tests {
 
     #[test]
     fn conflicting_constraints_are_unsat_with_core() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         // x >= 5 (encoded as 5 <= x), lit 10
         s.push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 10)
@@ -563,7 +583,7 @@ mod tests {
 
     #[test]
     fn backtrack_recovers_from_conflict() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         // Level 0: x >= 5.
         s.push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 10)
@@ -600,7 +620,7 @@ mod tests {
     fn assert_backtrack_reassert_constraint() {
         // C: x >= 5 (encoded as 5 <= x). D: x <= 1. C alone is feasible; C && D is not.
         // Exercises assert → backtrack → assert-again of the same constraint D.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
 
         // Assert C at level 0; feasible on its own.
@@ -627,7 +647,7 @@ mod tests {
 
     #[test]
     fn definition_is_enforced_in_model() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         // y := x + 3
         let y = s
@@ -651,7 +671,7 @@ mod tests {
 
     #[test]
     fn equality_constraint_ties_two_vars() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let y = s.register_var(None, true).unwrap();
         // x == y (via push_equality), and x == 9.
@@ -669,7 +689,7 @@ mod tests {
 
     #[test]
     fn strict_inequality_conflict() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         // x < 3 and x > 3 (encoded as 3 < x): infeasible.
         s.push_constraint(ArithConstraint::Lt(term(x, 1), ArithExpr::constant(3)), 10)
@@ -681,7 +701,7 @@ mod tests {
 
     #[test]
     fn model_only_reports_marked_vars() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let reported = s.register_var(None, true).unwrap();
         let hidden = s.register_var(None, false).unwrap();
         s.push_constraint(
@@ -715,7 +735,7 @@ mod tests {
 
     #[test]
     fn nested_levels_backtrack_partially() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         // L0: x >= 0.
         s.push_constraint(ArithConstraint::Leq(ArithExpr::constant(0), term(x, 1)), 10)
@@ -742,9 +762,68 @@ mod tests {
     }
 
     #[test]
+    fn integrality_is_enforced() {
+        // `3x >= 1 && 3x <= 2` pins x to [1/3, 2/3]: the rational relaxation is feasible but
+        // there is no integer in that interval, so branch-and-bound must report UNSAT. A pure
+        // LRA frontend would (unsoundly) report SAT here.
+        let mut s = IncrementalLiraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+        // 3x >= 1, encoded as 1 <= 3x.
+        s.push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(x, 3)), 10)
+            .unwrap();
+        // 3x <= 2.
+        s.push_constraint(ArithConstraint::Leq(term(x, 3), ArithExpr::constant(2)), 20)
+            .unwrap();
+        assert!(
+            matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)),
+            "x in [1/3, 2/3] has no integer solution; branch-and-bound must report UNSAT"
+        );
+    }
+
+    #[test]
+    fn branch_and_bound_state_is_fresh_across_checks() {
+        // A `check` that falls back to branch-and-bound must not leak speculative branch bounds
+        // into the persistent solver: the next `check` must see a fresh branch-and-bound state.
+        //
+        // The classic integer trap `3x >= 1 && 3x <= 2` forces B&B to prune the floor branch
+        // (x <= 0) and explore the ceil branch (x >= 1) — that `x >= 1` is exactly the bound that
+        // would leak. After backtracking away the trap and pinning x == 0, the system is feasible
+        // *only* if no residual `x >= 1` survives from the previous `check`.
+        let mut s = IncrementalLiraSolver::new();
+        let x = s.register_var(None, true).unwrap();
+
+        // Level 1: assert the trap, so `check` runs branch-and-bound and reports UNSAT.
+        s.notify_new_decision_level();
+        s.push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(x, 3)), 10)
+            .unwrap();
+        s.push_constraint(ArithConstraint::Leq(term(x, 3), ArithExpr::constant(2)), 20)
+            .unwrap();
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
+
+        // Backtrack to level 0: the trap's bounds are relaxed. Pin x == 0, which is feasible
+        // *unless* a speculative `x >= 1` from the previous branch-and-bound leaked through.
+        s.notify_backtrack(0);
+        s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(0)), 30)
+            .unwrap();
+        match s.check().unwrap() {
+            ArithCheckResult::Sat(buckets) => {
+                assert!(
+                    buckets.get(&IBig::from(0)).unwrap().contains(&x),
+                    "x should be 0; a leaked x >= 1 branch bound would make this UNSAT"
+                );
+            }
+            ArithCheckResult::Unsat(_) => {
+                panic!(
+                    "expected SAT: a residual branch-and-bound bound leaked across check() calls"
+                )
+            }
+        }
+    }
+
+    #[test]
     fn div_floor_semantics_sat() {
         // x = 3, div(x, 2) = 1: floor(3/2) = 1 holds under Euclidean division.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let two = const_var(&mut s, 2);
         s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(3)), 10)
@@ -760,7 +839,7 @@ mod tests {
     #[test]
     fn div_constant_numerator_floor_sat() {
         // r = div(7, 2), r = 3: Euclidean 7 = 2*3 + 1.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let seven = const_var(&mut s, 7);
         let two = const_var(&mut s, 2);
         let r = s.register_var(None, true).unwrap();
@@ -774,7 +853,7 @@ mod tests {
     #[test]
     fn div_wrong_quotient_unsat() {
         // r = div(7, 2), r = 4: 2*4 = 8 > 7 violates the remainder bound.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let seven = const_var(&mut s, 7);
         let two = const_var(&mut s, 2);
         let r = s.register_var(None, true).unwrap();
@@ -788,7 +867,7 @@ mod tests {
     #[test]
     fn div_negative_numerator_floors() {
         // div(-1, 2) = -1 under Euclidean semantics (-1 = 2*(-1) + 1).
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let neg1 = const_var(&mut s, -1);
         let two = const_var(&mut s, 2);
         let r = s.register_var(None, true).unwrap();
@@ -802,7 +881,7 @@ mod tests {
     #[test]
     fn div_negative_denominator_floors() {
         // div(9, -2) = -4 under Euclidean semantics (9 = (-2)*(-4) + 1).
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let nine = const_var(&mut s, 9);
         let neg2 = const_var(&mut s, -2);
         let r = s.register_var(None, true).unwrap();
@@ -816,7 +895,7 @@ mod tests {
     #[test]
     fn mod_matches_euclidean_remainder() {
         // x = 7, mod(x, 3) = 1 (7 = 3*2 + 1).
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let three = const_var(&mut s, 3);
         s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(7)), 10)
@@ -832,7 +911,7 @@ mod tests {
     #[test]
     fn mod_out_of_range_unsat() {
         // mod(x, 3) = 5 exceeds the remainder bound (0 <= r <= 2), infeasible even over the reals.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let three = const_var(&mut s, 3);
         s.push_constraint(
@@ -844,10 +923,10 @@ mod tests {
     }
 
     #[test]
-    fn mod_lra_over_approximates_integrality() {
+    fn mod_lra_does_not_over_approximate_integrality() {
         // x = 7, mod(x, 3) = 2 has no integer solution (7 mod 3 = 1), but the real quotient
-        // q = 5/3 satisfies the Euclidean rows, so this LRA-only frontend reports Sat.
-        let mut s = IncrementalLraSolver::new();
+        // q = 5/3 satisfies the Euclidean rows, so the LIRA frontend reports Unsat.
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let three = const_var(&mut s, 3);
         s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(7)), 10)
@@ -857,13 +936,13 @@ mod tests {
             20,
         )
         .unwrap();
-        assert!(is_sat(&s.check().unwrap()));
+        assert!(matches!(s.check().unwrap(), ArithCheckResult::Unsat(_)));
     }
 
     #[test]
     fn div_constraint_backtracks() {
         // L0: div(x, 2) = 5 forces 10 <= x <= 11. L1: x <= 3 conflicts; backtrack recovers.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let two = const_var(&mut s, 2);
         s.push_constraint(
@@ -884,7 +963,7 @@ mod tests {
 
     #[test]
     fn non_constant_divisor_is_rejected() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let d = s.register_var(None, false).unwrap(); // no constant definition
         assert!(
@@ -898,7 +977,7 @@ mod tests {
 
     #[test]
     fn zero_divisor_is_rejected() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let zero = const_var(&mut s, 0);
         assert!(
@@ -914,7 +993,7 @@ mod tests {
     fn constant_divisor_invalidated_after_backtrack() {
         // A constant divisor registered above the backtrack target has its defining
         // equality relaxed on backtrack, so it must no longer resolve as a constant.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
 
         // Level 1: register `two := 2`, usable as a constant divisor while its definition holds.
@@ -943,7 +1022,7 @@ mod tests {
     #[test]
     fn constant_divisor_at_level_zero_survives_backtrack() {
         // A constant registered at level 0 stays valid as a divisor across backtracking.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let two = const_var(&mut s, 2);
 
@@ -970,7 +1049,7 @@ mod tests {
         // y := x + 3 registered at level 0. A level-1 assert of x is relaxed on backtrack,
         // but the definition equality persists (asserted at level 0), so re-pinning x
         // after backtracking still forces y = x + 3.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         let y = s
             .register_var(
@@ -1012,7 +1091,7 @@ mod tests {
     fn definition_above_backtrack_level_is_relaxed() {
         // A definition registered above the backtrack target is relaxed like any other
         // constraint: its `VarId` stays valid, but the defined variable goes free.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(4)), 10)
             .unwrap();
@@ -1050,7 +1129,7 @@ mod tests {
     fn reasserted_definition_recouples_variable() {
         // Full cycle: assert def → solve → backtrack (relaxing it) → solve → re-assert
         // def → solve. Re-asserting the equality must re-establish the relation.
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         let x = s.register_var(None, true).unwrap();
         s.push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(4)), 10)
             .unwrap();
@@ -1093,7 +1172,7 @@ mod tests {
 
     #[test]
     fn unregistered_var_is_rejected() {
-        let mut s = IncrementalLraSolver::new();
+        let mut s = IncrementalLiraSolver::new();
         // VarId 99 was never registered.
         assert!(
             s.push_constraint(
