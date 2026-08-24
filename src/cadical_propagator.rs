@@ -311,7 +311,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
             {
-                for constraint in negated_model_or_datatype_constraints {
+                for (constraint, theory) in negated_model_or_datatype_constraints {
                     // todo: deleting this ordering thing -> just for debugging
                     let mut constraint_ordered = constraint.clone();
                     constraint_ordered.sort();
@@ -369,7 +369,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     );
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
-                    self.queue_theory_clause(shrunk_constraint, Theory::Background);
+                    self.queue_theory_clause(shrunk_constraint, theory);
                     debug_println!(
                         14 - 3,
                         0,
