@@ -47,6 +47,7 @@ pub fn cdcl_decision_procedure(
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
     eager_qi: i32,
+    qi_gc: bool,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -112,6 +113,7 @@ pub fn cdcl_decision_procedure(
                 }
             }),
         trail_atoms: std::collections::HashMap::new(),
+        qi_gc_enabled: qi_gc && eager_qi == 0,
         qi_generation: 0,
         qi_activation_lit: 0,
         qi_activation_pending: false,

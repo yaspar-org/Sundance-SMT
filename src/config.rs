@@ -46,7 +46,7 @@ pub struct Args {
     pub eager_skolem: bool,
     /// Max quantifier instantiations to add eagerly at each decision level.
     /// A negative value exhausts one fresh matching round per level; 0 disables eager QI.
-    #[arg(long, default_value_t = 5, allow_negative_numbers = true)]
+    #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
     pub eager_qi: i32,
     /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
     /// (Simplify/Z3-style auto-trigger inference). When off (default), an
@@ -69,4 +69,7 @@ pub struct Args {
     /// 0 = unbounded (materialize all pending).
     #[arg(long, default_value_t = 85)]
     pub batch_cap: usize,
+    /// Enable garbage collection of quantifier instantiations (only with lazy QI).
+    #[arg(long, default_value_t = false)]
+    pub qi_gc: bool,
 }

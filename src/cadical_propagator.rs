@@ -138,6 +138,8 @@ pub struct CustomExternalPropagator<'a> {
     pub trail_writer: Option<std::io::BufWriter<std::fs::File>>,
     pub trail_atoms: std::collections::HashMap<i32, String>,
     // --- QI garbage collection state ---
+    /// Whether QI garbage collection is enabled (--qi-gc flag).
+    pub qi_gc_enabled: bool,
     /// Current QI generation. Incremented on each GC (backtrack to level 0).
     pub qi_generation: u32,
     /// Activation literal for the current QI generation. 0 means none allocated.
@@ -343,7 +345,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 }
                 Skolemization { clauses } => (clauses, false),
             };
-            if is_qi && !clauses.is_empty() && matches!(self.eager_qi, EagerQiMode::Disabled) {
+            if is_qi && !clauses.is_empty() && self.qi_gc_enabled {
                 let act_lit = self.ensure_activation_lit();
                 // Only gate the LAST clause (the quantifier implication) with the
                 // activation literal. Tseitin definition clauses (all others) are
@@ -446,8 +448,8 @@ impl<'a> CustomExternalPropagator<'a> {
     /// then clear tracking state for the next generation.
     fn gc_qi_generation(&mut self) {
         assert!(
-            matches!(self.eager_qi, EagerQiMode::Disabled),
-            "QI garbage collection is not supported with eager QI mode"
+            self.qi_gc_enabled,
+            "gc_qi_generation called but QI GC is not enabled"
         );
         debug_println!(
             2,
