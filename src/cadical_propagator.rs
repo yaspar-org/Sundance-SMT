@@ -405,13 +405,15 @@ impl<'a> CustomExternalPropagator<'a> {
             self.solver_state.cnf_cache.next_var += 1;
             self.qi_activation_lits[level] = lit;
             self.add_observed_variable(lit);
+            self.proof_tracer.borrow_mut().register_activation_var(lit);
         }
         self.qi_activation_lits[level]
     }
 
     /// Garbage-collect all QI activation literals. At level 0, all per-level
-    /// propagations have been undone. We add [-g_L] for each level's activation
-    /// literal to permanently deactivate them, then clear the dedup map.
+    /// propagations have been undone. We re-add necessary conflict clauses and
+    /// their transitive QI antecedents, deactivate activation literals, then
+    /// clear tracking state.
     fn gc_qi_generation(&mut self) {
         debug_println!(
             2,
@@ -421,6 +423,28 @@ impl<'a> CustomExternalPropagator<'a> {
         );
         self.stats.qi_gc_count += 1;
 
+        // Compute which clauses need re-adding before clearing anything.
+        let (qi_clauses, conflict_clauses) = self.proof_tracer.borrow().compute_gc_readd();
+
+        if std::env::var("SUNDANCE_QI_GC_DEBUG").is_ok() {
+            eprintln!(
+                "[QI_GC] gc_qi_generation {}: re-adding {} QI clauses, {} conflict clauses",
+                self.qi_generation,
+                qi_clauses.len(),
+                conflict_clauses.len()
+            );
+        }
+
+        // Re-add necessary QI clauses ungated (permanent).
+        for clause in &qi_clauses {
+            self.queue_external_clause(clause.clone());
+        }
+
+        // Re-add tainted conflict clauses stripped of activation literals.
+        for clause in &conflict_clauses {
+            self.queue_external_clause(clause.clone());
+        }
+
         // Deactivate all per-level activation literals.
         for &lit in &self.qi_activation_lits {
             if lit != 0 {
@@ -429,6 +453,9 @@ impl<'a> CustomExternalPropagator<'a> {
         }
         self.qi_activation_lits.clear();
         self.qi_activation_lits.push(0); // index 0 unused
+
+        // Clear GC tracking in proof tracer.
+        self.proof_tracer.borrow_mut().clear_gc_tracking();
 
         // Clear instantiation dedup so the same instances can be re-discovered.
         self.solver_state.added_instantiations.clear();

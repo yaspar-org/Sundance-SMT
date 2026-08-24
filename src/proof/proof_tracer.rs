@@ -8,7 +8,7 @@ use crate::proof::{ProofStep, ProofStepType, Theory};
 use core::panic;
 use std::cmp::Eq;
 use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::ops::Neg;
 use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, SymbolQuote, Term};
@@ -24,6 +24,16 @@ pub struct SMTProofTracer {
     registered_clause_callbacks: HashMap<Vec<i32>, usize>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
+    // --- QI garbage collection tracking ---
+    /// Activation literal variables (absolute values).
+    qi_activation_vars: HashSet<i32>,
+    /// CaDiCaL clause ID → ungated QI clause literals (activation lit stripped).
+    qi_clause_ids: HashMap<u64, Vec<i32>>,
+    /// Derived clause ID → antecedent clause IDs (for transitive traversal).
+    derived_antecedents: HashMap<u64, Vec<u64>>,
+    /// Tainted derived clauses (contain negated activation lit).
+    /// Stores (clause_id, clause with activation lits stripped).
+    tainted_derived_clauses: Vec<(u64, Vec<i32>)>,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -233,6 +243,10 @@ impl SMTProofTracer {
             instantiations_for_smt2: Vec::new(),
             registered_clause_callbacks: HashMap::new(),
             deleted_clauses: 0,
+            qi_activation_vars: HashSet::new(),
+            qi_clause_ids: HashMap::new(),
+            derived_antecedents: HashMap::new(),
+            tainted_derived_clauses: Vec::new(),
         }
     }
 
@@ -289,6 +303,105 @@ impl SMTProofTracer {
             }
             Entry::Vacant(_) => false,
         }
+    }
+
+    ////////////////////////////////////////////////////////////////////////////
+    // QI garbage collection tracking
+
+    /// Register a variable as an activation literal (called by propagator).
+    pub fn register_activation_var(&mut self, var: i32) {
+        self.qi_activation_vars.insert(var);
+    }
+
+    /// Check if a literal is a negated activation literal (-g_L).
+    pub fn is_negated_activation_lit(&self, lit: i32) -> bool {
+        lit < 0 && self.qi_activation_vars.contains(&(-lit))
+    }
+
+    /// Check if a literal (positive or negative) is an activation literal variable.
+    pub fn is_activation_lit(&self, lit: i32) -> bool {
+        self.qi_activation_vars.contains(&lit.abs())
+    }
+
+    /// Record a gated QI clause by its CaDiCaL ID, storing the ungated version.
+    pub fn record_qi_clause(&mut self, id: u64, clause: &[i32]) {
+        let stripped: Vec<i32> = clause
+            .iter()
+            .copied()
+            .filter(|&lit| !self.is_negated_activation_lit(lit))
+            .collect();
+        self.qi_clause_ids.insert(id, stripped);
+    }
+
+    /// Record a derived clause's antecedents. If the clause is tainted
+    /// (contains a negated activation literal), store it for re-addition on GC.
+    /// Returns true if the clause is tainted.
+    pub fn record_derived_clause(&mut self, id: u64, clause: &[i32], antecedents: &[u64]) -> bool {
+        self.derived_antecedents.insert(id, antecedents.to_vec());
+
+        let mut has_activation = false;
+        let mut stripped = Vec::new();
+        for &lit in clause {
+            if self.is_negated_activation_lit(lit) {
+                has_activation = true;
+            } else {
+                stripped.push(lit);
+            }
+        }
+        if has_activation {
+            self.tainted_derived_clauses.push((id, stripped));
+        }
+        has_activation
+    }
+
+    /// On GC: BFS through antecedents of tainted derived clauses to find all
+    /// transitively-necessary QI clauses. Returns (qi_clauses_ungated, conflict_clauses_stripped).
+    pub fn compute_gc_readd(&self) -> (Vec<Vec<i32>>, Vec<Vec<i32>>) {
+        let mut visited: HashSet<u64> = HashSet::new();
+        let mut queue: VecDeque<u64> = VecDeque::new();
+
+        for (id, _clause) in &self.tainted_derived_clauses {
+            if visited.insert(*id) {
+                queue.push_back(*id);
+            }
+        }
+
+        while let Some(id) = queue.pop_front() {
+            if let Some(antecedents) = self.derived_antecedents.get(&id) {
+                for &ant_id in antecedents {
+                    if visited.insert(ant_id) {
+                        queue.push_back(ant_id);
+                    }
+                }
+            }
+        }
+
+        let qi_clauses: Vec<Vec<i32>> = visited
+            .iter()
+            .filter_map(|id| self.qi_clause_ids.get(id))
+            .cloned()
+            .collect();
+
+        let conflict_clauses: Vec<Vec<i32>> = self
+            .tainted_derived_clauses
+            .iter()
+            .map(|(_id, clause)| clause.clone())
+            .collect();
+
+        (qi_clauses, conflict_clauses)
+    }
+
+    /// Clear all GC tracking state (called after GC completes).
+    pub fn clear_gc_tracking(&mut self) {
+        self.qi_activation_vars.clear();
+        self.qi_clause_ids.clear();
+        self.derived_antecedents.clear();
+        self.tainted_derived_clauses.clear();
+    }
+
+    /// Whether QI GC tracking is active (any activation vars registered).
+    pub fn has_activation_vars(&self) -> bool {
+        !self.qi_activation_vars.is_empty()
     }
 
     ////////////////////////////////////////////////////////////////////////////

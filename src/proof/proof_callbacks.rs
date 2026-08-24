@@ -9,8 +9,28 @@ use cadical_sys::ProofTracer;
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
-    fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], restored: bool) {
+    fn add_original_clause(&mut self, id: u64, _redundant: bool, clause: &[i32], restored: bool) {
         let registered = self.consume_clause_callback_registration(clause);
+
+        // QI GC tracking: if this clause contains a negated activation literal,
+        // record it (stripped) so we can re-add it ungated after GC.
+        if self.has_activation_vars() {
+            let has_activation = clause.iter().any(|&lit| self.is_negated_activation_lit(lit));
+            if has_activation {
+                self.record_qi_clause(id, clause);
+                // Don't add gated QI clauses to the proof — only the re-added
+                // ungated versions will appear in the proof.
+                return;
+            }
+            // Debug: print any clause containing a positive activation literal
+            if clause.iter().any(|&lit| self.is_activation_lit(lit)) {
+                eprintln!(
+                    "[QI_GC] add_original_clause contains positive activation lit: id={} clause={:?}",
+                    id, clause
+                );
+            }
+        }
+
         if restored || registered {
             return;
         }
@@ -23,29 +43,35 @@ impl ProofTracer for SMTProofTracer {
     fn add_derived_clause(
         &mut self,
         id: u64,
-        _redundant: bool,
+        redundant: bool,
         clause: &[i32],
         antecedents: &[u64],
     ) {
-        debug_println!(6, 0, "*** SAT SOLVER CONFLICT CLAUSE LEARNED ***");
-        debug_println!(6, 0, "Clause ID: {}", id);
-        debug_println!(6, 0, "Conflict clause: {:?}", clause);
-        debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
-        debug_println!(6, 0, "Clause size: {}", clause.len());
+        if std::env::var("SUNDANCE_QI_GC_DEBUG").is_ok() {
+            eprintln!(
+                "[QI_GC] add_derived_clause: id={} redundant={} clause={:?} antecedents={:?}",
+                id, redundant, clause, antecedents
+            );
+        }
 
-        // Check if any literal in the clause is a bare activation literal
-        for &lit in clause {
-            if self.get_lit_info(lit).is_none() {
-                debug_println!(
-                    30,
-                    0,
-                    "WARNING: Learned clause {:?} contains bare literal {} (activation lit?)",
-                    clause,
-                    lit
-                );
-                break;
+        // QI GC tracking: record antecedents and check for tainted clauses.
+        if self.has_activation_vars() {
+            let tainted = self.record_derived_clause(id, clause, antecedents);
+            if tainted {
+                if std::env::var("SUNDANCE_QI_GC_DEBUG").is_ok() {
+                    eprintln!(
+                        "[QI_GC] skipping tainted clause {} from proof (contains activation lit)",
+                        id
+                    );
+                }
+                return;
             }
         }
+
+        debug_println!(6, 0, "*** SAT SOLVER CLAUSE LEARNED ***");
+        debug_println!(6, 0, "Clause ID: {}", id);
+        debug_println!(6, 0, "Clause: {:?}", clause);
+        debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
 
         self.add_sat_clause(clause);
     }
