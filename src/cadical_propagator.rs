@@ -343,7 +343,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 }
                 Skolemization { clauses } => (clauses, false),
             };
-            if is_qi && !clauses.is_empty() {
+            if is_qi && !clauses.is_empty() && matches!(self.eager_qi, EagerQiMode::Disabled) {
                 let act_lit = self.ensure_activation_lit();
                 // Only gate the LAST clause (the quantifier implication) with the
                 // activation literal. Tseitin definition clauses (all others) are
@@ -445,6 +445,10 @@ impl<'a> CustomExternalPropagator<'a> {
     /// it, re-add necessary conflict clauses and their transitive QI antecedents,
     /// then clear tracking state for the next generation.
     fn gc_qi_generation(&mut self) {
+        assert!(
+            matches!(self.eager_qi, EagerQiMode::Disabled),
+            "QI garbage collection is not supported with eager QI mode"
+        );
         debug_println!(
             2,
             0,
