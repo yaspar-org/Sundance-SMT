@@ -3,7 +3,7 @@
 
 //! Main CDCL decision loop
 use crate::arithmetic::lp::ArithSolver;
-use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode};
+use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode, QiLearner};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
@@ -113,12 +113,17 @@ pub fn cdcl_decision_procedure(
             }),
         trail_atoms: std::collections::HashMap::new(),
         qi_generation: 0,
-        qi_activation_lits: vec![0], // index 0 unused (level 0 has no activation lit)
+        qi_activation_lit: 0,
+        qi_activation_pending: false,
         qi_forgettable_queue: RefCell::new(vec![]),
-        qi_reason_pending: 0,
+        qi_learned_clauses: Rc::new(RefCell::new(Vec::new())),
     };
 
     solver.connect_external_propagator(&mut propagator);
+
+    // Connect a Learner to capture conflict clauses for QI GC.
+    let mut qi_learner = QiLearner::new(Rc::clone(&propagator.qi_learned_clauses));
+    solver.connect_learner(&mut qi_learner);
 
     debug_println!(2, 0, "CDCL: Starting CDCL solver");
     debug_println!(1, 1, "Adding {} clauses to solver", clauses.len());

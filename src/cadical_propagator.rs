@@ -17,7 +17,7 @@ use crate::quantifiers::quantifier::{
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
-use cadical_sys::{CaDiCal, ExternalPropagator};
+use cadical_sys::{CaDiCal, ExternalPropagator, Learner};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -75,6 +75,39 @@ impl EagerQiMode {
     }
 }
 
+/// Learner that captures conflict clauses for QI garbage collection.
+/// Connected to CaDiCaL's Learner interface; receives only 1-UIP conflict clauses.
+pub struct QiLearner {
+    /// Shared buffer of learned conflict clauses (shared with propagator).
+    learned_clauses: Rc<RefCell<Vec<Vec<i32>>>>,
+    /// In-progress clause being assembled (learn is called lit by lit).
+    current_clause: Vec<i32>,
+}
+
+impl QiLearner {
+    pub fn new(learned_clauses: Rc<RefCell<Vec<Vec<i32>>>>) -> Self {
+        Self {
+            learned_clauses,
+            current_clause: Vec::new(),
+        }
+    }
+}
+
+impl Learner for QiLearner {
+    fn learning(&mut self, _size: i32) -> bool {
+        true
+    }
+
+    fn learn(&mut self, lit: i32) {
+        if lit == 0 {
+            let clause = std::mem::take(&mut self.current_clause);
+            self.learned_clauses.borrow_mut().push(clause);
+        } else {
+            self.current_clause.push(lit);
+        }
+    }
+}
+
 /// Our implementation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
@@ -107,17 +140,16 @@ pub struct CustomExternalPropagator<'a> {
     // --- QI garbage collection state ---
     /// Current QI generation. Incremented on each GC (backtrack to level 0).
     pub qi_generation: u32,
-    /// Per-level activation literals. Indexed by decision level; 0 means no
-    /// activation literal allocated for that level yet. Each level's QI clauses
-    /// are gated by `-qi_activation_lits[level]`.
-    pub qi_activation_lits: Vec<i32>,
+    /// Activation literal for the current QI generation. 0 means none allocated.
+    /// Decided at level 1 via cb_decide; all QI clauses are gated with its negation.
+    pub qi_activation_lit: i32,
+    /// Whether the activation literal needs to be decided (returned from cb_decide).
+    pub qi_activation_pending: bool,
     /// Forgettable flag for the next clause to be delivered. Clauses in the
     /// disequalities queue are paired with this to control CaDiCaL's GC.
     pub qi_forgettable_queue: RefCell<Vec<bool>>,
-    /// Used by cb_add_reason_clause_lit: tracks which literal we're providing
-    /// a reason for. Equals the activation literal on first call (return it),
-    /// 0 on second call (return 0 to end clause).
-    pub qi_reason_pending: i32,
+    /// Conflict clauses captured by the Learner interface.
+    pub qi_learned_clauses: Rc<RefCell<Vec<Vec<i32>>>>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -312,7 +344,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 Skolemization { clauses } => (clauses, false),
             };
             if is_qi && !clauses.is_empty() {
-                let act_lit = self.ensure_activation_lit_for_level(self.decision_level);
+                let act_lit = self.ensure_activation_lit();
                 // Only gate the LAST clause (the quantifier implication) with the
                 // activation literal. Tseitin definition clauses (all others) are
                 // left ungated — they define the meaning of fresh variables that
@@ -396,24 +428,22 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     /// Allocate (or return existing) activation literal for a given decision level.
-    fn ensure_activation_lit_for_level(&mut self, level: usize) -> i32 {
-        while self.qi_activation_lits.len() <= level {
-            self.qi_activation_lits.push(0);
-        }
-        if self.qi_activation_lits[level] == 0 {
+    fn ensure_activation_lit(&mut self) -> i32 {
+        if self.qi_activation_lit == 0 {
             let lit = self.solver_state.cnf_cache.next_var;
             self.solver_state.cnf_cache.next_var += 1;
-            self.qi_activation_lits[level] = lit;
+            self.qi_activation_lit = lit;
+            self.qi_activation_pending = true;
             self.add_observed_variable(lit);
             self.proof_tracer.borrow_mut().register_activation_var(lit);
         }
-        self.qi_activation_lits[level]
+        self.qi_activation_lit
     }
 
-    /// Garbage-collect all QI activation literals. At level 0, all per-level
-    /// propagations have been undone. We re-add necessary conflict clauses and
-    /// their transitive QI antecedents, deactivate activation literals, then
-    /// clear tracking state.
+    /// Garbage-collect the current QI generation. Called on backtrack to level 0.
+    /// The activation literal decision has been undone. We permanently deactivate
+    /// it, re-add necessary conflict clauses and their transitive QI antecedents,
+    /// then clear tracking state for the next generation.
     fn gc_qi_generation(&mut self) {
         debug_println!(
             2,
@@ -423,15 +453,29 @@ impl<'a> CustomExternalPropagator<'a> {
         );
         self.stats.qi_gc_count += 1;
 
+        let act_lit = self.qi_activation_lit;
+
         // Compute which clauses need re-adding before clearing anything.
         let (qi_clauses, conflict_clauses) = self.proof_tracer.borrow().compute_gc_readd();
 
+        // Also check Learner-captured conflict clauses for any containing the
+        // activation literal (negative polarity = context in learned clause).
+        let neg_act = -act_lit;
+        let learned = self.qi_learned_clauses.borrow();
+        let learned_tainted: Vec<Vec<i32>> = learned
+            .iter()
+            .filter(|c| c.contains(&neg_act))
+            .map(|c| c.iter().copied().filter(|&l| l != neg_act).collect())
+            .collect();
+        drop(learned);
+
         if std::env::var("SUNDANCE_QI_GC_DEBUG").is_ok() {
             eprintln!(
-                "[QI_GC] gc_qi_generation {}: re-adding {} QI clauses, {} conflict clauses",
+                "[QI_GC] gc_qi_generation {}: re-adding {} QI clauses, {} conflict clauses (proof tracer), {} conflict clauses (learner)",
                 self.qi_generation,
                 qi_clauses.len(),
-                conflict_clauses.len()
+                conflict_clauses.len(),
+                learned_tainted.len()
             );
         }
 
@@ -444,18 +488,21 @@ impl<'a> CustomExternalPropagator<'a> {
         for clause in &conflict_clauses {
             self.queue_external_clause(clause.clone());
         }
-
-        // Deactivate all per-level activation literals.
-        for &lit in &self.qi_activation_lits {
-            if lit != 0 {
-                self.queue_bare_clause(vec![-lit], false);
-            }
+        for clause in &learned_tainted {
+            self.queue_external_clause(clause.clone());
         }
-        self.qi_activation_lits.clear();
-        self.qi_activation_lits.push(0); // index 0 unused
+
+        // Permanently deactivate the activation literal: learn [-g].
+        // Safe because g was a decision (no [g] clause was ever registered).
+        if act_lit != 0 {
+            self.queue_bare_clause(vec![-act_lit], false);
+        }
 
         // Clear GC tracking in proof tracer.
         self.proof_tracer.borrow_mut().clear_gc_tracking();
+
+        // Clear learned clauses buffer.
+        self.qi_learned_clauses.borrow_mut().clear();
 
         // Clear instantiation dedup so the same instances can be re-discovered.
         self.solver_state.added_instantiations.clear();
@@ -463,8 +510,10 @@ impl<'a> CustomExternalPropagator<'a> {
         // Drop any in-progress matching round.
         self.pending = None;
 
+        // Reset activation literal for new generation.
+        self.qi_activation_lit = 0;
+        self.qi_activation_pending = false;
         self.qi_generation += 1;
-        self.qi_reason_pending = 0;
     }
 
     /// Add instances from the current partial assignment according to the
@@ -707,9 +756,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         self.sync_new_vars();
 
-        // QI garbage collection: on backtrack to level 0, deactivate the
-        // current generation's QI clauses and start fresh.
-        if level == 0 && self.qi_activation_lits.iter().any(|&lit| lit != 0) {
+        // QI garbage collection: on backtrack to level 0, the activation
+        // literal decision is undone. Deactivate and start fresh.
+        if level == 0 && self.qi_activation_lit != 0 {
             self.gc_qi_generation();
         }
 
@@ -982,6 +1031,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn cb_decide(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
 
+        // Decide the QI activation literal at level 1 (before any other decision).
+        if self.qi_activation_pending && self.decision_level == 0 {
+            self.qi_activation_pending = false;
+            debug_println!(
+                2,
+                0,
+                "PROPAGATOR: Deciding QI activation literal {} at level 1",
+                self.qi_activation_lit
+            );
+            return self.qi_activation_lit;
+        }
+
         // For recursive datatypes, prefer base-case constructors to avoid infinite expansion
         if self.solver_state.datatype_info.has_recursive_datatype() {
             for &lit in &self.solver_state.base_case_tester_lits {
@@ -1000,47 +1061,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn cb_propagate(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Propagation callback invoked");
-        // Propagate any unassigned activation literal at or below the current level.
-        if self.decision_level > 0 {
-            let max_level = self.decision_level.min(self.qi_activation_lits.len() - 1);
-            for level in 1..=max_level {
-                let lit = self.qi_activation_lits[level];
-                if lit != 0 {
-                    let var_idx = lit as usize;
-                    let assigned =
-                        var_idx < self.assignments.len() && self.assignments[var_idx] != 0;
-                    if !assigned {
-                        debug_println!(
-                            30,
-                            0,
-                            "PROPAGATOR: Propagating QI activation literal {} for level {} (at decision level {})",
-                            lit,
-                            level,
-                            self.decision_level
-                        );
-                        return lit;
-                    }
-                }
-            }
-        }
         0
     }
 
     fn cb_add_reason_clause_lit(&mut self, propagated_lit: i32) -> i32 {
-        // Reason clause for an activation literal is [g] (unit clause).
-        // Protocol: first call returns g, second call returns 0 (end of clause).
-        // Resolution against [g] removes g from any learned clause.
-        if self.qi_reason_pending == propagated_lit {
-            // Second call: end the reason clause.
-            debug_println!(30, 0, "PROPAGATOR: reason_clause_lit({}) -> 0 (end)", propagated_lit);
-            self.qi_reason_pending = 0;
-            0
-        } else {
-            // First call: return the literal itself, mark as pending.
-            debug_println!(30, 0, "PROPAGATOR: reason_clause_lit({}) -> {} (literal)", propagated_lit, propagated_lit);
-            self.qi_reason_pending = propagated_lit;
+        // Activation literals are now decisions (via cb_decide), not propagations,
+        // so CaDiCaL should never ask for their reason.
+        panic!(
+            "cb_add_reason_clause_lit called for literal {} — no external propagations should exist",
             propagated_lit
-        }
+        );
     }
 
     fn cb_has_external_clause(&mut self, is_forgettable: &mut bool) -> bool {
