@@ -9,7 +9,18 @@ use cadical_sys::ProofTracer;
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
-    fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], restored: bool) {
+    fn add_original_clause(&mut self, id: u64, _redundant: bool, clause: &[i32], restored: bool) {
+        // Track QI clause IDs for GC dependency resolution.
+        // Must happen before the early return so we capture the CaDiCaL-assigned ID.
+        if let Some(ref gc_state) = self.qi_gc_state {
+            let gc = gc_state.borrow();
+            let neg_act = -gc.current_act;
+            if clause.contains(&neg_act) {
+                drop(gc);
+                gc_state.borrow_mut().qi_clause_registry.insert(id, clause.to_vec());
+            }
+        }
+
         let registered = self.consume_clause_callback_registration(clause);
         if restored || registered {
             return;
@@ -34,6 +45,30 @@ impl ProofTracer for SMTProofTracer {
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
         self.add_sat_clause(clause);
+
+        // Build transitive closure of QI clause dependencies.
+        // Since ¬act is never resolved away (no clause has positive act),
+        // every clause in the derivation chain of a QI-dependent clause contains ¬act.
+        if let Some(ref gc_state) = self.qi_gc_state {
+            let gc = gc_state.borrow();
+            let neg_act = -gc.current_act;
+            if clause.contains(&neg_act) {
+                let mut ancestry = std::collections::HashSet::new();
+                for &ant in antecedents {
+                    if gc.qi_clause_registry.contains_key(&ant) {
+                        ancestry.insert(ant);
+                    } else if let Some(ant_ancestry) = gc.qi_ancestry.get(&ant) {
+                        ancestry.extend(ant_ancestry.iter());
+                    }
+                }
+                drop(gc);
+                if !ancestry.is_empty() {
+                    let mut gc_mut = gc_state.borrow_mut();
+                    gc_mut.used_qi_ids.extend(ancestry.iter());
+                    gc_mut.qi_ancestry.insert(id, ancestry);
+                }
+            }
+        }
     }
 
     fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {

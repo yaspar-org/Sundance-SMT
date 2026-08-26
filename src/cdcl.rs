@@ -3,7 +3,9 @@
 
 //! Main CDCL decision loop
 use crate::arithmetic::lp::ArithSolver;
-use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode};
+use crate::cadical_propagator::{
+    CustomExternalPropagator, EagerQiMode, QiGcLearner, QiGcState, init_qi_gc_trace,
+};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
@@ -47,6 +49,7 @@ pub fn cdcl_decision_procedure(
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
     eager_qi: i32,
+    qi_gc: bool,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -84,6 +87,36 @@ pub fn cdcl_decision_procedure(
     let z3_incremental =
         using_z3_incremental.then(crate::arithmetic::z3incremental::Z3IncrementalState::new);
 
+    // --- QI Garbage Collection setup ---
+    // Only active with lazy QI (eager_qi == 0) and when qi_gc is enabled.
+    init_qi_gc_trace();
+    let qi_gc_active = qi_gc && eager_qi == 0;
+    let qi_gc_state: Option<Rc<RefCell<QiGcState>>> = if qi_gc_active {
+        let act_var = solver_state.cnf_cache.next_var;
+        solver_state.cnf_cache.next_var += 1;
+        solver.add_observed_var(act_var);
+        let state = Rc::new(RefCell::new(QiGcState {
+            current_act: act_var,
+            learned_clauses: Vec::new(),
+            learner_buf: Vec::new(),
+            qi_clause_registry: HashMap::new(),
+            qi_ancestry: HashMap::new(),
+            used_qi_ids: std::collections::HashSet::new(),
+            epoch: 0,
+        }));
+        proof_tracer.borrow_mut().qi_gc_state = Some(Rc::clone(&state));
+        eprintln!("[qi-gc] epoch 0: new activation literal act={}", act_var);
+        Some(state)
+    } else {
+        None
+    };
+    let mut qi_gc_learner = qi_gc_state
+        .as_ref()
+        .map(|s| QiGcLearner { state: Rc::clone(s) });
+    if let Some(ref mut learner) = qi_gc_learner {
+        solver.connect_learner(learner);
+    }
+
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
         solver_state,
@@ -112,6 +145,9 @@ pub fn cdcl_decision_procedure(
                 }
             }),
         trail_atoms: std::collections::HashMap::new(),
+        qi_gc_state,
+        forgettable_queue: Vec::new(),
+        draining_forgettable: false,
     };
 
     solver.connect_external_propagator(&mut propagator);
@@ -146,6 +182,11 @@ pub fn cdcl_decision_procedure(
     }
 
     let result = solve(&mut solver);
+
+    // Disconnect the learner before dropping the propagator
+    if qi_gc_learner.is_some() {
+        solver.disconnect_learner();
+    }
 
     // Disconnect the proof tracer before dropping the propagator
     solver.disconnect_proof_tracer1();

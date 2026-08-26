@@ -17,9 +17,85 @@ use crate::quantifiers::quantifier::{
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
-use cadical_sys::{CaDiCal, ExternalPropagator};
+use cadical_sys::{CaDiCal, ExternalPropagator, Learner};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// --- QI Garbage Collection ---
+
+static QI_GC_TRACE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn init_qi_gc_trace() {
+    QI_GC_TRACE.store(std::env::var("SUNDANCE_QI_GC_TRACE").is_ok(), Ordering::Relaxed);
+}
+
+macro_rules! qi_gc_trace {
+    ($($arg:tt)*) => {
+        if QI_GC_TRACE.load(Ordering::Relaxed) {
+            eprintln!("[qi-gc] {}", format!($($arg)*));
+        }
+    };
+}
+
+/// Shared mutable state for QI garbage collection, accessed by the Learner
+/// callback, ProofTracer callbacks, and the propagator.
+pub(crate) struct QiGcState {
+    /// Current activation literal (positive). QI clauses are guarded by its negation.
+    pub current_act: i32,
+    /// Conflict clauses captured by the Learner that contain ¬act.
+    pub learned_clauses: Vec<Vec<i32>>,
+    /// Buffer for the clause currently being received literal-by-literal from Learner.
+    pub learner_buf: Vec<i32>,
+    /// QI clause ID → original clause content (WITH ¬act).
+    pub qi_clause_registry: HashMap<u64, Vec<i32>>,
+    /// For each derived clause (with ¬act): its transitive QI clause ancestry.
+    pub qi_ancestry: HashMap<u64, HashSet<u64>>,
+    /// Accumulated set of QI clause IDs that transitively contributed to any
+    /// conflict clause containing ¬act.
+    pub used_qi_ids: HashSet<u64>,
+    /// Epoch counter.
+    pub epoch: usize,
+}
+
+/// Implements CaDiCaL's `Learner` trait to capture conflict clauses containing ¬act.
+///
+/// CaDiCaL's Learner protocol: for each learned clause, CaDiCaL first calls
+/// `learning(size)` — if we return true, it then calls `learn(lit)` for each
+/// literal, terminated by `learn(0)`. On receiving 0 we have the full clause.
+pub(crate) struct QiGcLearner {
+    pub state: Rc<RefCell<QiGcState>>,
+}
+
+impl Learner for QiGcLearner {
+    fn learning(&mut self, _size: i32) -> bool {
+        true
+    }
+
+    /// Called by CaDiCaL with each literal of a learned clause, terminated by 0.
+    /// On termination, if the clause contains ¬act, we save it — it's a conflict
+    /// clause that was derived from QI clauses and must be promoted at epoch end.
+    fn learn(&mut self, lit: i32) {
+        let mut state = self.state.borrow_mut();
+        if lit == 0 {
+            let neg_act = -state.current_act;
+            if state.learner_buf.contains(&neg_act) {
+                qi_gc_trace!(
+                    "epoch {}: captured conflict clause (len={}) containing ¬act={}",
+                    state.epoch,
+                    state.learner_buf.len(),
+                    neg_act
+                );
+                let clause = state.learner_buf.clone();
+                state.learned_clauses.push(clause);
+            }
+            state.learner_buf.clear();
+        } else {
+            state.learner_buf.push(lit);
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum EagerQiMode {
@@ -104,6 +180,12 @@ pub struct CustomExternalPropagator<'a> {
     // at the end (only complete then, as new literals appear during the search).
     pub trail_writer: Option<std::io::BufWriter<std::fs::File>>,
     pub trail_atoms: std::collections::HashMap<i32, String>,
+    // --- QI Garbage Collection ---
+    pub qi_gc_state: Option<Rc<RefCell<QiGcState>>>,
+    /// Separate queue for forgettable QI clauses (served with is_forgettable=true).
+    pub forgettable_queue: Vec<Vec<i32>>,
+    /// Whether the clause currently being drained via cb_add_external_clause_lit is forgettable.
+    pub draining_forgettable: bool,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -300,7 +382,23 @@ impl<'a> CustomExternalPropagator<'a> {
                 Skolemization { clauses } => clauses,
             };
             for clause in clauses {
-                self.queue_external_clause(clause.clone());
+                if let Some(ref gc) = self.qi_gc_state {
+                    let neg_act = -gc.borrow().current_act;
+                    let mut guarded = clause.clone();
+                    guarded.push(neg_act);
+                    qi_gc_trace!(
+                        "epoch {}: guarded clause (len={}) with ¬act={}, forgettable=true",
+                        gc.borrow().epoch,
+                        guarded.len(),
+                        neg_act
+                    );
+                    self.proof_tracer
+                        .borrow_mut()
+                        .register_clause_for_cadical_callback(&guarded);
+                    self.forgettable_queue.push(guarded);
+                } else {
+                    self.queue_external_clause(clause.clone());
+                }
             }
         }
         // Materializing an instance can enqueue arithmetic merges (via
@@ -365,6 +463,76 @@ impl<'a> CustomExternalPropagator<'a> {
         self.eager_qi.reset();
     }
 
+    /// Epoch transition for QI garbage collection. Called on backtrack to level 0.
+    /// Promotes conflict clauses and their QI dependencies to permanent status,
+    /// then starts a new epoch with a fresh activation literal.
+    fn trigger_epoch_transition(&mut self, gc_state: &Rc<RefCell<QiGcState>>) {
+        let gc = gc_state.borrow_mut();
+        let old_act = gc.current_act;
+        let neg_old_act = -old_act;
+        let epoch = gc.epoch;
+
+        qi_gc_trace!("epoch {}: backtrack to level 0, triggering epoch transition", epoch);
+
+        // 1. Queue the old activation literal as a permanent unit clause
+        let conflict_count = gc.learned_clauses.len();
+        let qi_count = gc.used_qi_ids.len();
+        drop(gc);
+        self.queue_theory_clause(vec![old_act], Theory::Background);
+
+        // 2. Re-learn captured conflict clauses without ¬act
+        let mut gc = gc_state.borrow_mut();
+        let learned: Vec<Vec<i32>> = gc.learned_clauses.drain(..).collect();
+        drop(gc);
+        for clause in learned {
+            let promoted: Vec<i32> = clause.into_iter()
+                .filter(|&lit| lit != neg_old_act)
+                .collect();
+            if !promoted.is_empty() {
+                qi_gc_trace!("epoch {}: promoting conflict clause (len={})", epoch, promoted.len());
+                self.queue_theory_clause(promoted, Theory::Background);
+            }
+        }
+
+        // 3. Re-learn used QI clauses without ¬act
+        let mut gc = gc_state.borrow_mut();
+        let used_ids: Vec<u64> = gc.used_qi_ids.drain().collect();
+        for id in used_ids {
+            if let Some(clause) = gc.qi_clause_registry.get(&id) {
+                let promoted: Vec<i32> = clause.iter()
+                    .filter(|&&lit| lit != neg_old_act)
+                    .copied()
+                    .collect();
+                if !promoted.is_empty() {
+                    drop(gc);
+                    qi_gc_trace!("epoch {}: promoting QI clause id={} (len={})", epoch, id, promoted.len());
+                    self.queue_theory_clause(promoted, Theory::Background);
+                    gc = gc_state.borrow_mut();
+                }
+            }
+        }
+
+        // 4. Clear epoch state and start new epoch
+        gc.qi_clause_registry.clear();
+        gc.qi_ancestry.clear();
+        gc.epoch += 1;
+
+        // 5. Allocate new activation literal
+        let new_act = self.solver_state.cnf_cache.next_var;
+        self.solver_state.cnf_cache.next_var += 1;
+        gc.current_act = new_act;
+        let new_epoch = gc.epoch;
+        drop(gc);
+
+        // 6. Observe the new variable
+        unsafe { (*self.solver).add_observed_var(new_act); }
+
+        qi_gc_trace!(
+            "epoch {}: transition complete. promoted {} conflict clauses + {} QI clauses. new act={}",
+            new_epoch, conflict_count, qi_count, new_act
+        );
+    }
+
     /// Add instances from the current partial assignment according to the
     /// configured per-level eager mode. Skolemization remains a complete-model
     /// operation.
@@ -405,6 +573,19 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
         debug_println!(16, 0, "{}", self.solver_state.egraph);
         for lit in lits {
+            // QI GC: skip the activation literal — it has no term in the egraph.
+            if let Some(ref gc) = self.qi_gc_state {
+                if lit.unsigned_abs() as i32 == gc.borrow().current_act {
+                    while self.assignments.len() <= lit.unsigned_abs() as usize {
+                        self.assignments.resize(2 * self.assignments.len(), 0);
+                    }
+                    let lit_sign = if *lit > 0 { 1 } else { -1 };
+                    self.assignments[lit.unsigned_abs() as usize] =
+                        ((self.decision_level + 1) as i32) * lit_sign;
+                    continue;
+                }
+            }
+
             debug_println!(
                 7,
                 0,
@@ -593,16 +774,28 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         self.sync_new_vars();
 
+        // QI GC: trigger epoch transition on backtrack to level 0
+        if level == 0 {
+            if let Some(gc_state) = self.qi_gc_state.clone() {
+                self.trigger_epoch_transition(&gc_state);
+            }
+        }
+
         debug_println!(16, 0, "Ending backtracking at level {}", level);
         debug_println!(11, 0, "{}", self.solver_state.egraph);
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        let qi_gc_act = self.qi_gc_state.as_ref().map(|gc| gc.borrow().current_act);
+
         // --trail-out: every model seen here in a non-SAT run is refuted;
         // note any new literals in the atom map and stream the trail line.
         if self.trail_writer.is_some() {
             for &l in model {
                 let id = l.unsigned_abs() as i32;
+                if qi_gc_act == Some(id) {
+                    continue;
+                }
                 if !self.trail_atoms.contains_key(&id) {
                     let atom = format!("{}", self.solver_state.get_term_from_lit(id));
                     self.trail_atoms.insert(id, atom);
@@ -618,6 +811,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             model,
             model
                 .iter()
+                .filter(|x| qi_gc_act != Some(x.unsigned_abs() as i32))
                 .map(|x| self.solver_state.get_term_from_lit(*x))
                 .collect::<Vec<_>>(),
         );
@@ -850,6 +1044,20 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn cb_decide(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
 
+        // QI GC: at level 0, decide the activation literal (becomes level 1)
+        if self.decision_level == 0 {
+            if let Some(ref gc) = self.qi_gc_state {
+                let act = gc.borrow().current_act;
+                let idx = act.unsigned_abs() as usize;
+                while idx >= self.assignments.len() {
+                    self.assignments.resize(self.assignments.len() * 2, 0);
+                }
+                debug_assert!(self.assignments[idx] == 0, "activation literal must be unassigned at level 0");
+                qi_gc_trace!("epoch {}: deciding act={}", gc.borrow().epoch, act);
+                return act;
+            }
+        }
+
         // For recursive datatypes, prefer base-case constructors to avoid infinite expansion
         if self.solver_state.datatype_info.has_recursive_datatype() {
             for &lit in &self.solver_state.base_case_tester_lits {
@@ -892,11 +1100,25 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "PROPAGATOR: Checking for external clauses (forgettable: {})",
             is_forgettable
         );
-        // For now, no external clauses
+
+        // Serve forgettable QI clauses first (guarded by ¬act)
+        if !self.forgettable_queue.is_empty() {
+            *is_forgettable = true;
+            self.draining_forgettable = true;
+            let clause_len = self.forgettable_queue.last().map_or(0, |c| c.len());
+            match clause_len {
+                0 | 1 => {}
+                2 => self.stats.binary_clauses += 1,
+                _ => self.stats.clauses += 1,
+            }
+            return true;
+        }
+
+        self.draining_forgettable = false;
+
         if (*self.disequalities.borrow_mut()).is_empty() {
             false
         } else {
-            // this is basically saying that the clause is not forgettable; cvc5 also does false
             *is_forgettable = false;
             let clause_len = self.disequalities.borrow().last().map_or(0, |c| c.len());
             match clause_len {
@@ -915,7 +1137,22 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_add_external_clause_lit(&mut self) -> i32 {
-        // For now, no external clauses
+        // Serve from the forgettable queue if that's what we're draining
+        if self.draining_forgettable {
+            assert!(!self.forgettable_queue.is_empty());
+            let last_index = self.forgettable_queue.len() - 1;
+            let literal = if self.forgettable_queue[last_index].is_empty() {
+                self.forgettable_queue.pop();
+                0
+            } else {
+                self.forgettable_queue[last_index].pop().unwrap()
+            };
+            if literal != 0 {
+                self.add_lit_to_proof_tracer(literal);
+            }
+            return literal;
+        }
+
         let mut v = self.disequalities.borrow_mut();
         assert!(!v.is_empty());
         debug_println!(4, 0, "We start with the following disequalities: {:?}", v);
@@ -939,9 +1176,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 literal,
                 term
             );
-        } else {
+        } else if literal == 0 {
             debug_println!(11, 0, "END OF CLAUSE");
-            assert!(literal == 0);
+        } else {
+            // QI GC activation literal has no term — that's expected.
+            debug_assert!(
+                self.qi_gc_state.is_some(),
+                "non-zero literal {literal} has no term and QI GC is not active"
+            );
         }
         debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal

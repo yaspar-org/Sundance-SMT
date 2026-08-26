@@ -69,4 +69,8 @@ pub struct Args {
     /// 0 = unbounded (materialize all pending).
     #[arg(long, default_value_t = 85)]
     pub batch_cap: usize,
+    /// Enable quantifier instantiation garbage collection via activation literals.
+    /// Only effective with lazy QI (--eager-qi 0).
+    #[arg(long, default_value_t = true)]
+    pub qi_gc: bool,
 }
