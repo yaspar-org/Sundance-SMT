@@ -102,9 +102,6 @@ pub fn cdcl_decision_procedure(
             activation_lits: initial_activation_lits,
             learned_clauses: Vec::new(),
             learner_buf: Vec::new(),
-            qi_clause_registry: HashMap::new(),
-            qi_ancestry: HashMap::new(),
-            used_qi_ids: std::collections::HashSet::new(),
             epoch: 0,
         }));
         proof_tracer.borrow_mut().qi_gc_state = Some(Rc::clone(&state));

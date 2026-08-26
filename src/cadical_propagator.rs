@@ -19,7 +19,7 @@ use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator, Learner};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -50,13 +50,6 @@ pub(crate) struct QiGcState {
     pub learned_clauses: Vec<Vec<i32>>,
     /// Buffer for the clause currently being received literal-by-literal from Learner.
     pub learner_buf: Vec<i32>,
-    /// QI clause ID → original clause content (WITH ¬act).
-    pub qi_clause_registry: HashMap<u64, Vec<i32>>,
-    /// For each derived clause (with ¬act): its transitive QI clause ancestry.
-    pub qi_ancestry: HashMap<u64, HashSet<u64>>,
-    /// Accumulated set of QI clause IDs that transitively contributed to any
-    /// conflict clause containing ¬act.
-    pub used_qi_ids: HashSet<u64>,
     /// Epoch counter.
     pub epoch: usize,
 }
@@ -484,7 +477,6 @@ impl<'a> CustomExternalPropagator<'a> {
 
         // 1. Queue the old activation literal as a permanent unit clause
         let conflict_count = gc.learned_clauses.len();
-        let qi_count = gc.used_qi_ids.len();
         drop(gc);
         self.queue_theory_clause(vec![old_act], Theory::Background);
 
@@ -497,32 +489,27 @@ impl<'a> CustomExternalPropagator<'a> {
                 .filter(|&lit| lit != neg_old_act)
                 .collect();
             if !promoted.is_empty() {
-                qi_gc_trace!("epoch {}: promoting conflict clause (len={})", epoch, promoted.len());
+                if QI_GC_TRACE.load(Ordering::Relaxed) {
+                    let terms: Vec<String> = promoted.iter().map(|&lit| {
+                        if self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
+                            format!("{}", self.solver_state.get_term_from_lit(lit))
+                        } else {
+                            format!("?{}", lit)
+                        }
+                    }).collect();
+                    eprintln!("[qi-gc] epoch {}: promoting conflict clause: {:?}", epoch, terms);
+                }
                 self.queue_theory_clause(promoted, Theory::Background);
             }
         }
 
-        // 3. Re-learn used QI clauses without ¬act
+        // 3. Clear added_instantiations so QI can be re-generated in the next epoch
         let mut gc = gc_state.borrow_mut();
-        let used_ids: Vec<u64> = gc.used_qi_ids.drain().collect();
-        for id in used_ids {
-            if let Some(clause) = gc.qi_clause_registry.get(&id) {
-                let promoted: Vec<i32> = clause.iter()
-                    .filter(|&&lit| lit != neg_old_act)
-                    .copied()
-                    .collect();
-                if !promoted.is_empty() {
-                    drop(gc);
-                    qi_gc_trace!("epoch {}: promoting QI clause id={} (len={})", epoch, id, promoted.len());
-                    self.queue_theory_clause(promoted, Theory::Background);
-                    gc = gc_state.borrow_mut();
-                }
-            }
-        }
+        let cleared_count = self.solver_state.added_instantiations.len();
+        self.solver_state.added_instantiations.clear();
+        qi_gc_trace!("epoch {}: cleared {} added_instantiations", epoch, cleared_count);
 
-        // 4. Clear epoch state and start new epoch
-        gc.qi_clause_registry.clear();
-        gc.qi_ancestry.clear();
+        // 4. Start new epoch
         gc.epoch += 1;
 
         // 5. Allocate new activation literal
@@ -537,8 +524,8 @@ impl<'a> CustomExternalPropagator<'a> {
         unsafe { (*self.solver).add_observed_var(new_act); }
 
         qi_gc_trace!(
-            "epoch {}: transition complete. promoted {} conflict clauses + {} QI clauses. new act={}",
-            new_epoch, conflict_count, qi_count, new_act
+            "epoch {}: transition complete. promoted {} conflict clauses. new act={}",
+            new_epoch, conflict_count, new_act
         );
     }
 
