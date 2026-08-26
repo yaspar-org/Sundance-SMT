@@ -94,7 +94,7 @@ pub fn cdcl_decision_procedure(
     let qi_gc_state: Option<Rc<RefCell<QiGcState>>> = if qi_gc_active {
         let act_var = solver_state.cnf_cache.next_var;
         solver_state.cnf_cache.next_var += 1;
-        solver.add_observed_var(act_var);
+        // add_observed_var is deferred to after connect_external_propagator
         let state = Rc::new(RefCell::new(QiGcState {
             current_act: act_var,
             learned_clauses: Vec::new(),
@@ -153,6 +153,11 @@ pub fn cdcl_decision_procedure(
     solver.connect_external_propagator(&mut propagator);
     // note: not using a fixed listener anymore
     // solver.connect_fixed_listener(&mut propagator);
+
+    // Observe the activation literal AFTER the propagator is connected.
+    if let Some(ref gc) = propagator.qi_gc_state {
+        solver.add_observed_var(gc.borrow().current_act);
+    }
 
     debug_println!(2, 0, "CDCL: Starting CDCL solver");
     debug_println!(1, 1, "Adding {} clauses to solver", clauses.len());

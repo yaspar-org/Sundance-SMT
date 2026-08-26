@@ -273,6 +273,12 @@ impl<'a> CustomExternalPropagator<'a> {
 
     pub fn add_lit_to_proof_tracer(&mut self, lit: i32) {
         let lit = lit.abs(); // only add the positive version
+        // Skip activation literals — they have no term mapping.
+        if !self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit)
+            && !self.solver_state.cnf_cache.var_map_reverse.contains_key(&-lit)
+        {
+            return;
+        }
         if self.proof_tracer.borrow().is_lit_registered(lit) {
             debug_println!(
                 19,
@@ -524,7 +530,7 @@ impl<'a> CustomExternalPropagator<'a> {
         let new_epoch = gc.epoch;
         drop(gc);
 
-        // 6. Observe the new variable
+        // Observe the new activation literal so CaDiCaL knows it exists.
         unsafe { (*self.solver).add_observed_var(new_act); }
 
         qi_gc_trace!(
@@ -573,17 +579,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
         debug_println!(16, 0, "{}", self.solver_state.egraph);
         for lit in lits {
-            // QI GC: skip the activation literal — it has no term in the egraph.
-            if let Some(ref gc) = self.qi_gc_state {
-                if lit.unsigned_abs() as i32 == gc.borrow().current_act {
-                    while self.assignments.len() <= lit.unsigned_abs() as usize {
-                        self.assignments.resize(2 * self.assignments.len(), 0);
-                    }
-                    let lit_sign = if *lit > 0 { 1 } else { -1 };
-                    self.assignments[lit.unsigned_abs() as usize] =
-                        ((self.decision_level + 1) as i32) * lit_sign;
-                    continue;
+            // Skip literals without a term mapping (activation literals from QI GC).
+            if !self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
+                while self.assignments.len() <= lit.unsigned_abs() as usize {
+                    self.assignments.resize(2 * self.assignments.len(), 0);
                 }
+                let lit_sign = if *lit > 0 { 1 } else { -1 };
+                self.assignments[lit.unsigned_abs() as usize] =
+                    ((self.decision_level + 1) as i32) * lit_sign;
+                continue;
             }
 
             debug_println!(
@@ -1032,6 +1036,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         if !self.start_quantifier_instantiation_round(true) {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.disequalities.borrow().is_empty());
+            qi_gc_trace!("cb_check_found_model: no new QI instances, returning true (SAT)");
             return true;
         }
 
@@ -1105,9 +1110,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             is_forgettable
         );
 
-        // Serve forgettable QI clauses first (guarded by ¬act)
+        // Serve guarded QI clauses. Not forgettable — CaDiCaL aggressively
+        // deletes forgettable clauses before they contribute to conflicts.
         if !self.forgettable_queue.is_empty() {
-            *is_forgettable = true;
+            *is_forgettable = false;
             self.draining_forgettable = true;
             let clause_len = self.forgettable_queue.last().map_or(0, |c| c.len());
             match clause_len {
