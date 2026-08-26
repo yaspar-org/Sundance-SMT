@@ -834,6 +834,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         for term in model {
+            // Skip activation literals (current and previous) — they have no term.
+            if !self.solver_state.cnf_cache.var_map_reverse.contains_key(&term.abs()) {
+                continue;
+            }
             let (u64_val, polarity) = self.solver_state.get_u64_from_lit_with_polarity(*term);
             debug_println!(
                 24,
