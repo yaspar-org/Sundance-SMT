@@ -1110,10 +1110,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             is_forgettable
         );
 
-        // Serve guarded QI clauses. Not forgettable — CaDiCaL aggressively
-        // deletes forgettable clauses before they contribute to conflicts.
+        // Serve guarded QI clauses as forgettable.
         if !self.forgettable_queue.is_empty() {
-            *is_forgettable = false;
+            *is_forgettable = true;
             self.draining_forgettable = true;
             let clause_len = self.forgettable_queue.last().map_or(0, |c| c.len());
             match clause_len {
