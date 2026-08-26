@@ -95,8 +95,11 @@ pub fn cdcl_decision_procedure(
         let act_var = solver_state.cnf_cache.next_var;
         solver_state.cnf_cache.next_var += 1;
         // add_observed_var is deferred to after connect_external_propagator
+        let mut initial_activation_lits = std::collections::HashSet::new();
+        initial_activation_lits.insert(act_var);
         let state = Rc::new(RefCell::new(QiGcState {
             current_act: act_var,
+            activation_lits: initial_activation_lits,
             learned_clauses: Vec::new(),
             learner_buf: Vec::new(),
             qi_clause_registry: HashMap::new(),

@@ -44,6 +44,8 @@ macro_rules! qi_gc_trace {
 pub(crate) struct QiGcState {
     /// Current activation literal (positive). QI clauses are guarded by its negation.
     pub current_act: i32,
+    /// All activation literals ever created (current + previous epochs).
+    pub activation_lits: HashSet<i32>,
     /// Conflict clauses captured by the Learner that contain ¬act.
     pub learned_clauses: Vec<Vec<i32>>,
     /// Buffer for the clause currently being received literal-by-literal from Learner.
@@ -274,10 +276,10 @@ impl<'a> CustomExternalPropagator<'a> {
     pub fn add_lit_to_proof_tracer(&mut self, lit: i32) {
         let lit = lit.abs(); // only add the positive version
         // Skip activation literals — they have no term mapping.
-        if !self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit)
-            && !self.solver_state.cnf_cache.var_map_reverse.contains_key(&-lit)
-        {
-            return;
+        if let Some(ref gc) = self.qi_gc_state {
+            if gc.borrow().activation_lits.contains(&lit) {
+                return;
+            }
         }
         if self.proof_tracer.borrow().is_lit_registered(lit) {
             debug_println!(
@@ -527,6 +529,7 @@ impl<'a> CustomExternalPropagator<'a> {
         let new_act = self.solver_state.cnf_cache.next_var;
         self.solver_state.cnf_cache.next_var += 1;
         gc.current_act = new_act;
+        gc.activation_lits.insert(new_act);
         let new_epoch = gc.epoch;
         drop(gc);
 
@@ -579,15 +582,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
         debug_println!(16, 0, "{}", self.solver_state.egraph);
         for lit in lits {
-            // Skip literals without a term mapping (activation literals from QI GC).
-            if !self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
-                while self.assignments.len() <= lit.unsigned_abs() as usize {
-                    self.assignments.resize(2 * self.assignments.len(), 0);
+            // Skip activation literals — they have no term in the egraph.
+            if let Some(ref gc) = self.qi_gc_state {
+                if gc.borrow().activation_lits.contains(&lit.abs()) {
+                    while self.assignments.len() <= lit.unsigned_abs() as usize {
+                        self.assignments.resize(2 * self.assignments.len(), 0);
+                    }
+                    let lit_sign = if *lit > 0 { 1 } else { -1 };
+                    self.assignments[lit.unsigned_abs() as usize] =
+                        ((self.decision_level + 1) as i32) * lit_sign;
+                    continue;
                 }
-                let lit_sign = if *lit > 0 { 1 } else { -1 };
-                self.assignments[lit.unsigned_abs() as usize] =
-                    ((self.decision_level + 1) as i32) * lit_sign;
-                continue;
             }
 
             debug_println!(
@@ -790,15 +795,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
-        let qi_gc_act = self.qi_gc_state.as_ref().map(|gc| gc.borrow().current_act);
-
         // --trail-out: every model seen here in a non-SAT run is refuted;
         // note any new literals in the atom map and stream the trail line.
         if self.trail_writer.is_some() {
             for &l in model {
                 let id = l.unsigned_abs() as i32;
-                if qi_gc_act == Some(id) {
-                    continue;
+                if let Some(ref gc) = self.qi_gc_state {
+                    if gc.borrow().activation_lits.contains(&id) {
+                        continue;
+                    }
                 }
                 if !self.trail_atoms.contains_key(&id) {
                     let atom = format!("{}", self.solver_state.get_term_from_lit(id));
@@ -808,17 +813,20 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.write_trail_line(model);
         }
 
-        debug_println!(
-            24,
-            0,
-            "PROPAGATOR: Checking model: {:?} [{:?}]",
-            model,
-            model
+        if crate::log::is_important(24) {
+            let model_terms: Vec<_> = model
                 .iter()
-                .filter(|x| qi_gc_act != Some(x.unsigned_abs() as i32))
-                .map(|x| self.solver_state.get_term_from_lit(*x))
-                .collect::<Vec<_>>(),
-        );
+                .filter_map(|x| {
+                    if let Some(ref gc) = self.qi_gc_state {
+                        if gc.borrow().activation_lits.contains(&x.abs()) {
+                            return None;
+                        }
+                    }
+                    Some(self.solver_state.get_term_from_lit(*x))
+                })
+                .collect();
+            debug_println!(24, 0, "PROPAGATOR: Checking model: {:?} [{:?}]", model, model_terms);
+        }
 
         if !self.disequalities.borrow_mut().is_empty() {
             debug_println!(
@@ -839,8 +847,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         for term in model {
             // Skip activation literals (current and previous) — they have no term.
-            if !self.solver_state.cnf_cache.var_map_reverse.contains_key(&term.abs()) {
-                continue;
+            if let Some(ref gc) = self.qi_gc_state {
+                if gc.borrow().activation_lits.contains(&term.abs()) {
+                    continue;
+                }
             }
             let (u64_val, polarity) = self.solver_state.get_u64_from_lit_with_polarity(*term);
             debug_println!(
