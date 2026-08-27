@@ -192,6 +192,7 @@ fn main() -> Result<(), String> {
         args.batch_cap,
         args.eager_qi,
         args.qi_gc,
+        args.relevancy,
     );
 
     match return_value {

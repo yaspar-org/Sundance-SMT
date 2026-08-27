@@ -14,6 +14,7 @@ use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemiz
 use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
+use crate::relevancy::RelevancyState;
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -84,6 +85,13 @@ impl Learner for QiGcLearner {
                 );
                 let clause = state.learner_buf.clone();
                 state.learned_clauses.push(clause);
+            } else if QI_GC_TRACE.load(Ordering::Relaxed) && !state.learner_buf.is_empty() {
+                eprintln!(
+                    "[qi-gc] learner: clause (len={}) does NOT contain ¬act={}: {:?}",
+                    state.learner_buf.len(),
+                    neg_act,
+                    &state.learner_buf[..state.learner_buf.len().min(5)]
+                );
             }
             state.learner_buf.clear();
         } else {
@@ -185,6 +193,8 @@ pub struct CustomExternalPropagator<'a> {
     pub next_is_decision: bool,
     /// Flag: next cb_decide should force_backtrack(0) to trigger epoch transition.
     pub qi_gc_force_backtrack: bool,
+    /// Relevancy propagation state — gates theory solver work.
+    pub relevancy: RelevancyState,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -617,8 +627,20 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.assignments[lit.unsigned_abs() as usize] =
                 ((self.decision_level + 1) as i32) * lit_sign;
 
+            // Relevancy filter: always propagate relevancy (even for fixed literals)
+            // so structural propagation fires. Skip irrelevant non-fixed literals.
+            let is_relevant = self.relevancy.notify_assignment(
+                *lit,
+                self.decision_level,
+                &self.assignments,
+            );
+
             if self.fixed_literals.contains(lit) {
                 debug_println!(6, 0, "Skipping literal {lit} because it is fixed");
+                continue;
+            }
+
+            if !is_relevant {
                 continue;
             }
 
@@ -756,6 +778,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level,
             level
         );
+
+        // Undo relevancy marks above this level
+        self.relevancy.backtrack_to(level);
 
         // Reset solver-level assignments
         for i in 1..self.assignments.len() {

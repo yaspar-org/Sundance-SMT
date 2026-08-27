@@ -6,6 +6,7 @@ use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::{
     CustomExternalPropagator, EagerQiMode, QiGcLearner, QiGcState, init_qi_gc_trace,
 };
+use crate::relevancy::RelevancyState;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
@@ -50,6 +51,7 @@ pub fn cdcl_decision_procedure(
     batch_cap: usize,
     eager_qi: i32,
     qi_gc: bool,
+    relevancy: bool,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -117,6 +119,18 @@ pub fn cdcl_decision_procedure(
         solver.connect_learner(learner);
     }
 
+    // Relevancy filtering: initialize from the original formula structure.
+    let mut relevancy_state = RelevancyState::new(relevancy);
+    if relevancy {
+        relevancy_state.initialize_structure(solver_state);
+        let root_lits: Vec<i32> = clauses
+            .iter()
+            .filter(|c| c.len() == 1)
+            .map(|c| c[0])
+            .collect();
+        relevancy_state.mark_roots_relevant(&root_lits);
+    }
+
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
         solver_state,
@@ -150,6 +164,7 @@ pub fn cdcl_decision_procedure(
         draining_forgettable: false,
         next_is_decision: false,
         qi_gc_force_backtrack: false,
+        relevancy: relevancy_state,
     };
 
     solver.connect_external_propagator(&mut propagator);

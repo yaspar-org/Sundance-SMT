@@ -73,4 +73,7 @@ pub struct Args {
     /// Only effective with lazy QI (--eager-qi 0).
     #[arg(long, default_value_t = true)]
     pub qi_gc: bool,
+    /// Enable relevancy filtering (skip theory work for irrelevant atoms)
+    #[arg(long, default_value_t = false)]
+    pub relevancy: bool,
 }
