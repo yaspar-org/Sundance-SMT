@@ -34,6 +34,29 @@ impl ProofTracer for SMTProofTracer {
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
         self.add_sat_clause(clause);
+
+        // Log conflict clauses containing ¬act for QI GC tracing
+        if let Some(ref gc_state) = self.qi_gc_state {
+            if std::env::var("SUNDANCE_QI_GC_TRACE").is_ok() {
+                let gc = gc_state.borrow();
+                let neg_act = -gc.current_act;
+                if clause.contains(&neg_act) {
+                    let terms: Vec<String> = clause.iter().map(|&lit| {
+                        if lit == neg_act {
+                            format!("¬act({})", neg_act)
+                        } else if let Some(desc) = self.lit_to_string(lit) {
+                            format!("{}={}", lit, desc)
+                        } else {
+                            format!("{}", lit)
+                        }
+                    }).collect();
+                    eprintln!(
+                        "[qi-gc] conflict clause (id={}): {:?} antecedents={:?}",
+                        id, terms, antecedents
+                    );
+                }
+            }
+        }
     }
 
     fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {

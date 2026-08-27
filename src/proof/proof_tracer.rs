@@ -324,6 +324,26 @@ impl SMTProofTracer {
     }
 
     /// Returns whether a term with the `literal` (or its negation) has been registered.
+    pub fn lit_to_string(&self, lit: i32) -> Option<String> {
+        if let Some((id, term, polarity)) = self.terms_list.get(&lit) {
+            let _ = id;
+            Some(if *polarity {
+                format!("{}", term)
+            } else {
+                format!("(not {})", term)
+            })
+        } else if let Some((id, term, polarity)) = self.terms_list.get(&-lit) {
+            let _ = id;
+            Some(if *polarity {
+                format!("(not {})", term)
+            } else {
+                format!("{}", term)
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn is_lit_registered(&self, literal: i32) -> bool {
         self.get_lit_info(literal).is_some() || self.get_lit_info(-literal).is_some()
     }

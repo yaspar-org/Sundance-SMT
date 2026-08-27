@@ -181,6 +181,10 @@ pub struct CustomExternalPropagator<'a> {
     pub forgettable_queue: Vec<Vec<i32>>,
     /// Whether the clause currently being drained via cb_add_external_clause_lit is forgettable.
     pub draining_forgettable: bool,
+    /// Track whether the next notify_assignment is a decision literal.
+    pub next_is_decision: bool,
+    /// Flag: next cb_decide should force_backtrack(0) to trigger epoch transition.
+    pub qi_gc_force_backtrack: bool,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -387,12 +391,16 @@ impl<'a> CustomExternalPropagator<'a> {
                     let neg_act = -gc.borrow().current_act;
                     let mut guarded = clause.clone();
                     guarded.push(neg_act);
-                    qi_gc_trace!(
-                        "epoch {}: guarded clause (len={}) with ¬act={}, forgettable=true",
-                        gc.borrow().epoch,
-                        guarded.len(),
-                        neg_act
-                    );
+                    if QI_GC_TRACE.load(Ordering::Relaxed) {
+                        let terms: Vec<String> = clause.iter().map(|&lit| {
+                            if self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
+                                format!("{}", self.solver_state.get_term_from_lit(lit))
+                            } else {
+                                format!("?{}", lit)
+                            }
+                        }).collect();
+                        eprintln!("[qi-gc] QI clause (epoch {}): {:?}", gc.borrow().epoch, terms);
+                    }
                     self.proof_tracer
                         .borrow_mut()
                         .register_clause_for_cadical_callback(&guarded);
@@ -591,6 +599,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.solver_state.get_term_from_lit(*lit)
             );
 
+            // Log decisions
+            if self.next_is_decision && QI_GC_TRACE.load(Ordering::Relaxed) {
+                self.next_is_decision = false;
+                eprintln!(
+                    "[qi-gc] decision level {}: lit={} term={}",
+                    self.decision_level, lit, self.solver_state.get_term_from_lit(*lit)
+                );
+            }
+
             // adding the literal to the assignment
             // add with level (negatively if we learn its negation)
             while self.assignments.len() <= lit.unsigned_abs() as usize {
@@ -711,6 +728,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level + 1
         );
         self.decision_level += 1;
+        self.next_is_decision = true;
         self.reset_eager_qi_for_level();
         // Record solver hash at new level
         while self.decision_level >= self.solver_state.hash_at_level.len() {
@@ -730,6 +748,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_backtrack(&mut self, level: usize) {
         self.stats.backtracks += 1;
+        qi_gc_trace!("backtrack: level {} -> level {}", self.decision_level, level);
         debug_println!(
             23,
             0,
@@ -770,7 +789,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         self.sync_new_vars();
 
-        // QI GC: trigger epoch transition on backtrack to level 0
+        // QI GC: backtrack to level 1 means all QI work above was invalidated.
+        // Schedule force_backtrack(0) on next cb_decide to trigger epoch transition.
+        if level == 1 && self.qi_gc_state.is_some() {
+            self.qi_gc_force_backtrack = true;
+        }
         if level == 0 {
             if let Some(gc_state) = self.qi_gc_state.clone() {
                 self.trigger_epoch_transition(&gc_state);
@@ -1049,6 +1072,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn cb_decide(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
+
+        // QI GC: force backtrack to level 0 if scheduled (triggers epoch transition)
+        if self.qi_gc_force_backtrack {
+            self.qi_gc_force_backtrack = false;
+            qi_gc_trace!("force_backtrack(0) from cb_decide at level {}", self.decision_level);
+            unsafe { (*self.solver).force_backtrack(0); }
+            // After force_backtrack, notify_backtrack(0) will fire and trigger
+            // epoch transition. CaDiCaL will re-call cb_decide at level 0.
+            return 0;
+        }
 
         // QI GC: at level 0, decide the activation literal (becomes level 1)
         if self.decision_level == 0 {

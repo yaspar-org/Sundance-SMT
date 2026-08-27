@@ -148,6 +148,8 @@ pub fn cdcl_decision_procedure(
         qi_gc_state,
         forgettable_queue: Vec::new(),
         draining_forgettable: false,
+        next_is_decision: false,
+        qi_gc_force_backtrack: false,
     };
 
     solver.connect_external_propagator(&mut propagator);
