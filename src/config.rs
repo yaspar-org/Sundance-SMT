@@ -74,6 +74,6 @@ pub struct Args {
     #[arg(long, default_value_t = true)]
     pub qi_gc: bool,
     /// Enable relevancy filtering (skip theory work for irrelevant atoms)
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     pub relevancy: bool,
 }

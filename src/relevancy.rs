@@ -3,11 +3,18 @@
 
 //! Relevancy propagation for gating theory solver work.
 //!
-//! Implements the technique from de Moura & Bjørner (2007): atoms are only
-//! sent to theory solvers when they are both assigned AND relevant. Relevancy
-//! propagates structurally through the formula tree (OR-true → one true child,
-//! AND-true → all children, etc.), avoiding expensive theory work on atoms
-//! that don't contribute to satisfying or refuting assertions.
+//! Implements the technique from de Moura & Bjørner (2007) / Z3 internals §7.1.4:
+//! atoms are only sent to theory solvers when they are both assigned AND relevant.
+//! Relevancy propagates structurally through the original formula tree:
+//!   - OR-true  → one true child relevant
+//!   - OR-false → all children relevant
+//!   - AND-true → all children relevant
+//!   - AND-false → one false child relevant
+//!   - NOT → child relevant
+//!   - IFF → both sides relevant
+//!   - ITE-true → condition + then-branch relevant (or else if condition false)
+//!   - ITE-false (¬ite) → condition + else-branch relevant (or then if condition false)
+//!   - Atom → immediate Boolean sub-expression literals relevant
 
 use std::collections::VecDeque;
 use yaspar_ir::ast::ATerm;
@@ -15,31 +22,24 @@ use yaspar_ir::traits::Repr;
 
 use crate::solver_state::SolverState;
 
-/// The formula structure of a node, pre-computed for fast propagation.
 #[derive(Debug, Clone)]
 enum NodeKind {
     Or(Vec<i32>),
     And(Vec<i32>),
-    Atom,
+    Not(i32),
+    Iff(i32, i32),
+    Ite { cond: i32, then_lit: i32, else_lit: i32 },
+    /// An atom: sub-expression literals that need relevancy for theory processing.
+    Atom(Vec<i32>),
 }
 
-/// Tracks relevancy state and propagates it through the formula structure.
 pub struct RelevancyState {
-    /// Pre-computed formula structure: maps abs(lit) → its kind and children.
-    node_kinds: Vec<NodeKind>,
-    /// Whether each literal (indexed by abs(lit)) is relevant.
+    node_kinds: Vec<Option<NodeKind>>,
     relevant: Vec<bool>,
-    /// Watches on positive assignment: when lit is assigned true, mark these relevant.
     watches_on_true: Vec<Vec<i32>>,
-    /// Watches on negative assignment: when lit is assigned false, mark these relevant.
     watches_on_false: Vec<Vec<i32>>,
-    /// Queue of literals that just became relevant and need structural propagation.
     queue: VecDeque<i32>,
-    /// Trail for backtracking: (level, lit) pairs recording when literals became relevant.
     trail: Vec<(usize, i32)>,
-    /// Trail for watches: (level, watched_abs_lit, positive, count_added).
-    watch_trail: Vec<(usize, i32, bool, usize)>,
-    /// Whether relevancy filtering is enabled.
     enabled: bool,
 }
 
@@ -52,7 +52,6 @@ impl RelevancyState {
             watches_on_false: Vec::new(),
             queue: VecDeque::new(),
             trail: Vec::new(),
-            watch_trail: Vec::new(),
             enabled,
         }
     }
@@ -68,19 +67,83 @@ impl RelevancyState {
             self.relevant.resize(new_len, false);
             self.watches_on_true.resize_with(new_len, Vec::new);
             self.watches_on_false.resize_with(new_len, Vec::new);
-            self.node_kinds.resize(new_len, NodeKind::Atom);
+            self.node_kinds.resize_with(new_len, || None);
         }
     }
 
+    /// Collect immediate sub-expression literals: descend until hitting a var_map
+    /// entry (which has its own NodeKind and will propagate further on its own).
+    fn collect_subterm_lits(term: &yaspar_ir::ast::Term, solver_state: &SolverState) -> Vec<i32> {
+        let mut lits = Vec::new();
+        let mut stack: Vec<&yaspar_ir::ast::Term> = Vec::new();
+        // Push immediate children of the root (not the root itself)
+        match term.repr() {
+            ATerm::App(_, args, _) => {
+                for arg in args {
+                    stack.push(arg);
+                }
+            }
+            ATerm::Not(child) => stack.push(child),
+            ATerm::Or(children) | ATerm::And(children) => {
+                for c in children {
+                    stack.push(c);
+                }
+            }
+            ATerm::Eq(a, b) => {
+                stack.push(a);
+                stack.push(b);
+            }
+            ATerm::Ite(c, t, e) => {
+                stack.push(c);
+                stack.push(t);
+                stack.push(e);
+            }
+            _ => {}
+        }
+        let mut visited = std::collections::HashSet::new();
+        while let Some(t) = stack.pop() {
+            let uid = t.uid();
+            if !visited.insert(uid) {
+                continue;
+            }
+            if let Some(&lit) = solver_state.cnf_cache.var_map.get(&uid) {
+                // Found a var_map entry — add it, don't recurse further
+                lits.push(lit);
+                continue;
+            }
+            // No var_map entry — recurse into children
+            match t.repr() {
+                ATerm::App(_, args, _) => {
+                    for arg in args {
+                        stack.push(arg);
+                    }
+                }
+                ATerm::Not(child) => stack.push(child),
+                ATerm::Or(children) | ATerm::And(children) => {
+                    for c in children {
+                        stack.push(c);
+                    }
+                }
+                ATerm::Eq(a, b) => {
+                    stack.push(a);
+                    stack.push(b);
+                }
+                ATerm::Ite(c, t, e) => {
+                    stack.push(c);
+                    stack.push(t);
+                    stack.push(e);
+                }
+                _ => {}
+            }
+        }
+        lits
+    }
+
     /// Pre-compute the formula structure for all terms in the CNF cache.
-    /// Must be called once after CNF conversion, before solving begins.
     pub fn initialize_structure(&mut self, solver_state: &SolverState) {
         if !self.enabled {
             return;
         }
-        let mut or_count = 0;
-        let mut and_count = 0;
-        let mut atom_count = 0;
         for (&uid, &lit) in solver_state.cnf_cache.var_map.iter() {
             let abs_lit = lit.unsigned_abs() as usize;
             self.ensure_capacity(lit);
@@ -93,7 +156,7 @@ impl RelevancyState {
                         .filter_map(|c| solver_state.cnf_cache.var_map.get(&c.uid()).copied())
                         .collect();
                     if child_lits.is_empty() {
-                        NodeKind::Atom
+                        NodeKind::Atom(Self::collect_subterm_lits(&term, solver_state))
                     } else {
                         NodeKind::Or(child_lits)
                     }
@@ -104,24 +167,56 @@ impl RelevancyState {
                         .filter_map(|c| solver_state.cnf_cache.var_map.get(&c.uid()).copied())
                         .collect();
                     if child_lits.is_empty() {
-                        NodeKind::Atom
+                        NodeKind::Atom(Self::collect_subterm_lits(&term, solver_state))
                     } else {
                         NodeKind::And(child_lits)
                     }
                 }
-                _ => NodeKind::Atom,
+                ATerm::Not(child) => {
+                    // Not is redundant: relevant[abs(-x)] == relevant[abs(x)].
+                    // Skip — the child term's structure at the same index handles propagation.
+                    // Only store Atom if the child doesn't have its own var_map entry.
+                    if solver_state.cnf_cache.var_map.get(&child.uid()).is_some() {
+                        continue; // child has the same abs index, it'll store its own kind
+                    }
+                    NodeKind::Atom(Self::collect_subterm_lits(&term, solver_state))
+                }
+                ATerm::Eq(a, b) => {
+                    let a_lit = solver_state.cnf_cache.var_map.get(&a.uid()).copied();
+                    let b_lit = solver_state.cnf_cache.var_map.get(&b.uid()).copied();
+                    if let (Some(al), Some(bl)) = (a_lit, b_lit) {
+                        NodeKind::Iff(al, bl)
+                    } else {
+                        NodeKind::Atom(Self::collect_subterm_lits(&term, solver_state))
+                    }
+                }
+                ATerm::Ite(c, t, e) => {
+                    let c_lit = solver_state.cnf_cache.var_map.get(&c.uid()).copied();
+                    let t_lit = solver_state.cnf_cache.var_map.get(&t.uid()).copied();
+                    let e_lit = solver_state.cnf_cache.var_map.get(&e.uid()).copied();
+                    if let (Some(cl), Some(tl), Some(el)) = (c_lit, t_lit, e_lit) {
+                        NodeKind::Ite { cond: cl, then_lit: tl, else_lit: el }
+                    } else {
+                        NodeKind::Atom(Self::collect_subterm_lits(&term, solver_state))
+                    }
+                }
+                _ => NodeKind::Atom(Self::collect_subterm_lits(&term, solver_state)),
             };
-            match &kind {
-                NodeKind::Or(_) => or_count += 1,
-                NodeKind::And(_) => and_count += 1,
-                NodeKind::Atom => atom_count += 1,
+            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                let kind_name = match &kind {
+                    NodeKind::Or(c) => format!("Or({})", c.len()),
+                    NodeKind::And(c) => format!("And({})", c.len()),
+                    NodeKind::Not(c) => format!("Not({})", c),
+                    NodeKind::Iff(a, b) => format!("Iff({},{})", a, b),
+                    NodeKind::Ite { cond, .. } => format!("Ite(cond={})", cond),
+                    NodeKind::Atom(s) => format!("Atom(subs={:?})", s),
+                };
+                eprintln!("[relevancy] lit={} kind={} term={}", lit, kind_name, term);
             }
-            self.node_kinds[abs_lit] = kind;
+            self.node_kinds[abs_lit] = Some(kind);
         }
-        eprintln!("[relevancy] structure: {} Or, {} And, {} Atom nodes", or_count, and_count, atom_count);
     }
 
-    /// Check if a literal is relevant.
     pub fn is_relevant(&self, lit: i32) -> bool {
         if !self.enabled {
             return true;
@@ -133,8 +228,6 @@ impl RelevancyState {
         self.relevant[idx]
     }
 
-    /// Mark a literal as relevant at the given decision level.
-    /// Returns true if it was newly marked (false if already relevant).
     fn mark_relevant(&mut self, lit: i32, level: usize) -> bool {
         self.ensure_capacity(lit);
         let idx = lit.unsigned_abs() as usize;
@@ -155,111 +248,102 @@ impl RelevancyState {
         for &lit in root_lits {
             self.mark_relevant(lit, 0);
         }
-        eprintln!("[relevancy] marked {} root literals relevant", root_lits.len());
+        self.propagate(0, &[]);
     }
 
     /// Called when a literal is assigned. Fires watches and propagates relevancy.
-    /// Returns whether the literal is relevant (and thus should be sent to theory solvers).
+    /// Returns whether the literal is relevant.
     pub fn notify_assignment(&mut self, lit: i32, level: usize, assignments: &[i32]) -> bool {
         if !self.enabled {
             return true;
         }
         self.ensure_capacity(lit);
+        let idx = lit.unsigned_abs() as usize;
 
         // Fire watches for this assignment
-        let idx = lit.unsigned_abs() as usize;
         let positive = lit > 0;
-
         let targets: Vec<i32> = if positive {
             self.watches_on_true[idx].clone()
         } else {
             self.watches_on_false[idx].clone()
         };
-
         for target_lit in targets {
             self.mark_relevant(target_lit, level);
         }
 
         // If this literal is relevant and has structure, propagate
         if self.relevant[idx] {
-            self.propagate_node(idx, lit, level, assignments);
+            self.propagate_node(idx, level, assignments);
         }
 
-        // Drain the propagation queue
         self.propagate(level, assignments);
-
         self.relevant[idx]
     }
 
-    /// Process the relevancy queue.
     fn propagate(&mut self, level: usize, assignments: &[i32]) {
         while let Some(lit) = self.queue.pop_front() {
             let idx = lit.unsigned_abs() as usize;
-            self.propagate_node(idx, lit, level, assignments);
+            self.propagate_node(idx, level, assignments);
         }
     }
 
-    /// Propagate relevancy for a single node based on its pre-computed structure.
-    fn propagate_node(&mut self, idx: usize, lit: i32, level: usize, assignments: &[i32]) {
+    fn propagate_node(&mut self, idx: usize, level: usize, assignments: &[i32]) {
         if idx >= self.node_kinds.len() {
             return;
         }
-        let kind = self.node_kinds[idx].clone();
+        let kind = match self.node_kinds[idx].clone() {
+            Some(k) => k,
+            None => return,
+        };
         match kind {
             NodeKind::Or(ref child_lits) => {
-                let assigned_val = self.get_assignment(lit, assignments);
-                match assigned_val {
+                match self.get_assignment_by_idx(idx, assignments) {
                     Some(true) => {
-                        // OR is true: find a child assigned true, mark it relevant.
-                        let mut found = false;
-                        for &child_lit in child_lits {
-                            if self.lit_is_true(child_lit, assignments) {
-                                self.mark_relevant(child_lit, level);
-                                found = true;
-                                break;
-                            }
-                        }
-                        if !found {
-                            // No child is true yet — install watches
-                            let count = child_lits.len();
+                        // OR true: one true child relevant.
+                        // Check if any child is already relevant (from a prior watch).
+                        let already_has_relevant = child_lits.iter().any(|&cl| {
+                            let ci = cl.unsigned_abs() as usize;
+                            ci < self.relevant.len() && self.relevant[ci]
+                        });
+                        if already_has_relevant {
+                            // Already picked a branch — skip
+                        } else {
+                            let mut found = false;
                             for &child_lit in child_lits {
-                                self.ensure_capacity(child_lit);
-                                let cidx = child_lit.unsigned_abs() as usize;
-                                self.watches_on_true[cidx].push(child_lit);
+                                if self.lit_is_true(child_lit, assignments) {
+                                    self.mark_relevant(child_lit, level);
+                                    found = true;
+                                    break;
+                                }
                             }
-                            self.watch_trail.push((level, lit, true, count));
+                            if !found {
+                                // Install watches: when a child becomes true, mark it relevant.
+                                // Use idx (the Or node) as target so we re-check and pick only one.
+                                for &child_lit in child_lits {
+                                    self.install_true_watch(child_lit, idx as i32);
+                                }
+                            }
                         }
                     }
                     Some(false) => {
-                        // OR is false: all children are relevant
+                        // OR false: all children relevant
                         for &child_lit in child_lits {
                             self.mark_relevant(child_lit, level);
                         }
                     }
-                    None => {
-                        // Relevant but unassigned: install watches on self for both polarities.
-                        // When assigned, re-propagate.
-                        // We mark self as needing re-propagation by adding self to its own watches.
-                        self.ensure_capacity(lit);
-                        let abs_lit = lit.unsigned_abs() as i32;
-                        self.watches_on_true[idx].push(abs_lit);
-                        self.watches_on_false[idx].push(abs_lit);
-                        self.watch_trail.push((level, lit, true, 1));
-                        self.watch_trail.push((level, lit, false, 1));
-                    }
+                    None => {}
                 }
             }
             NodeKind::And(ref child_lits) => {
-                let assigned_val = self.get_assignment(lit, assignments);
-                match assigned_val {
+                match self.get_assignment_by_idx(idx, assignments) {
                     Some(true) => {
-                        // AND is true: all children are relevant
+                        // AND true: all children relevant
                         for &child_lit in child_lits {
                             self.mark_relevant(child_lit, level);
                         }
                     }
                     Some(false) => {
-                        // AND is false: find a child assigned false, mark it relevant.
+                        // AND false: one false child relevant
                         let mut found = false;
                         for &child_lit in child_lits {
                             if self.lit_is_false(child_lit, assignments) {
@@ -269,60 +353,118 @@ impl RelevancyState {
                             }
                         }
                         if !found {
-                            let count = child_lits.len();
                             for &child_lit in child_lits {
-                                self.ensure_capacity(child_lit);
-                                let cidx = child_lit.unsigned_abs() as usize;
-                                self.watches_on_false[cidx].push(child_lit);
+                                self.install_false_watch(child_lit, child_lit);
                             }
-                            self.watch_trail.push((level, lit, false, count));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            NodeKind::Not(child_lit) => {
+                self.mark_relevant(child_lit, level);
+            }
+            NodeKind::Iff(a_lit, b_lit) => {
+                // Both sides always relevant
+                self.mark_relevant(a_lit, level);
+                self.mark_relevant(b_lit, level);
+            }
+            NodeKind::Ite { cond, then_lit, else_lit } => {
+                // Condition always relevant
+                self.mark_relevant(cond, level);
+                let ite_val = self.get_assignment_by_idx(idx, assignments);
+                let cond_val = self.lit_is_true(cond, assignments);
+                let cond_false = self.lit_is_false(cond, assignments);
+                match ite_val {
+                    Some(true) => {
+                        // ite true: if cond=true → then relevant; if cond=false → else relevant
+                        if cond_val {
+                            self.mark_relevant(then_lit, level);
+                        } else if cond_false {
+                            self.mark_relevant(else_lit, level);
+                        } else {
+                            self.install_true_watch(cond, then_lit);
+                            self.install_false_watch(cond, else_lit);
+                        }
+                    }
+                    Some(false) => {
+                        // ¬ite: if cond=true → else relevant; if cond=false → then relevant
+                        if cond_val {
+                            self.mark_relevant(else_lit, level);
+                        } else if cond_false {
+                            self.mark_relevant(then_lit, level);
+                        } else {
+                            self.install_true_watch(cond, else_lit);
+                            self.install_false_watch(cond, then_lit);
                         }
                     }
                     None => {
-                        self.ensure_capacity(lit);
-                        let abs_lit = lit.unsigned_abs() as i32;
-                        self.watches_on_true[idx].push(abs_lit);
-                        self.watches_on_false[idx].push(abs_lit);
-                        self.watch_trail.push((level, lit, true, 1));
-                        self.watch_trail.push((level, lit, false, 1));
+                        // ITE relevant but unassigned — wait for assignment
+                        // Install watches on self
+                        self.install_true_watch(idx as i32, idx as i32);
+                        self.install_false_watch(idx as i32, idx as i32);
                     }
                 }
             }
-            NodeKind::Atom => {
-                // Nothing to propagate structurally.
+            NodeKind::Atom(ref subterm_lits) => {
+                for &sub_lit in subterm_lits {
+                    self.mark_relevant(sub_lit, level);
+                }
             }
         }
     }
 
-    /// Get the Boolean value assigned to a literal.
-    fn get_assignment(&self, lit: i32, assignments: &[i32]) -> Option<bool> {
-        let idx = lit.unsigned_abs() as usize;
+    /// Install a watch: when `watched_lit` becomes true, mark `target` relevant.
+    fn install_true_watch(&mut self, watched_lit: i32, target: i32) {
+        self.ensure_capacity(watched_lit);
+        let idx = watched_lit.unsigned_abs() as usize;
+        if watched_lit > 0 {
+            self.watches_on_true[idx].push(target);
+        } else {
+            self.watches_on_false[idx].push(target);
+        }
+    }
+
+    /// Install a watch: when `watched_lit` becomes false, mark `target` relevant.
+    fn install_false_watch(&mut self, watched_lit: i32, target: i32) {
+        self.ensure_capacity(watched_lit);
+        let idx = watched_lit.unsigned_abs() as usize;
+        if watched_lit > 0 {
+            self.watches_on_false[idx].push(target);
+        } else {
+            self.watches_on_true[idx].push(target);
+        }
+    }
+
+    fn get_assignment_by_idx(&self, idx: usize, assignments: &[i32]) -> Option<bool> {
         if idx >= assignments.len() {
             return None;
         }
         let val = assignments[idx];
-        if val == 0 {
-            None
-        } else {
-            Some((val > 0) == (lit > 0))
-        }
+        if val == 0 { None } else { Some(val > 0) }
     }
 
     fn lit_is_true(&self, lit: i32, assignments: &[i32]) -> bool {
-        self.get_assignment(lit, assignments) == Some(true)
+        let idx = lit.unsigned_abs() as usize;
+        if idx >= assignments.len() { return false; }
+        let val = assignments[idx];
+        if val == 0 { return false; }
+        (val > 0) == (lit > 0)
     }
 
     fn lit_is_false(&self, lit: i32, assignments: &[i32]) -> bool {
-        self.get_assignment(lit, assignments) == Some(false)
+        let idx = lit.unsigned_abs() as usize;
+        if idx >= assignments.len() { return false; }
+        let val = assignments[idx];
+        if val == 0 { return false; }
+        (val > 0) != (lit > 0)
     }
 
-    /// Backtrack: undo relevancy marks and watches added above the given level.
+    /// Backtrack: undo relevancy marks added above the given level.
     pub fn backtrack_to(&mut self, level: usize) {
         if !self.enabled {
             return;
         }
-
-        // Undo relevancy marks
         while let Some(&(mark_level, lit)) = self.trail.last() {
             if mark_level <= level {
                 break;
@@ -331,25 +473,6 @@ impl RelevancyState {
             let idx = lit.unsigned_abs() as usize;
             self.relevant[idx] = false;
         }
-
-        // Undo watches
-        while let Some(&(watch_level, _watched_lit, positive, count)) = self.watch_trail.last() {
-            if watch_level <= level {
-                break;
-            }
-            self.watch_trail.pop();
-            // We added `count` watches — but we need to know which lists to pop from.
-            // Since watches are always appended, we can just truncate.
-            // However, the watches were spread across multiple child lists.
-            // For simplicity, we use a different approach: just clear and rebuild.
-            // TODO: more efficient backtracking
-            // For now, the watch trail entry doesn't store enough info to undo precisely.
-            // We'll accept slightly stale watches — they'll fire but mark already-relevant
-            // things, which is a no-op.
-            let _ = (positive, count);
-        }
-
-        // Clear the propagation queue
         self.queue.clear();
     }
 }
