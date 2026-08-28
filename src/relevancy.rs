@@ -20,7 +20,7 @@ pub(crate) enum NodeKind {
     Atom(Vec<i32>),
 }
 
-pub trait RelevancyTrait {
+pub(crate) trait RelevancyTrait {
     fn is_enabled(&self) -> bool;
     fn has_node(&self, lit: i32) -> bool;
     fn register_node(&mut self, lit: i32, kind: NodeKind);
