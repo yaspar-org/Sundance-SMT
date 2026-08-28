@@ -223,7 +223,7 @@ impl SolverState {
         }
     }
 
-    pub fn relevancy_ensure_known(&mut self, lit: i32, level: usize, assignments: &[i32]) {
+    pub fn relevancy_ensure_known(&mut self, lit: i32, level: usize) {
         if !self.relevancy.is_enabled() {
             return;
         }
@@ -241,7 +241,7 @@ impl SolverState {
             crate::relevancy::NodeKind::Atom(vec![])
         };
         self.relevancy.register_node(lit, kind);
-        self.relevancy.mark_relevant_root(lit, level, assignments);
+        self.relevancy.mark_relevant_root(lit, level);
     }
 
     pub(crate) fn relevancy_classify_term(&self, term: &Term) -> NodeKind {

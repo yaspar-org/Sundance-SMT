@@ -24,10 +24,10 @@ pub trait RelevancyTrait {
     fn is_enabled(&self) -> bool;
     fn has_node(&self, lit: i32) -> bool;
     fn register_node(&mut self, lit: i32, kind: NodeKind);
-    fn mark_relevant_root(&mut self, lit: i32, level: usize, assignments: &[i32]);
-    fn mark_relevant_roots(&mut self, root_lits: &[i32], level: usize, assignments: &[i32]);
+    fn mark_relevant_root(&mut self, lit: i32, level: usize);
+    fn mark_relevant_roots(&mut self, root_lits: &[i32], level: usize);
     fn is_relevant(&self, lit: i32) -> bool;
-    fn notify_assignment(&mut self, lit: i32, level: usize, assignments: &[i32]) -> bool;
+    fn notify_assignment(&mut self, lit: i32, level: usize) -> bool;
     fn backtrack_to(&mut self, level: usize);
 }
 
@@ -35,6 +35,10 @@ pub struct RelevancyState {
     node_kinds: Vec<Option<NodeKind>>,
     relevant: Vec<bool>,
     branch_chosen: Vec<bool>,
+    /// Per-variable polarity: 0=unassigned, 1=positive, -1=negative.
+    assignments: Vec<i8>,
+    /// Trail for undoing assignments on backtrack: (level, var_idx).
+    assignment_trail: Vec<(usize, usize)>,
     watches_on_true: Vec<Vec<i32>>,
     watches_on_false: Vec<Vec<i32>>,
     cond_watches_on_true: Vec<Vec<usize>>,
@@ -51,6 +55,8 @@ impl RelevancyState {
             node_kinds: Vec::new(),
             relevant: Vec::new(),
             branch_chosen: Vec::new(),
+            assignments: Vec::new(),
+            assignment_trail: Vec::new(),
             watches_on_true: Vec::new(),
             watches_on_false: Vec::new(),
             cond_watches_on_true: Vec::new(),
@@ -74,10 +80,10 @@ impl RelevancyState {
         true
     }
 
-    fn propagate(&mut self, level: usize, assignments: &[i32]) {
+    fn propagate(&mut self, level: usize) {
         while let Some(lit) = self.queue.pop_front() {
             let idx = lit.unsigned_abs() as usize;
-            self.propagate_node(idx, level, assignments);
+            self.propagate_node(idx, level);
         }
     }
 
@@ -87,6 +93,7 @@ impl RelevancyState {
             let new_len = (idx + 1).max(self.relevant.len() * 2).max(64);
             self.relevant.resize(new_len, false);
             self.branch_chosen.resize(new_len, false);
+            self.assignments.resize(new_len, 0);
             self.watches_on_true.resize_with(new_len, Vec::new);
             self.watches_on_false.resize_with(new_len, Vec::new);
             self.cond_watches_on_true.resize_with(new_len, Vec::new);
@@ -95,7 +102,7 @@ impl RelevancyState {
         }
     }
 
-    fn propagate_node(&mut self, idx: usize, level: usize, assignments: &[i32]) {
+    fn propagate_node(&mut self, idx: usize, level: usize) {
         if idx >= self.node_kinds.len() {
             return;
         }
@@ -105,14 +112,14 @@ impl RelevancyState {
         };
         match kind {
             NodeKind::Or(ref child_lits) => {
-                match self.get_assignment_by_idx(idx, assignments) {
+                match self.get_assignment_by_idx(idx) {
                     Some(true) => {
                         if self.branch_chosen[idx] {
                             return;
                         }
                         let mut found = false;
                         for &child_lit in child_lits {
-                            if self.lit_is_true(child_lit, assignments) {
+                            if self.lit_is_true(child_lit) {
                                 self.mark_relevant(child_lit, level);
                                 self.branch_chosen[idx] = true;
                                 self.branch_trail.push((level, idx));
@@ -135,7 +142,7 @@ impl RelevancyState {
                 }
             }
             NodeKind::And(ref child_lits) => {
-                match self.get_assignment_by_idx(idx, assignments) {
+                match self.get_assignment_by_idx(idx) {
                     Some(true) => {
                         for &child_lit in child_lits {
                             self.mark_relevant(child_lit, level);
@@ -147,7 +154,7 @@ impl RelevancyState {
                         }
                         let mut found = false;
                         for &child_lit in child_lits {
-                            if self.lit_is_false(child_lit, assignments) {
+                            if self.lit_is_false(child_lit) {
                                 self.mark_relevant(child_lit, level);
                                 self.branch_chosen[idx] = true;
                                 self.branch_trail.push((level, idx));
@@ -173,9 +180,9 @@ impl RelevancyState {
             }
             NodeKind::Ite { cond, then_lit, else_lit } => {
                 self.mark_relevant(cond, level);
-                let ite_val = self.get_assignment_by_idx(idx, assignments);
-                let cond_val = self.lit_is_true(cond, assignments);
-                let cond_false = self.lit_is_false(cond, assignments);
+                let ite_val = self.get_assignment_by_idx(idx);
+                let cond_val = self.lit_is_true(cond);
+                let cond_false = self.lit_is_false(cond);
                 match ite_val {
                     Some(true) => {
                         if cond_val {
@@ -248,26 +255,26 @@ impl RelevancyState {
         }
     }
 
-    fn get_assignment_by_idx(&self, idx: usize, assignments: &[i32]) -> Option<bool> {
-        if idx >= assignments.len() {
+    fn get_assignment_by_idx(&self, idx: usize) -> Option<bool> {
+        if idx >= self.assignments.len() {
             return None;
         }
-        let val = assignments[idx];
+        let val = self.assignments[idx];
         if val == 0 { None } else { Some(val > 0) }
     }
 
-    fn lit_is_true(&self, lit: i32, assignments: &[i32]) -> bool {
+    fn lit_is_true(&self, lit: i32) -> bool {
         let idx = lit.unsigned_abs() as usize;
-        if idx >= assignments.len() { return false; }
-        let val = assignments[idx];
+        if idx >= self.assignments.len() { return false; }
+        let val = self.assignments[idx];
         if val == 0 { return false; }
         (val > 0) == (lit > 0)
     }
 
-    fn lit_is_false(&self, lit: i32, assignments: &[i32]) -> bool {
+    fn lit_is_false(&self, lit: i32) -> bool {
         let idx = lit.unsigned_abs() as usize;
-        if idx >= assignments.len() { return false; }
-        let val = assignments[idx];
+        if idx >= self.assignments.len() { return false; }
+        let val = self.assignments[idx];
         if val == 0 { return false; }
         (val > 0) != (lit > 0)
     }
@@ -291,19 +298,19 @@ impl RelevancyTrait for RelevancyState {
         }
     }
 
-    fn mark_relevant_root(&mut self, lit: i32, level: usize, assignments: &[i32]) {
+    fn mark_relevant_root(&mut self, lit: i32, level: usize) {
         self.mark_relevant(lit, level);
-        self.propagate(level, assignments);
+        self.propagate(level);
     }
 
-    fn mark_relevant_roots(&mut self, root_lits: &[i32], level: usize, assignments: &[i32]) {
+    fn mark_relevant_roots(&mut self, root_lits: &[i32], level: usize) {
         if !self.enabled {
             return;
         }
         for &lit in root_lits {
             self.mark_relevant(lit, level);
         }
-        self.propagate(level, assignments);
+        self.propagate(level);
     }
 
     fn is_relevant(&self, lit: i32) -> bool {
@@ -317,12 +324,16 @@ impl RelevancyTrait for RelevancyState {
         self.relevant[idx]
     }
 
-    fn notify_assignment(&mut self, lit: i32, level: usize, assignments: &[i32]) -> bool {
+    fn notify_assignment(&mut self, lit: i32, level: usize) -> bool {
         if !self.enabled {
             return true;
         }
         self.ensure_capacity(lit);
         let idx = lit.unsigned_abs() as usize;
+
+        // Record the assignment internally
+        self.assignments[idx] = if lit > 0 { 1 } else { -1 };
+        self.assignment_trail.push((level, idx));
 
         let positive = lit > 0;
         let targets: Vec<i32> = if positive {
@@ -344,10 +355,10 @@ impl RelevancyTrait for RelevancyState {
         }
 
         if self.relevant[idx] {
-            self.propagate_node(idx, level, assignments);
+            self.propagate_node(idx, level);
         }
 
-        self.propagate(level, assignments);
+        self.propagate(level);
         self.relevant[idx]
     }
 
@@ -369,6 +380,13 @@ impl RelevancyTrait for RelevancyState {
             }
             self.branch_trail.pop();
             self.branch_chosen[node_idx] = false;
+        }
+        while let Some(&(mark_level, var_idx)) = self.assignment_trail.last() {
+            if mark_level <= level {
+                break;
+            }
+            self.assignment_trail.pop();
+            self.assignments[var_idx] = 0;
         }
         self.queue.clear();
     }

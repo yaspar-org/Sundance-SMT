@@ -130,7 +130,7 @@ pub fn cdcl_decision_procedure(
             .filter(|c| c.len() == 1)
             .map(|c| c[0])
             .collect();
-        solver_state.relevancy.mark_relevant_roots(&root_lits, 0, &[]);
+        solver_state.relevancy.mark_relevant_roots(&root_lits, 0);
     }
 
     let mut propagator = CustomExternalPropagator {

@@ -364,7 +364,7 @@ impl<'a> CustomExternalPropagator<'a> {
 
             if self.solver_state.relevancy.is_enabled() {
                 let or_lit = *self.solver_state.cnf_cache.var_map.get(&or_term.uid()).unwrap();
-                self.solver_state.relevancy_ensure_known(or_lit, self.decision_level, &self.assignments);
+                self.solver_state.relevancy_ensure_known(or_lit, self.decision_level);
             }
 
             self.sync_new_vars();
@@ -415,7 +415,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 // the relevancy filter (they're new theory assertions).
                 if self.solver_state.relevancy.is_enabled() {
                     for &lit in clause.iter() {
-                        self.solver_state.relevancy_ensure_known(lit, self.decision_level, &self.assignments);
+                        self.solver_state.relevancy_ensure_known(lit, self.decision_level);
                     }
                 }
 
@@ -655,7 +655,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             let is_relevant = self.solver_state.relevancy.notify_assignment(
                 *lit,
                 self.decision_level,
-                &self.assignments,
             );
 
             if self.fixed_literals.contains(lit) {
