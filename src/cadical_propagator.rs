@@ -641,6 +641,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
 
             if !is_relevant {
+                if QI_GC_TRACE.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "[qi-gc] SKIPPED irrelevant lit={} term={}",
+                        lit, self.solver_state.get_term_from_lit(*lit)
+                    );
+                }
                 continue;
             }
 

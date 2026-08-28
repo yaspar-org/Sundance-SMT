@@ -217,6 +217,61 @@ impl RelevancyState {
         }
     }
 
+    /// Classify a term into a NodeKind (extracted for reuse in lazy init).
+    fn classify_term(&self, term: &yaspar_ir::ast::Term, solver_state: &SolverState) -> NodeKind {
+        match term.repr() {
+            ATerm::Or(children) => {
+                let child_lits: Vec<i32> = children
+                    .iter()
+                    .filter_map(|c| solver_state.cnf_cache.var_map.get(&c.uid()).copied())
+                    .collect();
+                if child_lits.is_empty() {
+                    NodeKind::Atom(Self::collect_subterm_lits(term, solver_state))
+                } else {
+                    NodeKind::Or(child_lits)
+                }
+            }
+            ATerm::And(children) => {
+                let child_lits: Vec<i32> = children
+                    .iter()
+                    .filter_map(|c| solver_state.cnf_cache.var_map.get(&c.uid()).copied())
+                    .collect();
+                if child_lits.is_empty() {
+                    NodeKind::Atom(Self::collect_subterm_lits(term, solver_state))
+                } else {
+                    NodeKind::And(child_lits)
+                }
+            }
+            ATerm::Not(child) => {
+                if solver_state.cnf_cache.var_map.get(&child.uid()).is_some() {
+                    // Not is redundant (same abs index as child) — return child's classification
+                    return self.classify_term(child, solver_state);
+                }
+                NodeKind::Atom(Self::collect_subterm_lits(term, solver_state))
+            }
+            ATerm::Eq(a, b) => {
+                let a_lit = solver_state.cnf_cache.var_map.get(&a.uid()).copied();
+                let b_lit = solver_state.cnf_cache.var_map.get(&b.uid()).copied();
+                if let (Some(al), Some(bl)) = (a_lit, b_lit) {
+                    NodeKind::Iff(al, bl)
+                } else {
+                    NodeKind::Atom(Self::collect_subterm_lits(term, solver_state))
+                }
+            }
+            ATerm::Ite(c, t, e) => {
+                let c_lit = solver_state.cnf_cache.var_map.get(&c.uid()).copied();
+                let t_lit = solver_state.cnf_cache.var_map.get(&t.uid()).copied();
+                let e_lit = solver_state.cnf_cache.var_map.get(&e.uid()).copied();
+                if let (Some(cl), Some(tl), Some(el)) = (c_lit, t_lit, e_lit) {
+                    NodeKind::Ite { cond: cl, then_lit: tl, else_lit: el }
+                } else {
+                    NodeKind::Atom(Self::collect_subterm_lits(term, solver_state))
+                }
+            }
+            _ => NodeKind::Atom(Self::collect_subterm_lits(term, solver_state)),
+        }
+    }
+
     pub fn is_relevant(&self, lit: i32) -> bool {
         if !self.enabled {
             return true;
@@ -226,6 +281,35 @@ impl RelevancyState {
             return false;
         }
         self.relevant[idx]
+    }
+
+    /// Lazily initialize a new literal as a relevant root. Called for
+    /// theory-generated literals (datatype axioms, QI) that didn't exist
+    /// at initialization time.
+    pub fn ensure_known(&mut self, lit: i32, solver_state: &SolverState, level: usize, assignments: &[i32]) {
+        if !self.enabled {
+            return;
+        }
+        self.ensure_capacity(lit);
+        let idx = lit.unsigned_abs() as usize;
+        if self.node_kinds[idx].is_some() {
+            return; // already known
+        }
+        // Classify structure from the term registry
+        if let Some(&uid) = solver_state.cnf_cache.var_map_reverse.get(&(lit.abs())) {
+            if !matches!(solver_state.get_term_safe(uid), crate::solver_types::TermOption::None) {
+                let term = solver_state.get_term(uid);
+                let kind = self.classify_term(&term, solver_state);
+                self.node_kinds[idx] = Some(kind);
+            } else {
+                self.node_kinds[idx] = Some(NodeKind::Atom(vec![]));
+            }
+        } else {
+            self.node_kinds[idx] = Some(NodeKind::Atom(vec![]));
+        }
+        // Mark as relevant root and propagate
+        self.mark_relevant(lit, level);
+        self.propagate(level, assignments);
     }
 
     fn mark_relevant(&mut self, lit: i32, level: usize) -> bool {

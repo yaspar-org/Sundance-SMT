@@ -120,11 +120,13 @@ pub fn cdcl_decision_procedure(
     }
 
     // Relevancy filtering: initialize from the original formula structure.
+    // Both user assertions and datatype constraints are roots.
     let mut relevancy_state = RelevancyState::new(relevancy);
     if relevancy {
         relevancy_state.initialize_structure(solver_state);
         let root_lits: Vec<i32> = clauses
             .iter()
+            .chain(boolean_dt_constraints.iter())
             .filter(|c| c.len() == 1)
             .map(|c| c[0])
             .collect();
