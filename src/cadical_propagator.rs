@@ -609,6 +609,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             lits
         );
         debug_println!(16, 0, "{}", self.solver_state.egraph);
+        let mut skipped_lits: Vec<i32> = Vec::new();
         for lit in lits {
             // Skip activation literals — they have no term in the egraph.
             if let Some(ref gc) = self.qi_gc_state {
@@ -664,12 +665,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
 
             if !is_relevant {
-                if QI_GC_TRACE.load(Ordering::Relaxed) {
-                    eprintln!(
-                        "[qi-gc] SKIPPED irrelevant lit={} term={}",
-                        lit, self.solver_state.get_term_from_lit(*lit)
-                    );
-                }
+                skipped_lits.push(*lit);
                 continue;
             }
 
@@ -757,6 +753,22 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         "We have the following disequalities: {:?}",
                         self.disequalities.borrow()
                     );
+                }
+            }
+        }
+
+        // Second pass: process lits that were skipped as irrelevant but
+        // became relevant during this batch (due to batch ordering).
+        for &lit in skipped_lits.iter() {
+            if self.relevancy.is_relevant(lit) {
+                qi_gc_trace!("second pass: processing now-relevant lit={}", lit);
+                self.add_lit_to_proof_tracer(lit);
+                let constraints_opt =
+                    process_assignment(lit, self.solver_state, self.decision_level);
+                if let Some(constraints) = constraints_opt {
+                    for (clause, theory) in constraints {
+                        self.queue_theory_clause(clause, theory);
+                    }
                 }
             }
         }
