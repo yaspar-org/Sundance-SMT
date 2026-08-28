@@ -16,6 +16,8 @@ use crate::quantifiers::quantifier::{
 };
 use crate::relevancy::RelevancyState;
 use crate::solver_state::{SolverState, process_assignment};
+use crate::cnf::CNFConversion;
+use yaspar_ir::ast::{ObjectAllocatorExt, TermAllocator};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator, Learner};
@@ -351,12 +353,25 @@ impl<'a> CustomExternalPropagator<'a> {
                 .insert_predecessor(&gt_term, None, None, true);
             self.solver_state
                 .insert_predecessor(&eq_term, None, None, true);
-            let lt_lit = self.solver_state.get_or_allocate_lit_for_term(&lt_term);
-            let gt_lit = self.solver_state.get_or_allocate_lit_for_term(&gt_term);
-            let eq_lit = self.solver_state.get_or_allocate_lit_for_term(&eq_term);
-            let clause = vec![lt_lit, gt_lit, eq_lit];
+            let or_term = self.solver_state.context.or(vec![
+                lt_term.clone(), gt_term.clone(), eq_term.clone(),
+            ]);
+            self.solver_state.insert_predecessor(&or_term, None, None, true);
+            let cnf_formula = or_term.cnf_tseitin(self.solver_state);
+            let cnf_lits: Vec<Vec<i32>> = cnf_formula
+                .into_iter()
+                .map(|c| c.into_iter().collect())
+                .collect();
+
+            if self.relevancy.is_enabled() {
+                let or_lit = *self.solver_state.cnf_cache.var_map.get(&or_term.uid()).unwrap();
+                self.relevancy.ensure_known(or_lit, self.solver_state, self.decision_level, &self.assignments);
+            }
+
             self.sync_new_vars();
-            self.queue_theory_clause(clause, Theory::QfLia);
+            for clause in cnf_lits {
+                self.queue_theory_clause(clause, Theory::QfLia);
+            }
         }
     }
 
@@ -397,6 +412,14 @@ impl<'a> CustomExternalPropagator<'a> {
                 Skolemization { clauses } => clauses,
             };
             for clause in clauses {
+                // Register top-level clause literals as relevant roots for
+                // the relevancy filter (they're new theory assertions).
+                if self.relevancy.is_enabled() {
+                    for &lit in clause.iter() {
+                        self.relevancy.ensure_known(lit, self.solver_state, self.decision_level, &self.assignments);
+                    }
+                }
+
                 if let Some(ref gc) = self.qi_gc_state {
                     let neg_act = -gc.borrow().current_act;
                     let mut guarded = clause.clone();

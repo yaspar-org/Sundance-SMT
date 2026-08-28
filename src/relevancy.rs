@@ -38,6 +38,10 @@ pub struct RelevancyState {
     relevant: Vec<bool>,
     watches_on_true: Vec<Vec<i32>>,
     watches_on_false: Vec<Vec<i32>>,
+    /// Conditional watches: when lit (key) becomes true, re-evaluate the Or/And
+    /// at the given index. The guard "already has relevant child" prevents duplicates.
+    cond_watches_on_true: Vec<Vec<usize>>,
+    cond_watches_on_false: Vec<Vec<usize>>,
     queue: VecDeque<i32>,
     trail: Vec<(usize, i32)>,
     enabled: bool,
@@ -50,6 +54,8 @@ impl RelevancyState {
             relevant: Vec::new(),
             watches_on_true: Vec::new(),
             watches_on_false: Vec::new(),
+            cond_watches_on_true: Vec::new(),
+            cond_watches_on_false: Vec::new(),
             queue: VecDeque::new(),
             trail: Vec::new(),
             enabled,
@@ -67,6 +73,8 @@ impl RelevancyState {
             self.relevant.resize(new_len, false);
             self.watches_on_true.resize_with(new_len, Vec::new);
             self.watches_on_false.resize_with(new_len, Vec::new);
+            self.cond_watches_on_true.resize_with(new_len, Vec::new);
+            self.cond_watches_on_false.resize_with(new_len, Vec::new);
             self.node_kinds.resize_with(new_len, || None);
         }
     }
@@ -355,6 +363,18 @@ impl RelevancyState {
             self.mark_relevant(target_lit, level);
         }
 
+        // Fire conditional watches: re-evaluate Or/And nodes that are waiting
+        // for a child to become true/false. The node's propagation rule has
+        // an "already has relevant child" guard to enforce single-branch.
+        let cond_targets: Vec<usize> = if positive {
+            self.cond_watches_on_true[idx].clone()
+        } else {
+            self.cond_watches_on_false[idx].clone()
+        };
+        for or_and_idx in cond_targets {
+            self.queue.push_back(or_and_idx as i32);
+        }
+
         // If this literal is relevant and has structure, propagate
         if self.relevant[idx] {
             self.propagate_node(idx, level, assignments);
@@ -383,15 +403,13 @@ impl RelevancyState {
             NodeKind::Or(ref child_lits) => {
                 match self.get_assignment_by_idx(idx, assignments) {
                     Some(true) => {
-                        // OR true: one true child relevant.
-                        // Check if any child is already relevant (from a prior watch).
-                        let already_has_relevant = child_lits.iter().any(|&cl| {
+                        // OR true: one true child relevant (single-branch).
+                        // Guard: if a child is already relevant, skip.
+                        let already = child_lits.iter().any(|&cl| {
                             let ci = cl.unsigned_abs() as usize;
                             ci < self.relevant.len() && self.relevant[ci]
                         });
-                        if already_has_relevant {
-                            // Already picked a branch — skip
-                        } else {
+                        if !already {
                             let mut found = false;
                             for &child_lit in child_lits {
                                 if self.lit_is_true(child_lit, assignments) {
@@ -401,10 +419,10 @@ impl RelevancyState {
                                 }
                             }
                             if !found {
-                                // Install watches: when a child becomes true, mark it relevant.
-                                // Use idx (the Or node) as target so we re-check and pick only one.
+                                // Install conditional watches: when a child becomes true,
+                                // re-evaluate this Or (guard will pick only one).
                                 for &child_lit in child_lits {
-                                    self.install_true_watch(child_lit, idx as i32);
+                                    self.install_cond_true_watch(child_lit, idx);
                                 }
                             }
                         }
@@ -427,18 +445,25 @@ impl RelevancyState {
                         }
                     }
                     Some(false) => {
-                        // AND false: one false child relevant
-                        let mut found = false;
-                        for &child_lit in child_lits {
-                            if self.lit_is_false(child_lit, assignments) {
-                                self.mark_relevant(child_lit, level);
-                                found = true;
-                                break;
-                            }
-                        }
-                        if !found {
+                        // AND false: one false child relevant (single-branch).
+                        let already = child_lits.iter().any(|&cl| {
+                            let ci = cl.unsigned_abs() as usize;
+                            ci < self.relevant.len() && self.relevant[ci]
+                        });
+                        if !already {
+                            let mut found = false;
                             for &child_lit in child_lits {
-                                self.install_false_watch(child_lit, child_lit);
+                                if self.lit_is_false(child_lit, assignments) {
+                                    self.mark_relevant(child_lit, level);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                // Conditional watches: when a child becomes false, re-evaluate.
+                                for &child_lit in child_lits {
+                                    self.install_cond_false_watch(child_lit, idx);
+                                }
                             }
                         }
                     }
@@ -517,6 +542,28 @@ impl RelevancyState {
             self.watches_on_false[idx].push(target);
         } else {
             self.watches_on_true[idx].push(target);
+        }
+    }
+
+    /// Conditional watch: when `watched_lit` becomes true, re-evaluate node at `node_idx`.
+    fn install_cond_true_watch(&mut self, watched_lit: i32, node_idx: usize) {
+        self.ensure_capacity(watched_lit);
+        let idx = watched_lit.unsigned_abs() as usize;
+        if watched_lit > 0 {
+            self.cond_watches_on_true[idx].push(node_idx);
+        } else {
+            self.cond_watches_on_false[idx].push(node_idx);
+        }
+    }
+
+    /// Conditional watch: when `watched_lit` becomes false, re-evaluate node at `node_idx`.
+    fn install_cond_false_watch(&mut self, watched_lit: i32, node_idx: usize) {
+        self.ensure_capacity(watched_lit);
+        let idx = watched_lit.unsigned_abs() as usize;
+        if watched_lit > 0 {
+            self.cond_watches_on_false[idx].push(node_idx);
+        } else {
+            self.cond_watches_on_true[idx].push(node_idx);
         }
     }
 
