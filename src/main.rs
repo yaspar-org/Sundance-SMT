@@ -90,6 +90,7 @@ fn main() -> Result<(), String> {
         args.ddsmt,
         args.eager_skolem,
         args.infer_triggers,
+        args.relevancy,
     );
 
     solver_state.register_bool_constants(&true_term, &false_term);

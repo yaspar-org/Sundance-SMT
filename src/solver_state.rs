@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
-    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization, Repr,
-    Term, TermAllocator,
+    ATerm, Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization,
+    Repr, Term, TermAllocator,
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -24,6 +24,7 @@ use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
 use crate::proof::Theory;
+use crate::relevancy::RelevancyState;
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
@@ -166,6 +167,8 @@ pub struct SolverState {
     pub stat_dt_constructor_ax: u64,
     /// Number of datatype case splits (deferred tester clauses)
     pub stat_dt_splits: u64,
+    /// Relevancy propagation state — gates theory solver work.
+    pub relevancy: RelevancyState,
 }
 
 impl SolverState {
@@ -177,6 +180,7 @@ impl SolverState {
         ddsmt: bool,
         eager_skolem: bool,
         infer_triggers: bool,
+        relevancy: bool
     ) -> Self {
         let egraph = Egraph::new();
         let datatype_info = DatatypeInfo::from_context(&context);
@@ -208,6 +212,7 @@ impl SolverState {
             stat_dt_accessor_ax: 0,
             stat_dt_constructor_ax: 0,
             stat_dt_splits: 0,
+            relevancy: RelevancyState::new(relevancy)
         }
     }
 
@@ -215,6 +220,271 @@ impl SolverState {
         CNFEnv {
             context: &mut self.context,
             cache: &mut self.cnf_cache,
+        }
+    }
+
+    pub fn relevancy_ensure_known(&mut self, lit: i32, level: usize, assignments: &[i32]) {
+        if !self.relevancy.is_enabled() {
+            return;
+        }
+        self.relevancy.ensure_capacity(lit);
+        let idx = lit.unsigned_abs() as usize;
+        if self.relevancy.node_kinds[idx].is_some() {
+            return;
+        }
+        let kind = if let Some(&uid) = self.cnf_cache.var_map_reverse.get(&(lit.abs())) {
+            if let Some(TermOption::Some(term)) = self.terms_list.get(uid as usize) {
+                let term = term.clone();
+                self.relevancy_classify_term(&term)
+            } else {
+                crate::relevancy::NodeKind::Atom(vec![])
+            }
+        } else {
+            crate::relevancy::NodeKind::Atom(vec![])
+        };
+        self.relevancy.node_kinds[idx] = Some(kind);
+        self.relevancy.mark_relevant(lit, level);
+        self.relevancy.propagate(level, assignments);
+    }
+
+    pub fn relevancy_classify_term(&self, term: &Term) -> crate::relevancy::NodeKind {
+        use crate::relevancy::NodeKind;
+        match term.repr() {
+            ATerm::Or(children) => {
+                let child_lits: Vec<i32> = children
+                    .iter()
+                    .filter_map(|c| self.relevancy_lit_for_term(c))
+                    .collect();
+                if child_lits.is_empty() {
+                    NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                } else {
+                    NodeKind::Or(child_lits)
+                }
+            }
+            ATerm::And(children) => {
+                let child_lits: Vec<i32> = children
+                    .iter()
+                    .filter_map(|c| self.relevancy_lit_for_term(c))
+                    .collect();
+                if child_lits.is_empty() {
+                    NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                } else {
+                    NodeKind::And(child_lits)
+                }
+            }
+            ATerm::Not(child) => {
+                if self.cnf_cache.var_map.get(&child.uid()).is_some() {
+                    return self.relevancy_classify_term(child);
+                }
+                NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+            }
+            ATerm::Eq(a, b) => {
+                let a_lit = self.cnf_cache.var_map.get(&a.uid()).copied();
+                let b_lit = self.cnf_cache.var_map.get(&b.uid()).copied();
+                if let (Some(al), Some(bl)) = (a_lit, b_lit) {
+                    NodeKind::Iff(al, bl)
+                } else {
+                    NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                }
+            }
+            ATerm::Ite(c, t, e) => {
+                let c_lit = self.cnf_cache.var_map.get(&c.uid()).copied();
+                let t_lit = self.cnf_cache.var_map.get(&t.uid()).copied();
+                let e_lit = self.cnf_cache.var_map.get(&e.uid()).copied();
+                if let (Some(cl), Some(tl), Some(el)) = (c_lit, t_lit, e_lit) {
+                    NodeKind::Ite { cond: cl, then_lit: tl, else_lit: el }
+                } else {
+                    NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                }
+            }
+            _ => NodeKind::Atom(self.relevancy_collect_subterm_lits(term)),
+        }
+    }
+
+    pub fn relevancy_lit_for_term(&self, term: &Term) -> Option<i32> {
+        let uid = term.uid();
+        if let Some(&lit) = self.cnf_cache.var_map.get(&uid) {
+            return Some(lit);
+        }
+        if let Some(nnf_entry) = self.cnf_cache.nnf_cache.get(&uid) {
+            if let Some(ref nnf_term) = nnf_entry[1] {
+                if let Some(&lit) = self.cnf_cache.var_map.get(&nnf_term.uid()) {
+                    return Some(lit);
+                }
+            }
+        }
+        None
+    }
+
+    fn relevancy_collect_subterm_lits(&self, term: &Term) -> Vec<i32> {
+        let mut lits = Vec::new();
+        let mut stack: Vec<&Term> = Vec::new();
+        match term.repr() {
+            ATerm::App(_, args, _) => {
+                for arg in args { stack.push(arg); }
+            }
+            ATerm::Not(child) => stack.push(child),
+            ATerm::Or(children) | ATerm::And(children) => {
+                for c in children { stack.push(c); }
+            }
+            ATerm::Eq(a, b) => { stack.push(a); stack.push(b); }
+            ATerm::Ite(c, t, e) => { stack.push(c); stack.push(t); stack.push(e); }
+            _ => {}
+        }
+        let mut visited = std::collections::HashSet::new();
+        while let Some(t) = stack.pop() {
+            let uid = t.uid();
+            if !visited.insert(uid) { continue; }
+            if let Some(lit) = self.relevancy_lit_for_term(t) {
+                lits.push(lit);
+                continue;
+            }
+            match t.repr() {
+                ATerm::App(_, args, _) => {
+                    for arg in args { stack.push(arg); }
+                }
+                ATerm::Not(child) => stack.push(child),
+                ATerm::Or(children) | ATerm::And(children) => {
+                    for c in children { stack.push(c); }
+                }
+                ATerm::Eq(a, b) => { stack.push(a); stack.push(b); }
+                ATerm::Ite(c, t, e) => { stack.push(c); stack.push(t); stack.push(e); }
+                _ => {}
+            }
+        }
+        lits
+    }
+
+    pub fn relevancy_initialize_from_assertions(&mut self) {
+        if !self.relevancy.is_enabled() {
+            return;
+        }
+        let assertions = self.pre_nnf_assertions.clone();
+        let mut visited = std::collections::HashSet::new();
+        for assertion in &assertions {
+            self.relevancy_classify_recursive(assertion, &mut visited);
+        }
+    }
+
+    fn relevancy_classify_recursive(
+        &mut self,
+        term: &Term,
+        visited: &mut std::collections::HashSet<u64>,
+    ) {
+        let uid = term.uid();
+        if !visited.insert(uid) {
+            return;
+        }
+        let lit = match self.relevancy_lit_for_term(term) {
+            Some(l) => l,
+            None => return,
+        };
+        let idx = lit.unsigned_abs() as usize;
+        self.relevancy.ensure_capacity(lit);
+        if self.relevancy.node_kinds[idx].is_some() {
+            return;
+        }
+
+        let kind = match term.repr() {
+            ATerm::Eq(a, b) => {
+                if self.cnf_cache.var_map.contains_key(&uid) {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                } else {
+                    let a_lit = self.relevancy_lit_for_term(a);
+                    let b_lit = self.relevancy_lit_for_term(b);
+                    if let (Some(al), Some(bl)) = (a_lit, b_lit) {
+                        self.relevancy_classify_recursive(a, visited);
+                        self.relevancy_classify_recursive(b, visited);
+                        crate::relevancy::NodeKind::Iff(al, bl)
+                    } else {
+                        crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                    }
+                }
+            }
+            ATerm::Or(children) => {
+                let child_lits: Vec<i32> = children
+                    .iter()
+                    .filter_map(|c| self.relevancy_lit_for_term(c))
+                    .collect();
+                if child_lits.is_empty() {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                } else {
+                    for c in children {
+                        self.relevancy_classify_recursive(c, visited);
+                    }
+                    crate::relevancy::NodeKind::Or(child_lits)
+                }
+            }
+            ATerm::And(children) => {
+                let child_lits: Vec<i32> = children
+                    .iter()
+                    .filter_map(|c| self.relevancy_lit_for_term(c))
+                    .collect();
+                if child_lits.is_empty() {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                } else {
+                    for c in children {
+                        self.relevancy_classify_recursive(c, visited);
+                    }
+                    crate::relevancy::NodeKind::And(child_lits)
+                }
+            }
+            ATerm::Not(child) => {
+                self.relevancy_classify_recursive(child, visited);
+                return;
+            }
+            ATerm::Ite(c, t, e) => {
+                let c_lit = self.relevancy_lit_for_term(c);
+                let t_lit = self.relevancy_lit_for_term(t);
+                let e_lit = self.relevancy_lit_for_term(e);
+                if let (Some(cl), Some(tl), Some(el)) = (c_lit, t_lit, e_lit) {
+                    self.relevancy_classify_recursive(c, visited);
+                    self.relevancy_classify_recursive(t, visited);
+                    self.relevancy_classify_recursive(e, visited);
+                    crate::relevancy::NodeKind::Ite { cond: cl, then_lit: tl, else_lit: el }
+                } else {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                }
+            }
+            _ => crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term)),
+        };
+
+        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            use crate::relevancy::NodeKind;
+            let kind_name = match &kind {
+                NodeKind::Or(c) => format!("Or({})", c.len()),
+                NodeKind::And(c) => format!("And({})", c.len()),
+                NodeKind::Not(c) => format!("Not({})", c),
+                NodeKind::Iff(a, b) => format!("Iff({},{})", a, b),
+                NodeKind::Ite { cond, .. } => format!("Ite(cond={})", cond),
+                NodeKind::Atom(s) => format!("Atom(subs={:?})", s),
+            };
+            eprintln!("[relevancy] lit={} kind={} term={}", lit, kind_name, term);
+        }
+        self.relevancy.node_kinds[idx] = Some(kind);
+    }
+
+    pub fn relevancy_initialize_structure(&mut self) {
+        if !self.relevancy.is_enabled() {
+            return;
+        }
+        let entries: Vec<(u64, i32)> = self.cnf_cache.var_map.iter()
+            .map(|(&uid, &lit)| (uid, lit)).collect();
+        for (uid, lit) in entries {
+            let abs_lit = lit.unsigned_abs() as usize;
+            self.relevancy.ensure_capacity(lit);
+            if self.relevancy.node_kinds[abs_lit].is_some() {
+                continue;
+            }
+            let term = match self.terms_list.get(uid as usize) {
+                Some(TermOption::Some(t)) => t.clone(),
+                _ => continue,
+            };
+            if matches!(term.repr(), ATerm::Not(child) if self.cnf_cache.var_map.get(&child.uid()).is_some()) {
+                continue;
+            }
+            let kind = self.relevancy_classify_term(&term);
+            self.relevancy.node_kinds[abs_lit] = Some(kind);
         }
     }
 

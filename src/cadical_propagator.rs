@@ -195,8 +195,7 @@ pub struct CustomExternalPropagator<'a> {
     pub next_is_decision: bool,
     /// Flag: next cb_decide should force_backtrack(0) to trigger epoch transition.
     pub qi_gc_force_backtrack: bool,
-    /// Relevancy propagation state — gates theory solver work.
-    pub relevancy: RelevancyState,
+
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -363,9 +362,9 @@ impl<'a> CustomExternalPropagator<'a> {
                 .map(|c| c.into_iter().collect())
                 .collect();
 
-            if self.relevancy.is_enabled() {
+            if self.solver_state.relevancy.is_enabled() {
                 let or_lit = *self.solver_state.cnf_cache.var_map.get(&or_term.uid()).unwrap();
-                self.relevancy.ensure_known(or_lit, self.solver_state, self.decision_level, &self.assignments);
+                self.solver_state.relevancy_ensure_known(or_lit, self.decision_level, &self.assignments);
             }
 
             self.sync_new_vars();
@@ -414,9 +413,9 @@ impl<'a> CustomExternalPropagator<'a> {
             for clause in clauses {
                 // Register top-level clause literals as relevant roots for
                 // the relevancy filter (they're new theory assertions).
-                if self.relevancy.is_enabled() {
+                if self.solver_state.relevancy.is_enabled() {
                     for &lit in clause.iter() {
-                        self.relevancy.ensure_known(lit, self.solver_state, self.decision_level, &self.assignments);
+                        self.solver_state.relevancy_ensure_known(lit, self.decision_level, &self.assignments);
                     }
                 }
 
@@ -653,7 +652,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             // Relevancy filter: always propagate relevancy (even for fixed literals)
             // so structural propagation fires. Skip irrelevant non-fixed literals.
-            let is_relevant = self.relevancy.notify_assignment(
+            let is_relevant = self.solver_state.relevancy.notify_assignment(
                 *lit,
                 self.decision_level,
                 &self.assignments,
@@ -768,7 +767,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // Second pass: process lits that were skipped as irrelevant but
         // became relevant during this batch (due to batch ordering).
         for &lit in skipped_lits.iter() {
-            if self.relevancy.is_relevant(lit) {
+            if self.solver_state.relevancy.is_relevant(lit) {
                 qi_gc_trace!("second pass: processing now-relevant lit={}", lit);
                 self.add_lit_to_proof_tracer(lit);
                 let constraints_opt =
@@ -829,7 +828,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
 
         // Undo relevancy marks above this level
-        self.relevancy.backtrack_to(level);
+        self.solver_state.relevancy.backtrack_to(level);
 
         // Reset solver-level assignments
         for i in 1..self.assignments.len() {

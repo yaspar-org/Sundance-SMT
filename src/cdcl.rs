@@ -119,20 +119,18 @@ pub fn cdcl_decision_procedure(
         solver.connect_learner(learner);
     }
 
-    // Relevancy filtering: initialize from the pre-NNF formula structure
-    // (preserves Eq/Iff, ITE that NNF destroys), then fill in remaining
-    // terms from var_map (datatype preprocessing creates NNF-only terms).
-    let mut relevancy_state = RelevancyState::new(relevancy);
+    // Relevancy filtering: initialize from pre-NNF assertions then fill in
+    // remaining terms from var_map (datatype preprocessing creates NNF-only terms).
     if relevancy {
-        relevancy_state.initialize_from_assertions(solver_state);
-        relevancy_state.initialize_structure(solver_state);
+        solver_state.relevancy_initialize_from_assertions();
+        solver_state.relevancy_initialize_structure();
         let root_lits: Vec<i32> = clauses
             .iter()
             .chain(boolean_dt_constraints.iter())
             .filter(|c| c.len() == 1)
             .map(|c| c[0])
             .collect();
-        relevancy_state.mark_roots_relevant(&root_lits);
+        solver_state.relevancy.mark_roots_relevant(&root_lits);
     }
 
     let mut propagator = CustomExternalPropagator {
@@ -168,7 +166,6 @@ pub fn cdcl_decision_procedure(
         draining_forgettable: false,
         next_is_decision: false,
         qi_gc_force_backtrack: false,
-        relevancy: relevancy_state,
     };
 
     solver.connect_external_propagator(&mut propagator);
