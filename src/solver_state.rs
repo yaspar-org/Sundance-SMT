@@ -156,6 +156,9 @@ pub struct SolverState {
     /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
     pub base_case_tester_lits: Vec<i32>,
 
+    /// Pre-NNF assertion terms for relevancy (preserves Eq/Iff/ITE structure).
+    pub pre_nnf_assertions: Vec<Term>,
+
     // --- Stats counters (harvested into SolverStats at end of solve) ---
     /// Number of datatype accessor axioms generated (selector projection axioms)
     pub stat_dt_accessor_ax: u64,
@@ -201,6 +204,7 @@ impl SolverState {
             infer_triggers,
             egraph,
             base_case_tester_lits: vec![],
+            pre_nnf_assertions: vec![],
             stat_dt_accessor_ax: 0,
             stat_dt_constructor_ax: 0,
             stat_dt_splits: 0,

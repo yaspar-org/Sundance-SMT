@@ -665,6 +665,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
 
             if !is_relevant {
+                if QI_GC_TRACE.load(Ordering::Relaxed) {
+                    if self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
+                        eprintln!(
+                            "[qi-gc] SKIPPED irrelevant lit={} term={}",
+                            lit, self.solver_state.get_term_from_lit(*lit)
+                        );
+                    }
+                }
                 skipped_lits.push(*lit);
                 continue;
             }

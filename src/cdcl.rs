@@ -119,10 +119,12 @@ pub fn cdcl_decision_procedure(
         solver.connect_learner(learner);
     }
 
-    // Relevancy filtering: initialize from the original formula structure.
-    // Both user assertions and datatype constraints are roots.
+    // Relevancy filtering: initialize from the pre-NNF formula structure
+    // (preserves Eq/Iff, ITE that NNF destroys), then fill in remaining
+    // terms from var_map (datatype preprocessing creates NNF-only terms).
     let mut relevancy_state = RelevancyState::new(relevancy);
     if relevancy {
+        relevancy_state.initialize_from_assertions(solver_state);
         relevancy_state.initialize_structure(solver_state);
         let root_lits: Vec<i32> = clauses
             .iter()
