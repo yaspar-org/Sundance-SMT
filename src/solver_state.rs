@@ -24,7 +24,7 @@ use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
 use crate::proof::Theory;
-use crate::relevancy::RelevancyState;
+use crate::relevancy::{NodeKind, RelevancyState};
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
@@ -227,9 +227,7 @@ impl SolverState {
         if !self.relevancy.is_enabled() {
             return;
         }
-        self.relevancy.ensure_capacity(lit);
-        let idx = lit.unsigned_abs() as usize;
-        if self.relevancy.node_kinds[idx].is_some() {
+        if self.relevancy.has_node(lit) {
             return;
         }
         let kind = if let Some(&uid) = self.cnf_cache.var_map_reverse.get(&(lit.abs())) {
@@ -242,12 +240,12 @@ impl SolverState {
         } else {
             crate::relevancy::NodeKind::Atom(vec![])
         };
-        self.relevancy.node_kinds[idx] = Some(kind);
+        self.relevancy.register_node(lit, kind);
         self.relevancy.mark_relevant(lit, level);
         self.relevancy.propagate(level, assignments);
     }
 
-    pub fn relevancy_classify_term(&self, term: &Term) -> crate::relevancy::NodeKind {
+    pub(crate) fn relevancy_classify_term(&self, term: &Term) -> NodeKind {
         use crate::relevancy::NodeKind;
         match term.repr() {
             ATerm::Or(children) => {
@@ -379,9 +377,7 @@ impl SolverState {
             Some(l) => l,
             None => return,
         };
-        let idx = lit.unsigned_abs() as usize;
-        self.relevancy.ensure_capacity(lit);
-        if self.relevancy.node_kinds[idx].is_some() {
+        if self.relevancy.has_node(lit) {
             return;
         }
 
@@ -461,7 +457,7 @@ impl SolverState {
             };
             eprintln!("[relevancy] lit={} kind={} term={}", lit, kind_name, term);
         }
-        self.relevancy.node_kinds[idx] = Some(kind);
+        self.relevancy.register_node(lit, kind);
     }
 
     pub fn relevancy_initialize_structure(&mut self) {
@@ -471,9 +467,7 @@ impl SolverState {
         let entries: Vec<(u64, i32)> = self.cnf_cache.var_map.iter()
             .map(|(&uid, &lit)| (uid, lit)).collect();
         for (uid, lit) in entries {
-            let abs_lit = lit.unsigned_abs() as usize;
-            self.relevancy.ensure_capacity(lit);
-            if self.relevancy.node_kinds[abs_lit].is_some() {
+            if self.relevancy.has_node(lit) {
                 continue;
             }
             let term = match self.terms_list.get(uid as usize) {
@@ -484,7 +478,7 @@ impl SolverState {
                 continue;
             }
             let kind = self.relevancy_classify_term(&term);
-            self.relevancy.node_kinds[abs_lit] = Some(kind);
+            self.relevancy.register_node(lit, kind);
         }
     }
 

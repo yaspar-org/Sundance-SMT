@@ -21,7 +21,7 @@ pub(crate) enum NodeKind {
 }
 
 pub struct RelevancyState {
-    pub(crate) node_kinds: Vec<Option<NodeKind>>,
+    node_kinds: Vec<Option<NodeKind>>,
     relevant: Vec<bool>,
     branch_chosen: Vec<bool>,
     watches_on_true: Vec<Vec<i32>>,
@@ -55,7 +55,7 @@ impl RelevancyState {
         self.enabled
     }
 
-    pub(crate) fn ensure_capacity(&mut self, lit: i32) {
+    fn ensure_capacity(&mut self, lit: i32) {
         let idx = lit.unsigned_abs() as usize;
         if idx >= self.relevant.len() {
             let new_len = (idx + 1).max(self.relevant.len() * 2).max(64);
@@ -67,6 +67,11 @@ impl RelevancyState {
             self.cond_watches_on_false.resize_with(new_len, Vec::new);
             self.node_kinds.resize_with(new_len, || None);
         }
+    }
+
+    pub(crate) fn has_node(&self, lit: i32) -> bool {
+        let idx = lit.unsigned_abs() as usize;
+        idx < self.node_kinds.len() && self.node_kinds[idx].is_some()
     }
 
     pub(crate) fn register_node(&mut self, lit: i32, kind: NodeKind) {
