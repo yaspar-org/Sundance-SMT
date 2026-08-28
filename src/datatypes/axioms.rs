@@ -248,6 +248,10 @@ pub fn learn_exactly_one_tester_clause(
     let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
 
+    if let Some(&or_lit) = solver_state.cnf_cache.var_map.get(&tester_or.uid()) {
+        solver_state.relevancy_ensure_known(or_lit, 0);
+    }
+
     for uid in base_case_uids {
         if let Some(&lit) = solver_state.cnf_cache.var_map.get(&uid) {
             solver_state.base_case_tester_lits.push(lit);
@@ -364,6 +368,11 @@ pub fn learn_ctor_selector_clauses(
     let imp_cnf = imp.cnf_tseitin(solver_state);
     let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
     vector.extend(clauses);
+
+    if let Some(&imp_lit) = solver_state.cnf_cache.var_map.get(&imp_nnf.uid()) {
+        solver_state.relevancy_ensure_known(imp_lit, 0);
+    }
+
     vector
 }
 
@@ -393,11 +402,13 @@ fn learn_tester_for_ctor_app(
     );
     let tester_nnf = tester_app.nnf(solver_state);
     solver_state.insert_predecessor(&tester_nnf, None, None, from_quantifier);
-    tester_nnf
-        .cnf_tseitin(solver_state)
-        .into_iter()
-        .map(|x| x.0)
-        .collect()
+    let cnf = tester_nnf.cnf_tseitin(solver_state);
+
+    if let Some(&lit) = solver_state.cnf_cache.var_map.get(&tester_nnf.uid()) {
+        solver_state.relevancy_ensure_known(lit, 0);
+    }
+
+    cnf.into_iter().map(|x| x.0).collect()
 }
 
 /// We are learning the clause /\_i=1^k f_i(f(t1, ... tk)) = t_i
@@ -432,6 +443,11 @@ fn learn_selector_ctor_clause(
         let sel_eq_nnf = sel_eq.nnf(solver_state);
         solver_state.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier);
         let sel_eq_cnf = sel_eq.cnf_tseitin(solver_state);
+
+        if let Some(&lit) = solver_state.cnf_cache.var_map.get(&sel_eq_nnf.uid()) {
+            solver_state.relevancy_ensure_known(lit, 0);
+        }
+
         let clauses = sel_eq_cnf.into_iter().map(|c| c.0);
         vector.extend(clauses)
     }
@@ -455,6 +471,11 @@ pub fn learn_or_not_term_tester_term(
         .into_iter()
         .map(|x| x.0)
         .collect();
+
+    if let Some(&or_lit) = solver_state.cnf_cache.var_map.get(&or_not_tester_not_term.uid()) {
+        solver_state.relevancy_ensure_known(or_lit, 0);
+    }
+
     debug_println!(25, 10, "(assert {})", or_not_tester_not_term,);
     debug_println!(12, 2, "This gives us {:?}", tester_cnf);
     tester_cnf
