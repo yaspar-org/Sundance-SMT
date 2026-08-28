@@ -20,6 +20,17 @@ pub(crate) enum NodeKind {
     Atom(Vec<i32>),
 }
 
+pub trait RelevancyTrait {
+    fn is_enabled(&self) -> bool;
+    fn has_node(&self, lit: i32) -> bool;
+    fn register_node(&mut self, lit: i32, kind: NodeKind);
+    fn mark_relevant_root(&mut self, lit: i32, level: usize, assignments: &[i32]);
+    fn mark_relevant_roots(&mut self, root_lits: &[i32], level: usize, assignments: &[i32]);
+    fn is_relevant(&self, lit: i32) -> bool;
+    fn notify_assignment(&mut self, lit: i32, level: usize, assignments: &[i32]) -> bool;
+    fn backtrack_to(&mut self, level: usize);
+}
+
 pub struct RelevancyState {
     node_kinds: Vec<Option<NodeKind>>,
     relevant: Vec<bool>,
@@ -51,8 +62,23 @@ impl RelevancyState {
         }
     }
 
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
+    fn mark_relevant(&mut self, lit: i32, level: usize) -> bool {
+        self.ensure_capacity(lit);
+        let idx = lit.unsigned_abs() as usize;
+        if self.relevant[idx] {
+            return false;
+        }
+        self.relevant[idx] = true;
+        self.trail.push((level, lit));
+        self.queue.push_back(lit);
+        true
+    }
+
+    fn propagate(&mut self, level: usize, assignments: &[i32]) {
+        while let Some(lit) = self.queue.pop_front() {
+            let idx = lit.unsigned_abs() as usize;
+            self.propagate_node(idx, level, assignments);
+        }
     }
 
     fn ensure_capacity(&mut self, lit: i32) {
@@ -66,93 +92,6 @@ impl RelevancyState {
             self.cond_watches_on_true.resize_with(new_len, Vec::new);
             self.cond_watches_on_false.resize_with(new_len, Vec::new);
             self.node_kinds.resize_with(new_len, || None);
-        }
-    }
-
-    pub(crate) fn has_node(&self, lit: i32) -> bool {
-        let idx = lit.unsigned_abs() as usize;
-        idx < self.node_kinds.len() && self.node_kinds[idx].is_some()
-    }
-
-    pub(crate) fn register_node(&mut self, lit: i32, kind: NodeKind) {
-        self.ensure_capacity(lit);
-        let idx = lit.unsigned_abs() as usize;
-        if self.node_kinds[idx].is_none() {
-            self.node_kinds[idx] = Some(kind);
-        }
-    }
-
-    pub fn is_relevant(&self, lit: i32) -> bool {
-        if !self.enabled {
-            return true;
-        }
-        let idx = lit.unsigned_abs() as usize;
-        if idx >= self.relevant.len() {
-            return false;
-        }
-        self.relevant[idx]
-    }
-
-    pub(crate) fn mark_relevant(&mut self, lit: i32, level: usize) -> bool {
-        self.ensure_capacity(lit);
-        let idx = lit.unsigned_abs() as usize;
-        if self.relevant[idx] {
-            return false;
-        }
-        self.relevant[idx] = true;
-        self.trail.push((level, lit));
-        self.queue.push_back(lit);
-        true
-    }
-
-    pub fn mark_roots_relevant(&mut self, root_lits: &[i32]) {
-        if !self.enabled {
-            return;
-        }
-        for &lit in root_lits {
-            self.mark_relevant(lit, 0);
-        }
-        self.propagate(0, &[]);
-    }
-
-    pub fn notify_assignment(&mut self, lit: i32, level: usize, assignments: &[i32]) -> bool {
-        if !self.enabled {
-            return true;
-        }
-        self.ensure_capacity(lit);
-        let idx = lit.unsigned_abs() as usize;
-
-        let positive = lit > 0;
-        let targets: Vec<i32> = if positive {
-            self.watches_on_true[idx].clone()
-        } else {
-            self.watches_on_false[idx].clone()
-        };
-        for target_lit in targets {
-            self.mark_relevant(target_lit, level);
-        }
-
-        let cond_targets: Vec<usize> = if positive {
-            self.cond_watches_on_true[idx].clone()
-        } else {
-            self.cond_watches_on_false[idx].clone()
-        };
-        for node_idx in cond_targets {
-            self.queue.push_back(node_idx as i32);
-        }
-
-        if self.relevant[idx] {
-            self.propagate_node(idx, level, assignments);
-        }
-
-        self.propagate(level, assignments);
-        self.relevant[idx]
-    }
-
-    pub(crate) fn propagate(&mut self, level: usize, assignments: &[i32]) {
-        while let Some(lit) = self.queue.pop_front() {
-            let idx = lit.unsigned_abs() as usize;
-            self.propagate_node(idx, level, assignments);
         }
     }
 
@@ -332,8 +271,87 @@ impl RelevancyState {
         if val == 0 { return false; }
         (val > 0) != (lit > 0)
     }
+}
 
-    pub fn backtrack_to(&mut self, level: usize) {
+impl RelevancyTrait for RelevancyState {
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn has_node(&self, lit: i32) -> bool {
+        let idx = lit.unsigned_abs() as usize;
+        idx < self.node_kinds.len() && self.node_kinds[idx].is_some()
+    }
+
+    fn register_node(&mut self, lit: i32, kind: NodeKind) {
+        self.ensure_capacity(lit);
+        let idx = lit.unsigned_abs() as usize;
+        if self.node_kinds[idx].is_none() {
+            self.node_kinds[idx] = Some(kind);
+        }
+    }
+
+    fn mark_relevant_root(&mut self, lit: i32, level: usize, assignments: &[i32]) {
+        self.mark_relevant(lit, level);
+        self.propagate(level, assignments);
+    }
+
+    fn mark_relevant_roots(&mut self, root_lits: &[i32], level: usize, assignments: &[i32]) {
+        if !self.enabled {
+            return;
+        }
+        for &lit in root_lits {
+            self.mark_relevant(lit, level);
+        }
+        self.propagate(level, assignments);
+    }
+
+    fn is_relevant(&self, lit: i32) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        let idx = lit.unsigned_abs() as usize;
+        if idx >= self.relevant.len() {
+            return false;
+        }
+        self.relevant[idx]
+    }
+
+    fn notify_assignment(&mut self, lit: i32, level: usize, assignments: &[i32]) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        self.ensure_capacity(lit);
+        let idx = lit.unsigned_abs() as usize;
+
+        let positive = lit > 0;
+        let targets: Vec<i32> = if positive {
+            self.watches_on_true[idx].clone()
+        } else {
+            self.watches_on_false[idx].clone()
+        };
+        for target_lit in targets {
+            self.mark_relevant(target_lit, level);
+        }
+
+        let cond_targets: Vec<usize> = if positive {
+            self.cond_watches_on_true[idx].clone()
+        } else {
+            self.cond_watches_on_false[idx].clone()
+        };
+        for node_idx in cond_targets {
+            self.queue.push_back(node_idx as i32);
+        }
+
+        if self.relevant[idx] {
+            self.propagate_node(idx, level, assignments);
+        }
+
+        self.propagate(level, assignments);
+        self.relevant[idx]
+    }
+
+    fn backtrack_to(&mut self, level: usize) {
         if !self.enabled {
             return;
         }

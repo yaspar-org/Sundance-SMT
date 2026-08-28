@@ -6,9 +6,9 @@ use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::{
     CustomExternalPropagator, EagerQiMode, QiGcLearner, QiGcState, init_qi_gc_trace,
 };
-use crate::relevancy::RelevancyState;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
+use crate::relevancy::RelevancyTrait;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
@@ -130,7 +130,7 @@ pub fn cdcl_decision_procedure(
             .filter(|c| c.len() == 1)
             .map(|c| c[0])
             .collect();
-        solver_state.relevancy.mark_roots_relevant(&root_lits);
+        solver_state.relevancy.mark_relevant_roots(&root_lits, 0, &[]);
     }
 
     let mut propagator = CustomExternalPropagator {

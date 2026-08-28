@@ -14,10 +14,10 @@ use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemiz
 use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
-use crate::relevancy::RelevancyState;
 use crate::solver_state::{SolverState, process_assignment};
 use crate::cnf::CNFConversion;
-use yaspar_ir::ast::{ObjectAllocatorExt, TermAllocator};
+use crate::relevancy::RelevancyTrait;
+use yaspar_ir::ast::TermAllocator;
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator, Learner};

@@ -24,7 +24,7 @@ use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
 use crate::proof::Theory;
-use crate::relevancy::{NodeKind, RelevancyState};
+use crate::relevancy::{NodeKind, RelevancyState, RelevancyTrait};
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
@@ -241,8 +241,7 @@ impl SolverState {
             crate::relevancy::NodeKind::Atom(vec![])
         };
         self.relevancy.register_node(lit, kind);
-        self.relevancy.mark_relevant(lit, level);
-        self.relevancy.propagate(level, assignments);
+        self.relevancy.mark_relevant_root(lit, level, assignments);
     }
 
     pub(crate) fn relevancy_classify_term(&self, term: &Term) -> NodeKind {
