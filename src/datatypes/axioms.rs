@@ -248,9 +248,7 @@ pub fn learn_exactly_one_tester_clause(
     let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
 
-    if let Some(&or_lit) = solver_state.cnf_cache.var_map.get(&tester_or.uid()) {
-        solver_state.relevancy_ensure_known(or_lit, 0);
-    }
+    solver_state.relevancy_register_term(&tester_or, 0);
 
     for uid in base_case_uids {
         if let Some(&lit) = solver_state.cnf_cache.var_map.get(&uid) {
@@ -369,9 +367,7 @@ pub fn learn_ctor_selector_clauses(
     let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
     vector.extend(clauses);
 
-    if let Some(&imp_lit) = solver_state.cnf_cache.var_map.get(&imp_nnf.uid()) {
-        solver_state.relevancy_ensure_known(imp_lit, 0);
-    }
+    solver_state.relevancy_register_term(&imp, 0);
 
     vector
 }
@@ -404,9 +400,7 @@ fn learn_tester_for_ctor_app(
     solver_state.insert_predecessor(&tester_nnf, None, None, from_quantifier);
     let cnf = tester_nnf.cnf_tseitin(solver_state);
 
-    if let Some(&lit) = solver_state.cnf_cache.var_map.get(&tester_nnf.uid()) {
-        solver_state.relevancy_ensure_known(lit, 0);
-    }
+    solver_state.relevancy_register_term(&tester_app, 0);
 
     cnf.into_iter().map(|x| x.0).collect()
 }
@@ -444,9 +438,7 @@ fn learn_selector_ctor_clause(
         solver_state.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier);
         let sel_eq_cnf = sel_eq.cnf_tseitin(solver_state);
 
-        if let Some(&lit) = solver_state.cnf_cache.var_map.get(&sel_eq_nnf.uid()) {
-            solver_state.relevancy_ensure_known(lit, 0);
-        }
+        solver_state.relevancy_register_term(&sel_eq, 0);
 
         let clauses = sel_eq_cnf.into_iter().map(|c| c.0);
         vector.extend(clauses)
@@ -472,9 +464,7 @@ pub fn learn_or_not_term_tester_term(
         .map(|x| x.0)
         .collect();
 
-    if let Some(&or_lit) = solver_state.cnf_cache.var_map.get(&or_not_tester_not_term.uid()) {
-        solver_state.relevancy_ensure_known(or_lit, 0);
-    }
+    solver_state.relevancy_register_term(&or_not_tester_not_term, 0);
 
     debug_println!(25, 10, "(assert {})", or_not_tester_not_term,);
     debug_println!(12, 2, "This gives us {:?}", tester_cnf);

@@ -92,6 +92,7 @@ pub fn cdcl_decision_procedure(
     // --- QI Garbage Collection setup ---
     // Only active with lazy QI (eager_qi == 0) and when qi_gc is enabled.
     init_qi_gc_trace();
+    crate::relevancy::init_relevancy_trace();
     let qi_gc_active = qi_gc && eager_qi == 0;
     let qi_gc_state: Option<Rc<RefCell<QiGcState>>> = if qi_gc_active {
         let act_var = solver_state.cnf_cache.next_var;

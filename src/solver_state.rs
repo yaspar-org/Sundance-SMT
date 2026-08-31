@@ -223,25 +223,22 @@ impl SolverState {
         }
     }
 
-    pub fn relevancy_ensure_known(&mut self, lit: i32, level: usize) {
+    /// Register a pre-NNF term with relevancy: recursively classifies the term
+    /// and all sub-terms, then marks the root as relevant.
+    pub fn relevancy_register_term(&mut self, term: &Term, level: usize) {
+        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            eprint!("[relevancy] register_term: term={} level={}", term, level);
+        }
         if !self.relevancy.is_enabled() {
             return;
         }
-        if self.relevancy.has_node(lit) {
-            return;
+        let mut visited = std::collections::HashSet::new();
+        self.relevancy_classify_recursive(term, &mut visited);
+        if let Some(lit) = self.relevancy_lit_for_term(term) {
+            self.relevancy.mark_relevant_root(lit, level);
+        } else if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            eprintln!("[relevancy] WARNING: relevancy_register_term could not find lit for term={}", term);
         }
-        let kind = if let Some(&uid) = self.cnf_cache.var_map_reverse.get(&(lit.abs())) {
-            if let Some(TermOption::Some(term)) = self.terms_list.get(uid as usize) {
-                let term = term.clone();
-                self.relevancy_classify_term(&term)
-            } else {
-                crate::relevancy::NodeKind::Atom(vec![])
-            }
-        } else {
-            crate::relevancy::NodeKind::Atom(vec![])
-        };
-        self.relevancy.register_node(lit, kind);
-        self.relevancy.mark_relevant_root(lit, level);
     }
 
     pub(crate) fn relevancy_classify_term(&self, term: &Term) -> NodeKind {
@@ -374,9 +371,17 @@ impl SolverState {
         }
         let lit = match self.relevancy_lit_for_term(term) {
             Some(l) => l,
-            None => return,
+            None => {
+                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                    eprintln!("[relevancy] classify_recursive: no lit for uid={} term={}", uid, term);
+                }
+                return;
+            }
         };
         if self.relevancy.has_node(lit) {
+            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                eprintln!("[relevancy] classify_recursive: already has node for lit={} term={}", lit, term);
+            }
             return;
         }
 
@@ -399,7 +404,13 @@ impl SolverState {
             ATerm::Or(children) => {
                 let child_lits: Vec<i32> = children
                     .iter()
-                    .filter_map(|c| self.relevancy_lit_for_term(c))
+                    .filter_map(|c| {
+                        let r = self.relevancy_lit_for_term(c);
+                        if r.is_none() && std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                            eprintln!("[relevancy] Or child has no lit: uid={} term={}", c.uid(), c);
+                        }
+                        r
+                    })
                     .collect();
                 if child_lits.is_empty() {
                     crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
@@ -424,6 +435,25 @@ impl SolverState {
                     crate::relevancy::NodeKind::And(child_lits)
                 }
             }
+            ATerm::Implies(premises, conclusion) => {
+                // (implies a1 ... an b) = (or (not a1) ... (not an) b)
+                let mut child_lits: Vec<i32> = premises
+                    .iter()
+                    .filter_map(|p| self.relevancy_lit_for_term(p).map(|l| -l))
+                    .collect();
+                if let Some(bl) = self.relevancy_lit_for_term(conclusion) {
+                    child_lits.push(bl);
+                }
+                if child_lits.is_empty() {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                } else {
+                    for p in premises {
+                        self.relevancy_classify_recursive(p, visited);
+                    }
+                    self.relevancy_classify_recursive(conclusion, visited);
+                    crate::relevancy::NodeKind::Or(child_lits)
+                }
+            }
             ATerm::Not(child) => {
                 self.relevancy_classify_recursive(child, visited);
                 return;
@@ -444,18 +474,6 @@ impl SolverState {
             _ => crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term)),
         };
 
-        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
-            use crate::relevancy::NodeKind;
-            let kind_name = match &kind {
-                NodeKind::Or(c) => format!("Or({})", c.len()),
-                NodeKind::And(c) => format!("And({})", c.len()),
-                NodeKind::Not(c) => format!("Not({})", c),
-                NodeKind::Iff(a, b) => format!("Iff({},{})", a, b),
-                NodeKind::Ite { cond, .. } => format!("Ite(cond={})", cond),
-                NodeKind::Atom(s) => format!("Atom(subs={:?})", s),
-            };
-            eprintln!("[relevancy] lit={} kind={} term={}", lit, kind_name, term);
-        }
         self.relevancy.register_node(lit, kind);
     }
 

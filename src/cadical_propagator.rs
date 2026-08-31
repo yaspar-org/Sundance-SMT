@@ -15,6 +15,7 @@ use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
 use crate::solver_state::{SolverState, process_assignment};
+use crate::solver_types::TermOption;
 use crate::cnf::CNFConversion;
 use crate::relevancy::RelevancyTrait;
 use yaspar_ir::ast::TermAllocator;
@@ -362,10 +363,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 .map(|c| c.into_iter().collect())
                 .collect();
 
-            if self.solver_state.relevancy.is_enabled() {
-                let or_lit = *self.solver_state.cnf_cache.var_map.get(&or_term.uid()).unwrap();
-                self.solver_state.relevancy_ensure_known(or_lit, self.decision_level);
-            }
+            self.solver_state.relevancy_register_term(&or_term, self.decision_level);
 
             self.sync_new_vars();
             for clause in cnf_lits {
@@ -411,11 +409,19 @@ impl<'a> CustomExternalPropagator<'a> {
                 Skolemization { clauses } => clauses,
             };
             for clause in clauses {
-                // Register top-level clause literals as relevant roots for
-                // the relevancy filter (they're new theory assertions).
                 if self.solver_state.relevancy.is_enabled() {
-                    for &lit in clause.iter() {
-                        self.solver_state.relevancy_ensure_known(lit, self.decision_level);
+                    let child_terms: Vec<_> = clause.iter().filter_map(|&lit| {
+                        self.solver_state.cnf_cache.var_map_reverse.get(&lit.abs())
+                            .and_then(|&uid| match self.solver_state.terms_list.get(uid as usize) {
+                                Some(TermOption::Some(t)) => {
+                                    if lit > 0 { Some(t.clone()) } else { Some(self.solver_state.context.not(t.clone())) }
+                                }
+                                _ => None,
+                            })
+                    }).collect();
+                    if !child_terms.is_empty() {
+                        let or_term = self.solver_state.context.or(child_terms);
+                        self.solver_state.relevancy_register_term(&or_term, self.decision_level);
                     }
                 }
 

@@ -8,6 +8,16 @@
 //! only handles the propagation of relevancy through the registered structure.
 
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+
+static RELEVANCY_TRACE: AtomicBool = AtomicBool::new(false);
+
+pub fn init_relevancy_trace() {
+    RELEVANCY_TRACE.store(
+        std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum NodeKind {
@@ -294,6 +304,18 @@ impl RelevancyTrait for RelevancyState {
         self.ensure_capacity(lit);
         let idx = lit.unsigned_abs() as usize;
         if self.node_kinds[idx].is_none() {
+            if RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
+                || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                let kind_name = match &kind {
+                    NodeKind::Or(c) => format!("Or({})", c.len()),
+                    NodeKind::And(c) => format!("And({})", c.len()),
+                    NodeKind::Not(c) => format!("Not({})", c),
+                    NodeKind::Iff(a, b) => format!("Iff({},{})", a, b),
+                    NodeKind::Ite { cond, .. } => format!("Ite(cond={})", cond),
+                    NodeKind::Atom(s) => format!("Atom(subs={:?})", s),
+                };
+                eprintln!("[relevancy] register lit={} kind={}", lit, kind_name);
+            }
             self.node_kinds[idx] = Some(kind);
         }
     }
