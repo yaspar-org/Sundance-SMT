@@ -52,3 +52,32 @@ bash scripts/run_verus_all.sh
 ```
 
 > **Note:** Edit the solver paths at the top of the script to match your environment before running.
+
+---
+
+## plot_cdf.py
+
+Plots solve-time CDFs from one or more `run_verus.py` log files on a single
+chart: x is the time budget, y is the number of benchmarks solved within it.
+Lines without `->` are ignored; each series is labeled by the log's filename
+stem. Requires `matplotlib` (e.g. `python3 -m venv .venv && .venv/bin/pip install matplotlib`).
+
+### Usage
+
+```bash
+python scripts/plot_cdf.py z3-4.15.4.log cvc5-1.3.3.log \
+  sundance-arith-z3.log sundance-arith-internal.log -o cdf.png
+```
+
+### Options
+
+| Flag | Description |
+|---|---|
+| `-o`, `--output` | Output image path (default: `cdf.png`) |
+| `--status` | Result status to count (default: `UNSAT`) |
+| `--xmax` | X-axis upper bound in seconds (default: 10) |
+| `--title` | Chart title |
+| `--dpi` | Output resolution (default: 200) |
+
+At most four logs can be plotted together. Per-log counts, medians, and maxima
+are printed to stderr.
