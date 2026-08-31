@@ -34,10 +34,20 @@ pub(crate) trait RelevancyTrait {
     fn is_enabled(&self) -> bool;
     fn has_node(&self, lit: i32) -> bool;
     fn register_node(&mut self, lit: i32, kind: NodeKind);
-    fn mark_relevant_root(&mut self, lit: i32, level: usize);
-    fn mark_relevant_roots(&mut self, root_lits: &[i32], level: usize);
+    /// Mark `lit` as a relevant root. If `class_root` is provided, the
+    /// egraph class it identifies is also marked relevant (all future
+    /// lits whose term resolves to the same class are treated as relevant
+    /// via `is_relevant_with_class`).
+    fn mark_relevant_root(&mut self, lit: i32, class_root: Option<u32>, level: usize);
     fn is_relevant(&self, lit: i32) -> bool;
+    /// Same as `is_relevant` but also returns true if the given class
+    /// root has been marked relevant (by any prior `mark_relevant_root`
+    /// or `propagate_class_relevancy` call).
+    fn is_relevant_with_class(&self, lit: i32, class_root: Option<u32>) -> bool;
     fn notify_assignment(&mut self, lit: i32, level: usize) -> bool;
+    /// After an egraph merge, propagate class relevancy: if either
+    /// pre-merge root was relevant, mark `survivor` relevant.
+    fn propagate_class_relevancy(&mut self, survivor: u32, demoted: u32, level: usize);
     fn backtrack_to(&mut self, level: usize);
 }
 
@@ -56,6 +66,12 @@ pub struct RelevancyState {
     queue: VecDeque<i32>,
     trail: Vec<(usize, i32)>,
     branch_trail: Vec<(usize, usize)>,
+    /// Egraph class roots that contain at least one relevant lit. Callers
+    /// pass the current root explicitly; this state doesn't do egraph
+    /// lookups itself.
+    class_relevant: std::collections::HashSet<u32>,
+    /// Trail of `(level, root)` insertions into `class_relevant`.
+    class_trail: Vec<(usize, u32)>,
     enabled: bool,
 }
 
@@ -74,6 +90,8 @@ impl RelevancyState {
             queue: VecDeque::new(),
             trail: Vec::new(),
             branch_trail: Vec::new(),
+            class_relevant: std::collections::HashSet::new(),
+            class_trail: Vec::new(),
             enabled,
         }
     }
@@ -320,17 +338,17 @@ impl RelevancyTrait for RelevancyState {
         }
     }
 
-    fn mark_relevant_root(&mut self, lit: i32, level: usize) {
+    fn mark_relevant_root(&mut self, lit: i32, class_root: Option<u32>, level: usize) {
         self.mark_relevant(lit, level);
-        self.propagate(level);
-    }
-
-    fn mark_relevant_roots(&mut self, root_lits: &[i32], level: usize) {
-        if !self.enabled {
-            return;
-        }
-        for &lit in root_lits {
-            self.mark_relevant(lit, level);
+        if let Some(root) = class_root {
+            if self.class_relevant.insert(root) {
+                self.class_trail.push((level, root));
+                if RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
+                    || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok()
+                {
+                    eprintln!("[relevancy] class_root {} marked relevant (via lit={}, level={})", root, lit, level);
+                }
+            }
         }
         self.propagate(level);
     }
@@ -344,6 +362,33 @@ impl RelevancyTrait for RelevancyState {
             return false;
         }
         self.relevant[idx]
+    }
+
+    fn is_relevant_with_class(&self, lit: i32, class_root: Option<u32>) -> bool {
+        if !self.enabled {
+            return true;
+        }
+        if self.is_relevant(lit) {
+            return true;
+        }
+        class_root.is_some_and(|r| self.class_relevant.contains(&r))
+    }
+
+    fn propagate_class_relevancy(&mut self, survivor: u32, demoted: u32, level: usize) {
+        if !self.enabled {
+            return;
+        }
+        let s_rel = self.class_relevant.contains(&survivor);
+        let d_rel = self.class_relevant.contains(&demoted);
+        if (s_rel || d_rel) && !s_rel {
+            self.class_relevant.insert(survivor);
+            self.class_trail.push((level, survivor));
+            if RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
+                || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok()
+            {
+                eprintln!("[relevancy] class_root {} promoted to relevant on merge with {} (level={})", survivor, demoted, level);
+            }
+        }
     }
 
     fn notify_assignment(&mut self, lit: i32, level: usize) -> bool {
@@ -409,6 +454,13 @@ impl RelevancyTrait for RelevancyState {
             }
             self.assignment_trail.pop();
             self.assignments[var_idx] = 0;
+        }
+        while let Some(&(mark_level, root)) = self.class_trail.last() {
+            if mark_level <= level {
+                break;
+            }
+            self.class_trail.pop();
+            self.class_relevant.remove(&root);
         }
         self.queue.clear();
     }

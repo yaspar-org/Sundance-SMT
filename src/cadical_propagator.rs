@@ -778,22 +778,43 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
-        // Second pass: process lits that were skipped as irrelevant but
+        // Fixpoint pass: process lits that were skipped as irrelevant but
         // became relevant during this batch (due to batch ordering or
-        // egraph-driven class propagation).
-        for &lit in skipped_lits.iter() {
-            if self.solver_state.is_lit_relevant(lit) {
-                qi_gc_trace!("second pass: processing now-relevant lit={}", lit);
-                self.add_lit_to_proof_tracer(lit);
-                let constraints_opt =
-                    process_assignment(lit, self.solver_state, self.decision_level);
-                self.solver_state
-                    .propagate_class_relevancy_from_merges(self.decision_level);
-                if let Some(constraints) = constraints_opt {
-                    for (clause, theory) in constraints {
-                        self.queue_theory_clause(clause, theory);
+        // egraph-driven class propagation). Keep looping until no lit is
+        // newly processed, since a process_assignment in one round can
+        // trigger a merge that makes an earlier-skipped lit relevant.
+        //
+        // TODO: simplify. This exists because we gate process_assignment on
+        // relevancy AND respect SAT's assignment order — the two together
+        // force retroactive processing. z3 avoids this entirely by not
+        // gating core theory work on relevancy (only downstream work like
+        // QI). Consider either that (Option 3) or driving processing off a
+        // work-queue that re-enqueues on newly-relevant events.
+        let mut processed_second: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        loop {
+            let mut made_progress = false;
+            for &lit in skipped_lits.iter() {
+                if processed_second.contains(&lit) {
+                    continue;
+                }
+                if self.solver_state.is_lit_relevant(lit) {
+                    processed_second.insert(lit);
+                    made_progress = true;
+                    qi_gc_trace!("fixpoint pass: processing now-relevant lit={}", lit);
+                    self.add_lit_to_proof_tracer(lit);
+                    let constraints_opt =
+                        process_assignment(lit, self.solver_state, self.decision_level);
+                    self.solver_state
+                        .propagate_class_relevancy_from_merges(self.decision_level);
+                    if let Some(constraints) = constraints_opt {
+                        for (clause, theory) in constraints {
+                            self.queue_theory_clause(clause, theory);
+                        }
                     }
                 }
+            }
+            if !made_progress {
+                break;
             }
         }
 
@@ -846,7 +867,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // Undo relevancy marks above this level (structural + class-level)
         self.solver_state.relevancy.backtrack_to(level);
-        self.solver_state.backtrack_class_relevancy(level);
 
         // Reset solver-level assignments
         for i in 1..self.assignments.len() {

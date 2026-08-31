@@ -8,7 +8,6 @@ use crate::cadical_propagator::{
 };
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
-use crate::relevancy::RelevancyTrait;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
