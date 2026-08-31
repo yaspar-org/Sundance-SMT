@@ -658,10 +658,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             // Relevancy filter: always propagate relevancy (even for fixed literals)
             // so structural propagation fires. Skip irrelevant non-fixed literals.
-            let is_relevant = self.solver_state.relevancy.notify_assignment(
+            // is_relevant is composed of two signals: the structural relevancy
+            // (Or/And/Iff/Ite rules) plus egraph-class relevancy (any lit in the
+            // same class is relevant).
+            let structural = self.solver_state.relevancy.notify_assignment(
                 *lit,
                 self.decision_level,
             );
+            let is_relevant = structural || self.solver_state.is_lit_relevant(*lit);
 
             if self.fixed_literals.contains(lit) {
                 debug_println!(6, 0, "Skipping literal {lit} because it is fixed");
@@ -685,6 +689,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             let negated_model_or_datatype_constraints_opt =
                 process_assignment(*lit, self.solver_state, self.decision_level);
+
+            // Propagate class-level relevancy from any merges that happened
+            // inside process_assignment (direct + congruence-derived).
+            self.solver_state
+                .propagate_class_relevancy_from_merges(self.decision_level);
 
             // Drain merges triggered by this assignment, then push the lit
             // itself if it's arithmetic.
@@ -770,13 +779,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         // Second pass: process lits that were skipped as irrelevant but
-        // became relevant during this batch (due to batch ordering).
+        // became relevant during this batch (due to batch ordering or
+        // egraph-driven class propagation).
         for &lit in skipped_lits.iter() {
-            if self.solver_state.relevancy.is_relevant(lit) {
+            if self.solver_state.is_lit_relevant(lit) {
                 qi_gc_trace!("second pass: processing now-relevant lit={}", lit);
                 self.add_lit_to_proof_tracer(lit);
                 let constraints_opt =
                     process_assignment(lit, self.solver_state, self.decision_level);
+                self.solver_state
+                    .propagate_class_relevancy_from_merges(self.decision_level);
                 if let Some(constraints) = constraints_opt {
                     for (clause, theory) in constraints {
                         self.queue_theory_clause(clause, theory);
@@ -832,8 +844,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             level
         );
 
-        // Undo relevancy marks above this level
+        // Undo relevancy marks above this level (structural + class-level)
         self.solver_state.relevancy.backtrack_to(level);
+        self.solver_state.backtrack_class_relevancy(level);
 
         // Reset solver-level assignments
         for i in 1..self.assignments.len() {

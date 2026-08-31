@@ -123,6 +123,8 @@ pub fn cdcl_decision_procedure(
     // Relevancy filtering: initialize from pre-NNF assertions then fill in
     // remaining terms from var_map (datatype preprocessing creates NNF-only terms).
     if relevancy {
+        use crate::egraphs::EgraphTrait;
+        solver_state.egraph.set_track_all_merges(true);
         solver_state.relevancy_initialize_from_assertions();
         solver_state.relevancy_initialize_structure();
         let root_lits: Vec<i32> = clauses
@@ -131,7 +133,9 @@ pub fn cdcl_decision_procedure(
             .filter(|c| c.len() == 1)
             .map(|c| c[0])
             .collect();
-        solver_state.relevancy.mark_relevant_roots(&root_lits, 0);
+        for lit in &root_lits {
+            solver_state.mark_lit_relevant(*lit, 0);
+        }
     }
 
     let mut propagator = CustomExternalPropagator {

@@ -169,6 +169,17 @@ pub struct SolverState {
     pub stat_dt_splits: u64,
     /// Relevancy propagation state — gates theory solver work.
     pub relevancy: RelevancyState,
+
+    /// Egraph class roots whose class contains at least one relevant lit.
+    /// Populated in tandem with `relevancy.mark_relevant_root`. On egraph
+    /// merges, if either pre-merge root was in this set, the surviving root
+    /// is inserted here too (so descendants of the merged class inherit
+    /// relevance without an explicit mark on each member).
+    pub class_relevant: std::collections::HashSet<u32>,
+    /// Trail of `(level, root)` insertions into `class_relevant`. On
+    /// backtrack, entries at levels above the target are popped and their
+    /// roots removed from the set.
+    pub class_relevancy_trail: Vec<(usize, u32)>,
 }
 
 impl SolverState {
@@ -212,7 +223,9 @@ impl SolverState {
             stat_dt_accessor_ax: 0,
             stat_dt_constructor_ax: 0,
             stat_dt_splits: 0,
-            relevancy: RelevancyState::new(relevancy)
+            relevancy: RelevancyState::new(relevancy),
+            class_relevant: std::collections::HashSet::new(),
+            class_relevancy_trail: Vec::new(),
         }
     }
 
@@ -235,7 +248,7 @@ impl SolverState {
         let mut visited = std::collections::HashSet::new();
         self.relevancy_classify_recursive(term, &mut visited);
         if let Some(lit) = self.relevancy_lit_for_term(term) {
-            self.relevancy.mark_relevant_root(lit, level);
+            self.mark_lit_relevant(lit, level);
         } else if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
             eprintln!("[relevancy] WARNING: relevancy_register_term could not find lit for term={}", term);
         }
@@ -496,6 +509,80 @@ impl SolverState {
             }
             let kind = self.relevancy_classify_term(&term);
             self.relevancy.register_node(lit, kind);
+        }
+    }
+
+    /// Get the egraph class root for a lit's underlying term, or None if
+    /// the lit has no term (e.g. QI-GC activation literal) or the term
+    /// isn't in the egraph.
+    fn class_root_for_lit(&self, lit: i32) -> Option<u32> {
+        use crate::egraphs::EgraphTrait;
+        let uid = *self.cnf_cache.var_map_reverse.get(&lit.abs())?;
+        let eid = *self.id_map.get_by_left(&uid)?;
+        Some(self.egraph.find(eid))
+    }
+
+    /// Mark a lit relevant, both directly and at the egraph-class level.
+    pub fn mark_lit_relevant(&mut self, lit: i32, level: usize) {
+        use crate::relevancy::RelevancyTrait;
+        self.relevancy.mark_relevant_root(lit, level);
+        if let Some(root) = self.class_root_for_lit(lit) {
+            if self.class_relevant.insert(root) {
+                self.class_relevancy_trail.push((level, root));
+                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                    eprintln!("[relevancy] class_root {} marked relevant (via lit={}, level={})", root, lit, level);
+                }
+            }
+        }
+    }
+
+    /// Check whether a lit is relevant, either directly or by class.
+    pub fn is_lit_relevant(&self, lit: i32) -> bool {
+        use crate::relevancy::RelevancyTrait;
+        if !self.relevancy.is_enabled() {
+            return true;
+        }
+        if self.relevancy.is_relevant(lit) {
+            return true;
+        }
+        if let Some(root) = self.class_root_for_lit(lit) {
+            return self.class_relevant.contains(&root);
+        }
+        false
+    }
+
+    /// Drain the egraph's all-merges queue and propagate class relevancy:
+    /// if either pre-merge root was relevant, the surviving root becomes
+    /// relevant too.
+    pub fn propagate_class_relevancy_from_merges(&mut self, level: usize) {
+        use crate::egraphs::EgraphTrait;
+        if !self.relevancy.is_enabled() {
+            let _ = self.egraph.drain_all_merges();
+            return;
+        }
+        let merges = self.egraph.drain_all_merges();
+        for (survivor, demoted) in merges {
+            let s_rel = self.class_relevant.contains(&survivor);
+            let d_rel = self.class_relevant.contains(&demoted);
+            if (s_rel || d_rel) && !s_rel {
+                // survivor wasn't relevant yet; mark it.
+                self.class_relevant.insert(survivor);
+                self.class_relevancy_trail.push((level, survivor));
+                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                    eprintln!("[relevancy] class_root {} promoted to relevant on merge with {} (level={})", survivor, demoted, level);
+                }
+            }
+        }
+    }
+
+    /// Undo class-relevancy marks above the given level.
+    pub fn backtrack_class_relevancy(&mut self, level: usize) {
+        while let Some(&(mark_level, root)) = self.class_relevancy_trail.last() {
+            if mark_level <= level {
+                break;
+            }
+            self.class_relevancy_trail.pop();
+            self.class_relevant.remove(&root);
         }
     }
 

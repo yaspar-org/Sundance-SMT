@@ -241,6 +241,16 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Pre-merge (surviving_root, demoted_root) pairs from ALL unions
+    /// (direct or congruence-derived), for egraph-driven relevancy
+    /// propagation. Only populated when `track_all_merges` is true.
+    ///
+    /// TODO: merge this with `arithmetic_merge_queue` — they carry the same
+    /// info; the current separation is just because arithmetic gates on the
+    /// arithmetic tag. Unify into one queue with per-consumer draining.
+    relevancy_merge_queue: Vec<(u32, u32)>,
+    /// Whether to populate `relevancy_merge_queue`.
+    track_all_merges: bool,
     /// Accumulated egraph statistics.
     pub(crate) stats: EgraphStats,
 }
@@ -283,6 +293,8 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
+            relevancy_merge_queue: Vec::new(),
+            track_all_merges: false,
             stats: EgraphStats::default(),
         }
     }
@@ -1180,6 +1192,10 @@ impl Egraph {
             (x, y, x_root, y_root)
         };
 
+        if self.track_all_merges {
+            self.relevancy_merge_queue.push((x_root, y_root));
+        }
+
         // `mark_arithmetic` runs *after* `register_term` in
         // `insert_predecessor`, so a congruence merge here can precede tagging
         // on one side. If either root is tagged, queue the merge and upgrade
@@ -1724,6 +1740,17 @@ impl EgraphTrait for Egraph {
 
     fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)> {
         std::mem::take(&mut self.arithmetic_merge_queue)
+    }
+
+    fn set_track_all_merges(&mut self, enabled: bool) {
+        self.track_all_merges = enabled;
+        if !enabled {
+            self.relevancy_merge_queue.clear();
+        }
+    }
+
+    fn drain_all_merges(&mut self) -> Vec<(Self::TermId, Self::TermId)> {
+        std::mem::take(&mut self.relevancy_merge_queue)
     }
 
     fn notify_new_decision_level(&mut self) {

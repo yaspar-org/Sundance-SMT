@@ -111,6 +111,17 @@ pub trait EgraphTrait {
     /// Callers must drain before advancing the decision level.
     fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
 
+    /// Enable/disable tracking of ALL merges (direct + congruence) for the
+    /// relevancy propagation consumer.
+    ///
+    /// TODO: merge with `incremental_arithmetic` / `drain_arithmetic_equalities` —
+    /// see the note on `relevancy_merge_queue` in the basic impl.
+    fn set_track_all_merges(&mut self, enabled: bool);
+
+    /// Drain all-merge pairs pushed since the last drain. Returns a list of
+    /// (surviving_root, demoted_root). Only populated when tracking is on.
+    fn drain_all_merges(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
+
     // --- Decision level ---
 
     /// Advance the internal decision level by one.
