@@ -21,8 +21,11 @@ use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, 
 
 #[derive(Debug, Clone)]
 pub(crate) enum QuantifierInstance {
-    Instantiation { clauses: Vec<Vec<i32>> },
-    Skolemization { clauses: Vec<Vec<i32>> },
+    /// `pre_nnf_body` is the instance body after let-elim but before NNF/
+    /// Tseitin — used by relevancy filtering so structural rules see the
+    /// original connectives (Iff, ITE, Implies) that NNF destroys.
+    Instantiation { clauses: Vec<Vec<i32>>, pre_nnf_body: Term },
+    Skolemization { clauses: Vec<Vec<i32>>, pre_nnf_body: Term },
 }
 
 struct DeferredInstantiation {
@@ -235,6 +238,7 @@ fn process_deferred_skolemizations(
     } in deferred_skolemizations
     {
         let reduced_skolem: Term = skolem.let_elim(&mut solver_state.context);
+        let pre_nnf_body = reduced_skolem.clone();
         let reduced_skolem = reduced_skolem.nnf(solver_state);
         let additional_constraints =
             check_for_function_bool(&reduced_skolem, solver_state, true, ddsmt, lazy_dt);
@@ -294,6 +298,7 @@ fn process_deferred_skolemizations(
 
         results.push(QuantifierInstance::Skolemization {
             clauses: skolem_clauses,
+            pre_nnf_body,
         });
     }
     results
@@ -330,7 +335,25 @@ fn process_deferred_instantiations(
 
         let let_elim_term = t.let_elim(&mut solver_state.context);
 
-        let nnf_term = let_elim_term.nnf(solver_state);
+        // Wrap the body in `quantifier => body` and NNF+Tseitin the whole
+        // thing. This gives the wrapper implication its own SAT literal
+        // (needed by relevancy — a bare-body registration has no lit for
+        // the implication as a whole). NNF distributes over Implies as
+        // `Or(¬quantifier, nnf(body))`, so the body's Tseitin clauses are
+        // still emitted separately and remain ungated (preserving the
+        // propagation behavior the previous manual encoding was chosen
+        // for). Tseitinizing adds one fresh var and two extra backward
+        // clauses per instance — cheap.
+        let quantifier_term = solver_state.get_term(quantifier_id);
+        let quantifier_side = if is_exists {
+            solver_state.context.not(quantifier_term)
+        } else {
+            quantifier_term
+        };
+        let pre_nnf_body =
+            solver_state.implies(vec![quantifier_side], let_elim_term.clone());
+
+        let nnf_term = pre_nnf_body.nnf(solver_state);
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
@@ -338,7 +361,7 @@ fn process_deferred_instantiations(
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
 
-        let mut raw_clauses: Vec<Vec<i32>> = cnf_term
+        let raw_clauses: Vec<Vec<i32>> = cnf_term
             .into_iter()
             .map(|x| x.into_iter().collect::<Vec<_>>())
             .collect();
@@ -363,21 +386,6 @@ fn process_deferred_instantiations(
                 ProofStepType::Instantiation,
             );
 
-        // Assert the body only when the quantifier holds (`quantifier => body`).
-        // `cnf_tseitin` appends, as its final clause, a unit clause asserting the
-        // top literal unconditionally; guarding just that clause (turning it into
-        // the implication `-quantifier \/ top`) is enough for soundness. The
-        // remaining clauses only define fresh Tseitin variables and are valid
-        // regardless of the quantifier, so they stay ungated. Gating every clause
-        // instead (as the skolemization path does) suppresses all propagation of
-        // the body's structure until the top literal is decided, which badly
-        // hurts search.
-        let top = raw_clauses
-            .pop()
-            .expect("cnf_tseitin always emits the top-level clause");
-        debug_assert_eq!(top, vec![nnf_term_literal]);
-        raw_clauses.push(vec![-quantifier_dimacs_literal, nnf_term_literal]);
-
         proof_tracer
             .borrow_mut()
             .push_steps(&raw_clauses, ProofStepType::TheoryClause(Theory::Boolean));
@@ -392,7 +400,7 @@ fn process_deferred_instantiations(
         let mut clauses = raw_clauses;
         clauses.extend(additional_constraints);
 
-        results.push(QuantifierInstance::Instantiation { clauses });
+        results.push(QuantifierInstance::Instantiation { clauses, pre_nnf_body });
     }
     results
 }

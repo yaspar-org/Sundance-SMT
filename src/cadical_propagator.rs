@@ -15,7 +15,6 @@ use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
 use crate::solver_state::{SolverState, process_assignment};
-use crate::solver_types::TermOption;
 use crate::cnf::CNFConversion;
 use crate::relevancy::RelevancyTrait;
 use yaspar_ir::ast::TermAllocator;
@@ -401,30 +400,19 @@ impl<'a> CustomExternalPropagator<'a> {
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
     ) {
         for inst in instances {
-            let clauses = match inst {
-                Instantiation { clauses } => {
+            let (clauses, pre_nnf_body) = match inst {
+                Instantiation { clauses, pre_nnf_body } => {
                     self.stats.instantiations += 1;
-                    clauses
+                    (clauses, pre_nnf_body)
                 }
-                Skolemization { clauses } => clauses,
+                Skolemization { clauses, pre_nnf_body } => (clauses, pre_nnf_body),
             };
+            // Register the pre-NNF instance body with relevancy so structural
+            // rules see the original connectives (Iff/ITE/Implies) before
+            // NNF flattens them into Or/And.
+            self.solver_state
+                .relevancy_register_term(pre_nnf_body, self.decision_level);
             for clause in clauses {
-                if self.solver_state.relevancy.is_enabled() {
-                    let child_terms: Vec<_> = clause.iter().filter_map(|&lit| {
-                        self.solver_state.cnf_cache.var_map_reverse.get(&lit.abs())
-                            .and_then(|&uid| match self.solver_state.terms_list.get(uid as usize) {
-                                Some(TermOption::Some(t)) => {
-                                    if lit > 0 { Some(t.clone()) } else { Some(self.solver_state.context.not(t.clone())) }
-                                }
-                                _ => None,
-                            })
-                    }).collect();
-                    if !child_terms.is_empty() {
-                        let or_term = self.solver_state.context.or(child_terms);
-                        self.solver_state.relevancy_register_term(&or_term, self.decision_level);
-                    }
-                }
-
                 if let Some(ref gc) = self.qi_gc_state {
                     let neg_act = -gc.borrow().current_act;
                     let mut guarded = clause.clone();

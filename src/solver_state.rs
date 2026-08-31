@@ -24,7 +24,7 @@ use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
 use crate::proof::Theory;
-use crate::relevancy::{NodeKind, RelevancyState, RelevancyTrait};
+use crate::relevancy::{RelevancyState, RelevancyTrait};
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
@@ -241,60 +241,6 @@ impl SolverState {
         }
     }
 
-    pub(crate) fn relevancy_classify_term(&self, term: &Term) -> NodeKind {
-        use crate::relevancy::NodeKind;
-        match term.repr() {
-            ATerm::Or(children) => {
-                let child_lits: Vec<i32> = children
-                    .iter()
-                    .filter_map(|c| self.relevancy_lit_for_term(c))
-                    .collect();
-                if child_lits.is_empty() {
-                    NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
-                } else {
-                    NodeKind::Or(child_lits)
-                }
-            }
-            ATerm::And(children) => {
-                let child_lits: Vec<i32> = children
-                    .iter()
-                    .filter_map(|c| self.relevancy_lit_for_term(c))
-                    .collect();
-                if child_lits.is_empty() {
-                    NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
-                } else {
-                    NodeKind::And(child_lits)
-                }
-            }
-            ATerm::Not(child) => {
-                if self.cnf_cache.var_map.get(&child.uid()).is_some() {
-                    return self.relevancy_classify_term(child);
-                }
-                NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
-            }
-            ATerm::Eq(a, b) => {
-                let a_lit = self.cnf_cache.var_map.get(&a.uid()).copied();
-                let b_lit = self.cnf_cache.var_map.get(&b.uid()).copied();
-                if let (Some(al), Some(bl)) = (a_lit, b_lit) {
-                    NodeKind::Iff(al, bl)
-                } else {
-                    NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
-                }
-            }
-            ATerm::Ite(c, t, e) => {
-                let c_lit = self.cnf_cache.var_map.get(&c.uid()).copied();
-                let t_lit = self.cnf_cache.var_map.get(&t.uid()).copied();
-                let e_lit = self.cnf_cache.var_map.get(&e.uid()).copied();
-                if let (Some(cl), Some(tl), Some(el)) = (c_lit, t_lit, e_lit) {
-                    NodeKind::Ite { cond: cl, then_lit: tl, else_lit: el }
-                } else {
-                    NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
-                }
-            }
-            _ => NodeKind::Atom(self.relevancy_collect_subterm_lits(term)),
-        }
-    }
-
     pub fn relevancy_lit_for_term(&self, term: &Term) -> Option<i32> {
         let uid = term.uid();
         if let Some(&lit) = self.cnf_cache.var_map.get(&uid) {
@@ -475,28 +421,6 @@ impl SolverState {
         };
 
         self.relevancy.register_node(lit, kind);
-    }
-
-    pub fn relevancy_initialize_structure(&mut self) {
-        if !self.relevancy.is_enabled() {
-            return;
-        }
-        let entries: Vec<(u64, i32)> = self.cnf_cache.var_map.iter()
-            .map(|(&uid, &lit)| (uid, lit)).collect();
-        for (uid, lit) in entries {
-            if self.relevancy.has_node(lit) {
-                continue;
-            }
-            let term = match self.terms_list.get(uid as usize) {
-                Some(TermOption::Some(t)) => t.clone(),
-                _ => continue,
-            };
-            if matches!(term.repr(), ATerm::Not(child) if self.cnf_cache.var_map.get(&child.uid()).is_some()) {
-                continue;
-            }
-            let kind = self.relevancy_classify_term(&term);
-            self.relevancy.register_node(lit, kind);
-        }
     }
 
     /// Get the egraph class root for a lit's underlying term, or None if

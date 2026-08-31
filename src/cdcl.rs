@@ -119,13 +119,14 @@ pub fn cdcl_decision_procedure(
         solver.connect_learner(learner);
     }
 
-    // Relevancy filtering: initialize from pre-NNF assertions then fill in
-    // remaining terms from var_map (datatype preprocessing creates NNF-only terms).
+    // Relevancy filtering: initialize purely from pre-NNF assertions. Any
+    // theory-generated terms (datatype axioms, QI, trichotomy) register
+    // themselves via `relevancy_register_term` at the point of generation,
+    // so no var_map-scanning fallback is needed.
     if relevancy {
         use crate::egraphs::EgraphTrait;
         solver_state.egraph.set_track_all_merges(true);
         solver_state.relevancy_initialize_from_assertions();
-        solver_state.relevancy_initialize_structure();
         let root_lits: Vec<i32> = clauses
             .iter()
             .chain(boolean_dt_constraints.iter())
