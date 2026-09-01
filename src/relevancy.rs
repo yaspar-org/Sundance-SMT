@@ -143,11 +143,17 @@ impl RelevancyState {
                 match self.get_assignment_by_idx(idx) {
                     Some(true) => {
                         if self.branch_chosen[idx] {
+                            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                                eprintln!("[relevancy] Or-true idx={} already branch_chosen, skipping (level={})", idx, level);
+                            }
                             return;
                         }
                         let mut found = false;
                         for &child_lit in child_lits {
                             if self.lit_is_true(child_lit) {
+                                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                                    eprintln!("[relevancy] Or-true idx={} picking child={} (level={})", idx, child_lit, level);
+                                }
                                 self.mark_relevant(child_lit, level);
                                 self.branch_chosen[idx] = true;
                                 self.branch_trail.push((level, idx));
@@ -156,6 +162,13 @@ impl RelevancyState {
                             }
                         }
                         if !found {
+                            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                                let child_states: Vec<String> = child_lits.iter().map(|&c| {
+                                    let v = self.get_assignment_by_idx(c.unsigned_abs() as usize);
+                                    format!("{}:{:?}", c, v)
+                                }).collect();
+                                eprintln!("[relevancy] Or-true idx={} no true child, installing cond_watches on {:?} (level={})", idx, child_states, level);
+                            }
                             for &child_lit in child_lits {
                                 self.install_cond_true_watch(child_lit, idx);
                             }
@@ -172,6 +185,9 @@ impl RelevancyState {
             NodeKind::And(ref child_lits) => {
                 match self.get_assignment_by_idx(idx) {
                     Some(true) => {
+                        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                            eprintln!("[relevancy] And-true idx={} marking children {:?} relevant (level={})", idx, child_lits, level);
+                        }
                         for &child_lit in child_lits {
                             self.mark_relevant(child_lit, level);
                         }
@@ -417,6 +433,9 @@ impl RelevancyTrait for RelevancyState {
         } else {
             self.cond_watches_on_false[idx].clone()
         };
+        if !cond_targets.is_empty() && std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            eprintln!("[relevancy] cond_watch fired: lit={} → re-evaluate nodes {:?} (level={})", lit, cond_targets, level);
+        }
         for node_idx in cond_targets {
             self.queue.push_back(node_idx as i32);
         }
@@ -447,6 +466,9 @@ impl RelevancyTrait for RelevancyState {
             }
             self.branch_trail.pop();
             self.branch_chosen[node_idx] = false;
+            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                eprintln!("[relevancy] backtrack unwind branch_chosen[{}] (was set at level {}, target level {})", node_idx, mark_level, level);
+            }
         }
         while let Some(&(mark_level, var_idx)) = self.assignment_trail.last() {
             if mark_level <= level {

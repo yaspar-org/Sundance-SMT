@@ -171,6 +171,7 @@ pub fn cdcl_decision_procedure(
         draining_forgettable: false,
         next_is_decision: false,
         qi_gc_force_backtrack: false,
+        skipped_lits: Vec::new(),
     };
 
     solver.connect_external_propagator(&mut propagator);

@@ -195,7 +195,30 @@ pub struct CustomExternalPropagator<'a> {
     pub next_is_decision: bool,
     /// Flag: next cb_decide should force_backtrack(0) to trigger epoch transition.
     pub qi_gc_force_backtrack: bool,
+    /// Persistent list of assignments that were skipped as irrelevant.
+    /// Kept across `notify_assignment` batches so a lit skipped at level N
+    /// can be reprocessed if later structural or class propagation makes
+    /// it relevant.
+    ///
+    /// An entry stays in the list even after `process_assignment` runs for
+    /// it, with `processed_at_level` set to the level at which it was
+    /// processed. This is because the egraph merges from that processing
+    /// are tagged at `processed_at_level` and get undone on any backtrack
+    /// past that level. If the SAT assignment survives the backtrack
+    /// (i.e., `assigned_level <= new_level < processed_at_level`), the
+    /// theory needs to re-run `process_assignment` — otherwise SAT thinks
+    /// the lit is asserted but the egraph has forgotten the merges.
+    ///
+    /// On backtrack we:
+    ///   - remove entries whose `assigned_level > new_level`, and
+    ///   - clear `processed_at_level` for entries whose `processed_at_level > new_level`.
+    pub skipped_lits: Vec<SkippedLit>,
+}
 
+pub struct SkippedLit {
+    pub lit: i32,
+    pub assigned_level: usize,
+    pub processed_at_level: Option<usize>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -608,7 +631,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             lits
         );
         debug_println!(16, 0, "{}", self.solver_state.egraph);
-        let mut skipped_lits: Vec<i32> = Vec::new();
         for lit in lits {
             // Skip activation literals — they have no term in the egraph.
             if let Some(ref gc) = self.qi_gc_state {
@@ -687,7 +709,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         );
                     }
                 }
-                skipped_lits.push(*lit);
+                self.skipped_lits.push(SkippedLit {
+                    lit: *lit,
+                    assigned_level: self.decision_level,
+                    processed_at_level: None,
+                });
                 continue;
             }
 
@@ -784,27 +810,34 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
-        // Fixpoint pass: process lits that were skipped as irrelevant but
-        // became relevant during this batch (due to batch ordering or
-        // egraph-driven class propagation). Keep looping until no lit is
-        // newly processed, since a process_assignment in one round can
-        // trigger a merge that makes an earlier-skipped lit relevant.
+        // Fixpoint pass: scan the PERSISTENT skipped_lits list for
+        // assignments that were skipped (in this or an earlier batch)
+        // and have since become relevant — via structural propagation
+        // in this batch, or via egraph-driven class propagation from a
+        // merge that just happened. Loop until no more are newly-
+        // relevant, since a process_assignment can itself trigger a
+        // merge that makes another skipped lit relevant.
         //
-        // TODO: simplify. This exists because we gate process_assignment on
-        // relevancy AND respect SAT's assignment order — the two together
-        // force retroactive processing. z3 avoids this entirely by not
-        // gating core theory work on relevancy (only downstream work like
-        // QI). Consider either that (Option 3) or driving processing off a
-        // work-queue that re-enqueues on newly-relevant events.
-        let mut processed_second: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        // TODO: simplify. This exists because we gate process_assignment
+        // on relevancy AND respect SAT's assignment order — the two
+        // together force retroactive processing. z3 avoids this entirely
+        // by not gating core theory work on relevancy (only downstream
+        // work like QI).
         loop {
+            let mut i = 0;
             let mut made_progress = false;
-            for &lit in skipped_lits.iter() {
-                if processed_second.contains(&lit) {
+            while i < self.skipped_lits.len() {
+                let entry = &self.skipped_lits[i];
+                // Skip entries that have already been processed at a level
+                // still valid on the current SAT trail. If a subsequent
+                // backtrack invalidates that processing, `notify_backtrack`
+                // will clear `processed_at_level`, and we'll reprocess.
+                if entry.processed_at_level.is_some() {
+                    i += 1;
                     continue;
                 }
+                let lit = entry.lit;
                 if self.solver_state.is_lit_relevant(lit) {
-                    processed_second.insert(lit);
                     made_progress = true;
                     qi_gc_trace!("fixpoint pass: processing now-relevant lit={}", lit);
                     self.add_lit_to_proof_tracer(lit);
@@ -817,7 +850,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             self.queue_theory_clause(clause, theory);
                         }
                     }
+                    self.skipped_lits[i].processed_at_level = Some(self.decision_level);
                 }
+                i += 1;
             }
             if !made_progress {
                 break;
@@ -873,6 +908,21 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // Undo relevancy marks above this level (structural + class-level)
         self.solver_state.relevancy.backtrack_to(level);
+
+        // Purge persistent skipped_lits entries whose original SAT
+        // assignment level is above the backtrack target — those SAT
+        // assignments no longer hold. For entries whose SAT assignment
+        // survives, clear `processed_at_level` if we've backtracked past
+        // it: the egraph merges from that processing were undone, so on
+        // the next fixpoint we must reprocess.
+        self.skipped_lits.retain(|e| e.assigned_level <= level);
+        for entry in &mut self.skipped_lits {
+            if let Some(p) = entry.processed_at_level {
+                if p > level {
+                    entry.processed_at_level = None;
+                }
+            }
+        }
 
         // Reset solver-level assignments
         for i in 1..self.assignments.len() {
