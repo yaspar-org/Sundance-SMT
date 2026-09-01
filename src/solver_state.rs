@@ -256,16 +256,25 @@ impl SolverState {
         // For atomic terms (App, Global, Local), nnf_cache is either
         // absent or maps to the term itself, so the outcome is the same.
         //
-        // Slot [1] = positive polarity (term reached under even Nots),
-        // slot [0] = negative polarity. Both share the same underlying
-        // SAT variable (lits differ only in sign, abs is the same), so
-        // either is fine as a target.
+        // Slot [1] = positive polarity — stored NNF term stands for the
+        // input term. Return its lit as-is.
+        // Slot [0] = negative polarity — stored NNF term stands for the
+        // NEGATION of the input term. Return the negated lit so callers
+        // get a lit that represents the input term itself. Without this
+        // flip, callers that further negate (e.g. Implies premises,
+        // Not children) double-flip and install the wrong child in Or
+        // nodes — Or-true single-branch then picks the "premise-is-false"
+        // disjunct even when the premise is true, and the conclusion
+        // never becomes relevant (bug on minimal_inferred_multipattern).
         if let Some(nnf_entry) = self.cnf_cache.nnf_cache.get(&uid) {
-            for polarity in [1, 0] {
-                if let Some(ref nnf_term) = nnf_entry[polarity] {
-                    if let Some(&lit) = self.cnf_cache.var_map.get(&nnf_term.uid()) {
-                        return Some(lit);
-                    }
+            if let Some(ref nnf_term) = nnf_entry[1] {
+                if let Some(&lit) = self.cnf_cache.var_map.get(&nnf_term.uid()) {
+                    return Some(lit);
+                }
+            }
+            if let Some(ref nnf_term) = nnf_entry[0] {
+                if let Some(&lit) = self.cnf_cache.var_map.get(&nnf_term.uid()) {
+                    return Some(-lit);
                 }
             }
         }
