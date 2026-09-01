@@ -53,6 +53,15 @@ pub(crate) trait RelevancyTrait {
 
 pub struct RelevancyState {
     node_kinds: Vec<Option<NodeKind>>,
+    /// Sign of the lit passed to `register_node` for this idx. `+1` means the
+    /// term is TRUE iff `assignments[idx] > 0`; `-1` means the term is TRUE
+    /// iff `assignments[idx] < 0`. Needed because `relevancy_lit_for_term`
+    /// can return a signed lit (e.g. when only the NNF-negation of the term
+    /// is Tseitin-cached, as for an OR that appears only under top-level
+    /// `not`). Without this, `propagate_node` fires the wrong branch
+    /// (Or-TRUE when the OR is actually FALSE) and dependent lits never
+    /// become relevant.
+    node_polarity: Vec<i8>,
     relevant: Vec<bool>,
     branch_chosen: Vec<bool>,
     /// Per-variable polarity: 0=unassigned, 1=positive, -1=negative.
@@ -79,6 +88,7 @@ impl RelevancyState {
     pub fn new(enabled: bool) -> Self {
         RelevancyState {
             node_kinds: Vec::new(),
+            node_polarity: Vec::new(),
             relevant: Vec::new(),
             branch_chosen: Vec::new(),
             assignments: Vec::new(),
@@ -133,7 +143,18 @@ impl RelevancyState {
             self.cond_watches_on_true.resize_with(new_len, Vec::new);
             self.cond_watches_on_false.resize_with(new_len, Vec::new);
             self.node_kinds.resize_with(new_len, || None);
+            self.node_polarity.resize(new_len, 1);
         }
+    }
+
+    /// Returns the assignment of the *term* at `idx`, adjusted for the
+    /// registration polarity. `Some(true)` means the term is currently
+    /// TRUE; `Some(false)` means FALSE; `None` means the SAT var is
+    /// unassigned.
+    fn get_term_truth(&self, idx: usize) -> Option<bool> {
+        let raw = self.get_assignment_by_idx(idx)?;
+        let pol = if idx < self.node_polarity.len() { self.node_polarity[idx] } else { 1 };
+        Some(raw == (pol > 0))
     }
 
     fn propagate_node(&mut self, idx: usize, level: usize) {
@@ -146,7 +167,7 @@ impl RelevancyState {
         };
         match kind {
             NodeKind::Or(ref child_lits) => {
-                match self.get_assignment_by_idx(idx) {
+                match self.get_term_truth(idx) {
                     Some(true) => {
                         if self.branch_chosen[idx] {
                             if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
@@ -189,7 +210,7 @@ impl RelevancyState {
                 }
             }
             NodeKind::And(ref child_lits) => {
-                match self.get_assignment_by_idx(idx) {
+                match self.get_term_truth(idx) {
                     Some(true) => {
                         if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
                             eprintln!("[relevancy] And-true idx={} marking children {:?} relevant (level={})", idx, child_lits, level);
@@ -230,7 +251,7 @@ impl RelevancyState {
             }
             NodeKind::Ite { cond, then_lit, else_lit } => {
                 self.mark_relevant(cond, level);
-                let ite_val = self.get_assignment_by_idx(idx);
+                let ite_val = self.get_term_truth(idx);
                 let cond_val = self.lit_is_true(cond);
                 let cond_false = self.lit_is_false(cond);
                 match ite_val {
@@ -359,6 +380,7 @@ impl RelevancyTrait for RelevancyState {
                 eprintln!("[relevancy] register lit={} kind={} (already-assigned={} already-relevant={})", lit, kind_name, asgn, rel);
             }
             self.node_kinds[idx] = Some(kind);
+            self.node_polarity[idx] = if lit >= 0 { 1 } else { -1 };
         }
     }
 

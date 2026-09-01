@@ -71,9 +71,9 @@ pub struct Args {
     pub batch_cap: usize,
     /// Enable quantifier instantiation garbage collection via activation literals.
     /// Only effective with lazy QI (--eager-qi 0).
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     pub qi_gc: bool,
     /// Enable relevancy filtering (skip theory work for irrelevant atoms)
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, num_args=0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
     pub relevancy: bool,
 }

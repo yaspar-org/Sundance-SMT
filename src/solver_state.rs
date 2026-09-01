@@ -888,6 +888,11 @@ impl SolverState {
                     for attr in attrs.iter() {
                         match attr {
                             Attribute::Pattern(s_exprs) => {
+                                if s_exprs.is_empty() {
+                                    panic!(
+                                        "forall has an empty :pattern trigger: {term}"
+                                    );
+                                }
                                 let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
                                     s_exprs.iter().map(|p| self.build_pattern(p)).collect();
                                 trigger_ids.push(pattern_ids);
