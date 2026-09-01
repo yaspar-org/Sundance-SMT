@@ -709,6 +709,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         );
                     }
                 }
+                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                    let term_str = if self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
+                        format!("{}", self.solver_state.get_term_from_lit(*lit))
+                    } else {
+                        format!("?{}", lit)
+                    };
+                    eprintln!("[relevancy] push to skipped_lits: lit={} term={} at level={}", *lit, term_str, self.decision_level);
+                }
                 self.skipped_lits.push(SkippedLit {
                     lit: *lit,
                     assigned_level: self.decision_level,
@@ -823,6 +831,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // together force retroactive processing. z3 avoids this entirely
         // by not gating core theory work on relevancy (only downstream
         // work like QI).
+        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() && !self.skipped_lits.is_empty() {
+            for e in &self.skipped_lits {
+                let term_str = if self.solver_state.cnf_cache.var_map_reverse.contains_key(&e.lit.abs()) {
+                    format!("{}", self.solver_state.get_term_from_lit(e.lit))
+                } else {
+                    format!("?{}", e.lit)
+                };
+                eprintln!("[relevancy] fixpoint scan (decision_level={}): lit={} term={} asgn_lvl={} proc={:?} rel={}",
+                    self.decision_level, e.lit, term_str, e.assigned_level, e.processed_at_level,
+                    self.solver_state.is_lit_relevant(e.lit));
+            }
+        }
         loop {
             let mut i = 0;
             let mut made_progress = false;

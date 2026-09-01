@@ -454,7 +454,57 @@ impl SolverState {
             _ => crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term)),
         };
 
+        // Any branch that resolved to Atom (App/catch-all, or a fallback
+        // from Eq/Or/And/Implies/Ite when a child lacks a lit) still owes
+        // structural classification to any Boolean-connective sub-terms
+        // buried inside. Without that, e.g. `(= P (B (or ...)))` — non-Bool
+        // Eq falls through to Atom, but the `(or ...)` inside never gets
+        // an Or NodeKind, and its child equality never becomes relevant.
+        // Bug on tester-constructor3-reduced3.smt2.
+        if matches!(kind, crate::relevancy::NodeKind::Atom(_)) {
+            self.relevancy_classify_bool_subterms(term, visited);
+        }
+
+        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            eprintln!("[relevancy] classify lit={} term={}", lit, term);
+        }
         self.relevancy.register_node(lit, kind);
+    }
+
+    /// Recursively call `classify_recursive` on Boolean-connective sub-terms
+    /// reachable from `term`. Used by the App/catch-all classification
+    /// branch to ensure buried Boolean structure gets its own NodeKind.
+    fn relevancy_classify_bool_subterms(
+        &mut self,
+        term: &Term,
+        visited: &mut std::collections::HashSet<u64>,
+    ) {
+        let mut stack: Vec<Term> = Vec::new();
+        match term.repr() {
+            ATerm::App(_, args, _) => { for a in args { stack.push(a.clone()); } }
+            ATerm::Not(child) => stack.push(child.clone()),
+            ATerm::Or(children) | ATerm::And(children) => {
+                for c in children { stack.push(c.clone()); }
+            }
+            ATerm::Eq(a, b) => { stack.push(a.clone()); stack.push(b.clone()); }
+            ATerm::Ite(c, t, e) => {
+                stack.push(c.clone()); stack.push(t.clone()); stack.push(e.clone());
+            }
+            _ => {}
+        }
+        while let Some(t) = stack.pop() {
+            match t.repr() {
+                ATerm::Or(_) | ATerm::And(_) | ATerm::Not(_)
+                | ATerm::Eq(_, _) | ATerm::Ite(_, _, _)
+                | ATerm::Implies(_, _) => {
+                    self.relevancy_classify_recursive(&t, visited);
+                }
+                ATerm::App(_, args, _) => {
+                    for a in args { stack.push(a.clone()); }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Get the egraph class root for a lit's underlying term, or None if

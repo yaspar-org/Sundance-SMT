@@ -100,11 +100,17 @@ impl RelevancyState {
         self.ensure_capacity(lit);
         let idx = lit.unsigned_abs() as usize;
         if self.relevant[idx] {
+            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                eprintln!("[relevancy] mark_relevant(lit={}, level={}) — already relevant, no-op", lit, level);
+            }
             return false;
         }
         self.relevant[idx] = true;
         self.trail.push((level, lit));
         self.queue.push_back(lit);
+        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            eprintln!("[relevancy] mark_relevant(lit={}, level={}) — newly relevant, queued", lit, level);
+        }
         true
     }
 
@@ -341,14 +347,16 @@ impl RelevancyTrait for RelevancyState {
             if RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
                 || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
                 let kind_name = match &kind {
-                    NodeKind::Or(c) => format!("Or({})", c.len()),
-                    NodeKind::And(c) => format!("And({})", c.len()),
+                    NodeKind::Or(c) => format!("Or({}) children={:?}", c.len(), c),
+                    NodeKind::And(c) => format!("And({}) children={:?}", c.len(), c),
                     NodeKind::Not(c) => format!("Not({})", c),
                     NodeKind::Iff(a, b) => format!("Iff({},{})", a, b),
                     NodeKind::Ite { cond, .. } => format!("Ite(cond={})", cond),
                     NodeKind::Atom(s) => format!("Atom(subs={:?})", s),
                 };
-                eprintln!("[relevancy] register lit={} kind={}", lit, kind_name);
+                let asgn = if idx < self.assignments.len() { self.assignments[idx] } else { 0 };
+                let rel = idx < self.relevant.len() && self.relevant[idx];
+                eprintln!("[relevancy] register lit={} kind={} (already-assigned={} already-relevant={})", lit, kind_name, asgn, rel);
             }
             self.node_kinds[idx] = Some(kind);
         }
