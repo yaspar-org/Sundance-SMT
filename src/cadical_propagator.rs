@@ -845,6 +845,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         process_assignment(lit, self.solver_state, self.decision_level);
                     self.solver_state
                         .propagate_class_relevancy_from_merges(self.decision_level);
+                    // Mirror the main pass: drain the arithmetic merge queue
+                    // and feed the lit to Z3 (if arithmetic). Both are needed:
+                    // - drain enforces the "queue empty before decision level
+                    //   advances" invariant the egraph asserts;
+                    // - on_literal_assignment is how arithmetic atoms enter
+                    //   Z3's incremental trail (no batch resync exists).
+                    #[cfg(feature = "z3-solver")]
+                    if let Some(z3) = self.z3_incremental.as_mut() {
+                        z3.drain_merge_queue(self.solver_state);
+                        z3.on_literal_assignment(lit, self.solver_state);
+                    }
+                    self.sync_new_vars();
                     if let Some(constraints) = constraints_opt {
                         for (clause, theory) in constraints {
                             self.queue_theory_clause(clause, theory);
