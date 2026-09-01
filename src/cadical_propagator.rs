@@ -410,8 +410,14 @@ impl<'a> CustomExternalPropagator<'a> {
             // Register the pre-NNF instance body with relevancy so structural
             // rules see the original connectives (Iff/ITE/Implies) before
             // NNF flattens them into Or/And.
+            //
+            // Register at level 0: QI clauses are permanent in SAT (they
+            // survive backtracks), so their relevancy roots must persist
+            // too. Registering at `self.decision_level` would leave a
+            // gap where the clauses are live but relevancy has forgotten
+            // the root after a backtrack past this level.
             self.solver_state
-                .relevancy_register_term(pre_nnf_body, self.decision_level);
+                .relevancy_register_term(pre_nnf_body, 0);
             for clause in clauses {
                 if let Some(ref gc) = self.qi_gc_state {
                     let neg_act = -gc.borrow().current_act;
@@ -654,6 +660,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.decision_level,
             );
             let is_relevant = structural || self.solver_state.is_lit_relevant(*lit);
+
+            if QI_GC_TRACE.load(Ordering::Relaxed)
+                && self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs())
+            {
+                eprintln!(
+                    "[qi-gc] notify_assignment lit={} term={} structural={} is_relevant={}",
+                    lit,
+                    self.solver_state.get_term_from_lit(*lit),
+                    structural,
+                    is_relevant
+                );
+            }
 
             if self.fixed_literals.contains(lit) {
                 debug_println!(6, 0, "Skipping literal {lit} because it is fixed");

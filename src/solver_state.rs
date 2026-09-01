@@ -243,15 +243,34 @@ impl SolverState {
 
     pub fn relevancy_lit_for_term(&self, term: &Term) -> Option<i32> {
         let uid = term.uid();
-        if let Some(&lit) = self.cnf_cache.var_map.get(&uid) {
-            return Some(lit);
-        }
+        // Prefer the NNF-cache path when available. For compound Boolean
+        // terms (Iff, Implies, Ite, etc.), NNF rewrites them into an
+        // Or/And structure, and it's THAT structure's Tseitin lit that
+        // SAT actually assigns during propagation. The term's own uid
+        // may also appear in `var_map` — via `get_or_allocate_lit_for_term`
+        // used for proof tracing — but that lit is a fresh unconnected
+        // SAT variable, not the one SAT actually asserts. Registering
+        // relevancy at that spurious lit means our structural nodes never
+        // fire on the real assignment.
+        //
+        // For atomic terms (App, Global, Local), nnf_cache is either
+        // absent or maps to the term itself, so the outcome is the same.
+        //
+        // Slot [1] = positive polarity (term reached under even Nots),
+        // slot [0] = negative polarity. Both share the same underlying
+        // SAT variable (lits differ only in sign, abs is the same), so
+        // either is fine as a target.
         if let Some(nnf_entry) = self.cnf_cache.nnf_cache.get(&uid) {
-            if let Some(ref nnf_term) = nnf_entry[1] {
-                if let Some(&lit) = self.cnf_cache.var_map.get(&nnf_term.uid()) {
-                    return Some(lit);
+            for polarity in [1, 0] {
+                if let Some(ref nnf_term) = nnf_entry[polarity] {
+                    if let Some(&lit) = self.cnf_cache.var_map.get(&nnf_term.uid()) {
+                        return Some(lit);
+                    }
                 }
             }
+        }
+        if let Some(&lit) = self.cnf_cache.var_map.get(&uid) {
+            return Some(lit);
         }
         None
     }
@@ -333,18 +352,24 @@ impl SolverState {
 
         let kind = match term.repr() {
             ATerm::Eq(a, b) => {
-                if self.cnf_cache.var_map.contains_key(&uid) {
-                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                // If both sides have SAT lits, treat as Iff (semantically
+                // correct for bool-bool Eq; for non-bool Eq the sides are
+                // atoms without direct SAT lits and this falls through to
+                // Atom naturally).
+                //
+                // Do NOT gate on `var_map.contains_key(&uid)`: the Eq's
+                // own uid may end up in var_map via
+                // `get_or_allocate_lit_for_term` (used by proof tracing on
+                // the QI path) with a fresh disconnected lit, which is
+                // not evidence that the Eq was Tseitinized as an atom.
+                let a_lit = self.relevancy_lit_for_term(a);
+                let b_lit = self.relevancy_lit_for_term(b);
+                if let (Some(al), Some(bl)) = (a_lit, b_lit) {
+                    self.relevancy_classify_recursive(a, visited);
+                    self.relevancy_classify_recursive(b, visited);
+                    crate::relevancy::NodeKind::Iff(al, bl)
                 } else {
-                    let a_lit = self.relevancy_lit_for_term(a);
-                    let b_lit = self.relevancy_lit_for_term(b);
-                    if let (Some(al), Some(bl)) = (a_lit, b_lit) {
-                        self.relevancy_classify_recursive(a, visited);
-                        self.relevancy_classify_recursive(b, visited);
-                        crate::relevancy::NodeKind::Iff(al, bl)
-                    } else {
-                        crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
-                    }
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
                 }
             }
             ATerm::Or(children) => {
