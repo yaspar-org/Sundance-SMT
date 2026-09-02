@@ -112,9 +112,9 @@ pub fn cdcl_decision_procedure(
     } else {
         None
     };
-    let mut qi_gc_learner = qi_gc_state
-        .as_ref()
-        .map(|s| QiGcLearner { state: Rc::clone(s) });
+    let mut qi_gc_learner = qi_gc_state.as_ref().map(|s| QiGcLearner {
+        state: Rc::clone(s),
+    });
     if let Some(ref mut learner) = qi_gc_learner {
         solver.connect_learner(learner);
     }
@@ -171,7 +171,9 @@ pub fn cdcl_decision_procedure(
         draining_forgettable: false,
         next_is_decision: false,
         qi_gc_force_backtrack: false,
-        skipped_lits: Vec::new(),
+        theory_processed_levels: vec![None, None],
+        pending_relevant_assignments: std::collections::VecDeque::new(),
+        theory_assignment_pending: vec![false, false],
     };
 
     solver.connect_external_propagator(&mut propagator);

@@ -5,33 +5,35 @@ use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 #[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
+use crate::cnf::CNFConversion;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
-use crate::log::is_important;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
-use crate::solver_state::{SolverState, process_assignment};
-use crate::cnf::CNFConversion;
 use crate::relevancy::RelevancyTrait;
-use yaspar_ir::ast::TermAllocator;
+use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator, Learner};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use yaspar_ir::ast::TermAllocator;
 
 // --- QI Garbage Collection ---
 
 static QI_GC_TRACE: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn init_qi_gc_trace() {
-    QI_GC_TRACE.store(std::env::var("SUNDANCE_QI_GC_TRACE").is_ok(), Ordering::Relaxed);
+    QI_GC_TRACE.store(
+        std::env::var("SUNDANCE_QI_GC_TRACE").is_ok(),
+        Ordering::Relaxed,
+    );
 }
 
 macro_rules! qi_gc_trace {
@@ -195,30 +197,14 @@ pub struct CustomExternalPropagator<'a> {
     pub next_is_decision: bool,
     /// Flag: next cb_decide should force_backtrack(0) to trigger epoch transition.
     pub qi_gc_force_backtrack: bool,
-    /// Persistent list of assignments that were skipped as irrelevant.
-    /// Kept across `notify_assignment` batches so a lit skipped at level N
-    /// can be reprocessed if later structural or class propagation makes
-    /// it relevant.
-    ///
-    /// An entry stays in the list even after `process_assignment` runs for
-    /// it, with `processed_at_level` set to the level at which it was
-    /// processed. This is because the egraph merges from that processing
-    /// are tagged at `processed_at_level` and get undone on any backtrack
-    /// past that level. If the SAT assignment survives the backtrack
-    /// (i.e., `assigned_level <= new_level < processed_at_level`), the
-    /// theory needs to re-run `process_assignment` — otherwise SAT thinks
-    /// the lit is asserted but the egraph has forgotten the merges.
-    ///
-    /// On backtrack we:
-    ///   - remove entries whose `assigned_level > new_level`, and
-    ///   - clear `processed_at_level` for entries whose `processed_at_level > new_level`.
-    pub skipped_lits: Vec<SkippedLit>,
-}
-
-pub struct SkippedLit {
-    pub lit: i32,
-    pub assigned_level: usize,
-    pub processed_at_level: Option<usize>,
+    /// Decision level at which each currently assigned SAT literal was last
+    /// applied to the theory solvers. A `None` entry means either irrelevant
+    /// or waiting in `pending_relevant_assignments`.
+    pub theory_processed_levels: Vec<Option<usize>>,
+    /// Assigned literals that became relevant and still need theory work.
+    pub pending_relevant_assignments: VecDeque<i32>,
+    /// Queue-membership bits used to deduplicate pending work.
+    pub theory_assignment_pending: Vec<bool>,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -376,16 +362,20 @@ impl<'a> CustomExternalPropagator<'a> {
             self.solver_state
                 .insert_predecessor(&eq_term, None, None, true);
             let or_term = self.solver_state.context.or(vec![
-                lt_term.clone(), gt_term.clone(), eq_term.clone(),
+                lt_term.clone(),
+                gt_term.clone(),
+                eq_term.clone(),
             ]);
-            self.solver_state.insert_predecessor(&or_term, None, None, true);
+            self.solver_state
+                .insert_predecessor(&or_term, None, None, true);
             let cnf_formula = or_term.cnf_tseitin(self.solver_state);
             let cnf_lits: Vec<Vec<i32>> = cnf_formula
                 .into_iter()
                 .map(|c| c.into_iter().collect())
                 .collect();
 
-            self.solver_state.relevancy_register_term(&or_term, self.decision_level);
+            self.solver_state
+                .relevancy_register_term(&or_term, self.decision_level);
 
             self.sync_new_vars();
             for clause in cnf_lits {
@@ -424,11 +414,17 @@ impl<'a> CustomExternalPropagator<'a> {
     ) {
         for inst in instances {
             let (clauses, pre_nnf_body) = match inst {
-                Instantiation { clauses, pre_nnf_body } => {
+                Instantiation {
+                    clauses,
+                    pre_nnf_body,
+                } => {
                     self.stats.instantiations += 1;
                     (clauses, pre_nnf_body)
                 }
-                Skolemization { clauses, pre_nnf_body } => (clauses, pre_nnf_body),
+                Skolemization {
+                    clauses,
+                    pre_nnf_body,
+                } => (clauses, pre_nnf_body),
             };
             // Register the pre-NNF instance body with relevancy so structural
             // rules see the original connectives (Iff/ITE/Implies) before
@@ -439,22 +435,33 @@ impl<'a> CustomExternalPropagator<'a> {
             // too. Registering at `self.decision_level` would leave a
             // gap where the clauses are live but relevancy has forgotten
             // the root after a backtrack past this level.
-            self.solver_state
-                .relevancy_register_term(pre_nnf_body, 0);
+            self.solver_state.relevancy_register_term(pre_nnf_body, 0);
             for clause in clauses {
                 if let Some(ref gc) = self.qi_gc_state {
                     let neg_act = -gc.borrow().current_act;
                     let mut guarded = clause.clone();
                     guarded.push(neg_act);
                     if QI_GC_TRACE.load(Ordering::Relaxed) {
-                        let terms: Vec<String> = clause.iter().map(|&lit| {
-                            if self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
-                                format!("{}", self.solver_state.get_term_from_lit(lit))
-                            } else {
-                                format!("?{}", lit)
-                            }
-                        }).collect();
-                        eprintln!("[qi-gc] QI clause (epoch {}): {:?}", gc.borrow().epoch, terms);
+                        let terms: Vec<String> = clause
+                            .iter()
+                            .map(|&lit| {
+                                if self
+                                    .solver_state
+                                    .cnf_cache
+                                    .var_map_reverse
+                                    .contains_key(&lit.abs())
+                                {
+                                    format!("{}", self.solver_state.get_term_from_lit(lit))
+                                } else {
+                                    format!("?{}", lit)
+                                }
+                            })
+                            .collect();
+                        eprintln!(
+                            "[qi-gc] QI clause (epoch {}): {:?}",
+                            gc.borrow().epoch,
+                            terms
+                        );
                     }
                     self.proof_tracer
                         .borrow_mut()
@@ -536,7 +543,10 @@ impl<'a> CustomExternalPropagator<'a> {
         let neg_old_act = -old_act;
         let epoch = gc.epoch;
 
-        qi_gc_trace!("epoch {}: backtrack to level 0, triggering epoch transition", epoch);
+        qi_gc_trace!(
+            "epoch {}: backtrack to level 0, triggering epoch transition",
+            epoch
+        );
 
         // 1. Queue the old activation literal as a permanent unit clause
         let conflict_count = gc.learned_clauses.len();
@@ -548,19 +558,31 @@ impl<'a> CustomExternalPropagator<'a> {
         let learned: Vec<Vec<i32>> = gc.learned_clauses.drain(..).collect();
         drop(gc);
         for clause in learned {
-            let promoted: Vec<i32> = clause.into_iter()
+            let promoted: Vec<i32> = clause
+                .into_iter()
                 .filter(|&lit| lit != neg_old_act)
                 .collect();
             if !promoted.is_empty() {
                 if QI_GC_TRACE.load(Ordering::Relaxed) {
-                    let terms: Vec<String> = promoted.iter().map(|&lit| {
-                        if self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
-                            format!("{}", self.solver_state.get_term_from_lit(lit))
-                        } else {
-                            format!("?{}", lit)
-                        }
-                    }).collect();
-                    eprintln!("[qi-gc] epoch {}: promoting conflict clause: {:?}", epoch, terms);
+                    let terms: Vec<String> = promoted
+                        .iter()
+                        .map(|&lit| {
+                            if self
+                                .solver_state
+                                .cnf_cache
+                                .var_map_reverse
+                                .contains_key(&lit.abs())
+                            {
+                                format!("{}", self.solver_state.get_term_from_lit(lit))
+                            } else {
+                                format!("?{}", lit)
+                            }
+                        })
+                        .collect();
+                    eprintln!(
+                        "[qi-gc] epoch {}: promoting conflict clause: {:?}",
+                        epoch, terms
+                    );
                 }
                 self.queue_theory_clause(promoted, Theory::Background);
             }
@@ -570,7 +592,11 @@ impl<'a> CustomExternalPropagator<'a> {
         let mut gc = gc_state.borrow_mut();
         let cleared_count = self.solver_state.added_instantiations.len();
         self.solver_state.added_instantiations.clear();
-        qi_gc_trace!("epoch {}: cleared {} added_instantiations", epoch, cleared_count);
+        qi_gc_trace!(
+            "epoch {}: cleared {} added_instantiations",
+            epoch,
+            cleared_count
+        );
 
         // 4. Start new epoch
         gc.epoch += 1;
@@ -584,11 +610,15 @@ impl<'a> CustomExternalPropagator<'a> {
         drop(gc);
 
         // Observe the new activation literal so CaDiCaL knows it exists.
-        unsafe { (*self.solver).add_observed_var(new_act); }
+        unsafe {
+            (*self.solver).add_observed_var(new_act);
+        }
 
         qi_gc_trace!(
             "epoch {}: transition complete. promoted {} conflict clauses. new act={}",
-            new_epoch, conflict_count, new_act
+            new_epoch,
+            conflict_count,
+            new_act
         );
     }
 
@@ -619,6 +649,121 @@ impl<'a> CustomExternalPropagator<'a> {
             }
         }
     }
+
+    fn ensure_theory_assignment_capacity(&mut self, idx: usize) {
+        if idx < self.assignments.len() {
+            return;
+        }
+        let new_len = (idx + 1).max(self.assignments.len() * 2).max(64);
+        self.assignments.resize(new_len, 0);
+        self.theory_processed_levels.resize(new_len, None);
+        self.theory_assignment_pending.resize(new_len, false);
+    }
+
+    fn record_sat_assignment(&mut self, lit: i32) {
+        let idx = lit.unsigned_abs() as usize;
+        self.ensure_theory_assignment_capacity(idx);
+        let sign = if lit > 0 { 1 } else { -1 };
+        let encoded = ((self.decision_level + 1) as i32) * sign;
+        let old = self.assignments[idx];
+        debug_assert!(
+            old == 0 || old.signum() == encoded.signum(),
+            "SAT variable {} was assigned both polarities without a backtrack",
+            idx
+        );
+        if old == 0 || encoded.abs() < old.abs() {
+            self.assignments[idx] = encoded;
+        }
+    }
+
+    fn queue_relevant_assignment(&mut self, lit: i32) {
+        let idx = lit.unsigned_abs() as usize;
+        self.ensure_theory_assignment_capacity(idx);
+        let assignment = self.assignments[idx];
+        if assignment == 0
+            || self.theory_processed_levels[idx].is_some()
+            || self.theory_assignment_pending[idx]
+        {
+            return;
+        }
+        let assigned_lit = if assignment > 0 {
+            idx as i32
+        } else {
+            -(idx as i32)
+        };
+        if self.fixed_literals.contains(&assigned_lit)
+            || !self.solver_state.is_lit_relevant(assigned_lit)
+        {
+            return;
+        }
+        self.theory_assignment_pending[idx] = true;
+        self.pending_relevant_assignments.push_back(assigned_lit);
+    }
+
+    fn queue_newly_relevant_assignments(&mut self) {
+        self.solver_state.propagate_relevancy();
+        let events = self.solver_state.drain_newly_relevant_lits();
+        for event in events {
+            self.queue_relevant_assignment(event.lit);
+        }
+    }
+
+    fn apply_relevant_assignment(&mut self, lit: i32) {
+        self.add_lit_to_proof_tracer(lit);
+
+        let constraints_opt = process_assignment(lit, self.solver_state, self.decision_level);
+
+        self.solver_state
+            .propagate_class_relevancy_from_merges(self.decision_level);
+
+        #[cfg(feature = "z3-solver")]
+        {
+            if let Some(z3) = self.z3_incremental.as_mut() {
+                z3.drain_merge_queue(self.solver_state);
+                z3.on_literal_assignment(lit, self.solver_state);
+            }
+        }
+        self.sync_new_vars();
+
+        if let Some(constraints) = constraints_opt {
+            for (constraint, theory) in constraints {
+                let mut shrunk_constraint = Vec::new();
+                let mut already_considered = DeterministicHashSet::default();
+                for constraint_lit in constraint {
+                    if already_considered.insert(constraint_lit) {
+                        shrunk_constraint.push(constraint_lit);
+                    }
+                }
+                self.queue_theory_clause(shrunk_constraint, theory);
+            }
+        }
+    }
+
+    fn process_pending_relevant_assignments(&mut self) {
+        self.queue_newly_relevant_assignments();
+        while let Some(lit) = self.pending_relevant_assignments.pop_front() {
+            let idx = lit.unsigned_abs() as usize;
+            self.ensure_theory_assignment_capacity(idx);
+            self.theory_assignment_pending[idx] = false;
+
+            let assignment = self.assignments[idx];
+            if assignment == 0 || self.theory_processed_levels[idx].is_some() {
+                continue;
+            }
+            let assigned_lit = if assignment > 0 {
+                idx as i32
+            } else {
+                -(idx as i32)
+            };
+            if assigned_lit != lit || !self.solver_state.is_lit_relevant(lit) {
+                continue;
+            }
+
+            self.apply_relevant_assignment(lit);
+            self.theory_processed_levels[idx] = Some(self.decision_level);
+            self.queue_newly_relevant_assignments();
+        }
+    }
 }
 
 impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
@@ -635,12 +780,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             // Skip activation literals — they have no term in the egraph.
             if let Some(ref gc) = self.qi_gc_state {
                 if gc.borrow().activation_lits.contains(&lit.abs()) {
-                    while self.assignments.len() <= lit.unsigned_abs() as usize {
-                        self.assignments.resize(2 * self.assignments.len(), 0);
-                    }
-                    let lit_sign = if *lit > 0 { 1 } else { -1 };
-                    self.assignments[lit.unsigned_abs() as usize] =
-                        ((self.decision_level + 1) as i32) * lit_sign;
+                    self.record_sat_assignment(*lit);
                     continue;
                 }
             }
@@ -659,32 +799,31 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.next_is_decision = false;
                 eprintln!(
                     "[qi-gc] decision level {}: lit={} term={}",
-                    self.decision_level, lit, self.solver_state.get_term_from_lit(*lit)
+                    self.decision_level,
+                    lit,
+                    self.solver_state.get_term_from_lit(*lit)
                 );
             }
 
-            // adding the literal to the assignment
-            // add with level (negatively if we learn its negation)
-            while self.assignments.len() <= lit.unsigned_abs() as usize {
-                self.assignments.resize(2 * self.assignments.len(), 0);
-            }
-            let lit_sign = if *lit > 0 { 1 } else { -1 };
-            self.assignments[lit.unsigned_abs() as usize] =
-                ((self.decision_level + 1) as i32) * lit_sign;
+            self.record_sat_assignment(*lit);
 
-            // Relevancy filter: always propagate relevancy (even for fixed literals)
-            // so structural propagation fires. Skip irrelevant non-fixed literals.
-            // is_relevant is composed of two signals: the structural relevancy
-            // (Or/And/Iff/Ite rules) plus egraph-class relevancy (any lit in the
-            // same class is relevant).
-            let structural = self.solver_state.relevancy.notify_assignment(
-                *lit,
-                self.decision_level,
-            );
+            // Relevancy propagation always sees the SAT assignment. Any
+            // literal that transitions to relevant is emitted as an event;
+            // if it is already assigned, the event queues its theory work.
+            let structural = self
+                .solver_state
+                .relevancy
+                .notify_assignment(*lit, self.decision_level);
+            self.solver_state.propagate_relevancy();
             let is_relevant = structural || self.solver_state.is_lit_relevant(*lit);
+            self.queue_newly_relevant_assignments();
 
             if QI_GC_TRACE.load(Ordering::Relaxed)
-                && self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs())
+                && self
+                    .solver_state
+                    .cnf_cache
+                    .var_map_reverse
+                    .contains_key(&lit.abs())
             {
                 eprintln!(
                     "[qi-gc] notify_assignment lit={} term={} structural={} is_relevant={}",
@@ -700,196 +839,25 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 continue;
             }
 
-            if !is_relevant {
-                if QI_GC_TRACE.load(Ordering::Relaxed) {
-                    if self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
-                        eprintln!(
-                            "[qi-gc] SKIPPED irrelevant lit={} term={}",
-                            lit, self.solver_state.get_term_from_lit(*lit)
-                        );
-                    }
-                }
-                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
-                    let term_str = if self.solver_state.cnf_cache.var_map_reverse.contains_key(&lit.abs()) {
-                        format!("{}", self.solver_state.get_term_from_lit(*lit))
-                    } else {
-                        format!("?{}", lit)
-                    };
-                    eprintln!("[relevancy] push to skipped_lits: lit={} term={} at level={}", *lit, term_str, self.decision_level);
-                }
-                self.skipped_lits.push(SkippedLit {
-                    lit: *lit,
-                    assigned_level: self.decision_level,
-                    processed_at_level: None,
-                });
-                continue;
-            }
-
-            self.add_lit_to_proof_tracer(*lit);
-
-            let negated_model_or_datatype_constraints_opt =
-                process_assignment(*lit, self.solver_state, self.decision_level);
-
-            // Propagate class-level relevancy from any merges that happened
-            // inside process_assignment (direct + congruence-derived).
-            self.solver_state
-                .propagate_class_relevancy_from_merges(self.decision_level);
-
-            // Drain merges triggered by this assignment, then push the lit
-            // itself if it's arithmetic.
-            #[cfg(feature = "z3-solver")]
+            if is_relevant {
+                self.queue_relevant_assignment(*lit);
+            } else if QI_GC_TRACE.load(Ordering::Relaxed)
+                && self
+                    .solver_state
+                    .cnf_cache
+                    .var_map_reverse
+                    .contains_key(&lit.abs())
             {
-                if let Some(z3) = self.z3_incremental.as_mut() {
-                    z3.drain_merge_queue(self.solver_state);
-                    z3.on_literal_assignment(*lit, self.solver_state);
-                }
+                eprintln!(
+                    "[qi-gc] deferred irrelevant lit={} term={}",
+                    lit,
+                    self.solver_state.get_term_from_lit(*lit)
+                );
             }
-            self.sync_new_vars();
-
-            if let Some(negated_model_or_datatype_constraints) =
-                negated_model_or_datatype_constraints_opt
-            {
-                for (constraint, theory) in negated_model_or_datatype_constraints {
-                    // todo: deleting this ordering thing -> just for debugging
-                    let mut constraint_ordered = constraint.clone();
-                    constraint_ordered.sort();
-                    debug_println!(
-                        16,
-                        0,
-                        "[in notify_assignment] We have the following constraint: {:?}",
-                        constraint_ordered
-                    );
-                    if is_important(12) {
-                        for lit in constraint.clone() {
-                            debug_println!(12, 4, "{}", self.solver_state.get_term_from_lit(lit));
-                        }
-                    }
-                    let mut shrunk_constraint = vec![];
-                    let mut already_considered = DeterministicHashSet::default();
-                    for lit in constraint {
-                        if already_considered.contains(&lit) {
-                            // TODO: we are checking for repeats here, but we should fix this at the conflict clause level so that we never get repeats
-                            // the repeats are coming from (= x y) and true being merged and x and y being merged
-                            debug_println!(
-                                2,
-                                0,
-                                "Skipping literal {lit} from negated model because it is repeated"
-                            );
-                        } else {
-                            shrunk_constraint.push(lit);
-                            already_considered.insert(lit);
-                        }
-                    }
-                    // todo: deleting this ordering thing -> just for debugging
-                    let mut shrunk_constraint_ordered = shrunk_constraint.clone();
-                    shrunk_constraint_ordered.sort();
-                    debug_println!(
-                        16,
-                        1,
-                        "After shrinking [ in notify_assignment]: {:?}",
-                        shrunk_constraint_ordered
-                    );
-                    debug_println!(11, 1, "This corresponds to ");
-                    for lit in shrunk_constraint.iter() {
-                        debug_println!(11, 1, "  {}", self.solver_state.get_term_from_lit(*lit));
-                    }
-                    self.sync_new_vars();
-
-                    // Store the theory lemma with its proof steps
-                    // TODO: I am not doing proof step stuff right now, but I need to add it back in
-                    // let proof_steps = self.solver_state.egraph.get_proof_steps_for_lemma(&shrunk_constraint);
-
-                    debug_println!(
-                        14 - 3,
-                        0,
-                        "In case 1 currently disequalities: {:?}",
-                        self.disequalities.borrow()
-                    );
-
-                    // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
-                    self.queue_theory_clause(shrunk_constraint, theory);
-                    debug_println!(
-                        14 - 3,
-                        0,
-                        "We have the following disequalities: {:?}",
-                        self.disequalities.borrow()
-                    );
-                }
-            }
+            self.process_pending_relevant_assignments();
         }
 
-        // Fixpoint pass: scan the PERSISTENT skipped_lits list for
-        // assignments that were skipped (in this or an earlier batch)
-        // and have since become relevant — via structural propagation
-        // in this batch, or via egraph-driven class propagation from a
-        // merge that just happened. Loop until no more are newly-
-        // relevant, since a process_assignment can itself trigger a
-        // merge that makes another skipped lit relevant.
-        //
-        // TODO: simplify. This exists because we gate process_assignment
-        // on relevancy AND respect SAT's assignment order — the two
-        // together force retroactive processing. z3 avoids this entirely
-        // by not gating core theory work on relevancy (only downstream
-        // work like QI).
-        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() && !self.skipped_lits.is_empty() {
-            for e in &self.skipped_lits {
-                let term_str = if self.solver_state.cnf_cache.var_map_reverse.contains_key(&e.lit.abs()) {
-                    format!("{}", self.solver_state.get_term_from_lit(e.lit))
-                } else {
-                    format!("?{}", e.lit)
-                };
-                eprintln!("[relevancy] fixpoint scan (decision_level={}): lit={} term={} asgn_lvl={} proc={:?} rel={}",
-                    self.decision_level, e.lit, term_str, e.assigned_level, e.processed_at_level,
-                    self.solver_state.is_lit_relevant(e.lit));
-            }
-        }
-        loop {
-            let mut i = 0;
-            let mut made_progress = false;
-            while i < self.skipped_lits.len() {
-                let entry = &self.skipped_lits[i];
-                // Skip entries that have already been processed at a level
-                // still valid on the current SAT trail. If a subsequent
-                // backtrack invalidates that processing, `notify_backtrack`
-                // will clear `processed_at_level`, and we'll reprocess.
-                if entry.processed_at_level.is_some() {
-                    i += 1;
-                    continue;
-                }
-                let lit = entry.lit;
-                if self.solver_state.is_lit_relevant(lit) {
-                    made_progress = true;
-                    qi_gc_trace!("fixpoint pass: processing now-relevant lit={}", lit);
-                    self.add_lit_to_proof_tracer(lit);
-                    let constraints_opt =
-                        process_assignment(lit, self.solver_state, self.decision_level);
-                    self.solver_state
-                        .propagate_class_relevancy_from_merges(self.decision_level);
-                    // Mirror the main pass: drain the arithmetic merge queue
-                    // and feed the lit to Z3 (if arithmetic). Both are needed:
-                    // - drain enforces the "queue empty before decision level
-                    //   advances" invariant the egraph asserts;
-                    // - on_literal_assignment is how arithmetic atoms enter
-                    //   Z3's incremental trail (no batch resync exists).
-                    #[cfg(feature = "z3-solver")]
-                    if let Some(z3) = self.z3_incremental.as_mut() {
-                        z3.drain_merge_queue(self.solver_state);
-                        z3.on_literal_assignment(lit, self.solver_state);
-                    }
-                    self.sync_new_vars();
-                    if let Some(constraints) = constraints_opt {
-                        for (clause, theory) in constraints {
-                            self.queue_theory_clause(clause, theory);
-                        }
-                    }
-                    self.skipped_lits[i].processed_at_level = Some(self.decision_level);
-                }
-                i += 1;
-            }
-            if !made_progress {
-                break;
-            }
-        }
+        self.process_pending_relevant_assignments();
 
         // Trigger matching, like incremental arithmetic above, can use a
         // partial assignment. Existing pending work is always consumed before
@@ -929,7 +897,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_backtrack(&mut self, level: usize) {
         self.stats.backtracks += 1;
-        qi_gc_trace!("backtrack: level {} -> level {}", self.decision_level, level);
+        qi_gc_trace!(
+            "backtrack: level {} -> level {}",
+            self.decision_level,
+            level
+        );
         debug_println!(
             23,
             0,
@@ -941,25 +913,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // Undo relevancy marks above this level (structural + class-level)
         self.solver_state.relevancy.backtrack_to(level);
 
-        // Purge persistent skipped_lits entries whose original SAT
-        // assignment level is above the backtrack target — those SAT
-        // assignments no longer hold. For entries whose SAT assignment
-        // survives, clear `processed_at_level` if we've backtracked past
-        // it: the egraph merges from that processing were undone, so on
-        // the next fixpoint we must reprocess.
-        self.skipped_lits.retain(|e| e.assigned_level <= level);
-        for entry in &mut self.skipped_lits {
-            if let Some(p) = entry.processed_at_level {
-                if p > level {
-                    entry.processed_at_level = None;
-                }
-            }
-        }
+        self.pending_relevant_assignments.clear();
+        self.theory_assignment_pending.fill(false);
 
-        // Reset solver-level assignments
+        // Reset assignments that SAT removed. Theory work performed above the
+        // target level is invalidated even when the underlying assignment
+        // survives, so it will be re-queued after the egraph backtrack.
         for i in 1..self.assignments.len() {
             if self.assignments[i].abs() > (level + 1) as i32 {
                 self.assignments[i] = 0;
+                self.theory_processed_levels[i] = None;
+            } else if self.theory_processed_levels[i].is_some_and(|p| p > level) {
+                self.theory_processed_levels[i] = None;
             }
         }
 
@@ -978,6 +943,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // any congruence merges from `union_to_eclass` replay, so the queue
         // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
+        self.solver_state
+            .propagate_class_relevancy_from_merges(level);
 
         #[cfg(feature = "z3-solver")]
         {
@@ -987,6 +954,25 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
         self.sync_new_vars();
+
+        let surviving_unprocessed: Vec<i32> = self
+            .assignments
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(idx, assignment)| {
+                (*assignment != 0 && self.theory_processed_levels[idx].is_none()).then_some(
+                    if *assignment > 0 {
+                        idx as i32
+                    } else {
+                        -(idx as i32)
+                    },
+                )
+            })
+            .collect();
+        for lit in surviving_unprocessed {
+            self.queue_relevant_assignment(lit);
+        }
 
         // QI GC: backtrack to level 1 means all QI work above was invalidated.
         // Schedule force_backtrack(0) on next cb_decide to trigger epoch transition.
@@ -1034,9 +1020,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     Some(self.solver_state.get_term_from_lit(*x))
                 })
                 .collect();
-            debug_println!(24, 0, "PROPAGATOR: Checking model: {:?} [{:?}]", model, model_terms);
+            debug_println!(
+                24,
+                0,
+                "PROPAGATOR: Checking model: {:?} [{:?}]",
+                model,
+                model_terms
+            );
         }
 
+        self.process_pending_relevant_assignments();
         if !self.disequalities.borrow_mut().is_empty() {
             debug_println!(
                 24,
@@ -1080,18 +1073,33 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // The incremental backend already saw every atom via notify_assignment
         // — just flush any post-hoc merges and call check(). Otherwise use the
-        // eager entry point.
+        // eager entry point. The eager entry point re-linearizes the full
+        // model, so we must strip irrelevant lits first: notify_assignment
+        // skipped them at the theory layer and they didn't shape the egraph,
+        // so re-adding them to the arithmetic solver would break relevancy.
+        let filtered_model: Vec<i32> = model
+            .iter()
+            .copied()
+            .filter(|&l| self.solver_state.is_lit_relevant(l))
+            .collect();
         #[cfg(feature = "z3-solver")]
         let arith_result = if let Some(z3) = self.z3_incremental.as_mut() {
             z3.drain_merge_queue(self.solver_state);
             z3.check(self.solver_state)
         } else {
-            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state)
+            check_integer_constraints_satisfiable(
+                &self.arithmetic,
+                &filtered_model,
+                self.solver_state,
+            )
         };
         self.sync_new_vars();
         #[cfg(not(feature = "z3-solver"))]
-        let arith_result =
-            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state);
+        let arith_result = check_integer_constraints_satisfiable(
+            &self.arithmetic,
+            &filtered_model,
+            self.solver_state,
+        );
 
         match arith_result {
             ArithResult::Unsat(arithmetic_literals, arith_stats) => {
@@ -1275,8 +1283,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // QI GC: force backtrack to level 0 if scheduled (triggers epoch transition)
         if self.qi_gc_force_backtrack {
             self.qi_gc_force_backtrack = false;
-            qi_gc_trace!("force_backtrack(0) from cb_decide at level {}", self.decision_level);
-            unsafe { (*self.solver).force_backtrack(0); }
+            qi_gc_trace!(
+                "force_backtrack(0) from cb_decide at level {}",
+                self.decision_level
+            );
+            unsafe {
+                (*self.solver).force_backtrack(0);
+            }
             // After force_backtrack, notify_backtrack(0) will fire and trigger
             // epoch transition. CaDiCaL will re-call cb_decide at level 0.
             return 0;
@@ -1290,7 +1303,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 while idx >= self.assignments.len() {
                     self.assignments.resize(self.assignments.len() * 2, 0);
                 }
-                debug_assert!(self.assignments[idx] == 0, "activation literal must be unassigned at level 0");
+                debug_assert!(
+                    self.assignments[idx] == 0,
+                    "activation literal must be unassigned at level 0"
+                );
                 qi_gc_trace!("epoch {}: deciding act={}", gc.borrow().epoch, act);
                 return act;
             }
