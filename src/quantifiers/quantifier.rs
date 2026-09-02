@@ -12,6 +12,7 @@ use crate::egraphs::EgraphTrait;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
+use crate::relevancy::RelevancyTrait;
 use crate::solver_state::SolverState;
 use crate::solver_types::Polarity;
 use crate::utils::DeterministicHashMap;
@@ -24,8 +25,14 @@ pub(crate) enum QuantifierInstance {
     /// `pre_nnf_body` is the instance body after let-elim but before NNF/
     /// Tseitin — used by relevancy filtering so structural rules see the
     /// original connectives (Iff, ITE, Implies) that NNF destroys.
-    Instantiation { clauses: Vec<Vec<i32>>, pre_nnf_body: Term },
-    Skolemization { clauses: Vec<Vec<i32>>, pre_nnf_body: Term },
+    Instantiation {
+        clauses: Vec<Vec<i32>>,
+        pre_nnf_body: Term,
+    },
+    Skolemization {
+        clauses: Vec<Vec<i32>>,
+        pre_nnf_body: Term,
+    },
 }
 
 struct DeferredInstantiation {
@@ -93,6 +100,9 @@ pub(crate) fn instantiate_quantifiers(
         if quantifier_assignment == 0 {
             continue;
         }
+        if !solver_state.is_lit_relevant(quantifier_literal) {
+            continue;
+        }
 
         // if an odd number of these is true (i.e., XOR true) -> skolemize
         // if an even number of these is true (i.e., XOR false) -> instantiate
@@ -135,7 +145,17 @@ pub(crate) fn instantiate_quantifiers(
             let trigger_term_pairs: Vec<(usize, Option<u32>)> =
                 multipattern.iter().map(|t| (*t, None)).collect();
 
-            let list_assignments = solver_state.egraph.match_triggers(trigger_term_pairs);
+            // Only match against ground terms whose class was marked
+            // relevant. When relevancy is disabled, pass None to bypass
+            // the filter (class_relevant will be empty and can't be used).
+            let class_filter = if solver_state.relevancy.is_enabled() {
+                Some(solver_state.relevancy.class_relevant_set())
+            } else {
+                None
+            };
+            let list_assignments = solver_state
+                .egraph
+                .match_triggers(trigger_term_pairs, class_filter);
 
             if list_assignments.is_empty() {
                 continue;
@@ -350,8 +370,7 @@ fn process_deferred_instantiations(
         } else {
             quantifier_term
         };
-        let pre_nnf_body =
-            solver_state.implies(vec![quantifier_side], let_elim_term.clone());
+        let pre_nnf_body = solver_state.implies(vec![quantifier_side], let_elim_term.clone());
 
         let nnf_term = pre_nnf_body.nnf(solver_state);
 
@@ -400,7 +419,10 @@ fn process_deferred_instantiations(
         let mut clauses = raw_clauses;
         clauses.extend(additional_constraints);
 
-        results.push(QuantifierInstance::Instantiation { clauses, pre_nnf_body });
+        results.push(QuantifierInstance::Instantiation {
+            clauses,
+            pre_nnf_body,
+        });
     }
     results
 }

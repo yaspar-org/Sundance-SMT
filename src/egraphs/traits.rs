@@ -163,10 +163,15 @@ pub trait EgraphTrait {
     /// - `Some(t)` means the pattern must match in the same equivalence class as `t`
     /// - `None` means the pattern can match any term of the right function
     ///
+    /// `class_relevant_filter`: if `Some`, only match against function terms whose
+    /// egraph class root is in the set. `None` disables filtering (used when
+    /// relevancy is off).
+    ///
     /// Returns a list of substitution maps (bound variable `Local` → matched term ID).
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
+        class_relevant_filter: Option<&std::collections::HashSet<u32>>,
     ) -> Vec<crate::utils::DeterministicHashMap<Local, Self::TermId>>;
 
     // --- Backtracking ---

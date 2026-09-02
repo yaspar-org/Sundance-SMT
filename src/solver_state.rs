@@ -180,7 +180,7 @@ impl SolverState {
         ddsmt: bool,
         eager_skolem: bool,
         infer_triggers: bool,
-        relevancy: bool
+        relevancy: bool,
     ) -> Self {
         let egraph = Egraph::new();
         let datatype_info = DatatypeInfo::from_context(&context);
@@ -237,8 +237,12 @@ impl SolverState {
         if let Some(lit) = self.relevancy_lit_for_term(term) {
             self.mark_lit_relevant(lit, level);
         } else if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
-            eprintln!("[relevancy] WARNING: relevancy_register_term could not find lit for term={}", term);
+            eprintln!(
+                "[relevancy] WARNING: relevancy_register_term could not find lit for term={}",
+                term
+            );
         }
+        self.propagate_class_relevancy_from_merges(level);
     }
 
     pub fn relevancy_lit_for_term(&self, term: &Term) -> Option<i32> {
@@ -289,34 +293,58 @@ impl SolverState {
         let mut stack: Vec<&Term> = Vec::new();
         match term.repr() {
             ATerm::App(_, args, _) => {
-                for arg in args { stack.push(arg); }
+                for arg in args {
+                    stack.push(arg);
+                }
             }
             ATerm::Not(child) => stack.push(child),
             ATerm::Or(children) | ATerm::And(children) => {
-                for c in children { stack.push(c); }
+                for c in children {
+                    stack.push(c);
+                }
             }
-            ATerm::Eq(a, b) => { stack.push(a); stack.push(b); }
-            ATerm::Ite(c, t, e) => { stack.push(c); stack.push(t); stack.push(e); }
+            ATerm::Eq(a, b) => {
+                stack.push(a);
+                stack.push(b);
+            }
+            ATerm::Ite(c, t, e) => {
+                stack.push(c);
+                stack.push(t);
+                stack.push(e);
+            }
             _ => {}
         }
         let mut visited = std::collections::HashSet::new();
         while let Some(t) = stack.pop() {
             let uid = t.uid();
-            if !visited.insert(uid) { continue; }
+            if !visited.insert(uid) {
+                continue;
+            }
             if let Some(lit) = self.relevancy_lit_for_term(t) {
                 lits.push(lit);
                 continue;
             }
             match t.repr() {
                 ATerm::App(_, args, _) => {
-                    for arg in args { stack.push(arg); }
+                    for arg in args {
+                        stack.push(arg);
+                    }
                 }
                 ATerm::Not(child) => stack.push(child),
                 ATerm::Or(children) | ATerm::And(children) => {
-                    for c in children { stack.push(c); }
+                    for c in children {
+                        stack.push(c);
+                    }
                 }
-                ATerm::Eq(a, b) => { stack.push(a); stack.push(b); }
-                ATerm::Ite(c, t, e) => { stack.push(c); stack.push(t); stack.push(e); }
+                ATerm::Eq(a, b) => {
+                    stack.push(a);
+                    stack.push(b);
+                }
+                ATerm::Ite(c, t, e) => {
+                    stack.push(c);
+                    stack.push(t);
+                    stack.push(e);
+                }
                 _ => {}
             }
         }
@@ -347,14 +375,20 @@ impl SolverState {
             Some(l) => l,
             None => {
                 if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
-                    eprintln!("[relevancy] classify_recursive: no lit for uid={} term={}", uid, term);
+                    eprintln!(
+                        "[relevancy] classify_recursive: no lit for uid={} term={}",
+                        uid, term
+                    );
                 }
                 return;
             }
         };
         if self.relevancy.has_node(lit) {
             if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
-                eprintln!("[relevancy] classify_recursive: already has node for lit={} term={}", lit, term);
+                eprintln!(
+                    "[relevancy] classify_recursive: already has node for lit={} term={}",
+                    lit, term
+                );
             }
             return;
         }
@@ -387,7 +421,11 @@ impl SolverState {
                     .filter_map(|c| {
                         let r = self.relevancy_lit_for_term(c);
                         if r.is_none() && std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
-                            eprintln!("[relevancy] Or child has no lit: uid={} term={}", c.uid(), c);
+                            eprintln!(
+                                "[relevancy] Or child has no lit: uid={} term={}",
+                                c.uid(),
+                                c
+                            );
                         }
                         r
                     })
@@ -446,7 +484,11 @@ impl SolverState {
                     self.relevancy_classify_recursive(c, visited);
                     self.relevancy_classify_recursive(t, visited);
                     self.relevancy_classify_recursive(e, visited);
-                    crate::relevancy::NodeKind::Ite { cond: cl, then_lit: tl, else_lit: el }
+                    crate::relevancy::NodeKind::Ite {
+                        cond: cl,
+                        then_lit: tl,
+                        else_lit: el,
+                    }
                 } else {
                     crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
                 }
@@ -481,26 +523,42 @@ impl SolverState {
     ) {
         let mut stack: Vec<Term> = Vec::new();
         match term.repr() {
-            ATerm::App(_, args, _) => { for a in args { stack.push(a.clone()); } }
+            ATerm::App(_, args, _) => {
+                for a in args {
+                    stack.push(a.clone());
+                }
+            }
             ATerm::Not(child) => stack.push(child.clone()),
             ATerm::Or(children) | ATerm::And(children) => {
-                for c in children { stack.push(c.clone()); }
+                for c in children {
+                    stack.push(c.clone());
+                }
             }
-            ATerm::Eq(a, b) => { stack.push(a.clone()); stack.push(b.clone()); }
+            ATerm::Eq(a, b) => {
+                stack.push(a.clone());
+                stack.push(b.clone());
+            }
             ATerm::Ite(c, t, e) => {
-                stack.push(c.clone()); stack.push(t.clone()); stack.push(e.clone());
+                stack.push(c.clone());
+                stack.push(t.clone());
+                stack.push(e.clone());
             }
             _ => {}
         }
         while let Some(t) = stack.pop() {
             match t.repr() {
-                ATerm::Or(_) | ATerm::And(_) | ATerm::Not(_)
-                | ATerm::Eq(_, _) | ATerm::Ite(_, _, _)
+                ATerm::Or(_)
+                | ATerm::And(_)
+                | ATerm::Not(_)
+                | ATerm::Eq(_, _)
+                | ATerm::Ite(_, _, _)
                 | ATerm::Implies(_, _) => {
                     self.relevancy_classify_recursive(&t, visited);
                 }
                 ATerm::App(_, args, _) => {
-                    for a in args { stack.push(a.clone()); }
+                    for a in args {
+                        stack.push(a.clone());
+                    }
                 }
                 _ => {}
             }
@@ -517,11 +575,138 @@ impl SolverState {
         Some(self.egraph.find(eid))
     }
 
-    /// Mark a lit relevant, both directly and at the egraph-class level.
+    /// Mark a literal relevant and run literal/term/e-class propagation to a
+    /// fixpoint. `RelevancyState` owns the event queues; `SolverState` resolves
+    /// those events against terms and the egraph.
     pub fn mark_lit_relevant(&mut self, lit: i32, level: usize) {
         use crate::relevancy::RelevancyTrait;
         let class_root = self.class_root_for_lit(lit);
         self.relevancy.mark_relevant_root(lit, class_root, level);
+        self.propagate_relevancy();
+    }
+
+    fn propagate_relevant_term(&mut self, term: &Term, level: usize) {
+        use crate::egraphs::EgraphTrait;
+        use crate::relevancy::RelevancyTrait;
+
+        if let Some(&eid) = self.id_map.get_by_left(&term.uid()) {
+            let root = self.egraph.find(eid);
+            self.relevancy.add_class_relevant(root, level);
+        }
+
+        // A term discovered through an e-class may have a SAT literal even
+        // though its ordinary literal-relevance bit has not been set yet.
+        if let Some(lit) = self.relevancy_lit_for_term(term) {
+            let root = self.class_root_for_lit(lit);
+            self.relevancy.mark_relevant_root(lit, root, level);
+        }
+
+        match term.repr() {
+            ATerm::App(_, args, _) => {
+                for arg in args {
+                    self.relevancy.mark_term_relevant(arg.uid(), level);
+                }
+            }
+            ATerm::Eq(left, right) => {
+                self.relevancy.mark_term_relevant(left.uid(), level);
+                self.relevancy.mark_term_relevant(right.uid(), level);
+            }
+            ATerm::Ite(cond, then_term, else_term) => {
+                self.relevancy.mark_term_relevant(cond.uid(), level);
+                if let Some(cond_lit) = self.relevancy_lit_for_term(cond) {
+                    let branch_level = level.max(
+                        self.relevancy
+                            .lit_assignment_level(cond_lit)
+                            .unwrap_or(level),
+                    );
+                    match self.relevancy.lit_truth(cond_lit) {
+                        Some(true) => self
+                            .relevancy
+                            .mark_term_relevant(then_term.uid(), branch_level),
+                        Some(false) => self
+                            .relevancy
+                            .mark_term_relevant(else_term.uid(), branch_level),
+                        None => self.relevancy.install_term_ite_watch(
+                            term.uid(),
+                            cond_lit,
+                            then_term.uid(),
+                            else_term.uid(),
+                            level,
+                        ),
+                    }
+                } else {
+                    // Constants or otherwise non-CNF conditions are rare here.
+                    // Marking both branches is conservative and keeps theory
+                    // filtering sound when no SAT event can select one.
+                    self.relevancy.mark_term_relevant(then_term.uid(), level);
+                    self.relevancy.mark_term_relevant(else_term.uid(), level);
+                }
+            }
+            ATerm::Distinct(items) | ATerm::Xor(items) => {
+                for item in items {
+                    self.relevancy.mark_term_relevant(item.uid(), level);
+                }
+            }
+            ATerm::Annotated(inner, _) => {
+                self.relevancy.mark_term_relevant(inner.uid(), level);
+            }
+            // Boolean Or/And/Implies/Not structure is handled by NodeKind so
+            // irrelevant branches are not made relevant eagerly.
+            _ => {}
+        }
+    }
+
+    /// Drain literal, term, and e-class relevance events until no rule creates
+    /// another event. This is deliberately pull-based instead of invoking a
+    /// callback from `RelevancyState`, which avoids re-entrant mutable borrows.
+    pub fn propagate_relevancy(&mut self) {
+        use crate::egraphs::EgraphTrait;
+        use crate::relevancy::RelevancyTrait;
+
+        if !self.relevancy.is_enabled() {
+            return;
+        }
+
+        loop {
+            let lit_events = self.relevancy.drain_lits_for_term_propagation();
+            let term_events = self.relevancy.drain_newly_relevant_terms();
+            let class_events = self.relevancy.drain_newly_relevant_classes();
+            if lit_events.is_empty() && term_events.is_empty() && class_events.is_empty() {
+                break;
+            }
+
+            for event in lit_events {
+                if let Some(&uid) = self.cnf_cache.var_map_reverse.get(&event.lit.abs()) {
+                    self.relevancy.mark_term_relevant(uid, event.level);
+                }
+            }
+
+            for event in term_events {
+                let term = match self.get_term_safe(event.uid) {
+                    TermOption::Some(term) | TermOption::Uninitialized(term) => term,
+                    TermOption::None => continue,
+                };
+                self.propagate_relevant_term(&term, event.level);
+            }
+
+            for event in class_events {
+                let current_root = self.egraph.find(event.root);
+                let members: Vec<u64> = self
+                    .id_map
+                    .iter()
+                    .filter_map(|(uid, eid)| {
+                        (self.egraph.find(*eid) == current_root).then_some(*uid)
+                    })
+                    .collect();
+                for uid in members {
+                    self.relevancy.mark_term_relevant(uid, event.level);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn drain_newly_relevant_lits(&mut self) -> Vec<crate::relevancy::RelevantLitEvent> {
+        self.relevancy.drain_newly_relevant_lits()
     }
 
     /// Check whether a lit is relevant, either directly or by class.
@@ -545,6 +730,7 @@ impl SolverState {
             self.relevancy
                 .propagate_class_relevancy(survivor, demoted, level);
         }
+        self.propagate_relevancy();
     }
 
     pub fn is_valid_hash(&self, hash: u32, level: usize) -> bool {
@@ -889,9 +1075,7 @@ impl SolverState {
                         match attr {
                             Attribute::Pattern(s_exprs) => {
                                 if s_exprs.is_empty() {
-                                    panic!(
-                                        "forall has an empty :pattern trigger: {term}"
-                                    );
+                                    panic!("forall has an empty :pattern trigger: {term}");
                                 }
                                 let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
                                     s_exprs.iter().map(|p| self.build_pattern(p)).collect();
