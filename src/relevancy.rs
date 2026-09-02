@@ -745,11 +745,21 @@ impl RelevancyTrait for RelevancyState {
             (None, Some(b)) => Some(b),
             (None, None) => None,
         };
-        if let Some(propagated_level) = propagated_level
-            && self.mark_class_relevant_internal(survivor, propagated_level)
-        {
-            if RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
-                || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok()
+        if let Some(propagated_level) = propagated_level {
+            let newly_marked = self.mark_class_relevant_internal(survivor, propagated_level);
+            if !newly_marked {
+                // Even when the surviving root was already relevant, the
+                // merge may have added previously irrelevant terms from the
+                // demoted class. Re-emit the class event so the solver scans
+                // the enlarged class and promotes those new members.
+                self.newly_relevant_classes.push_back(RelevantClassEvent {
+                    root: survivor,
+                    level: propagated_level,
+                });
+            }
+            if newly_marked
+                && (RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
+                    || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok())
             {
                 eprintln!(
                     "[relevancy] class_root {} promoted to relevant on merge with {} (level={})",
@@ -866,7 +876,7 @@ impl RelevancyTrait for RelevancyState {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeKind, RelevancyState, RelevancyTrait};
+    use super::{NodeKind, RelevancyState, RelevancyTrait, RelevantClassEvent};
 
     #[test]
     fn ite_condition_selects_branch_independent_of_ite_value() {
@@ -973,5 +983,19 @@ mod tests {
 
         assert!(state.is_relevant(2));
         assert!(!state.is_relevant(3));
+    }
+
+    #[test]
+    fn relevant_class_merge_rescans_new_members() {
+        let mut state = RelevancyState::new(true);
+        state.add_class_relevant(10, 0);
+        assert_eq!(state.drain_newly_relevant_classes().len(), 1);
+
+        state.propagate_class_relevancy(10, 11, 2);
+
+        assert_eq!(
+            state.drain_newly_relevant_classes(),
+            vec![RelevantClassEvent { root: 10, level: 0 }]
+        );
     }
 }

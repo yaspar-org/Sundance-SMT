@@ -1576,18 +1576,30 @@ impl Egraph {
                 }
                 if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() && ground_root.is_none() {
                     eprintln!(
-                        "[relevancy] e-match KEEP func={} term_id={} class={}",
-                        func_name, i, i_root
+                        "[relevancy] e-match KEEP func={} term_id={} class={} children={:?}",
+                        func_name, i, i_root, subterms
                     );
                 }
             }
             if ground_root.is_none() || ground_root.unwrap() == i_root {
-                let subterms_canonical: Vec<u32> = subterms.iter().map(|s| self.find(*s)).collect();
+                // With relevancy filtering, distinct relevant enodes in the
+                // same e-class can become visible at different times and can
+                // carry different syntactic substitutions (notably for
+                // Boolean terms whose SAT value is not represented as an
+                // egraph merge). Preserve those enodes here and let the
+                // quantifier-level substitution set remove true duplicates.
+                // Without filtering, retain the existing canonical e-class
+                // deduplication behavior.
+                let dedup_subterms: Vec<u32> = if class_filter.is_some() {
+                    subterms.clone()
+                } else {
+                    subterms.iter().map(|s| self.find(*s)).collect()
+                };
 
-                if considered_function_terms.contains(&subterms_canonical) {
+                if considered_function_terms.contains(&dedup_subterms) {
                     continue;
                 }
-                considered_function_terms.insert(subterms_canonical);
+                considered_function_terms.insert(dedup_subterms);
 
                 let new_assignments = self.match_subpatterns(
                     &mut assignment.clone(),

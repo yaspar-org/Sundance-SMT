@@ -510,6 +510,13 @@ impl<'a> CustomExternalPropagator<'a> {
             self.pending = Some(pending);
         }
 
+        // Registering an instance root can make literals from the existing SAT
+        // trail relevant. Their assignments were already reported by CaDiCaL,
+        // so no later callback is guaranteed to process their theory effects.
+        // Drain those relevance events after materialization is complete and
+        // re-entrancy through quantifier materialization is disabled.
+        self.process_pending_relevant_assignments();
+
         count
     }
 

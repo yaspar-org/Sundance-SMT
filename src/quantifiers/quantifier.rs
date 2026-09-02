@@ -157,6 +157,13 @@ pub(crate) fn instantiate_quantifiers(
                 .egraph
                 .match_triggers(trigger_term_pairs, class_filter);
 
+            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                eprintln!(
+                    "[relevancy] quantifier {} produced {} trigger matches",
+                    quantifier.id,
+                    list_assignments.len()
+                );
+            }
             if list_assignments.is_empty() {
                 continue;
             }
@@ -176,7 +183,19 @@ pub(crate) fn instantiate_quantifiers(
                 if let Some(set) = solver_state.added_instantiations.get(&quantifier.id)
                     && set.contains(&subs)
                 {
+                    if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                        eprintln!(
+                            "[relevancy] quantifier {} skipping duplicate substitution {:?}",
+                            quantifier.id, subs
+                        );
+                    }
                     continue;
+                }
+                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                    eprintln!(
+                        "[relevancy] quantifier {} accepting substitution {:?}",
+                        quantifier.id, subs
+                    );
                 }
                 solver_state
                     .added_instantiations
