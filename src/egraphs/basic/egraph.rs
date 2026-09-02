@@ -206,8 +206,12 @@ pub struct Egraph {
     compiled_patterns: Vec<Pattern>,
     /// map from vertices (u32) -> ProofForestEdge
     proof_forest: Vec<ProofForestEdge>,
+    /// Circular linked lists of e-class members. For each class root `r`,
+    /// following `member_next` from `r` visits every member exactly once and
+    /// returns to `r`. Merging two classes is a swap of their root links.
+    member_next: Vec<u32>,
     /// keeps track of a stack of "edges" to backtrack on
-    proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u32, ProofForestEdge)>,
+    proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u32, ProofForestEdge, u32, u32)>,
     /// this is a map from terms (u32) -> (term in the same egraph, predecessor of term in same egraph)
     predecessors: Vec<FastDeterministicHashMap<u32, Predecessor>>,
     /// number to keep track of the current hash
@@ -281,6 +285,7 @@ impl Egraph {
                 children: DeterministicHashSet::new(),
                 arithmetic: false,
             }],
+            member_next: vec![0],
             proof_forest_backtrack_stack: Vec::new(),
             predecessors: vec![FastDeterministicHashMap::default()],
             predecessor_hash: 1,
@@ -355,6 +360,7 @@ impl Egraph {
             children: DeterministicHashSet::new(),
             arithmetic: false,
         };
+        self.member_next[id as usize] = id;
 
         // Add to function_maps using the op's string key
         let func_key = op.to_function_map_key();
@@ -436,6 +442,7 @@ impl Egraph {
                 self.predecessors.len() * 2,
                 FastDeterministicHashMap::default(),
             );
+            self.member_next.resize(self.member_next.len() * 2, 0);
         }
     }
 
@@ -454,6 +461,7 @@ impl Egraph {
             children: DeterministicHashSet::new(),
             arithmetic: false,
         };
+        self.member_next[id as usize] = id;
         id
     }
 
@@ -916,9 +924,12 @@ impl Egraph {
             if last_level <= level {
                 break;
             }
-            let (_, backtrack_equality, y, y_root) =
+            let (_, backtrack_equality, y, y_root, x_root, merged_y_root) =
                 self.proof_forest_backtrack_stack.pop().unwrap();
             self.proof_forest_backtrack(backtrack_equality, y, y_root);
+            // Swapping the same two links restores both pre-merge cycles.
+            self.member_next
+                .swap(x_root as usize, merged_y_root as usize);
         }
 
         // Replay sig_trail in reverse AFTER UF is restored.
@@ -1247,8 +1258,14 @@ impl Egraph {
                 proof_parent.clone(),
                 y_root,
                 y_root_parent.clone(),
+                x_root,
+                y_root,
             ));
         }
+
+        // Splice the two circular member lists in O(1). This list is
+        // independent of proof-tree orientation, so use the pre-merge roots.
+        self.member_next.swap(x_root as usize, y_root as usize);
 
         // Perform the union first so we can check for disequality violations early.
         debug_println!(
@@ -1715,6 +1732,50 @@ impl Egraph {
                 list_assignments
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Egraph;
+    use crate::egraphs::EgraphTrait;
+
+    fn class_members(egraph: &Egraph, start: u32) -> Vec<u32> {
+        let mut members = vec![start];
+        let mut current = egraph.member_next[start as usize];
+        while current != start {
+            assert!(
+                members.len() <= egraph.next_id as usize,
+                "e-class member cycle did not return to its start"
+            );
+            members.push(current);
+            current = egraph.member_next[current as usize];
+        }
+        members
+    }
+
+    #[test]
+    fn member_lists_splice_and_backtrack_with_unions() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_opaque();
+        let b = egraph.register_opaque();
+        let c = egraph.register_opaque();
+
+        assert_eq!(class_members(&egraph, a), vec![a]);
+        assert_eq!(class_members(&egraph, b), vec![b]);
+        assert_eq!(class_members(&egraph, c), vec![c]);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        assert_eq!(class_members(&egraph, a), vec![a, b]);
+
+        assert!(egraph.assert_equal(a, c).conflict.is_none());
+        assert_eq!(class_members(&egraph, a), vec![a, c, b]);
+
+        egraph.backtrack_to(0);
+        assert_eq!(class_members(&egraph, a), vec![a]);
+        assert_eq!(class_members(&egraph, b), vec![b]);
+        assert_eq!(class_members(&egraph, c), vec![c]);
     }
 }
 
