@@ -798,6 +798,13 @@ impl<'a> CustomExternalPropagator<'a> {
 
     fn queue_relevant_assignment(&mut self, lit: i32) {
         let idx = lit.unsigned_abs() as usize;
+        if self
+            .qi_gc_state
+            .as_ref()
+            .is_some_and(|gc| gc.borrow().activation_lits.contains(&(idx as i32)))
+        {
+            return;
+        }
         self.ensure_theory_assignment_capacity(idx);
         let assignment = self.assignments[idx];
         if assignment == 0
