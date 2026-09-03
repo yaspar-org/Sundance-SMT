@@ -8,15 +8,20 @@
 //! only handles the propagation of relevancy through the registered structure.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static RELEVANCY_TRACE: AtomicBool = AtomicBool::new(false);
 
 pub fn init_relevancy_trace() {
     RELEVANCY_TRACE.store(
         std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok(),
-        std::sync::atomic::Ordering::Relaxed,
+        Ordering::Relaxed,
     );
+}
+
+#[inline]
+pub(crate) fn relevancy_trace_enabled() -> bool {
+    RELEVANCY_TRACE.load(Ordering::Relaxed)
 }
 
 #[derive(Debug, Clone)]
@@ -204,7 +209,7 @@ impl RelevancyState {
         let idx = lit.unsigned_abs() as usize;
         let old_level = self.relevance_levels[idx];
         if old_level.is_some_and(|old| old <= level) {
-            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            if relevancy_trace_enabled() {
                 eprintln!(
                     "[relevancy] mark_relevant(lit={}, level={}) — already relevant at {:?}, no-op",
                     lit, level, old_level
@@ -218,7 +223,7 @@ impl RelevancyState {
         let event = RelevantLitEvent { lit, level };
         self.lits_for_term_propagation.push_back(event);
         self.newly_relevant_lits.push_back(event);
-        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+        if relevancy_trace_enabled() {
             eprintln!(
                 "[relevancy] mark_relevant(lit={}, level={}) — newly relevant or lowered from {:?}, queued",
                 lit, level, old_level
@@ -353,7 +358,7 @@ impl RelevancyState {
                             let child_idx = child_lit.unsigned_abs() as usize;
                             let level = base_level
                                 .max(self.assignment_level(child_idx).unwrap_or(base_level));
-                            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                            if relevancy_trace_enabled() {
                                 eprintln!(
                                     "[relevancy] Or-true idx={} picking child={} (level={})",
                                     idx, child_lit, level
@@ -366,7 +371,7 @@ impl RelevancyState {
                         }
                     }
                     if !found {
-                        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                        if relevancy_trace_enabled() {
                             let child_states: Vec<String> = child_lits
                                 .iter()
                                 .map(|&c| {
@@ -397,7 +402,7 @@ impl RelevancyState {
                 Some(true) => {
                     let level =
                         parent_level.max(self.assignment_level(idx).unwrap_or(parent_level));
-                    if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                    if relevancy_trace_enabled() {
                         eprintln!(
                             "[relevancy] And-true idx={} marking children {:?} relevant (level={})",
                             idx, child_lits, level
@@ -602,9 +607,7 @@ impl RelevancyTrait for RelevancyState {
         self.ensure_capacity(lit);
         let idx = lit.unsigned_abs() as usize;
         if self.node_kinds[idx].is_none() {
-            if RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
-                || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok()
-            {
+            if relevancy_trace_enabled() {
                 let kind_name = match &kind {
                     NodeKind::Or(c) => format!("Or({}) children={:?}", c.len(), c),
                     NodeKind::And(c) => format!("And({}) children={:?}", c.len(), c),
@@ -633,9 +636,7 @@ impl RelevancyTrait for RelevancyState {
         self.mark_relevant(lit, level);
         if let Some(root) = class_root {
             if self.mark_class_relevant_internal(root, level, true) {
-                if RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
-                    || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok()
-                {
+                if relevancy_trace_enabled() {
                     eprintln!(
                         "[relevancy] class_root {} marked relevant (via lit={}, level={})",
                         root, lit, level
@@ -676,7 +677,7 @@ impl RelevancyTrait for RelevancyState {
             return;
         }
         if self.mark_class_relevant_internal(class_root, level, true) {
-            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            if relevancy_trace_enabled() {
                 eprintln!(
                     "[relevancy] class_root {} became relevant (level={})",
                     class_root, level
@@ -775,8 +776,7 @@ impl RelevancyTrait for RelevancyState {
             (Some(_), Some(_)) | (None, None) => None,
         };
         if let Some(propagation) = propagation
-            && (RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
-                || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok())
+            && relevancy_trace_enabled()
         {
             eprintln!(
                 "[relevancy] class merge {} <- {} promotes {:?} members (level={})",
@@ -821,7 +821,7 @@ impl RelevancyTrait for RelevancyState {
         } else {
             self.cond_watches_on_false[idx].clone()
         };
-        if !cond_targets.is_empty() && std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+        if !cond_targets.is_empty() && relevancy_trace_enabled() {
             eprintln!(
                 "[relevancy] cond_watch fired: lit={} → re-evaluate nodes {:?} (level={})",
                 lit, cond_targets, level

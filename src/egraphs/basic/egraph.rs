@@ -9,6 +9,7 @@ use crate::egraphs::traits::{
     Conflict, EClassMemberRange, EgraphMergeEvent, EgraphResult, EgraphTrait, Lit,
 };
 use crate::log::is_important;
+use crate::relevancy::relevancy_trace_enabled;
 use crate::utils::{
     DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
 };
@@ -1618,7 +1619,7 @@ impl Egraph {
             // ground hint's class is already committed by the caller.
             if let Some(filter) = class_filter {
                 if ground_root.is_none() && !filter.contains(&i_root) {
-                    if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                    if relevancy_trace_enabled() {
                         eprintln!(
                             "[relevancy] e-match SKIP func={} term_id={} class={} (not in class_relevant)",
                             func_name, i, i_root
@@ -1626,7 +1627,7 @@ impl Egraph {
                     }
                     continue;
                 }
-                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() && ground_root.is_none() {
+                if relevancy_trace_enabled() && ground_root.is_none() {
                     eprintln!(
                         "[relevancy] e-match KEEP func={} term_id={} class={} children={:?}",
                         func_name, i, i_root, subterms

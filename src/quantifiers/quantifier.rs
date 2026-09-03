@@ -12,7 +12,7 @@ use crate::egraphs::EgraphTrait;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
-use crate::relevancy::RelevancyTrait;
+use crate::relevancy::{RelevancyTrait, relevancy_trace_enabled};
 use crate::solver_state::SolverState;
 use crate::solver_types::Polarity;
 use crate::utils::DeterministicHashMap;
@@ -172,7 +172,7 @@ pub(crate) fn instantiate_quantifiers(
                 .egraph
                 .match_triggers(trigger_term_pairs, class_filter);
 
-            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            if relevancy_trace_enabled() {
                 eprintln!(
                     "[relevancy] quantifier {} produced {} trigger matches",
                     quantifier.id,
@@ -211,7 +211,7 @@ pub(crate) fn instantiate_quantifiers(
                 if let Some(set) = solver_state.added_instantiations.get(&quantifier.id)
                     && set.contains(&subs)
                 {
-                    if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                    if relevancy_trace_enabled() {
                         eprintln!(
                             "[relevancy] quantifier {} skipping duplicate substitution {:?}",
                             quantifier.id, subs
@@ -219,7 +219,7 @@ pub(crate) fn instantiate_quantifiers(
                     }
                     continue;
                 }
-                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                if relevancy_trace_enabled() {
                     eprintln!(
                         "[relevancy] quantifier {} accepting substitution {:?}",
                         quantifier.id, subs

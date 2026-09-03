@@ -24,7 +24,9 @@ use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
 use crate::proof::Theory;
-use crate::relevancy::{RelevancyState, RelevancyTrait, RelevantMergeMembers};
+use crate::relevancy::{
+    RelevancyState, RelevancyTrait, RelevantMergeMembers, relevancy_trace_enabled,
+};
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
@@ -236,7 +238,7 @@ impl SolverState {
     /// Register a pre-NNF term with relevancy: recursively classifies the term
     /// and all sub-terms, then marks the root as relevant.
     pub fn relevancy_register_term(&mut self, term: &Term, level: usize) {
-        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+        if relevancy_trace_enabled() {
             eprint!("[relevancy] register_term: term={} level={}", term, level);
         }
         if !self.relevancy.is_enabled() {
@@ -246,7 +248,7 @@ impl SolverState {
         self.relevancy_classify_recursive(term, &mut visited);
         if let Some(lit) = self.relevancy_lit_for_term(term) {
             self.mark_lit_relevant(lit, level);
-        } else if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+        } else if relevancy_trace_enabled() {
             eprintln!(
                 "[relevancy] WARNING: relevancy_register_term could not find lit for term={}",
                 term
@@ -384,7 +386,7 @@ impl SolverState {
         let lit = match self.relevancy_lit_for_term(term) {
             Some(l) => l,
             None => {
-                if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                if relevancy_trace_enabled() {
                     eprintln!(
                         "[relevancy] classify_recursive: no lit for uid={} term={}",
                         uid, term
@@ -394,7 +396,7 @@ impl SolverState {
             }
         };
         if self.relevancy.has_node(lit) {
-            if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+            if relevancy_trace_enabled() {
                 eprintln!(
                     "[relevancy] classify_recursive: already has node for lit={} term={}",
                     lit, term
@@ -430,7 +432,7 @@ impl SolverState {
                     .iter()
                     .filter_map(|c| {
                         let r = self.relevancy_lit_for_term(c);
-                        if r.is_none() && std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+                        if r.is_none() && relevancy_trace_enabled() {
                             eprintln!(
                                 "[relevancy] Or child has no lit: uid={} term={}",
                                 c.uid(),
@@ -517,7 +519,7 @@ impl SolverState {
             self.relevancy_classify_bool_subterms(term, visited);
         }
 
-        if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
+        if relevancy_trace_enabled() {
             eprintln!("[relevancy] classify lit={} term={}", lit, term);
         }
         self.relevancy.register_node(lit, kind);
