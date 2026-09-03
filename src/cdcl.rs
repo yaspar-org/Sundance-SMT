@@ -145,6 +145,7 @@ pub fn cdcl_decision_procedure(
         fixed_literals: DeterministicHashSet::default(),
         proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference
         assignments: vec![0, 0],
+        sat_assignment_trail: Vec::new(),
         solver: &mut solver as *mut CaDiCal,
         arithmetic,
         stats: SolverStats::new(),

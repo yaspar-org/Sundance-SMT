@@ -166,6 +166,10 @@ pub struct CustomExternalPropagator<'a> {
     pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
+    /// Currently assigned literals in the order CaDiCaL reported them.
+    /// Complete-model theory saturation replays deferred assignments in this
+    /// order so it preserves the conflict/merge ordering of unfiltered runs.
+    pub sat_assignment_trail: Vec<i32>,
     pub solver: *mut CaDiCal,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
@@ -698,6 +702,9 @@ impl<'a> CustomExternalPropagator<'a> {
             "SAT variable {} was assigned both polarities without a backtrack",
             idx
         );
+        if old == 0 {
+            self.sat_assignment_trail.push(lit);
+        }
         if old == 0 || encoded.abs() < old.abs() {
             self.assignments[idx] = encoded;
         }
@@ -795,8 +802,10 @@ impl<'a> CustomExternalPropagator<'a> {
     /// assignment through the theory layer. Relevancy remains a partial-search
     /// optimization, but it must not indefinitely hide valid theory conflicts
     /// and egraph merges that can refute a candidate model.
-    fn process_complete_model_assignments(&mut self, model: &[i32]) {
-        for &lit in model {
+    fn process_complete_model_assignments(&mut self, _model: &[i32]) {
+        let trail_len = self.sat_assignment_trail.len();
+        for trail_idx in 0..trail_len {
+            let lit = self.sat_assignment_trail[trail_idx];
             if let Some(ref gc) = self.qi_gc_state {
                 if gc.borrow().activation_lits.contains(&lit.abs()) {
                     continue;
@@ -1012,6 +1021,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.theory_processed_levels[i] = None;
             }
         }
+        let assignments = &self.assignments;
+        self.sat_assignment_trail
+            .retain(|lit| assignments[lit.unsigned_abs() as usize] != 0);
 
         // Bump solver hash on backtrack and invalidate higher levels
         self.solver_state.current_hash += 1;
