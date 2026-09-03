@@ -426,8 +426,13 @@ impl<'a> CustomExternalPropagator<'a> {
                 .map(|c| c.into_iter().collect())
                 .collect();
 
-            self.solver_state
-                .relevancy_register_term(&or_term, self.decision_level);
+            // This is a permanent theory lemma. Z3's arithmetic theory marks
+            // the atoms it creates as relevant instead of filtering the
+            // lemma structurally. Keep the marks at level 0 so they survive
+            // backtracking together with the clause.
+            self.solver_state.relevancy_register_term(&lt_term, 0);
+            self.solver_state.relevancy_register_term(&gt_term, 0);
+            self.solver_state.relevancy_register_term(&eq_term, 0);
 
             self.sync_new_vars();
             for clause in cnf_lits {

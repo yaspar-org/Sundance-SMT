@@ -359,7 +359,7 @@ pub fn learn_ctor_selector_clauses(
     let eq_clause = eq_cnf.0[0].0.clone();
     assert_eq!(eq_clause.len(), 1);
 
-    let imp = solver_state.implies(vec![tester_app], eq);
+    let imp = solver_state.implies(vec![tester_app.clone()], eq.clone());
     debug_println!(25, 10, "(assert {})", imp);
     let imp_nnf = imp.nnf(solver_state);
     solver_state.insert_predecessor(&imp_nnf, None, None, from_quantifier);
@@ -367,7 +367,12 @@ pub fn learn_ctor_selector_clauses(
     let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
     vector.extend(clauses);
 
-    solver_state.relevancy_register_term(&imp, 0);
+    // This is a theory-owned implication. Z3's datatype theory marks both
+    // the recognizer antecedent and generated equality as relevant when it
+    // creates this axiom, rather than relying on Boolean branch selection to
+    // eventually expose the equality.
+    solver_state.relevancy_register_term(&tester_app, 0);
+    solver_state.relevancy_register_term(&eq, 0);
 
     vector
 }
@@ -455,7 +460,7 @@ pub fn learn_or_not_term_tester_term(
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     let not_tester_term = solver_state.not(tester_term.clone());
-    let not_term = solver_state.not(term);
+    let not_term = solver_state.not(term.clone());
     let or_not_tester_not_term = solver_state.or(vec![not_tester_term, not_term]);
     solver_state.insert_predecessor(&or_not_tester_not_term, None, None, from_quantifier);
     let tester_cnf = or_not_tester_not_term
@@ -464,7 +469,11 @@ pub fn learn_or_not_term_tester_term(
         .map(|x| x.0)
         .collect();
 
-    solver_state.relevancy_register_term(&or_not_tester_not_term, 0);
+    // Both recognizers caused this theory lemma and must remain visible to
+    // datatype assignment processing. Register the atoms directly instead
+    // of treating the generated clause as user Boolean structure.
+    solver_state.relevancy_register_term(&tester_term, 0);
+    solver_state.relevancy_register_term(&term, 0);
 
     debug_println!(25, 10, "(assert {})", or_not_tester_not_term,);
     debug_println!(12, 2, "This gives us {:?}", tester_cnf);
