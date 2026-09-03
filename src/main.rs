@@ -9,6 +9,7 @@ use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
+use sundance_smt::theory_check::reject_unsupported_theories;
 use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
@@ -71,6 +72,11 @@ fn main() -> Result<(), String> {
             }
         })
         .collect::<Vec<_>>();
+
+    // Bail out before the assertions reach the egraph when operators from theories we do not
+    // implement would silently become uninterpreted functions and could yield `sat` on an `unsat`
+    // problem.
+    reject_unsupported_theories(&assertions, &mut context)?;
 
     let mut prop_skeleton: Vec<Vec<i32>> = vec![];
 
