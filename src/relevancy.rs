@@ -91,6 +91,33 @@ struct TermIteWatch {
     level: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelevancyTrailEntry {
+    RelevantLit(usize),
+    BranchChoice(usize),
+    Assignment(usize),
+    RelevantTerm(u64),
+    RelevantClass(u32),
+    LitWatch {
+        idx: usize,
+        on_true: bool,
+        parent_idx: usize,
+        target: i32,
+    },
+    CondWatch {
+        idx: usize,
+        on_true: bool,
+        parent_idx: usize,
+    },
+    TermIteWatch {
+        idx: usize,
+        parent_uid: u64,
+        cond: i32,
+        then_uid: u64,
+        else_uid: u64,
+    },
+}
+
 pub(crate) trait RelevancyTrait {
     fn is_enabled(&self) -> bool;
     fn has_node(&self, lit: i32) -> bool;
@@ -173,6 +200,11 @@ pub struct RelevancyState {
     class_relevant: std::collections::HashSet<u32>,
     class_relevance_levels: HashMap<u32, usize>,
     newly_relevant_classes: VecDeque<RelevantClassEvent>,
+    /// Changes grouped by their earliest justification level. Entries made at
+    /// level zero never need undo records. Lowering a state to an earlier
+    /// level appends a new record there; the stale later-level record is
+    /// ignored because backtracking verifies the state's current level.
+    trail_by_level: Vec<Vec<RelevancyTrailEntry>>,
     enabled: bool,
 }
 
@@ -200,8 +232,19 @@ impl RelevancyState {
             class_relevant: std::collections::HashSet::new(),
             class_relevance_levels: HashMap::new(),
             newly_relevant_classes: VecDeque::new(),
+            trail_by_level: vec![Vec::new()],
             enabled,
         }
+    }
+
+    fn record_trail(&mut self, level: usize, entry: RelevancyTrailEntry) {
+        if level == 0 {
+            return;
+        }
+        if self.trail_by_level.len() <= level {
+            self.trail_by_level.resize_with(level + 1, Vec::new);
+        }
+        self.trail_by_level[level].push(entry);
     }
 
     fn mark_relevant(&mut self, lit: i32, level: usize) -> bool {
@@ -219,6 +262,7 @@ impl RelevancyState {
         }
         self.relevant[idx] = true;
         self.relevance_levels[idx] = Some(level);
+        self.record_trail(level, RelevancyTrailEntry::RelevantLit(idx));
         self.queue.push_back((lit, level));
         let event = RelevantLitEvent { lit, level };
         self.lits_for_term_propagation.push_back(event);
@@ -241,6 +285,7 @@ impl RelevancyState {
             return false;
         }
         self.relevant_term_levels.insert(uid, level);
+        self.record_trail(level, RelevancyTrailEntry::RelevantTerm(uid));
         self.newly_relevant_terms
             .push_back(RelevantTermEvent { uid, level });
         true
@@ -256,6 +301,7 @@ impl RelevancyState {
         }
         self.class_relevant.insert(root);
         self.class_relevance_levels.insert(root, level);
+        self.record_trail(level, RelevancyTrailEntry::RelevantClass(root));
         if emit_event {
             self.newly_relevant_classes
                 .push_back(RelevantClassEvent { root, level });
@@ -275,6 +321,7 @@ impl RelevancyState {
         );
         self.branch_choices[idx] = Some(child_lit);
         self.branch_levels[idx] = Some(level);
+        self.record_trail(level, RelevancyTrailEntry::BranchChoice(idx));
     }
 
     fn relevance_level(&self, idx: usize) -> Option<usize> {
@@ -487,12 +534,26 @@ impl RelevancyState {
     ) {
         self.ensure_capacity(watched_lit);
         let idx = watched_lit.unsigned_abs() as usize;
-        let watches = if watched_lit > 0 {
-            &mut self.watches_on_true[idx]
-        } else {
-            &mut self.watches_on_false[idx]
+        let on_true = watched_lit > 0;
+        let changed = {
+            let watches = if on_true {
+                &mut self.watches_on_true[idx]
+            } else {
+                &mut self.watches_on_false[idx]
+            };
+            Self::insert_lit_watch(watches, parent_idx, target, level)
         };
-        Self::insert_lit_watch(watches, parent_idx, target, level);
+        if changed {
+            self.record_trail(
+                level,
+                RelevancyTrailEntry::LitWatch {
+                    idx,
+                    on_true,
+                    parent_idx,
+                    target,
+                },
+            );
+        }
     }
 
     fn install_false_watch(
@@ -504,59 +565,203 @@ impl RelevancyState {
     ) {
         self.ensure_capacity(watched_lit);
         let idx = watched_lit.unsigned_abs() as usize;
-        let watches = if watched_lit > 0 {
-            &mut self.watches_on_false[idx]
-        } else {
-            &mut self.watches_on_true[idx]
+        let on_true = watched_lit <= 0;
+        let changed = {
+            let watches = if on_true {
+                &mut self.watches_on_true[idx]
+            } else {
+                &mut self.watches_on_false[idx]
+            };
+            Self::insert_lit_watch(watches, parent_idx, target, level)
         };
-        Self::insert_lit_watch(watches, parent_idx, target, level);
+        if changed {
+            self.record_trail(
+                level,
+                RelevancyTrailEntry::LitWatch {
+                    idx,
+                    on_true,
+                    parent_idx,
+                    target,
+                },
+            );
+        }
     }
 
-    fn insert_lit_watch(watches: &mut Vec<LitWatch>, parent_idx: usize, target: i32, level: usize) {
+    fn insert_lit_watch(
+        watches: &mut Vec<LitWatch>,
+        parent_idx: usize,
+        target: i32,
+        level: usize,
+    ) -> bool {
         if let Some(existing) = watches
             .iter_mut()
             .find(|watch| watch.parent_idx == parent_idx && watch.target == target)
         {
-            existing.level = existing.level.min(level);
+            if level < existing.level {
+                existing.level = level;
+                true
+            } else {
+                false
+            }
         } else {
             watches.push(LitWatch {
                 parent_idx,
                 target,
                 level,
             });
+            true
         }
     }
 
     fn install_cond_true_watch(&mut self, watched_lit: i32, parent_idx: usize, level: usize) {
         self.ensure_capacity(watched_lit);
         let idx = watched_lit.unsigned_abs() as usize;
-        let watches = if watched_lit > 0 {
-            &mut self.cond_watches_on_true[idx]
-        } else {
-            &mut self.cond_watches_on_false[idx]
+        let on_true = watched_lit > 0;
+        let changed = {
+            let watches = if on_true {
+                &mut self.cond_watches_on_true[idx]
+            } else {
+                &mut self.cond_watches_on_false[idx]
+            };
+            Self::insert_cond_watch(watches, parent_idx, level)
         };
-        Self::insert_cond_watch(watches, parent_idx, level);
+        if changed {
+            self.record_trail(
+                level,
+                RelevancyTrailEntry::CondWatch {
+                    idx,
+                    on_true,
+                    parent_idx,
+                },
+            );
+        }
     }
 
     fn install_cond_false_watch(&mut self, watched_lit: i32, parent_idx: usize, level: usize) {
         self.ensure_capacity(watched_lit);
         let idx = watched_lit.unsigned_abs() as usize;
-        let watches = if watched_lit > 0 {
-            &mut self.cond_watches_on_false[idx]
-        } else {
-            &mut self.cond_watches_on_true[idx]
+        let on_true = watched_lit <= 0;
+        let changed = {
+            let watches = if on_true {
+                &mut self.cond_watches_on_true[idx]
+            } else {
+                &mut self.cond_watches_on_false[idx]
+            };
+            Self::insert_cond_watch(watches, parent_idx, level)
         };
-        Self::insert_cond_watch(watches, parent_idx, level);
+        if changed {
+            self.record_trail(
+                level,
+                RelevancyTrailEntry::CondWatch {
+                    idx,
+                    on_true,
+                    parent_idx,
+                },
+            );
+        }
     }
 
-    fn insert_cond_watch(watches: &mut Vec<CondWatch>, parent_idx: usize, level: usize) {
+    fn insert_cond_watch(watches: &mut Vec<CondWatch>, parent_idx: usize, level: usize) -> bool {
         if let Some(existing) = watches
             .iter_mut()
             .find(|watch| watch.parent_idx == parent_idx)
         {
-            existing.level = existing.level.min(level);
+            if level < existing.level {
+                existing.level = level;
+                true
+            } else {
+                false
+            }
         } else {
             watches.push(CondWatch { parent_idx, level });
+            true
+        }
+    }
+
+    fn undo_trail_entry(&mut self, entry: RelevancyTrailEntry, mark_level: usize) {
+        match entry {
+            RelevancyTrailEntry::RelevantLit(idx) => {
+                if self.relevance_levels[idx] == Some(mark_level) {
+                    self.relevance_levels[idx] = None;
+                    self.relevant[idx] = false;
+                }
+            }
+            RelevancyTrailEntry::BranchChoice(idx) => {
+                if self.branch_levels[idx] == Some(mark_level) {
+                    self.branch_levels[idx] = None;
+                    self.branch_choices[idx] = None;
+                }
+            }
+            RelevancyTrailEntry::Assignment(idx) => {
+                if self.assignment_levels[idx] == Some(mark_level) {
+                    self.assignment_levels[idx] = None;
+                    self.assignments[idx] = 0;
+                }
+            }
+            RelevancyTrailEntry::RelevantTerm(uid) => {
+                if self.relevant_term_levels.get(&uid) == Some(&mark_level) {
+                    self.relevant_term_levels.remove(&uid);
+                }
+            }
+            RelevancyTrailEntry::RelevantClass(root) => {
+                if self.class_relevance_levels.get(&root) == Some(&mark_level) {
+                    self.class_relevance_levels.remove(&root);
+                    self.class_relevant.remove(&root);
+                }
+            }
+            RelevancyTrailEntry::LitWatch {
+                idx,
+                on_true,
+                parent_idx,
+                target,
+            } => {
+                let watches = if on_true {
+                    &mut self.watches_on_true[idx]
+                } else {
+                    &mut self.watches_on_false[idx]
+                };
+                if let Some(pos) = watches.iter().position(|watch| {
+                    watch.parent_idx == parent_idx
+                        && watch.target == target
+                        && watch.level == mark_level
+                }) {
+                    watches.remove(pos);
+                }
+            }
+            RelevancyTrailEntry::CondWatch {
+                idx,
+                on_true,
+                parent_idx,
+            } => {
+                let watches = if on_true {
+                    &mut self.cond_watches_on_true[idx]
+                } else {
+                    &mut self.cond_watches_on_false[idx]
+                };
+                if let Some(pos) = watches
+                    .iter()
+                    .position(|watch| watch.parent_idx == parent_idx && watch.level == mark_level)
+                {
+                    watches.remove(pos);
+                }
+            }
+            RelevancyTrailEntry::TermIteWatch {
+                idx,
+                parent_uid,
+                cond,
+                then_uid,
+                else_uid,
+            } => {
+                if let Some(pos) = self.term_ite_watches[idx].iter().position(|watch| {
+                    watch.parent_uid == parent_uid
+                        && watch.cond == cond
+                        && watch.then_uid == then_uid
+                        && watch.else_uid == else_uid
+                        && watch.level == mark_level
+                }) {
+                    self.term_ite_watches[idx].remove(pos);
+                }
+            }
         }
     }
 
@@ -705,13 +910,18 @@ impl RelevancyTrait for RelevancyState {
         }
         self.ensure_capacity(cond);
         let idx = cond.unsigned_abs() as usize;
-        if let Some(existing) = self.term_ite_watches[idx].iter_mut().find(|watch| {
+        let changed = if let Some(existing) = self.term_ite_watches[idx].iter_mut().find(|watch| {
             watch.parent_uid == parent_uid
                 && watch.cond == cond
                 && watch.then_uid == then_uid
                 && watch.else_uid == else_uid
         }) {
-            existing.level = existing.level.min(level);
+            if level < existing.level {
+                existing.level = level;
+                true
+            } else {
+                false
+            }
         } else {
             self.term_ite_watches[idx].push(TermIteWatch {
                 parent_uid,
@@ -720,6 +930,19 @@ impl RelevancyTrait for RelevancyState {
                 else_uid,
                 level,
             });
+            true
+        };
+        if changed {
+            self.record_trail(
+                level,
+                RelevancyTrailEntry::TermIteWatch {
+                    idx,
+                    parent_uid,
+                    cond,
+                    then_uid,
+                    else_uid,
+                },
+            );
         }
     }
 
@@ -799,10 +1022,13 @@ impl RelevancyTrait for RelevancyState {
             "SAT variable {} was assigned both polarities without a backtrack",
             idx
         );
+        let old_level = self.assignment_levels[idx];
+        let assignment_level = old_level.map_or(level, |old| old.min(level));
         self.assignments[idx] = polarity;
-        self.assignment_levels[idx] =
-            Some(self.assignment_levels[idx].map_or(level, |old_level| old_level.min(level)));
-        let assignment_level = self.assignment_levels[idx].unwrap_or(level);
+        self.assignment_levels[idx] = Some(assignment_level);
+        if old_level != Some(assignment_level) {
+            self.record_trail(assignment_level, RelevancyTrailEntry::Assignment(idx));
+        }
 
         let positive = lit > 0;
         let targets: Vec<LitWatch> = if positive {
@@ -858,31 +1084,15 @@ impl RelevancyTrait for RelevancyState {
         if !self.enabled {
             return;
         }
-        for idx in 0..self.relevance_levels.len() {
-            if self.relevance_levels[idx].is_some_and(|mark_level| mark_level > level) {
-                self.relevance_levels[idx] = None;
-                self.relevant[idx] = false;
+        if level + 1 < self.trail_by_level.len() {
+            for mark_level in ((level + 1)..self.trail_by_level.len()).rev() {
+                let entries = std::mem::take(&mut self.trail_by_level[mark_level]);
+                for entry in entries.into_iter().rev() {
+                    self.undo_trail_entry(entry, mark_level);
+                }
             }
-            if self.branch_levels[idx].is_some_and(|mark_level| mark_level > level) {
-                self.branch_levels[idx] = None;
-                self.branch_choices[idx] = None;
-            }
-            if self.assignment_levels[idx].is_some_and(|mark_level| mark_level > level) {
-                self.assignment_levels[idx] = None;
-                self.assignments[idx] = 0;
-            }
-            self.watches_on_true[idx].retain(|watch| watch.level <= level);
-            self.watches_on_false[idx].retain(|watch| watch.level <= level);
-            self.cond_watches_on_true[idx].retain(|watch| watch.level <= level);
-            self.cond_watches_on_false[idx].retain(|watch| watch.level <= level);
-            self.term_ite_watches[idx].retain(|watch| watch.level <= level);
+            self.trail_by_level.truncate(level + 1);
         }
-        self.relevant_term_levels
-            .retain(|_, mark_level| *mark_level <= level);
-        self.class_relevance_levels
-            .retain(|_, mark_level| *mark_level <= level);
-        self.class_relevant
-            .retain(|root| self.class_relevance_levels.contains_key(root));
         self.queue.clear();
         self.lits_for_term_propagation.clear();
         self.newly_relevant_lits.clear();
@@ -946,6 +1156,19 @@ mod tests {
         state.backtrack_to(0);
 
         assert!(state.is_relevant(1));
+    }
+
+    #[test]
+    fn lowered_mark_does_not_hide_unrelated_backtrack_work() {
+        let mut state = RelevancyState::new(true);
+        state.mark_relevant_root(1, None, 3);
+        state.mark_relevant_root(2, None, 3);
+        state.mark_relevant_root(1, None, 0);
+
+        state.backtrack_to(0);
+
+        assert!(state.is_relevant(1));
+        assert!(!state.is_relevant(2));
     }
 
     #[test]
