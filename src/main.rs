@@ -9,7 +9,7 @@ use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
-use sundance_smt::theory_check::reject_unsupported_theories;
+use sundance_smt::theory_check::{reject_nonlinear_arithmetic, reject_unsupported_theories};
 use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
@@ -77,6 +77,12 @@ fn main() -> Result<(), String> {
     // implement would silently become uninterpreted functions and could yield `sat` on an `unsat`
     // problem.
     reject_unsupported_theories(&assertions, &mut context)?;
+
+    // Likewise for non-linear multiplication, which the arithmetic frontend cannot translate.
+    // Catching it here keeps it a clean error reported by the solver. The equivalent check inside
+    // `extract_linear_expression` runs in a CaDiCaL callback, where cxx turns the panic into
+    // `abort()`.
+    reject_nonlinear_arithmetic(&assertions)?;
 
     let mut prop_skeleton: Vec<Vec<i32>> = vec![];
 
