@@ -9,7 +9,7 @@
 //! naming the theory and the offending term.
 
 use yaspar_ir::ast::{Context, FetchSort, Repr, Term};
-use yaspar_ir::statics::{BITVEC, STRING, ARRAY, REGLAN, SET};
+use yaspar_ir::statics::{ARRAY, BITVEC, REGLAN, SET, STRING};
 
 /// The theory name for a sort Sundance has no decision procedure for, or `None` if the sort is
 /// supported.
