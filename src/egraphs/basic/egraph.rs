@@ -1524,7 +1524,7 @@ impl Egraph {
     /// Match a list of (pattern, ground_hint) pairs against the egraph.
     /// Returns all valid variable assignments.
     fn match_patterns(
-        &mut self,
+        &self,
         assignment: &mut DeterministicHashMap<Local, u32>,
         pattern_term_pairs: &[(PatternId, Option<u32>)],
         class_filter: Option<&std::collections::HashSet<u32>>,
@@ -1533,23 +1533,23 @@ impl Egraph {
             return vec![assignment.clone()];
         }
         let (pattern_id, ground_hint) = pattern_term_pairs[0];
-        let pattern = self.compiled_patterns[pattern_id].clone();
+        let pattern = &self.compiled_patterns[pattern_id];
         self.match_pattern_recursive(
             assignment,
-            &pattern,
+            pattern,
             ground_hint,
-            &pattern_term_pairs[1..].to_vec(),
+            &pattern_term_pairs[1..],
             class_filter,
         )
     }
 
     /// Match a single pattern against an optional ground term, then continue with remaining pairs.
     fn match_pattern_recursive(
-        &mut self,
+        &self,
         assignment: &mut DeterministicHashMap<Local, u32>,
         pattern: &Pattern,
         ground_hint: Option<u32>,
-        remaining: &Vec<(PatternId, Option<u32>)>,
+        remaining: &[(PatternId, Option<u32>)],
         class_filter: Option<&std::collections::HashSet<u32>>,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
         match pattern {
@@ -1590,16 +1590,16 @@ impl Egraph {
 
     /// Find all function applications matching the given op, then recurse into sub-patterns.
     fn find_assignments_on_pattern(
-        &mut self,
+        &self,
         ground_hint: Option<u32>,
         func_name: &str,
         sub_patterns: &[Pattern],
-        remaining: &Vec<(PatternId, Option<u32>)>,
+        remaining: &[(PatternId, Option<u32>)],
         assignment: &mut DeterministicHashMap<Local, u32>,
         class_filter: Option<&std::collections::HashSet<u32>>,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
         let function_terms = match self.function_maps.get(func_name) {
-            Some(terms) => terms.clone(),
+            Some(terms) => terms,
             None => return vec![],
         };
 
@@ -1612,7 +1612,7 @@ impl Egraph {
                 continue;
             }
 
-            let i_root = self.find(i);
+            let i_root = self.find(*i);
             // Relevancy filter: skip terms whose class was never marked
             // relevant. When `class_filter` is None (relevancy disabled) or
             // the ground hint pinned a class, the filter is bypassed — the
@@ -1657,7 +1657,7 @@ impl Egraph {
                 let new_assignments = self.match_subpatterns(
                     &mut assignment.clone(),
                     sub_patterns,
-                    &subterms,
+                    subterms,
                     remaining,
                     class_filter,
                 );
@@ -1669,11 +1669,11 @@ impl Egraph {
 
     /// Match sub-patterns against ground subterms, then continue with remaining pattern pairs.
     fn match_subpatterns(
-        &mut self,
+        &self,
         assignment: &mut DeterministicHashMap<Local, u32>,
         sub_patterns: &[Pattern],
         ground_subterms: &[u32],
-        remaining: &Vec<(PatternId, Option<u32>)>,
+        remaining: &[(PatternId, Option<u32>)],
         class_filter: Option<&std::collections::HashSet<u32>>,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
         if sub_patterns.is_empty() {
@@ -1721,7 +1721,7 @@ impl Egraph {
             Pattern::App(op, children) => {
                 let func_name = op.to_function_map_key();
                 let function_terms = match self.function_maps.get(&func_name) {
-                    Some(terms) => terms.clone(),
+                    Some(terms) => terms,
                     None => return vec![],
                 };
 
@@ -1733,7 +1733,7 @@ impl Egraph {
                     if subterms.len() != children.len() {
                         continue;
                     }
-                    let i_root = self.find(i);
+                    let i_root = self.find(*i);
                     // Here ground_root is pinned by the parent match, so
                     // any candidate with a matching class root is a valid
                     // sub-match — no need for the class_filter guard.
@@ -1749,8 +1749,8 @@ impl Egraph {
                         let sub_results = self.match_subpatterns(
                             &mut sub_assignment,
                             children,
-                            &subterms,
-                            &vec![],
+                            subterms,
+                            &[],
                             class_filter,
                         );
                         for mut sub in sub_results {
@@ -1985,12 +1985,12 @@ impl EgraphTrait for Egraph {
     }
 
     fn match_triggers(
-        &mut self,
-        trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
+        &self,
+        trigger_term_pairs: &[(PatternId, Option<Self::TermId>)],
         class_relevant_filter: Option<&std::collections::HashSet<u32>>,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
         let mut assignment = DeterministicHashMap::default();
-        self.match_patterns(&mut assignment, &trigger_term_pairs, class_relevant_filter)
+        self.match_patterns(&mut assignment, trigger_term_pairs, class_relevant_filter)
     }
 
     fn backtrack_to(&mut self, level: usize) {

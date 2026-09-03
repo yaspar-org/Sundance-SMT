@@ -170,7 +170,7 @@ pub(crate) fn instantiate_quantifiers(
             };
             let list_assignments = solver_state
                 .egraph
-                .match_triggers(trigger_term_pairs, class_filter);
+                .match_triggers(&trigger_term_pairs, class_filter);
 
             if relevancy_trace_enabled() {
                 eprintln!(

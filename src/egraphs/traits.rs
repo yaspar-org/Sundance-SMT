@@ -194,8 +194,8 @@ pub trait EgraphTrait {
     ///
     /// Returns a list of substitution maps (bound variable `Local` → matched term ID).
     fn match_triggers(
-        &mut self,
-        trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
+        &self,
+        trigger_term_pairs: &[(PatternId, Option<Self::TermId>)],
         class_relevant_filter: Option<&std::collections::HashSet<u32>>,
     ) -> Vec<crate::utils::DeterministicHashMap<Local, Self::TermId>>;
 
