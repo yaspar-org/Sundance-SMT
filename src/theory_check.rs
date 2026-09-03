@@ -5,23 +5,40 @@
 //!
 //! Any operator that `SolverState::extract_op` does not recognise is registered in the egraph as an
 //! ordinary application (`Op::App`), so it is only constrained by congruence closure. For a theory
-//! operator that is unsound. Rather than answer incorrectly, we reject the input with an error
+//! operator, that is unsound. Rather than answer incorrectly, we reject the input with an error
 //! naming the theory and the offending term.
 
 use yaspar_ir::ast::{Context, FetchSort, Repr, Term};
+use yaspar_ir::statics::{BITVEC, STRING, ARRAY, REGLAN, SET};
 
-/// Sorts whose theory Sundance has no decision procedure for, paired with the
-/// human-readable theory name used in the diagnostic.
-const UNSUPPORTED_SORTS: &[(&str, &str)] = &[(yaspar_ir::statics::BITVEC, "fixed-size bitvectors")];
+/// The theory name for a sort Sundance has no decision procedure for, or `None` if the sort is
+/// supported.
+fn unsupported_theory(sort_name: &str) -> Option<&'static str> {
+    match sort_name {
+        BITVEC => Some("fixed-size bitvectors"),
+        STRING => Some("strings"),
+        REGLAN => Some("regular expressions"),
+        ARRAY => Some("arrays"),
+        SET => Some("sets"),
+        _ => None,
+    }
+}
 
 /// Reject `assertions` if any subterm belongs to an unsupported theory.
 ///
 /// Detection is by sort rather than by operator.
+///
+/// Call this as early as possible: it wants the raw typechecked assertions, before let-elimination,
+/// NNF, or any egraph registration, so detecting an unsupported input costs little beyond parsing.
+/// `sub_terms` descends into let bindings and quantifier bodies, so nothing has to be expanded
+/// first for the walk to be complete.
 pub fn reject_unsupported_theories(
     assertions: &[Term],
     context: &mut Context,
 ) -> Result<(), String> {
-    let mut stack: Vec<Term> = assertions.to_vec();
+    let mut stack: Vec<&Term> = assertions.iter().collect();
+    // Terms are hash-consed, so subterms are shared within and across assertions. Memoizing on
+    // uid keeps the walk linear in the number of distinct subterms.
     let mut seen = crate::utils::FastDeterministicHashSet::default();
 
     while let Some(term) = stack.pop() {
@@ -30,15 +47,14 @@ pub fn reject_unsupported_theories(
         }
 
         let sort = term.get_sort(context);
-        let sort_name = sort.sort_name().as_str();
-        if let Some((_, theory)) = UNSUPPORTED_SORTS.iter().find(|(s, _)| *s == sort_name) {
+        if let Some(theory) = unsupported_theory(sort.sort_name().as_str()) {
             return Err(format!(
-                "Error: unsupported theory: {theory}. The term `{term}` has sort `{sort}`, \
+                "unsupported theory: {theory}. The term `{term}` has sort `{sort}`, \
                  and Sundance has no decision procedure for this theory."
             ));
         }
 
-        stack.extend(term.repr().sub_terms().cloned());
+        stack.extend(term.repr().sub_terms());
     }
 
     Ok(())

@@ -85,8 +85,10 @@ def categorize_result(stdout: str, stderr: str) -> str:
     # Check for timeout
     if "TIMEOUT" in stderr:
         return "timeout"
-    # Check for errors
-    if "ERROR" in stderr:
+    # Check for errors: this script's own ERROR sentinel (see run_cargo_on_file), a solver
+    # panic, or the solver refusing to answer -- `main` reports the latter as `Error: "..."`
+    # on stderr, e.g. when an assertion uses an unsupported theory such as bitvectors.
+    if "ERROR" in stderr or "Error:" in stderr or "panicked at" in stderr:
         return "error"
     # Otherwise categorize as other
     return "other"
