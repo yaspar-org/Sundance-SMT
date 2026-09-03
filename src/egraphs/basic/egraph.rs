@@ -13,6 +13,7 @@ use crate::relevancy::relevancy_trace_enabled;
 use crate::utils::{
     DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
 };
+use std::cell::Cell;
 use std::default::Default;
 use std::fmt;
 use yaspar_ir::ast::Local;
@@ -272,6 +273,11 @@ pub struct Egraph {
     track_all_merges: bool,
     /// Accumulated egraph statistics.
     pub(crate) stats: EgraphStats,
+    /// Low-overhead counters used to diagnose e-matching and QI-GC growth.
+    e_match_calls: Cell<u64>,
+    e_match_candidates_scanned: Cell<u64>,
+    e_match_relevant_candidates_scanned: Cell<u64>,
+    e_match_results: Cell<u64>,
 }
 
 /// Statistics accumulated by the egraph.
@@ -279,6 +285,24 @@ pub struct Egraph {
 pub(crate) struct EgraphStats {
     /// Number of successful equality merges (where roots differed).
     pub(crate) merges: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EgraphGcProfile {
+    pub(crate) registered_terms: usize,
+    pub(crate) function_entries: usize,
+    pub(crate) relevant_function_entries: usize,
+    pub(crate) active_relevant_terms: usize,
+    pub(crate) predecessor_entries: usize,
+    pub(crate) qi_predecessor_entries: usize,
+    pub(crate) union_to_eclass_entries: usize,
+    pub(crate) signature_entries: usize,
+    pub(crate) backtrack_entries: usize,
+    pub(crate) merges: u64,
+    pub(crate) e_match_calls: u64,
+    pub(crate) e_match_candidates_scanned: u64,
+    pub(crate) e_match_relevant_candidates_scanned: u64,
+    pub(crate) e_match_results: u64,
 }
 
 impl Default for Egraph {
@@ -320,6 +344,41 @@ impl Egraph {
             relevancy_merge_queue: Vec::new(),
             track_all_merges: false,
             stats: EgraphStats::default(),
+            e_match_calls: Cell::new(0),
+            e_match_candidates_scanned: Cell::new(0),
+            e_match_relevant_candidates_scanned: Cell::new(0),
+            e_match_results: Cell::new(0),
+        }
+    }
+
+    pub(crate) fn gc_profile(&self) -> EgraphGcProfile {
+        EgraphGcProfile {
+            registered_terms: self
+                .terms
+                .iter()
+                .filter(|slot| !matches!(slot, TermSlot::Empty))
+                .count(),
+            function_entries: self.function_maps.values().map(Vec::len).sum(),
+            relevant_function_entries: self.relevant_function_maps.values().map(Vec::len).sum(),
+            active_relevant_terms: self
+                .e_matching_relevance_levels
+                .iter()
+                .filter(|level| level.is_some())
+                .count(),
+            predecessor_entries: self.predecessors.iter().map(|entries| entries.len()).sum(),
+            qi_predecessor_entries: self
+                .predecessors_created_by_quantifiers
+                .values()
+                .map(|entries| entries.len())
+                .sum(),
+            union_to_eclass_entries: self.union_to_eclass.len(),
+            signature_entries: self.sig_table.len(),
+            backtrack_entries: self.proof_forest_backtrack_stack.len(),
+            merges: self.stats.merges,
+            e_match_calls: self.e_match_calls.get(),
+            e_match_candidates_scanned: self.e_match_candidates_scanned.get(),
+            e_match_relevant_candidates_scanned: self.e_match_relevant_candidates_scanned.get(),
+            e_match_results: self.e_match_results.get(),
         }
     }
 
@@ -1679,6 +1738,12 @@ impl Egraph {
         let mut considered_function_terms = DeterministicHashSet::default();
 
         for (i, subterms) in function_terms {
+            self.e_match_candidates_scanned
+                .set(self.e_match_candidates_scanned.get() + 1);
+            if relevant_only && ground_root.is_none() {
+                self.e_match_relevant_candidates_scanned
+                    .set(self.e_match_relevant_candidates_scanned.get() + 1);
+            }
             if subterms.len() != sub_patterns.len() {
                 continue;
             }
@@ -1792,6 +1857,8 @@ impl Egraph {
                 let mut considered = DeterministicHashSet::default();
 
                 for (i, subterms) in function_terms {
+                    self.e_match_candidates_scanned
+                        .set(self.e_match_candidates_scanned.get() + 1);
                     if subterms.len() != children.len() {
                         continue;
                     }
@@ -2105,8 +2172,12 @@ impl EgraphTrait for Egraph {
         trigger_term_pairs: &[(PatternId, Option<Self::TermId>)],
         relevant_only: bool,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
+        self.e_match_calls.set(self.e_match_calls.get() + 1);
         let mut assignment = DeterministicHashMap::default();
-        self.match_patterns(&mut assignment, trigger_term_pairs, relevant_only)
+        let results = self.match_patterns(&mut assignment, trigger_term_pairs, relevant_only);
+        self.e_match_results
+            .set(self.e_match_results.get() + results.len() as u64);
+        results
     }
 
     fn backtrack_to(&mut self, level: usize) {

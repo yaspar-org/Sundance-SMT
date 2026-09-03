@@ -29,6 +29,7 @@ use yaspar_ir::ast::{ATerm, Repr, TermAllocator};
 // --- QI Garbage Collection ---
 
 static QI_GC_TRACE: AtomicBool = AtomicBool::new(false);
+static QI_GC_PROFILE: AtomicBool = AtomicBool::new(false);
 
 /// Start eager matching only after CaDiCaL has assigned almost all variables
 /// from the original Boolean formula. This keeps QI-created variables from
@@ -38,6 +39,10 @@ const EAGER_UNASSIGNED_ORIGINAL_LIMIT: usize = 0;
 pub(crate) fn init_qi_gc_trace() {
     QI_GC_TRACE.store(
         std::env::var("SUNDANCE_QI_GC_TRACE").is_ok(),
+        Ordering::Relaxed,
+    );
+    QI_GC_PROFILE.store(
+        std::env::var("SUNDANCE_QI_GC_PROFILE").is_ok(),
         Ordering::Relaxed,
     );
 }
@@ -63,6 +68,18 @@ pub(crate) struct QiGcState {
     pub learner_buf: Vec<i32>,
     /// Epoch counter.
     pub epoch: usize,
+    /// QI clauses guarded in the current epoch and over the whole solve.
+    pub epoch_guarded_clauses: u64,
+    pub total_guarded_clauses: u64,
+    /// Instantiations materialized in the current epoch and over the whole solve.
+    pub epoch_instantiations: u64,
+    pub total_epoch_instantiations: u64,
+    /// Number of completed epoch transitions.
+    pub transitions: u64,
+}
+
+fn retire_activation_unit(activation: i32) -> Vec<i32> {
+    vec![-activation]
 }
 
 /// Implements CaDiCaL's `Learner` trait to capture conflict clauses containing ¬act.
@@ -213,6 +230,9 @@ pub struct CustomExternalPropagator<'a> {
     pub next_is_decision: bool,
     /// Flag: next cb_decide should force_backtrack(0) to trigger epoch transition.
     pub qi_gc_force_backtrack: bool,
+    /// A root backtrack should perform exactly one requested epoch transition.
+    /// Ordinary CaDiCaL backtracks to level zero do not collect QI state.
+    pub qi_gc_transition_pending: bool,
     /// Decision level at which each currently assigned SAT literal was last
     /// applied to the theory solvers. A `None` entry means either irrelevant
     /// or waiting in `pending_relevant_assignments`.
@@ -226,6 +246,111 @@ pub struct CustomExternalPropagator<'a> {
 }
 
 impl<'a> CustomExternalPropagator<'a> {
+    fn print_qi_gc_profile(&self, event: &str) {
+        if !QI_GC_PROFILE.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let egraph = self.solver_state.egraph.gc_profile();
+        let relevance = self.solver_state.relevancy.profile();
+        let assigned = self
+            .assignments
+            .iter()
+            .skip(1)
+            .filter(|lit| **lit != 0)
+            .count();
+        let (epoch, transitions, epoch_instances, total_instances, epoch_clauses, total_clauses) =
+            self.qi_gc_state.as_ref().map_or((0, 0, 0, 0, 0, 0), |gc| {
+                let gc = gc.borrow();
+                (
+                    gc.epoch,
+                    gc.transitions,
+                    gc.epoch_instantiations,
+                    gc.total_epoch_instantiations,
+                    gc.epoch_guarded_clauses,
+                    gc.total_guarded_clauses,
+                )
+            });
+
+        eprintln!(
+            "[qi-gc-profile] event={event} elapsed={:.3}s level={} assigned={} \
+             decisions={} backtracks={} conflicts={} arith_checks={} \
+             epoch={} transitions={} epoch_instances={} total_instances={} \
+             epoch_clauses={} total_clauses={} qi_rounds={} pending_qi={}",
+            self.stats.elapsed().as_secs_f64(),
+            self.decision_level,
+            assigned,
+            self.stats.decisions,
+            self.stats.backtracks,
+            self.stats.conflicts,
+            self.stats.arith_checks,
+            epoch,
+            transitions,
+            epoch_instances,
+            total_instances,
+            epoch_clauses,
+            total_clauses,
+            self.stats.instantiation_rounds,
+            self.pending.is_some(),
+        );
+        eprintln!(
+            "[qi-gc-profile] egraph terms={} function_entries={} relevant_entries={} \
+             active_relevant_terms={} predecessors={} qi_predecessors={} union_terms={} \
+             signatures={} backtrack_entries={} merges={} match_calls={} \
+             match_candidates={} relevant_match_candidates={} match_results={}",
+            egraph.registered_terms,
+            egraph.function_entries,
+            egraph.relevant_function_entries,
+            egraph.active_relevant_terms,
+            egraph.predecessor_entries,
+            egraph.qi_predecessor_entries,
+            egraph.union_to_eclass_entries,
+            egraph.signature_entries,
+            egraph.backtrack_entries,
+            egraph.merges,
+            egraph.e_match_calls,
+            egraph.e_match_candidates_scanned,
+            egraph.e_match_relevant_candidates_scanned,
+            egraph.e_match_results,
+        );
+        eprintln!(
+            "[qi-gc-profile] relevance nodes={} literals={} terms={} classes={} \
+             lit_watches={} cond_watches={} ite_watches={} queued={} trail={} \
+             arithmetic_terms={} bool_vars={} clauses={} binary_clauses={} deleted_clauses={}",
+            relevance.nodes,
+            relevance.relevant_literals,
+            relevance.relevant_terms,
+            relevance.relevant_classes,
+            relevance.literal_watches,
+            relevance.conditional_watches,
+            relevance.term_ite_watches,
+            relevance.queued_events,
+            relevance.trail_entries,
+            self.solver_state.arithmetic_terms.len(),
+            self.solver_state.cnf_cache.next_var.saturating_sub(1),
+            self.stats.clauses,
+            self.stats.binary_clauses,
+            self.proof_tracer.borrow().deleted_clauses,
+        );
+
+        #[cfg(feature = "z3-solver")]
+        if let Some(z3) = self.z3_incremental.as_ref() {
+            let z3 = z3.gc_profile();
+            eprintln!(
+                "[qi-gc-profile] z3 variables={} trackers={} non_arithmetic_lits={} \
+                 active_lits={} pushed_scopes={} level_variables={} level={} pending={}",
+                z3.variables,
+                z3.trackers,
+                z3.non_arithmetic_literals,
+                z3.active_literals,
+                z3.pushed_scopes,
+                z3.level_variables,
+                z3.current_level,
+                z3.pending_partial_assertions,
+            );
+        }
+    }
+
     #[cfg(feature = "z3-solver")]
     fn check_partial_arithmetic_trail(&mut self) {
         let Some(z3) = self.z3_incremental.as_mut() else {
@@ -466,19 +591,24 @@ impl<'a> CustomExternalPropagator<'a> {
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
     ) {
         for inst in instances {
-            let (clauses, pre_nnf_body) = match inst {
+            let (clauses, pre_nnf_body, is_instantiation) = match inst {
                 Instantiation {
                     clauses,
                     pre_nnf_body,
                 } => {
                     self.stats.instantiations += 1;
-                    (clauses, pre_nnf_body)
+                    (clauses, pre_nnf_body, true)
                 }
                 Skolemization {
                     clauses,
                     pre_nnf_body,
-                } => (clauses, pre_nnf_body),
+                } => (clauses, pre_nnf_body, false),
             };
+            if is_instantiation && let Some(ref gc) = self.qi_gc_state {
+                let mut gc = gc.borrow_mut();
+                gc.epoch_instantiations += 1;
+                gc.total_epoch_instantiations += 1;
+            }
             // Register the pre-NNF instance body with relevancy so structural
             // rules see the original connectives (Iff/ITE/Implies) before
             // NNF flattens them into Or/And.
@@ -491,7 +621,12 @@ impl<'a> CustomExternalPropagator<'a> {
             self.solver_state.relevancy_register_term(pre_nnf_body, 0);
             for clause in clauses {
                 if let Some(ref gc) = self.qi_gc_state {
-                    let neg_act = -gc.borrow().current_act;
+                    let mut gc = gc.borrow_mut();
+                    let neg_act = -gc.current_act;
+                    gc.epoch_guarded_clauses += 1;
+                    gc.total_guarded_clauses += 1;
+                    let epoch = gc.epoch;
+                    drop(gc);
                     let mut guarded = clause.clone();
                     guarded.push(neg_act);
                     if QI_GC_TRACE.load(Ordering::Relaxed) {
@@ -510,11 +645,7 @@ impl<'a> CustomExternalPropagator<'a> {
                                 }
                             })
                             .collect();
-                        eprintln!(
-                            "[qi-gc] QI clause (epoch {}): {:?}",
-                            gc.borrow().epoch,
-                            terms
-                        );
+                        eprintln!("[qi-gc] QI clause (epoch {}): {:?}", epoch, terms);
                     }
                     self.proof_tracer
                         .borrow_mut()
@@ -542,6 +673,7 @@ impl<'a> CustomExternalPropagator<'a> {
         let Some(mut pending) = self.pending.take() else {
             return 0;
         };
+        let started = std::time::Instant::now();
         debug_assert!(!self.materializing_quantifiers);
         self.materializing_quantifiers = true;
 
@@ -570,6 +702,20 @@ impl<'a> CustomExternalPropagator<'a> {
         // re-entrancy through quantifier materialization is disabled.
         self.process_pending_relevant_assignments();
 
+        // Single-item materialization is the common model-refutation path.
+        // Reporting every such item distorts the benchmark and produces
+        // megabytes of output; the next matching/periodic snapshot contains
+        // the cumulative state. Large batches are useful checkpoint events.
+        if QI_GC_PROFILE.load(Ordering::Relaxed) && count > 1 {
+            eprintln!(
+                "[qi-gc-profile] materialize count={} duration={:.6}s cap={}",
+                count,
+                started.elapsed().as_secs_f64(),
+                cap
+            );
+            self.print_qi_gc_profile("materialize-complete");
+        }
+
         count
     }
 
@@ -584,6 +730,8 @@ impl<'a> CustomExternalPropagator<'a> {
         instantiation_limit: Option<usize>,
     ) -> bool {
         debug_assert!(self.pending.is_none());
+        self.print_qi_gc_profile("qi-match-start");
+        let started = std::time::Instant::now();
         let pending = instantiate_quantifiers(
             self.solver_state,
             &self.assignments,
@@ -593,6 +741,14 @@ impl<'a> CustomExternalPropagator<'a> {
             generation_limit,
             instantiation_limit,
         );
+        if QI_GC_PROFILE.load(Ordering::Relaxed) {
+            eprintln!(
+                "[qi-gc-profile] qi-match duration={:.6}s produced_work={}",
+                started.elapsed().as_secs_f64(),
+                !pending.is_empty()
+            );
+            self.print_qi_gc_profile("qi-match-complete");
+        }
         if pending.is_empty() {
             return false;
         }
@@ -625,11 +781,14 @@ impl<'a> CustomExternalPropagator<'a> {
             "epoch {}: backtrack to level 0, triggering epoch transition",
             epoch
         );
-
-        // 1. Queue the old activation literal as a permanent unit clause
-        let conflict_count = gc.learned_clauses.len();
         drop(gc);
-        self.queue_theory_clause(vec![old_act], Theory::Background);
+        self.print_qi_gc_profile("epoch-transition-start");
+
+        // 1. Permanently retire the old epoch. QI clauses have the shape
+        // `¬act ∨ instance`, so asserting `¬act` satisfies any clause CaDiCaL
+        // has not physically forgotten.
+        let conflict_count = gc_state.borrow().learned_clauses.len();
+        self.queue_theory_clause(retire_activation_unit(old_act), Theory::Background);
 
         // 2. Re-learn captured conflict clauses without ¬act
         let mut gc = gc_state.borrow_mut();
@@ -640,30 +799,31 @@ impl<'a> CustomExternalPropagator<'a> {
                 .into_iter()
                 .filter(|&lit| lit != neg_old_act)
                 .collect();
-            if !promoted.is_empty() {
-                if QI_GC_TRACE.load(Ordering::Relaxed) {
-                    let terms: Vec<String> = promoted
-                        .iter()
-                        .map(|&lit| {
-                            if self
-                                .solver_state
-                                .cnf_cache
-                                .var_map_reverse
-                                .contains_key(&lit.abs())
-                            {
-                                format!("{}", self.solver_state.get_term_from_lit(lit))
-                            } else {
-                                format!("?{}", lit)
-                            }
-                        })
-                        .collect();
-                    eprintln!(
-                        "[qi-gc] epoch {}: promoting conflict clause: {:?}",
-                        epoch, terms
-                    );
-                }
-                self.queue_theory_clause(promoted, Theory::Background);
+            if QI_GC_TRACE.load(Ordering::Relaxed) {
+                let terms: Vec<String> = promoted
+                    .iter()
+                    .map(|&lit| {
+                        if self
+                            .solver_state
+                            .cnf_cache
+                            .var_map_reverse
+                            .contains_key(&lit.abs())
+                        {
+                            format!("{}", self.solver_state.get_term_from_lit(lit))
+                        } else {
+                            format!("?{}", lit)
+                        }
+                    })
+                    .collect();
+                eprintln!(
+                    "[qi-gc] epoch {}: promoting conflict clause: {:?}",
+                    epoch, terms
+                );
             }
+            // A learned unit `¬act` promotes to the empty clause: the QI epoch
+            // proved the permanent problem UNSAT. Dropping it would discard
+            // the proof and restart an unbounded instantiation sequence.
+            self.queue_theory_clause(promoted, Theory::Background);
         }
 
         // 3. Clear added_instantiations so QI can be re-generated in the next epoch
@@ -678,6 +838,9 @@ impl<'a> CustomExternalPropagator<'a> {
 
         // 4. Start new epoch
         gc.epoch += 1;
+        gc.transitions += 1;
+        gc.epoch_guarded_clauses = 0;
+        gc.epoch_instantiations = 0;
 
         // 5. Allocate new activation literal
         let new_act = self.solver_state.cnf_cache.next_var;
@@ -698,6 +861,7 @@ impl<'a> CustomExternalPropagator<'a> {
             conflict_count,
             new_act
         );
+        self.print_qi_gc_profile("epoch-transition-complete");
     }
 
     /// Add instances from the current partial assignment according to the
@@ -1043,6 +1207,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn notify_new_decision_level(&mut self) {
         self.stats.decisions += 1;
+        if self.stats.decisions % 10_000 == 0 {
+            self.print_qi_gc_profile("periodic-decisions");
+        }
         debug_println!(
             11,
             0,
@@ -1149,12 +1316,17 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.queue_relevant_assignment(lit);
         }
 
-        // QI GC: backtrack to level 1 means all QI work above was invalidated.
-        // Schedule force_backtrack(0) on next cb_decide to trigger epoch transition.
-        if level == 1 && self.qi_gc_state.is_some() {
-            self.qi_gc_force_backtrack = true;
-        }
-        if level == 0 {
+        // A learned clause containing `¬act` that reaches level zero requests
+        // a mandatory transition so its activation-independent consequence can
+        // be promoted. Other transitions are resource-threshold driven.
+        let root_qi_conflict = level == 0
+            && self
+                .qi_gc_state
+                .as_ref()
+                .is_some_and(|gc| !gc.borrow().learned_clauses.is_empty());
+        if level == 0 && (self.qi_gc_transition_pending || root_qi_conflict) {
+            self.qi_gc_transition_pending = false;
+            self.qi_gc_force_backtrack = false;
             if let Some(gc_state) = self.qi_gc_state.clone() {
                 self.trigger_epoch_transition(&gc_state);
             }
@@ -1459,6 +1631,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // QI GC: force backtrack to level 0 if scheduled (triggers epoch transition)
         if self.qi_gc_force_backtrack {
             self.qi_gc_force_backtrack = false;
+            self.qi_gc_transition_pending = true;
             qi_gc_trace!(
                 "force_backtrack(0) from cb_decide at level {}",
                 self.decision_level
@@ -1617,5 +1790,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal
+    }
+}
+
+#[cfg(test)]
+mod qi_gc_tests {
+    use super::retire_activation_unit;
+
+    #[test]
+    fn retiring_activation_satisfies_negatively_guarded_epoch_clauses() {
+        assert_eq!(retire_activation_unit(17), vec![-17]);
     }
 }

@@ -205,6 +205,19 @@ pub struct RelevancyState {
     enabled: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RelevancyProfile {
+    pub(crate) nodes: usize,
+    pub(crate) relevant_literals: usize,
+    pub(crate) relevant_terms: usize,
+    pub(crate) relevant_classes: usize,
+    pub(crate) literal_watches: usize,
+    pub(crate) conditional_watches: usize,
+    pub(crate) term_ite_watches: usize,
+    pub(crate) queued_events: usize,
+    pub(crate) trail_entries: usize,
+}
+
 impl RelevancyState {
     pub fn new(enabled: bool) -> Self {
         RelevancyState {
@@ -231,6 +244,34 @@ impl RelevancyState {
             newly_relevant_classes: VecDeque::new(),
             trail_by_level: vec![Vec::new()],
             enabled,
+        }
+    }
+
+    pub(crate) fn profile(&self) -> RelevancyProfile {
+        RelevancyProfile {
+            nodes: self.node_kinds.iter().filter(|kind| kind.is_some()).count(),
+            relevant_literals: self.relevant.iter().filter(|relevant| **relevant).count(),
+            relevant_terms: self.relevant_term_levels.len(),
+            relevant_classes: self.class_relevant.len(),
+            literal_watches: self
+                .watches_on_true
+                .iter()
+                .chain(self.watches_on_false.iter())
+                .map(Vec::len)
+                .sum(),
+            conditional_watches: self
+                .cond_watches_on_true
+                .iter()
+                .chain(self.cond_watches_on_false.iter())
+                .map(Vec::len)
+                .sum(),
+            term_ite_watches: self.term_ite_watches.iter().map(Vec::len).sum(),
+            queued_events: self.queue.len()
+                + self.lits_for_term_propagation.len()
+                + self.newly_relevant_lits.len()
+                + self.newly_relevant_terms.len()
+                + self.newly_relevant_classes.len(),
+            trail_entries: self.trail_by_level.iter().map(Vec::len).sum(),
         }
     }
 

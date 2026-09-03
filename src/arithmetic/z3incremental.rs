@@ -72,6 +72,18 @@ pub struct Z3IncrementalState {
     pending_partial_assertions: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Z3GcProfile {
+    pub(crate) variables: usize,
+    pub(crate) trackers: usize,
+    pub(crate) non_arithmetic_literals: usize,
+    pub(crate) active_literals: usize,
+    pub(crate) pushed_scopes: u32,
+    pub(crate) level_variables: usize,
+    pub(crate) current_level: usize,
+    pub(crate) pending_partial_assertions: usize,
+}
+
 impl Z3IncrementalState {
     pub fn new() -> Self {
         Self {
@@ -85,6 +97,19 @@ impl Z3IncrementalState {
             vars_by_level: vec![Vec::new()],
             current_level: 0,
             pending_partial_assertions: 0,
+        }
+    }
+
+    pub(crate) fn gc_profile(&self) -> Z3GcProfile {
+        Z3GcProfile {
+            variables: self.var_map.len(),
+            trackers: self.tracker_by_abs_lit.len(),
+            non_arithmetic_literals: self.non_arithmetic_lits.len(),
+            active_literals: self.active_lits.len(),
+            pushed_scopes: self.push_counts.iter().copied().sum(),
+            level_variables: self.vars_by_level.iter().map(Vec::len).sum(),
+            current_level: self.current_level,
+            pending_partial_assertions: self.pending_partial_assertions,
         }
     }
 

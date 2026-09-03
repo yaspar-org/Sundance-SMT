@@ -106,6 +106,11 @@ pub fn cdcl_decision_procedure(
             learned_clauses: Vec::new(),
             learner_buf: Vec::new(),
             epoch: 0,
+            epoch_guarded_clauses: 0,
+            total_guarded_clauses: 0,
+            epoch_instantiations: 0,
+            total_epoch_instantiations: 0,
+            transitions: 0,
         }));
         proof_tracer.borrow_mut().qi_gc_state = Some(Rc::clone(&state));
         eprintln!("[qi-gc] epoch 0: new activation literal act={}", act_var);
@@ -175,6 +180,7 @@ pub fn cdcl_decision_procedure(
         draining_forgettable: false,
         next_is_decision: false,
         qi_gc_force_backtrack: false,
+        qi_gc_transition_pending: false,
         theory_processed_levels: vec![None, None],
         pending_relevant_assignments: std::collections::VecDeque::new(),
         theory_assignment_pending: vec![false, false],
