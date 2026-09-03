@@ -448,6 +448,16 @@ pub fn extract_linear_expression(
                                 .collect()
                         } else {
                             // Two non-constant factors: non-linear.
+                            //
+                            // `theory_check::reject_nonlinear_arithmetic` rejects the ground cases
+                            // before the search starts, so reaching here means the product was
+                            // produced by quantifier instantiation.
+                            //
+                            // TODO: This is a poor way to report it: we are inside a CaDiCaL
+                            // external-propagator callback, and cxx converts a panic crossing that
+                            // FFI boundary into `abort()` — SIGABRT and a core dump rather than an
+                            // error message. Fixing that means catching the panic at the propagator
+                            // boundary and surfacing it after `solve` returns.
                             panic!(
                                 "non-linear multiplication is not supported: {}",
                                 solver_state.get_term(term_id),
