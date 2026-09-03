@@ -735,7 +735,7 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
-    fn apply_relevant_assignment(&mut self, lit: i32) {
+    fn apply_theory_assignment(&mut self, lit: i32) {
         self.add_lit_to_proof_tracer(lit);
 
         let constraints_opt = process_assignment(lit, self.solver_state, self.decision_level);
@@ -785,10 +785,69 @@ impl<'a> CustomExternalPropagator<'a> {
                 continue;
             }
 
-            self.apply_relevant_assignment(lit);
+            self.apply_theory_assignment(lit);
             self.theory_processed_levels[idx] = Some(self.decision_level);
             self.queue_newly_relevant_assignments();
         }
+    }
+
+    /// Before accepting a complete Boolean model, send every still-unprocessed
+    /// assignment through the theory layer. Relevancy remains a partial-search
+    /// optimization, but it must not indefinitely hide valid theory conflicts
+    /// and egraph merges that can refute a candidate model.
+    fn process_complete_model_assignments(&mut self, model: &[i32]) {
+        for &lit in model {
+            if let Some(ref gc) = self.qi_gc_state {
+                if gc.borrow().activation_lits.contains(&lit.abs()) {
+                    continue;
+                }
+            }
+
+            let idx = lit.unsigned_abs() as usize;
+            self.ensure_theory_assignment_capacity(idx);
+            if self.fixed_literals.contains(&lit)
+                || self.theory_processed_levels[idx].is_some()
+            {
+                continue;
+            }
+
+            let assignment = self.assignments[idx];
+            debug_assert_ne!(
+                assignment, 0,
+                "complete-model literal {} was not reported as assigned",
+                lit
+            );
+            let assigned_lit = if assignment > 0 {
+                idx as i32
+            } else {
+                -(idx as i32)
+            };
+            debug_assert_eq!(
+                assigned_lit, lit,
+                "complete model disagrees with recorded assignment for variable {}",
+                idx
+            );
+            if assignment == 0 || assigned_lit != lit {
+                continue;
+            }
+
+            if QI_GC_TRACE.load(Ordering::Relaxed)
+                && !self.solver_state.is_lit_relevant(lit)
+            {
+                eprintln!(
+                    "[qi-gc] complete-model theory saturation lit={} term={}",
+                    lit,
+                    self.solver_state.get_term_from_lit(lit)
+                );
+            }
+
+            self.apply_theory_assignment(lit);
+            self.theory_processed_levels[idx] = Some(self.decision_level);
+        }
+
+        // Full theory processing can create egraph merges that make already
+        // assigned literals relevant. Drain those events before continuing.
+        self.process_pending_relevant_assignments();
     }
 }
 
@@ -1072,6 +1131,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
+        self.process_complete_model_assignments(model);
+        if !self.disequalities.borrow().is_empty() {
+            self.stats.conflicts += 1;
+            return false;
+        }
+
         for term in model {
             // Skip activation literals (current and previous) — they have no term.
             if let Some(ref gc) = self.qi_gc_state {
@@ -1096,35 +1161,21 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
-        // The incremental backend already saw every atom via notify_assignment
-        // — just flush any post-hoc merges and call check(). Otherwise use the
-        // eager entry point. The eager entry point re-linearizes the full
-        // model, so we must strip irrelevant lits first: notify_assignment
-        // skipped them at the theory layer and they didn't shape the egraph,
-        // so re-adding them to the arithmetic solver would break relevancy.
-        let filtered_model: Vec<i32> = model
-            .iter()
-            .copied()
-            .filter(|&l| self.solver_state.is_lit_relevant(l))
-            .collect();
+        // Complete-model saturation above sent every atom to the incremental
+        // backend and shaped the egraph with the full assignment. Flush any
+        // post-hoc merges and call check(); the eager backend likewise checks
+        // the complete model.
         #[cfg(feature = "z3-solver")]
         let arith_result = if let Some(z3) = self.z3_incremental.as_mut() {
             z3.drain_merge_queue(self.solver_state);
             z3.check(self.solver_state)
         } else {
-            check_integer_constraints_satisfiable(
-                &self.arithmetic,
-                &filtered_model,
-                self.solver_state,
-            )
+            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state)
         };
         self.sync_new_vars();
         #[cfg(not(feature = "z3-solver"))]
-        let arith_result = check_integer_constraints_satisfiable(
-            &self.arithmetic,
-            &filtered_model,
-            self.solver_state,
-        );
+        let arith_result =
+            check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state);
 
         match arith_result {
             ArithResult::Unsat(arithmetic_literals, arith_stats) => {

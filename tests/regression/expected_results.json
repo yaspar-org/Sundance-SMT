@@ -97,7 +97,7 @@
     "edge_cases_quantifiers/quantifier_ite_no_error2.smt2": "unknown",
     "edge_cases_quantifiers/quantifier_ite_no_error3.smt2": "timeout",
     "edge_cases_quantifiers/quantifier_ite_no_error4.smt2": "unknown",
-    "edge_cases_quantifiers/relevancy_ematch_incompleteness.smt2": "unknown", 
+    "edge_cases_quantifiers/relevancy_ematch_incompleteness.smt2": "unsat",
     "edge_cases_quantifiers/quantifier_ite_no_error5.smt2": "unknown",
     "edge_cases_quantifiers/quantifier_ite_no_error6.smt2": "unknown",
     "edge_cases_quantifiers/quantifier_disequalities_level.smt2": "unknown",
