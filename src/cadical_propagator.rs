@@ -23,7 +23,7 @@ use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use yaspar_ir::ast::TermAllocator;
+use yaspar_ir::ast::{ATerm, Repr, TermAllocator};
 
 // --- QI Garbage Collection ---
 
@@ -710,6 +710,25 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
+    /// Theory atoms can produce useful conflicts from a partial assignment
+    /// even when their Boolean context is currently irrelevant. Relevancy
+    /// filtering still suppresses pure Boolean/Tseitin structure and inactive
+    /// quantifiers, which have no independent theory effect.
+    fn is_theory_atom(&mut self, lit: i32) -> bool {
+        let term = self.solver_state.get_term_from_lit(lit.abs());
+        !matches!(
+            term.repr(),
+            ATerm::And(_)
+                | ATerm::Or(_)
+                | ATerm::Not(_)
+                | ATerm::Implies(_, _)
+                | ATerm::Ite(_, _, _)
+                | ATerm::Xor(_)
+                | ATerm::Forall(_, _)
+                | ATerm::Exists(_, _)
+        )
+    }
+
     fn queue_relevant_assignment(&mut self, lit: i32) {
         let idx = lit.unsigned_abs() as usize;
         self.ensure_theory_assignment_capacity(idx);
@@ -935,6 +954,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             if is_relevant {
                 self.queue_relevant_assignment(*lit);
+            } else if self.is_theory_atom(*lit) {
+                let idx = lit.unsigned_abs() as usize;
+                self.apply_theory_assignment(*lit);
+                self.theory_processed_levels[idx] = Some(self.decision_level);
+                self.queue_newly_relevant_assignments();
             } else if QI_GC_TRACE.load(Ordering::Relaxed)
                 && self
                     .solver_state
