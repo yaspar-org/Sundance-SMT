@@ -53,6 +53,18 @@ pub(crate) struct RelevantClassEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelevantMergeMembers {
+    Survivor,
+    Demoted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RelevantMergePropagation {
+    pub members: RelevantMergeMembers,
+    pub level: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LitWatch {
     parent_idx: usize,
     target: i32,
@@ -111,9 +123,14 @@ pub(crate) trait RelevancyTrait {
     fn drain_newly_relevant_terms(&mut self) -> Vec<RelevantTermEvent>;
     fn drain_newly_relevant_classes(&mut self) -> Vec<RelevantClassEvent>;
     fn notify_assignment(&mut self, lit: i32, level: usize) -> bool;
-    /// After an egraph merge, propagate class relevancy: if either
-    /// pre-merge root was relevant, mark `survivor` relevant.
-    fn propagate_class_relevancy(&mut self, survivor: u32, demoted: u32, level: usize);
+    /// After an egraph merge, update class relevancy and identify the one
+    /// pre-merge member range, if any, that has just become relevant.
+    fn propagate_class_relevancy(
+        &mut self,
+        survivor: u32,
+        demoted: u32,
+        level: usize,
+    ) -> Option<RelevantMergePropagation>;
     fn backtrack_to(&mut self, level: usize);
 }
 
@@ -224,7 +241,7 @@ impl RelevancyState {
         true
     }
 
-    fn mark_class_relevant_internal(&mut self, root: u32, level: usize) -> bool {
+    fn mark_class_relevant_internal(&mut self, root: u32, level: usize, emit_event: bool) -> bool {
         if self
             .class_relevance_levels
             .get(&root)
@@ -234,8 +251,10 @@ impl RelevancyState {
         }
         self.class_relevant.insert(root);
         self.class_relevance_levels.insert(root, level);
-        self.newly_relevant_classes
-            .push_back(RelevantClassEvent { root, level });
+        if emit_event {
+            self.newly_relevant_classes
+                .push_back(RelevantClassEvent { root, level });
+        }
         true
     }
 
@@ -613,7 +632,7 @@ impl RelevancyTrait for RelevancyState {
     fn mark_relevant_root(&mut self, lit: i32, class_root: Option<u32>, level: usize) {
         self.mark_relevant(lit, level);
         if let Some(root) = class_root {
-            if self.mark_class_relevant_internal(root, level) {
+            if self.mark_class_relevant_internal(root, level, true) {
                 if RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
                     || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok()
                 {
@@ -656,7 +675,7 @@ impl RelevancyTrait for RelevancyState {
         if !self.enabled {
             return;
         }
-        if self.mark_class_relevant_internal(class_root, level) {
+        if self.mark_class_relevant_internal(class_root, level, true) {
             if std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok() {
                 eprintln!(
                     "[relevancy] class_root {} became relevant (level={})",
@@ -729,44 +748,42 @@ impl RelevancyTrait for RelevancyState {
         self.newly_relevant_classes.drain(..).collect()
     }
 
-    fn propagate_class_relevancy(&mut self, survivor: u32, demoted: u32, level: usize) {
+    fn propagate_class_relevancy(
+        &mut self,
+        survivor: u32,
+        demoted: u32,
+        level: usize,
+    ) -> Option<RelevantMergePropagation> {
         if !self.enabled {
-            return;
+            return None;
         }
         let survivor_level = self.class_relevance_levels.get(&survivor).copied();
-        let demoted_level = self
-            .class_relevance_levels
-            .get(&demoted)
-            .copied()
-            .map(|relevance_level| relevance_level.max(level));
-        let propagated_level = match (survivor_level, demoted_level) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        let demoted_level = self.class_relevance_levels.get(&demoted).copied();
+        let propagation = match (survivor_level, demoted_level) {
+            (Some(source_level), None) => Some(RelevantMergePropagation {
+                members: RelevantMergeMembers::Demoted,
+                level: source_level.max(level),
+            }),
+            (None, Some(source_level)) => {
+                let activation_level = source_level.max(level);
+                self.mark_class_relevant_internal(survivor, activation_level, false);
+                Some(RelevantMergePropagation {
+                    members: RelevantMergeMembers::Survivor,
+                    level: activation_level,
+                })
+            }
+            (Some(_), Some(_)) | (None, None) => None,
         };
-        if let Some(propagated_level) = propagated_level {
-            let newly_marked = self.mark_class_relevant_internal(survivor, propagated_level);
-            if !newly_marked {
-                // Even when the surviving root was already relevant, the
-                // merge may have added previously irrelevant terms from the
-                // demoted class. Re-emit the class event so the solver scans
-                // the enlarged class and promotes those new members.
-                self.newly_relevant_classes.push_back(RelevantClassEvent {
-                    root: survivor,
-                    level: propagated_level,
-                });
-            }
-            if newly_marked
-                && (RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
-                    || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok())
-            {
-                eprintln!(
-                    "[relevancy] class_root {} promoted to relevant on merge with {} (level={})",
-                    survivor, demoted, propagated_level
-                );
-            }
+        if let Some(propagation) = propagation
+            && (RELEVANCY_TRACE.load(std::sync::atomic::Ordering::Relaxed)
+                || std::env::var("SUNDANCE_RELEVANCY_TRACE").is_ok())
+        {
+            eprintln!(
+                "[relevancy] class merge {} <- {} promotes {:?} members (level={})",
+                survivor, demoted, propagation.members, propagation.level
+            );
         }
+        propagation
     }
 
     fn notify_assignment(&mut self, lit: i32, level: usize) -> bool {
@@ -876,7 +893,9 @@ impl RelevancyTrait for RelevancyState {
 
 #[cfg(test)]
 mod tests {
-    use super::{NodeKind, RelevancyState, RelevancyTrait, RelevantClassEvent};
+    use super::{
+        NodeKind, RelevancyState, RelevancyTrait, RelevantMergeMembers, RelevantMergePropagation,
+    };
 
     #[test]
     fn ite_condition_selects_branch_independent_of_ite_value() {
@@ -986,16 +1005,28 @@ mod tests {
     }
 
     #[test]
-    fn relevant_class_merge_rescans_new_members() {
+    fn relevant_class_merge_promotes_only_new_members_at_merge_level() {
         let mut state = RelevancyState::new(true);
         state.add_class_relevant(10, 0);
         assert_eq!(state.drain_newly_relevant_classes().len(), 1);
 
-        state.propagate_class_relevancy(10, 11, 2);
+        assert_eq!(
+            state.propagate_class_relevancy(10, 11, 2),
+            Some(RelevantMergePropagation {
+                members: RelevantMergeMembers::Demoted,
+                level: 2,
+            })
+        );
+        assert!(state.drain_newly_relevant_classes().is_empty());
 
         assert_eq!(
-            state.drain_newly_relevant_classes(),
-            vec![RelevantClassEvent { root: 10, level: 0 }]
+            state.propagate_class_relevancy(12, 10, 3),
+            Some(RelevantMergePropagation {
+                members: RelevantMergeMembers::Survivor,
+                level: 3,
+            })
         );
+        assert!(state.class_relevant_set().contains(&12));
+        assert!(state.drain_newly_relevant_classes().is_empty());
     }
 }

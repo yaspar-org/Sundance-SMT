@@ -24,7 +24,7 @@ use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
 use crate::proof::Theory;
-use crate::relevancy::{RelevancyState, RelevancyTrait};
+use crate::relevancy::{RelevancyState, RelevancyTrait, RelevantMergeMembers};
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
@@ -242,7 +242,7 @@ impl SolverState {
                 term
             );
         }
-        self.propagate_class_relevancy_from_merges(level);
+        self.propagate_class_relevancy_from_merges();
     }
 
     pub fn relevancy_lit_for_term(&self, term: &Term) -> Option<i32> {
@@ -656,6 +656,28 @@ impl SolverState {
         }
     }
 
+    /// Mark every mapped solver term in an inclusive e-class member range.
+    fn mark_egraph_member_range_relevant(
+        &mut self,
+        range: crate::egraphs::EClassMemberRange<u32>,
+        level: usize,
+    ) {
+        use crate::egraphs::EgraphTrait;
+        use crate::relevancy::RelevancyTrait;
+
+        let mut eid = range.first;
+        loop {
+            let next = self.egraph.next_class_member(eid);
+            if let Some(&uid) = self.id_map.get_by_right(&eid) {
+                self.relevancy.mark_term_relevant(uid, level);
+            }
+            if eid == range.last {
+                break;
+            }
+            eid = next;
+        }
+    }
+
     /// Drain literal, term, and e-class relevance events until no rule creates
     /// another event. This is deliberately pull-based instead of invoking a
     /// callback from `RelevancyState`, which avoids re-entrant mutable borrows.
@@ -690,17 +712,8 @@ impl SolverState {
             }
 
             for event in class_events {
-                let current_root = self.egraph.find(event.root);
-                let members: Vec<u64> = self
-                    .id_map
-                    .iter()
-                    .filter_map(|(uid, eid)| {
-                        (self.egraph.find(*eid) == current_root).then_some(*uid)
-                    })
-                    .collect();
-                for uid in members {
-                    self.relevancy.mark_term_relevant(uid, event.level);
-                }
+                let range = self.egraph.class_member_range(event.root);
+                self.mark_egraph_member_range_relevant(range, event.level);
             }
         }
     }
@@ -716,19 +729,28 @@ impl SolverState {
             .is_relevant_with_class(lit, self.class_root_for_lit(lit))
     }
 
-    /// Drain the egraph's all-merges queue and propagate class relevancy:
-    /// if either pre-merge root was relevant, the surviving root becomes
-    /// relevant too.
-    pub fn propagate_class_relevancy_from_merges(&mut self, level: usize) {
+    /// Drain the egraph's all-merges queue and propagate class relevancy only
+    /// through the pre-merge member range that has just become relevant.
+    pub fn propagate_class_relevancy_from_merges(&mut self) {
         use crate::egraphs::EgraphTrait;
         use crate::relevancy::RelevancyTrait;
         let merges = self.egraph.drain_all_merges();
         if !self.relevancy.is_enabled() {
             return;
         }
-        for (survivor, demoted) in merges {
-            self.relevancy
-                .propagate_class_relevancy(survivor, demoted, level);
+        for event in merges {
+            let Some(propagation) = self.relevancy.propagate_class_relevancy(
+                event.survivor,
+                event.demoted,
+                event.level,
+            ) else {
+                continue;
+            };
+            let range = match propagation.members {
+                RelevantMergeMembers::Survivor => event.survivor_members,
+                RelevantMergeMembers::Demoted => event.demoted_members,
+            };
+            self.mark_egraph_member_range_relevant(range, propagation.level);
         }
         self.propagate_relevancy();
     }

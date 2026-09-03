@@ -720,8 +720,7 @@ impl<'a> CustomExternalPropagator<'a> {
 
         let constraints_opt = process_assignment(lit, self.solver_state, self.decision_level);
 
-        self.solver_state
-            .propagate_class_relevancy_from_merges(self.decision_level);
+        self.solver_state.propagate_class_relevancy_from_merges();
 
         #[cfg(feature = "z3-solver")]
         {
@@ -950,8 +949,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // any congruence merges from `union_to_eclass` replay, so the queue
         // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
-        self.solver_state
-            .propagate_class_relevancy_from_merges(level);
+        self.solver_state.propagate_class_relevancy_from_merges();
 
         #[cfg(feature = "z3-solver")]
         {

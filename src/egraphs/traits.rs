@@ -15,6 +15,25 @@ use yaspar_ir::ast::Local;
 /// Zero means "no decision" when returned from decision methods.
 pub type Lit = i32;
 
+/// A contiguous segment of a circular e-class member list, inclusive at
+/// both ends. The range remains stable when later class lists are spliced
+/// because traversal stops before following the `last` member's link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EClassMemberRange<T> {
+    pub first: T,
+    pub last: T,
+}
+
+/// Information captured immediately before an egraph union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EgraphMergeEvent<T> {
+    pub survivor: T,
+    pub demoted: T,
+    pub survivor_members: EClassMemberRange<T>,
+    pub demoted_members: EClassMemberRange<T>,
+    pub level: usize,
+}
+
 /// Conflict explanation: the equalities that were asserted (and their
 /// congruence consequences) that together violate a disequality.
 /// T is a generic parameter for the Term type that we use
@@ -118,9 +137,9 @@ pub trait EgraphTrait {
     /// see the note on `relevancy_merge_queue` in the basic impl.
     fn set_track_all_merges(&mut self, enabled: bool);
 
-    /// Drain all-merge pairs pushed since the last drain. Returns a list of
-    /// (surviving_root, demoted_root). Only populated when tracking is on.
-    fn drain_all_merges(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
+    /// Drain pre-merge events pushed since the last drain. Each event includes
+    /// stable ranges for the two classes and the level at which they merged.
+    fn drain_all_merges(&mut self) -> Vec<EgraphMergeEvent<Self::TermId>>;
 
     // --- Decision level ---
 
@@ -154,6 +173,12 @@ pub trait EgraphTrait {
 
     /// Check if two terms are in the same equivalence class.
     fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool;
+
+    /// Return the current class as a stable member-list range.
+    fn class_member_range(&self, term: Self::TermId) -> EClassMemberRange<Self::TermId>;
+
+    /// Return the next member in the circular e-class member list.
+    fn next_class_member(&self, term: Self::TermId) -> Self::TermId;
 
     // --- E-matching ---
 

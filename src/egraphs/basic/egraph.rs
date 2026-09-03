@@ -5,7 +5,9 @@ use super::datastructures::{CanonicalOp, DisequalTerm, Predecessor};
 use super::proofforest::*;
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use crate::debug_println;
-use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
+use crate::egraphs::traits::{
+    Conflict, EClassMemberRange, EgraphMergeEvent, EgraphResult, EgraphTrait, Lit,
+};
 use crate::log::is_important;
 use crate::utils::{
     DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
@@ -245,14 +247,14 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
-    /// Pre-merge (surviving_root, demoted_root) pairs from ALL unions
-    /// (direct or congruence-derived), for egraph-driven relevancy
-    /// propagation. Only populated when `track_all_merges` is true.
+    /// Pre-merge events from ALL unions (direct or congruence-derived), for
+    /// egraph-driven relevancy propagation. Only populated when
+    /// `track_all_merges` is true.
     ///
     /// TODO: merge this with `arithmetic_merge_queue` — they carry the same
     /// info; the current separation is just because arithmetic gates on the
     /// arithmetic tag. Unify into one queue with per-consumer draining.
-    relevancy_merge_queue: Vec<(u32, u32)>,
+    relevancy_merge_queue: Vec<EgraphMergeEvent<u32>>,
     /// Whether to populate `relevancy_merge_queue`.
     track_all_merges: bool,
     /// Accumulated egraph statistics.
@@ -482,6 +484,32 @@ impl Egraph {
             ProofForestEdge::Congruence { parent: p, .. }
             | ProofForestEdge::Equality { parent: p, .. } => self.find(*p),
         }
+    }
+
+    fn member_range_for_root(&self, root: u32) -> EClassMemberRange<u32> {
+        debug_assert_eq!(self.find(root), root);
+        EClassMemberRange {
+            first: self.member_next[root as usize],
+            last: root,
+        }
+    }
+
+    #[cfg(test)]
+    fn collect_member_range(&self, range: EClassMemberRange<u32>) -> Vec<u32> {
+        let mut members = Vec::new();
+        let mut current = range.first;
+        loop {
+            members.push(current);
+            if current == range.last {
+                break;
+            }
+            assert!(
+                members.len() <= self.next_id as usize,
+                "e-class member range did not reach its final member"
+            );
+            current = self.member_next[current as usize];
+        }
+        members
     }
 
     // FIND operation for union-find
@@ -973,6 +1001,7 @@ impl Egraph {
         // them so that only re-fired congruence merges (added by the loop
         // below) survive.
         self.arithmetic_merge_queue.clear();
+        self.relevancy_merge_queue.clear();
 
         // Re-do union_to_eclass via sig table probe. Entries added at or below
         // `level` were already reconciled with the sig_table at that level and
@@ -1204,7 +1233,13 @@ impl Egraph {
         };
 
         if self.track_all_merges {
-            self.relevancy_merge_queue.push((x_root, y_root));
+            self.relevancy_merge_queue.push(EgraphMergeEvent {
+                survivor: x_root,
+                demoted: y_root,
+                survivor_members: self.member_range_for_root(x_root),
+                demoted_members: self.member_range_for_root(y_root),
+                level,
+            });
         }
 
         // `mark_arithmetic` runs *after* `register_term` in
@@ -1760,6 +1795,7 @@ mod tests {
         let a = egraph.register_opaque();
         let b = egraph.register_opaque();
         let c = egraph.register_opaque();
+        egraph.set_track_all_merges(true);
 
         assert_eq!(class_members(&egraph, a), vec![a]);
         assert_eq!(class_members(&egraph, b), vec![b]);
@@ -1772,10 +1808,36 @@ mod tests {
         assert!(egraph.assert_equal(a, c).conflict.is_none());
         assert_eq!(class_members(&egraph, a), vec![a, c, b]);
 
+        let events = egraph.drain_all_merges();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            egraph.collect_member_range(events[0].survivor_members),
+            vec![a]
+        );
+        assert_eq!(
+            egraph.collect_member_range(events[0].demoted_members),
+            vec![b]
+        );
+        assert_eq!(
+            egraph.collect_member_range(events[1].survivor_members),
+            vec![b, a]
+        );
+        assert_eq!(
+            egraph.collect_member_range(events[1].demoted_members),
+            vec![c]
+        );
+        assert_eq!(events[0].level, 1);
+        assert_eq!(events[1].level, 1);
+
         egraph.backtrack_to(0);
         assert_eq!(class_members(&egraph, a), vec![a]);
         assert_eq!(class_members(&egraph, b), vec![b]);
         assert_eq!(class_members(&egraph, c), vec![c]);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        egraph.backtrack_to(0);
+        assert!(egraph.drain_all_merges().is_empty());
     }
 }
 
@@ -1871,7 +1933,7 @@ impl EgraphTrait for Egraph {
         }
     }
 
-    fn drain_all_merges(&mut self) -> Vec<(Self::TermId, Self::TermId)> {
+    fn drain_all_merges(&mut self) -> Vec<EgraphMergeEvent<Self::TermId>> {
         std::mem::take(&mut self.relevancy_merge_queue)
     }
 
@@ -1911,6 +1973,14 @@ impl EgraphTrait for Egraph {
 
     fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool {
         self.find(t1) == self.find(t2)
+    }
+
+    fn class_member_range(&self, term: Self::TermId) -> EClassMemberRange<Self::TermId> {
+        self.member_range_for_root(self.find(term))
+    }
+
+    fn next_class_member(&self, term: Self::TermId) -> Self::TermId {
+        self.member_next[term as usize]
     }
 
     fn match_triggers(
