@@ -12,7 +12,7 @@ use crate::egraphs::traits::Conflict;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::{
-    PendingInstantiations, instantiate_quantifiers, materialize_next,
+    PendingInstantiations, TriggerMatchScope, instantiate_quantifiers, materialize_next,
 };
 use crate::relevancy::RelevancyTrait;
 use crate::solver_state::{SolverState, process_assignment};
@@ -522,10 +522,20 @@ impl<'a> CustomExternalPropagator<'a> {
 
     /// Refresh trigger matches only after every item from the previous matching
     /// round has been materialized.
-    fn start_quantifier_instantiation_round(&mut self, allow_skolemization: bool) -> bool {
+    fn start_quantifier_instantiation_round(
+        &mut self,
+        allow_skolemization: bool,
+        require_quantifier_relevance: bool,
+        trigger_match_scope: TriggerMatchScope,
+    ) -> bool {
         debug_assert!(self.pending.is_none());
-        let pending =
-            instantiate_quantifiers(self.solver_state, &self.assignments, allow_skolemization);
+        let pending = instantiate_quantifiers(
+            self.solver_state,
+            &self.assignments,
+            allow_skolemization,
+            require_quantifier_relevance,
+            trigger_match_scope,
+        );
         if pending.is_empty() {
             return false;
         }
@@ -643,12 +653,22 @@ impl<'a> CustomExternalPropagator<'a> {
                 // Work from an earlier matching round must not be discarded or
                 // mixed with the one fresh round for this level.
                 self.materialize_pending(0);
-                if self.start_quantifier_instantiation_round(false) {
+                if self.start_quantifier_instantiation_round(
+                    false,
+                    true,
+                    TriggerMatchScope::RelevantClasses,
+                ) {
                     self.materialize_pending(0);
                 }
             }
             Some(EagerQiAction::Bounded(budget)) => {
-                if self.pending.is_none() && !self.start_quantifier_instantiation_round(false) {
+                if self.pending.is_none()
+                    && !self.start_quantifier_instantiation_round(
+                        false,
+                        true,
+                        TriggerMatchScope::RelevantClasses,
+                    )
+                {
                     return;
                 }
                 let materialized = self.materialize_pending(budget);
@@ -1265,7 +1285,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         debug_println!(11, 0, "Starting quantifier instantiations");
-        if !self.start_quantifier_instantiation_round(true) {
+        // Eager rounds use relevant classes as a cheap source of likely useful
+        // instances. At a complete-model check, widen to all trigger classes:
+        // a filtered round can keep producing a small stream of instances and
+        // indefinitely postpone terms that are needed to refute the model.
+        if !self.start_quantifier_instantiation_round(
+            true,
+            false,
+            TriggerMatchScope::AllClasses,
+        ) {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.disequalities.borrow().is_empty());
             qi_gc_trace!("cb_check_found_model: no new QI instances, returning true (SAT)");

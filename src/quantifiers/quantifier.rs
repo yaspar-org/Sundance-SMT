@@ -55,6 +55,12 @@ pub(crate) struct PendingInstantiations {
     skolemized_quantifier_idxs: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TriggerMatchScope {
+    RelevantClasses,
+    AllClasses,
+}
+
 impl PendingInstantiations {
     pub(crate) fn is_empty(&self) -> bool {
         self.deferred_instantiations.is_empty() && self.deferred_skolemizations.is_empty()
@@ -71,6 +77,8 @@ pub(crate) fn instantiate_quantifiers(
     solver_state: &mut SolverState,
     assignments: &[i32],
     allow_skolemization: bool,
+    require_quantifier_relevance: bool,
+    trigger_match_scope: TriggerMatchScope,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
@@ -100,7 +108,9 @@ pub(crate) fn instantiate_quantifiers(
         if quantifier_assignment == 0 {
             continue;
         }
-        if !solver_state.is_lit_relevant(quantifier_literal) {
+        if require_quantifier_relevance
+            && !solver_state.is_lit_relevant(quantifier_literal)
+        {
             continue;
         }
 
@@ -145,10 +155,12 @@ pub(crate) fn instantiate_quantifiers(
             let trigger_term_pairs: Vec<(usize, Option<u32>)> =
                 multipattern.iter().map(|t| (*t, None)).collect();
 
-            // Only match against ground terms whose class was marked
-            // relevant. When relevancy is disabled, pass None to bypass
-            // the filter (class_relevant will be empty and can't be used).
-            let class_filter = if solver_state.relevancy.is_enabled() {
+            // Eager matching considers only ground terms whose class was marked
+            // relevant. Complete-model checks widen the search to every class
+            // so filtered progress cannot indefinitely postpone a refutation.
+            let class_filter = if solver_state.relevancy.is_enabled()
+                && trigger_match_scope == TriggerMatchScope::RelevantClasses
+            {
                 Some(solver_state.relevancy.class_relevant_set())
             } else {
                 None
