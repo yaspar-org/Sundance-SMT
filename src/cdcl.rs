@@ -151,6 +151,9 @@ pub fn cdcl_decision_procedure(
         stats: SolverStats::new(),
         pending: None,
         eager_qi: EagerQiMode::new(eager_qi),
+        eager_original_vars: vec![false, false],
+        unassigned_eager_original_vars: 0,
+        eager_attempted_since_model: false,
         materializing_quantifiers: false,
         max_arith_conflicts_per_round,
         last_observed_var: 1,
@@ -202,6 +205,7 @@ pub fn cdcl_decision_procedure(
 
     // Observe all known CNF variables at startup
     propagator.sync_new_vars();
+    propagator.mark_current_vars_as_eager_originals();
 
     debug_println!(2, 1, "All clauses added, starting solver");
 

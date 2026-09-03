@@ -29,6 +29,11 @@ use yaspar_ir::ast::{ATerm, Repr, TermAllocator};
 
 static QI_GC_TRACE: AtomicBool = AtomicBool::new(false);
 
+/// Start eager matching only after CaDiCaL has assigned almost all variables
+/// from the original Boolean formula. This keeps QI-created variables from
+/// taking over the decision order while still allowing work before final check.
+const EAGER_UNASSIGNED_ORIGINAL_LIMIT: usize = 0;
+
 pub(crate) fn init_qi_gc_trace() {
     QI_GC_TRACE.store(
         std::env::var("SUNDANCE_QI_GC_TRACE").is_ok(),
@@ -156,6 +161,10 @@ impl EagerQiMode {
             Self::FullRound { started } => *started = false,
         }
     }
+
+    fn is_disabled(&self) -> bool {
+        matches!(self, Self::Disabled)
+    }
 }
 
 /// Our implementation of a Cadical Propagator
@@ -175,6 +184,12 @@ pub struct CustomExternalPropagator<'a> {
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
     pub(crate) eager_qi: EagerQiMode,
+    /// SAT variables that existed after the original formula was loaded.
+    pub(crate) eager_original_vars: Vec<bool>,
+    /// Number of original variables that are currently unassigned.
+    pub(crate) unassigned_eager_original_vars: usize,
+    /// Allow at most one eager matching round before each complete-model check.
+    pub(crate) eager_attempted_since_model: bool,
     /// Prevent nested QI while observing variables created by materialization.
     pub materializing_quantifiers: bool,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
@@ -334,6 +349,36 @@ impl<'a> CustomExternalPropagator<'a> {
             self.proof_tracer
                 .borrow_mut()
                 .register_term(-lit, &term, false);
+        }
+    }
+
+    pub(crate) fn mark_current_vars_as_eager_originals(&mut self) {
+        if self.eager_qi.is_disabled() {
+            return;
+        }
+        self.eager_original_vars
+            .resize(self.last_observed_var as usize, false);
+        self.unassigned_eager_original_vars = 0;
+        for var in 1..self.last_observed_var {
+            let uid = self
+                .solver_state
+                .cnf_cache
+                .var_map_reverse
+                .get(&var)
+                .or_else(|| self.solver_state.cnf_cache.var_map_reverse.get(&-var));
+            let Some(&uid) = uid else {
+                continue;
+            };
+            if self.solver_state.get_term_safe(uid).is_none()
+                || self.solver_state.generation_of(uid) != 0
+            {
+                continue;
+            }
+            let idx = var as usize;
+            self.eager_original_vars[idx] = true;
+            if self.assignments.get(idx).copied().unwrap_or(0) == 0 {
+                self.unassigned_eager_original_vars += 1;
+            }
         }
     }
 
@@ -531,6 +576,8 @@ impl<'a> CustomExternalPropagator<'a> {
         allow_skolemization: bool,
         require_quantifier_relevance: bool,
         trigger_match_scope: TriggerMatchScope,
+        generation_limit: Option<u32>,
+        instantiation_limit: Option<usize>,
     ) -> bool {
         debug_assert!(self.pending.is_none());
         let pending = instantiate_quantifiers(
@@ -539,6 +586,8 @@ impl<'a> CustomExternalPropagator<'a> {
             allow_skolemization,
             require_quantifier_relevance,
             trigger_match_scope,
+            generation_limit,
+            instantiation_limit,
         );
         if pending.is_empty() {
             return false;
@@ -553,6 +602,10 @@ impl<'a> CustomExternalPropagator<'a> {
 
     fn reset_eager_qi_for_level(&mut self) {
         self.eager_qi.reset();
+    }
+
+    fn eager_instantiation_frontier_reached(&self) -> bool {
+        self.unassigned_eager_original_vars <= EAGER_UNASSIGNED_ORIGINAL_LIMIT
     }
 
     /// Epoch transition for QI garbage collection. Called on backtrack to level 0.
@@ -650,10 +703,16 @@ impl<'a> CustomExternalPropagator<'a> {
         if self.materializing_quantifiers || !self.disequalities.borrow().is_empty() {
             return;
         }
+        if self.pending.is_none()
+            && (self.eager_attempted_since_model || !self.eager_instantiation_frontier_reached())
+        {
+            return;
+        }
 
         match self.eager_qi.next_action() {
             None => {}
             Some(EagerQiAction::FullRound) => {
+                self.eager_attempted_since_model = true;
                 // Work from an earlier matching round must not be discarded or
                 // mixed with the one fresh round for this level.
                 self.materialize_pending(0);
@@ -661,16 +720,21 @@ impl<'a> CustomExternalPropagator<'a> {
                     false,
                     true,
                     TriggerMatchScope::RelevantClasses,
+                    Some(1),
+                    None,
                 ) {
                     self.materialize_pending(0);
                 }
             }
             Some(EagerQiAction::Bounded(budget)) => {
+                self.eager_attempted_since_model = true;
                 if self.pending.is_none()
                     && !self.start_quantifier_instantiation_round(
                         false,
                         true,
                         TriggerMatchScope::RelevantClasses,
+                        Some(1),
+                        Some(budget),
                     )
                 {
                     return;
@@ -704,6 +768,9 @@ impl<'a> CustomExternalPropagator<'a> {
         );
         if old == 0 {
             self.sat_assignment_trail.push(lit);
+            if self.eager_original_vars.get(idx).copied().unwrap_or(false) {
+                self.unassigned_eager_original_vars -= 1;
+            }
         }
         if old == 0 || encoded.abs() < old.abs() {
             self.assignments[idx] = encoded;
@@ -833,9 +900,7 @@ impl<'a> CustomExternalPropagator<'a> {
 
             let idx = lit.unsigned_abs() as usize;
             self.ensure_theory_assignment_capacity(idx);
-            if self.fixed_literals.contains(&lit)
-                || self.theory_processed_levels[idx].is_some()
-            {
+            if self.fixed_literals.contains(&lit) || self.theory_processed_levels[idx].is_some() {
                 continue;
             }
 
@@ -859,9 +924,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 continue;
             }
 
-            if QI_GC_TRACE.load(Ordering::Relaxed)
-                && !self.solver_state.is_lit_relevant(lit)
-            {
+            if QI_GC_TRACE.load(Ordering::Relaxed) && !self.solver_state.is_lit_relevant(lit) {
                 eprintln!(
                     "[qi-gc] complete-model theory saturation lit={} term={}",
                     lit,
@@ -1039,6 +1102,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // survives, so it will be re-queued after the egraph backtrack.
         for i in 1..self.assignments.len() {
             if self.assignments[i].abs() > (level + 1) as i32 {
+                if self.eager_original_vars.get(i).copied().unwrap_or(false) {
+                    self.unassigned_eager_original_vars += 1;
+                }
                 self.assignments[i] = 0;
                 self.theory_processed_levels[i] = None;
             } else if self.theory_processed_levels[i].is_some_and(|p| p > level) {
@@ -1110,6 +1176,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        self.eager_attempted_since_model = false;
+        self.reset_eager_qi_for_level();
+
         // --trail-out: every model seen here in a non-SAT run is refuted;
         // note any new literals in the atom map and stream the trail line.
         if self.trail_writer.is_some() {
@@ -1380,6 +1449,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             true,
             false,
             TriggerMatchScope::AllClasses,
+            None,
+            None,
         ) {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.disequalities.borrow().is_empty());

@@ -40,6 +40,7 @@ struct DeferredInstantiation {
     is_exists: bool,
     literal: i32,
     quantifier_id: u64,
+    generation: u32,
 }
 
 struct DeferredSkolemization {
@@ -47,6 +48,7 @@ struct DeferredSkolemization {
     skolem_vars: Vec<(Str, Sort)>,
     is_exists: bool,
     literal: i32,
+    generation: u32,
 }
 
 pub(crate) struct PendingInstantiations {
@@ -79,6 +81,8 @@ pub(crate) fn instantiate_quantifiers(
     allow_skolemization: bool,
     require_quantifier_relevance: bool,
     trigger_match_scope: TriggerMatchScope,
+    generation_limit: Option<u32>,
+    instantiation_limit: Option<usize>,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
@@ -88,7 +92,7 @@ pub(crate) fn instantiate_quantifiers(
     let mut deferred_instantiations: VecDeque<DeferredInstantiation> = VecDeque::new();
 
     // We `enumerate()` so we can update quantifiers[i].skolemized after the loop
-    for (i, quantifier) in quantifiers.iter().enumerate() {
+    'quantifiers: for (i, quantifier) in quantifiers.iter().enumerate() {
         debug_println!(
             19,
             0,
@@ -108,9 +112,7 @@ pub(crate) fn instantiate_quantifiers(
         if quantifier_assignment == 0 {
             continue;
         }
-        if require_quantifier_relevance
-            && !solver_state.is_lit_relevant(quantifier_literal)
-        {
+        if require_quantifier_relevance && !solver_state.is_lit_relevant(quantifier_literal) {
             continue;
         }
 
@@ -133,6 +135,7 @@ pub(crate) fn instantiate_quantifiers(
                 skolem_vars,
                 is_exists: quantifier_is_exists,
                 literal: quantifier_literal,
+                generation: solver_state.generation_of(quantifier.id).saturating_add(1),
             });
         }
 
@@ -181,6 +184,19 @@ pub(crate) fn instantiate_quantifiers(
             }
 
             for subs_ids in list_assignments.iter() {
+                if instantiation_limit.is_some_and(|limit| deferred_instantiations.len() >= limit) {
+                    break 'quantifiers;
+                }
+                let candidate_generation = subs_ids
+                    .iter()
+                    .map(|(_, id)| solver_state.generation_of(solver_state.to_solver_uid(*id)))
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                if generation_limit.is_some_and(|limit| candidate_generation > limit) {
+                    continue;
+                }
+
                 // Convert the (Local -> egraph id) map into a (Local -> Term) map for substitution
                 let subs: DeterministicHashMap<Local, Term> = subs_ids
                     .iter()
@@ -223,6 +239,7 @@ pub(crate) fn instantiate_quantifiers(
                     is_exists: quantifier_is_exists,
                     literal: quantifier_literal,
                     quantifier_id: quantifier.id,
+                    generation: candidate_generation,
                 });
             }
         }
@@ -286,15 +303,21 @@ fn process_deferred_skolemizations(
         skolem_vars,
         is_exists,
         literal,
+        generation,
     } in deferred_skolemizations
     {
+        let previous_generation = solver_state.current_instantiation_generation;
+        solver_state.current_instantiation_generation = previous_generation.max(generation);
         let reduced_skolem: Term = skolem.let_elim(&mut solver_state.context);
         let pre_nnf_body = reduced_skolem.clone();
         let reduced_skolem = reduced_skolem.nnf(solver_state);
+        solver_state.set_generation(skolem.uid(), generation);
+        solver_state.set_generation(reduced_skolem.uid(), generation);
         let additional_constraints =
             check_for_function_bool(&reduced_skolem, solver_state, true, ddsmt, lazy_dt);
 
         solver_state.insert_predecessor(&reduced_skolem, None, None, true);
+        solver_state.current_instantiation_generation = previous_generation;
 
         // Must do Tseitin *before* allocating the skolem literal — see comment on instantiation path
         let clauses = reduced_skolem.cnf_tseitin(solver_state);
@@ -368,6 +391,7 @@ fn process_deferred_instantiations(
         is_exists,
         literal,
         quantifier_id,
+        generation,
     } in deferred_instantiations
     {
         let t = if is_exists {
@@ -407,6 +431,11 @@ fn process_deferred_instantiations(
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
+        let previous_generation = solver_state.current_instantiation_generation;
+        solver_state.current_instantiation_generation = previous_generation.max(generation);
+        solver_state.set_generation(t.uid(), generation);
+        solver_state.set_generation(pre_nnf_body.uid(), generation);
+        solver_state.set_generation(nnf_term.uid(), generation);
         solver_state.insert_predecessor(&nnf_term, None, None, true);
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
@@ -442,6 +471,7 @@ fn process_deferred_instantiations(
 
         let additional_constraints =
             check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
+        solver_state.current_instantiation_generation = previous_generation;
         proof_tracer.borrow_mut().push_steps(
             &additional_constraints,
             ProofStepType::TheoryClause(Theory::Background),

@@ -123,6 +123,14 @@ pub struct SolverState {
     /// Tracks quantifier instantiations to avoid duplicates.
     pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
 
+    /// Instantiation depth of terms, keyed by solver UID. Original terms are
+    /// generation 0; a QI-produced term is one deeper than its trigger terms.
+    generation: DeterministicHashMap<u64, u32>,
+
+    /// Generation assigned to terms first registered while materializing the
+    /// current quantifier instance. Zero outside instance materialization.
+    pub(crate) current_instantiation_generation: u32,
+
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
 
@@ -196,6 +204,8 @@ impl SolverState {
             assertions: vec![],
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
+            generation: DeterministicHashMap::default(),
+            current_instantiation_generation: 0,
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
@@ -869,6 +879,14 @@ impl SolverState {
         }
     }
 
+    pub(crate) fn generation_of(&self, uid: u64) -> u32 {
+        self.generation.get(&uid).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn set_generation(&mut self, uid: u64, generation: u32) {
+        self.generation.entry(uid).or_insert(generation);
+    }
+
     /// Convert a solver term UID to the corresponding egraph ID.
     pub fn to_egraph_id(&self, solver_uid: u64) -> u32 {
         *self
@@ -959,6 +977,9 @@ impl SolverState {
         }
         if let TermOption::Some(_) = &self.terms_list[num as usize] {
             return self.to_egraph_id(num);
+        }
+        if self.current_instantiation_generation > 0 {
+            self.set_generation(num, self.current_instantiation_generation);
         }
         // Reuse egraph ID if build_pattern already allocated one for this term
         if let Some(eid) = self.id_map.get_by_left(&num).copied() {
@@ -1547,5 +1568,20 @@ pub fn find_if_eq_diseq<'a>(
             );
             Assertion::Other
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn term_generation_is_first_write_wins() {
+        let mut solver_state = SolverState::new(Context::new(), true, false, false, false, true);
+
+        solver_state.set_generation(42, 1);
+        solver_state.set_generation(42, 7);
+
+        assert_eq!(solver_state.generation_of(42), 1);
     }
 }
