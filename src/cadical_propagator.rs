@@ -176,10 +176,6 @@ pub struct CustomExternalPropagator<'a> {
     pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
-    /// Currently assigned literals in the order CaDiCaL reported them.
-    /// Complete-model theory saturation replays deferred assignments in this
-    /// order so it preserves the conflict/merge ordering of unfiltered runs.
-    pub sat_assignment_trail: Vec<i32>,
     pub solver: *mut CaDiCal,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
@@ -774,11 +770,8 @@ impl<'a> CustomExternalPropagator<'a> {
             "SAT variable {} was assigned both polarities without a backtrack",
             idx
         );
-        if old == 0 {
-            self.sat_assignment_trail.push(lit);
-            if self.eager_original_vars.get(idx).copied().unwrap_or(false) {
-                self.unassigned_eager_original_vars -= 1;
-            }
+        if old == 0 && self.eager_original_vars.get(idx).copied().unwrap_or(false) {
+            self.unassigned_eager_original_vars -= 1;
         }
         if old == 0 || encoded.abs() < old.abs() {
             self.assignments[idx] = encoded;
@@ -899,61 +892,44 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
-    /// Before accepting a complete Boolean model, send every still-unprocessed
-    /// assignment through the theory layer. Relevancy remains a partial-search
-    /// optimization, but it must not indefinitely hide valid theory conflicts
-    /// and egraph merges that can refute a candidate model.
-    fn process_complete_model_assignments(&mut self, _model: &[i32]) {
-        let trail_len = self.sat_assignment_trail.len();
-        for trail_idx in 0..trail_len {
-            let lit = self.sat_assignment_trail[trail_idx];
-            if let Some(ref gc) = self.qi_gc_state {
-                if gc.borrow().activation_lits.contains(&lit.abs()) {
-                    continue;
-                }
-            }
-
-            let idx = lit.unsigned_abs() as usize;
-            self.ensure_theory_assignment_capacity(idx);
-            if self.fixed_literals.contains(&lit) || self.theory_processed_levels[idx].is_some() {
+    #[cfg(debug_assertions)]
+    fn assert_relevant_assignments_processed(&mut self) {
+        debug_assert!(self.pending_relevant_assignments.is_empty());
+        for (idx, assignment) in self.assignments.iter().copied().enumerate().skip(1) {
+            if assignment == 0 {
                 continue;
             }
-
-            let assignment = self.assignments[idx];
-            debug_assert_ne!(
-                assignment, 0,
-                "complete-model literal {} was not reported as assigned",
-                lit
-            );
-            let assigned_lit = if assignment > 0 {
+            let lit = if assignment > 0 {
                 idx as i32
             } else {
                 -(idx as i32)
             };
-            debug_assert_eq!(
-                assigned_lit, lit,
-                "complete model disagrees with recorded assignment for variable {}",
-                idx
-            );
-            if assignment == 0 || assigned_lit != lit {
+            if self
+                .qi_gc_state
+                .as_ref()
+                .is_some_and(|gc| gc.borrow().activation_lits.contains(&(idx as i32)))
+                || self.fixed_literals.contains(&lit)
+                || !(self
+                    .solver_state
+                    .cnf_cache
+                    .var_map_reverse
+                    .contains_key(&(idx as i32))
+                    || self
+                        .solver_state
+                        .cnf_cache
+                        .var_map_reverse
+                        .contains_key(&-(idx as i32)))
+                || !self.solver_state.is_lit_relevant(lit)
+            {
                 continue;
             }
-
-            if QI_GC_TRACE.load(Ordering::Relaxed) && !self.solver_state.is_lit_relevant(lit) {
-                eprintln!(
-                    "[qi-gc] complete-model theory saturation lit={} term={}",
-                    lit,
-                    self.solver_state.get_term_from_lit(lit)
-                );
-            }
-
-            self.apply_theory_assignment(lit);
-            self.theory_processed_levels[idx] = Some(self.decision_level);
+            debug_assert!(
+                self.theory_processed_levels[idx].is_some(),
+                "assigned relevant literal was not processed: lit={} term={}",
+                lit,
+                self.solver_state.get_term_from_lit(lit)
+            );
         }
-
-        // Full theory processing can create egraph merges that make already
-        // assigned literals relevant. Drain those events before continuing.
-        self.process_pending_relevant_assignments();
     }
 }
 
@@ -1128,10 +1104,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.theory_processed_levels[i] = None;
             }
         }
-        let assignments = &self.assignments;
-        self.sat_assignment_trail
-            .retain(|lit| assignments[lit.unsigned_abs() as usize] != 0);
-
         // Bump solver hash on backtrack and invalidate higher levels
         self.solver_state.current_hash += 1;
         for i in level + 1..self.decision_level + 1 {
@@ -1253,11 +1225,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
-        self.process_complete_model_assignments(model);
-        if !self.disequalities.borrow().is_empty() {
-            self.stats.conflicts += 1;
-            return false;
-        }
+        #[cfg(debug_assertions)]
+        self.assert_relevant_assignments_processed();
 
         for term in model {
             // Skip activation literals (current and previous) — they have no term.
@@ -1283,10 +1252,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         debug_println!(21, 0, "Starting arithmetic check",);
         self.stats.arith_checks += 1;
 
-        // Complete-model saturation above sent every atom to the incremental
-        // backend and shaped the egraph with the full assignment. Flush any
-        // post-hoc merges and call check(); the eager backend likewise checks
-        // the complete model.
+        // Relevance events have already sent every required atom to the
+        // incremental backend and shaped the egraph. Flush any post-hoc merges
+        // and call check(); the eager backend checks the relevant model.
         #[cfg(feature = "z3-solver")]
         let arith_result = if let Some(z3) = self.z3_incremental.as_mut() {
             z3.drain_merge_queue(self.solver_state);
