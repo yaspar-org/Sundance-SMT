@@ -6,7 +6,7 @@ use clap::Parser;
 use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
-use sundance_smt::config::Args;
+use sundance_smt::config::{Args, resolve_relevancy_level};
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
 use sundance_smt::{debug_println, log};
@@ -61,6 +61,15 @@ fn main() -> Result<(), String> {
         .type_check(&mut context)
         .map_err(|e| format!("Error checking typed commands: {e}"))?;
 
+    let declared_logic = typed_commands.iter().find_map(|command| {
+        if let alg::Command::SetLogic(logic) = command.repr() {
+            Some(logic.to_string())
+        } else {
+            None
+        }
+    });
+    let relevancy_level = resolve_relevancy_level(args.relevancy, declared_logic.as_deref());
+
     let mut assertions: Vec<Term> = typed_commands
         .iter()
         .filter_map(|c| {
@@ -90,7 +99,7 @@ fn main() -> Result<(), String> {
         args.ddsmt,
         args.eager_skolem,
         args.infer_triggers,
-        args.relevancy,
+        relevancy_level.is_enabled(),
     );
 
     solver_state.register_bool_constants(&true_term, &false_term);
@@ -195,7 +204,7 @@ fn main() -> Result<(), String> {
         args.batch_cap,
         args.eager_qi,
         args.qi_gc,
-        args.relevancy,
+        relevancy_level,
     );
 
     match return_value {

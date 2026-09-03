@@ -6,6 +6,60 @@
 use crate::arithmetic::lp::ArithSolver;
 use clap::Parser;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// Controls when assigned Boolean atoms are sent to the theory solvers.
+///
+/// These levels mirror Z3's relevancy modes:
+/// - 0: disable relevancy filtering;
+/// - 1: process irrelevant non-quantifier atoms eagerly;
+/// - 2: process an assignment only after it becomes relevant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelevancyLevel {
+    Off,
+    Level1,
+    Level2,
+}
+
+impl RelevancyLevel {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub fn eagerly_processes_irrelevant_atoms(self) -> bool {
+        matches!(self, Self::Level1)
+    }
+}
+
+impl FromStr for RelevancyLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "0" | "false" | "off" => Ok(Self::Off),
+            "1" | "true" | "on" => Ok(Self::Level1),
+            "2" => Ok(Self::Level2),
+            _ => Err(format!(
+                "invalid relevancy level '{value}': expected 0, 1, 2, false, or true"
+            )),
+        }
+    }
+}
+
+/// Match Z3's QF_UF configuration while preserving Sundance's current level-1
+/// behavior for every other logic unless the user explicitly chooses a level.
+pub fn resolve_relevancy_level(
+    requested: Option<RelevancyLevel>,
+    declared_logic: Option<&str>,
+) -> RelevancyLevel {
+    requested.unwrap_or_else(|| {
+        if declared_logic == Some("QF_UF") {
+            RelevancyLevel::Off
+        } else {
+            RelevancyLevel::Level1
+        }
+    })
+}
 
 /// Sundance is an SMT solver for program verification
 #[derive(Parser, Debug)]
@@ -73,7 +127,56 @@ pub struct Args {
     /// Only effective with lazy QI (--eager-qi 0).
     #[arg(long, default_value_t = false)]
     pub qi_gc: bool,
-    /// Enable relevancy filtering (skip theory work for irrelevant atoms)
-    #[arg(long, default_value_t = true, num_args=0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
-    pub relevancy: bool,
+    /// Relevancy filtering level: 0/false=off, 1/true=eager atoms, 2=strict.
+    /// Defaults to 0 for QF_UF and 1 for other logics.
+    #[arg(long, num_args=0..=1, default_missing_value = "1")]
+    pub relevancy: Option<RelevancyLevel>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Args, RelevancyLevel, resolve_relevancy_level};
+    use clap::Parser;
+
+    #[test]
+    fn parses_legacy_and_numeric_relevancy_values() {
+        for (value, expected) in [
+            ("false", RelevancyLevel::Off),
+            ("0", RelevancyLevel::Off),
+            ("true", RelevancyLevel::Level1),
+            ("1", RelevancyLevel::Level1),
+            ("2", RelevancyLevel::Level2),
+        ] {
+            let args = Args::try_parse_from(["sundance-smt", "input.smt2", "--relevancy", value])
+                .expect("relevancy value should parse");
+            assert_eq!(args.relevancy, Some(expected));
+        }
+    }
+
+    #[test]
+    fn bare_relevancy_flag_selects_level_one() {
+        let args = Args::try_parse_from(["sundance-smt", "input.smt2", "--relevancy"])
+            .expect("bare relevancy flag should parse");
+        assert_eq!(args.relevancy, Some(RelevancyLevel::Level1));
+    }
+
+    #[test]
+    fn defaults_qf_uf_to_relevancy_off() {
+        assert_eq!(
+            resolve_relevancy_level(None, Some("QF_UF")),
+            RelevancyLevel::Off
+        );
+        assert_eq!(
+            resolve_relevancy_level(None, Some("UFDTLIA")),
+            RelevancyLevel::Level1
+        );
+    }
+
+    #[test]
+    fn explicit_level_overrides_qf_uf_default() {
+        assert_eq!(
+            resolve_relevancy_level(Some(RelevancyLevel::Level2), Some("QF_UF")),
+            RelevancyLevel::Level2
+        );
+    }
 }

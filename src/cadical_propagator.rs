@@ -6,6 +6,7 @@ use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 #[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
 use crate::cnf::CNFConversion;
+use crate::config::RelevancyLevel;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
@@ -224,6 +225,8 @@ pub struct CustomExternalPropagator<'a> {
     pub pending_relevant_assignments: VecDeque<i32>,
     /// Queue-membership bits used to deduplicate pending work.
     pub theory_assignment_pending: Vec<bool>,
+    /// Z3-style relevancy level controlling the assignment-to-theory gate.
+    pub relevancy_level: RelevancyLevel,
 }
 
 impl<'a> CustomExternalPropagator<'a> {
@@ -1024,7 +1027,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
             if is_relevant {
                 self.queue_relevant_assignment(*lit);
-            } else if self.is_theory_atom(*lit) {
+            } else if self.relevancy_level.eagerly_processes_irrelevant_atoms()
+                && self.is_theory_atom(*lit)
+            {
                 let idx = lit.unsigned_abs() as usize;
                 self.apply_theory_assignment(*lit);
                 self.theory_processed_levels[idx] = Some(self.decision_level);

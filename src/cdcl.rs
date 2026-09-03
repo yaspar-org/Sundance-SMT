@@ -6,6 +6,7 @@ use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::{
     CustomExternalPropagator, EagerQiMode, QiGcLearner, QiGcState, init_qi_gc_trace,
 };
+use crate::config::RelevancyLevel;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
@@ -50,7 +51,7 @@ pub fn cdcl_decision_procedure(
     batch_cap: usize,
     eager_qi: i32,
     qi_gc: bool,
-    relevancy: bool,
+    relevancy_level: RelevancyLevel,
 ) -> (Status, SolverStats) {
     let mut solver = CaDiCal::new();
     assert!(
@@ -123,7 +124,7 @@ pub fn cdcl_decision_procedure(
     // theory-generated terms (datatype axioms, QI, trichotomy) register
     // themselves via `relevancy_register_term` at the point of generation,
     // so no var_map-scanning fallback is needed.
-    if relevancy {
+    if relevancy_level.is_enabled() {
         use crate::egraphs::EgraphTrait;
         solver_state.egraph.set_track_all_merges(true);
         solver_state.relevancy_initialize_from_assertions();
@@ -178,6 +179,7 @@ pub fn cdcl_decision_procedure(
         theory_processed_levels: vec![None, None],
         pending_relevant_assignments: std::collections::VecDeque::new(),
         theory_assignment_pending: vec![false, false],
+        relevancy_level,
     };
 
     solver.connect_external_propagator(&mut propagator);
