@@ -602,6 +602,7 @@ impl SolverState {
         use crate::relevancy::RelevancyTrait;
 
         if let Some(&eid) = self.id_map.get_by_left(&term.uid()) {
+            self.egraph.mark_e_matching_term_relevant(eid, level);
             let root = self.egraph.find(eid);
             self.relevancy.add_class_relevant(root, level);
         }

@@ -132,9 +132,6 @@ pub(crate) trait RelevancyTrait {
     /// root has been marked relevant (by any prior `mark_relevant_root`
     /// or `propagate_class_relevancy` call).
     fn is_relevant_with_class(&self, lit: i32, class_root: Option<u32>) -> bool;
-    /// Snapshot access to the set of egraph class roots currently marked
-    /// relevant. Used by e-matching to filter candidate ground terms.
-    fn class_relevant_set(&self) -> &std::collections::HashSet<u32>;
     /// Add `class_root` to the relevant class set (idempotent). Used by
     /// structural relevancy propagation to mark subterm classes reachable
     /// from a term whose lit was marked relevant.
@@ -873,10 +870,6 @@ impl RelevancyTrait for RelevancyState {
         class_root.is_some_and(|r| self.class_relevant.contains(&r))
     }
 
-    fn class_relevant_set(&self) -> &std::collections::HashSet<u32> {
-        &self.class_relevant
-    }
-
     fn add_class_relevant(&mut self, class_root: u32, level: usize) {
         if !self.enabled {
             return;
@@ -1249,7 +1242,7 @@ mod tests {
                 level: 3,
             })
         );
-        assert!(state.class_relevant_set().contains(&12));
+        assert!(state.class_relevant.contains(&12));
         assert!(state.drain_newly_relevant_classes().is_empty());
     }
 }

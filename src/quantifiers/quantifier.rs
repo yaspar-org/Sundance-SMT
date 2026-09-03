@@ -161,16 +161,11 @@ pub(crate) fn instantiate_quantifiers(
             // Eager matching considers only ground terms whose class was marked
             // relevant. Complete-model checks widen the search to every class
             // so filtered progress cannot indefinitely postpone a refutation.
-            let class_filter = if solver_state.relevancy.is_enabled()
-                && trigger_match_scope == TriggerMatchScope::RelevantClasses
-            {
-                Some(solver_state.relevancy.class_relevant_set())
-            } else {
-                None
-            };
+            let relevant_only = solver_state.relevancy.is_enabled()
+                && trigger_match_scope == TriggerMatchScope::RelevantClasses;
             let list_assignments = solver_state
                 .egraph
-                .match_triggers(&trigger_term_pairs, class_filter);
+                .match_triggers(&trigger_term_pairs, relevant_only);
 
             if relevancy_trace_enabled() {
                 eprintln!(

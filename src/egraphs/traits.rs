@@ -182,21 +182,27 @@ pub trait EgraphTrait {
 
     // --- E-matching ---
 
+    /// Add a registered term to the relevant e-matching candidate index.
+    ///
+    /// Repeated calls retain the earliest relevance level. Implementations
+    /// must undo marks above a later `backtrack_to` target.
+    fn mark_e_matching_term_relevant(&mut self, term: Self::TermId, level: usize);
+
     /// Match a multi-trigger pattern.
     ///
     /// `trigger_term_pairs` is a list of (PatternId, optional_ground_term_hint).
     /// - `Some(t)` means the pattern must match in the same equivalence class as `t`
     /// - `None` means the pattern can match any term of the right function
     ///
-    /// `class_relevant_filter`: if `Some`, only match against function terms whose
-    /// egraph class root is in the set. `None` disables filtering (used when
-    /// relevancy is off).
+    /// When `relevant_only` is true, unpinned root patterns use the incremental
+    /// relevant-candidate index. Ground-pinned recursive matching still sees
+    /// the complete e-class.
     ///
     /// Returns a list of substitution maps (bound variable `Local` → matched term ID).
     fn match_triggers(
         &self,
         trigger_term_pairs: &[(PatternId, Option<Self::TermId>)],
-        class_relevant_filter: Option<&std::collections::HashSet<u32>>,
+        relevant_only: bool,
     ) -> Vec<crate::utils::DeterministicHashMap<Local, Self::TermId>>;
 
     // --- Backtracking ---
