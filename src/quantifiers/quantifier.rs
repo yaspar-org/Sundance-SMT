@@ -11,6 +11,7 @@ use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::EgraphTrait;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
+use crate::qi_gc::QiInstantiationKey;
 use crate::quantifiers::skolem::skolemize;
 use crate::relevancy::{RelevancyTrait, relevancy_trace_enabled};
 use crate::solver_state::SolverState;
@@ -28,6 +29,7 @@ pub(crate) enum QuantifierInstance {
     Instantiation {
         clauses: Vec<Vec<i32>>,
         pre_nnf_body: Term,
+        key: QiInstantiationKey,
     },
     Skolemization {
         clauses: Vec<Vec<i32>>,
@@ -37,6 +39,7 @@ pub(crate) enum QuantifierInstance {
 
 struct DeferredInstantiation {
     substituted_term: Term,
+    substitution: DeterministicHashMap<Local, Term>,
     is_exists: bool,
     literal: i32,
     quantifier_id: u64,
@@ -227,10 +230,12 @@ pub(crate) fn instantiate_quantifiers(
                     .insert(subs.clone());
 
                 let term = solver_state.get_term(body);
+                let substitution_key = subs.clone();
                 let substitution = Substitution::new(subs);
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
                 deferred_instantiations.push_back(DeferredInstantiation {
                     substituted_term,
+                    substitution: substitution_key,
                     is_exists: quantifier_is_exists,
                     literal: quantifier_literal,
                     quantifier_id: quantifier.id,
@@ -383,6 +388,7 @@ fn process_deferred_instantiations(
     let mut results = vec![];
     for DeferredInstantiation {
         substituted_term,
+        substitution,
         is_exists,
         literal,
         quantifier_id,
@@ -478,6 +484,10 @@ fn process_deferred_instantiations(
         results.push(QuantifierInstance::Instantiation {
             clauses,
             pre_nnf_body,
+            key: QiInstantiationKey {
+                quantifier_id,
+                substitution,
+            },
         });
     }
     results

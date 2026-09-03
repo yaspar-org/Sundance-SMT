@@ -11,6 +11,7 @@ use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
 use crate::proof::{SMTProofTracer, Theory};
+use crate::qi_gc::QiGcTracker;
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::{
     PendingInstantiations, TriggerMatchScope, instantiate_quantifiers, materialize_next,
@@ -30,11 +31,19 @@ use yaspar_ir::ast::{ATerm, Repr, TermAllocator};
 
 static QI_GC_TRACE: AtomicBool = AtomicBool::new(false);
 static QI_GC_PROFILE: AtomicBool = AtomicBool::new(false);
+static QI_GC_PROFILE_PERIODIC: AtomicBool = AtomicBool::new(false);
 
 /// Start eager matching only after CaDiCaL has assigned almost all variables
 /// from the original Boolean formula. This keeps QI-created variables from
 /// taking over the decision order while still allowing work before final check.
 const EAGER_UNASSIGNED_ORIGINAL_LIMIT: usize = 0;
+
+/// Epoch collection is disruptive: it forces a root restart and re-adds the
+/// useful part of the old clause database. Let CaDiCaL's normal forgettable
+/// clause deletion work until an epoch is both large and cheaply compressible.
+const QI_GC_MIN_EPOCH_CLAUSES: u64 = 10_000;
+const QI_GC_MIN_RECLAIMED_CLAUSES: usize = 5_000;
+const QI_GC_MAX_RETAIN_PERCENT: usize = 60;
 
 pub(crate) fn init_qi_gc_trace() {
     QI_GC_TRACE.store(
@@ -43,6 +52,10 @@ pub(crate) fn init_qi_gc_trace() {
     );
     QI_GC_PROFILE.store(
         std::env::var("SUNDANCE_QI_GC_PROFILE").is_ok(),
+        Ordering::Relaxed,
+    );
+    QI_GC_PROFILE_PERIODIC.store(
+        std::env::var("SUNDANCE_QI_GC_PROFILE_PERIODIC").is_ok(),
         Ordering::Relaxed,
     );
 }
@@ -76,10 +89,64 @@ pub(crate) struct QiGcState {
     pub total_epoch_instantiations: u64,
     /// Number of completed epoch transitions.
     pub transitions: u64,
+    /// Exact QI-clause ancestry for the current epoch.
+    pub tracker: QiGcTracker,
+    /// Cumulative transition results.
+    pub total_retained_qi_clauses: u64,
+    pub total_retired_qi_clauses: u64,
+    pub total_promoted_derived_clauses: u64,
 }
 
 fn retire_activation_unit(activation: i32) -> Vec<i32> {
     vec![-activation]
+}
+
+fn deduplicate_clauses(clauses: impl IntoIterator<Item = Vec<i32>>) -> Vec<Vec<i32>> {
+    let mut seen = HashSet::new();
+    clauses
+        .into_iter()
+        .filter(|clause| {
+            let mut key = clause.clone();
+            key.sort_unstable();
+            key.dedup();
+            seen.insert(key)
+        })
+        .collect()
+}
+
+fn root_assignment_falsifies(assignments: &[i32], lit: i32) -> bool {
+    let assignment = assignments
+        .get(lit.unsigned_abs() as usize)
+        .copied()
+        .unwrap_or(0);
+    assignment.abs() == 1 && (assignment > 0) != (lit > 0)
+}
+
+fn activation_consequence_is_false_at_root(
+    assignments: &[i32],
+    clause: &[i32],
+    activation: i32,
+) -> bool {
+    clause
+        .iter()
+        .copied()
+        .filter(|lit| *lit != -activation)
+        .all(|lit| root_assignment_falsifies(assignments, lit))
+}
+
+fn qi_gc_reduction_is_worthwhile(
+    epoch_clauses: u64,
+    observed_qi: usize,
+    retained_qi: usize,
+    promoted_derived: usize,
+) -> bool {
+    if epoch_clauses < QI_GC_MIN_EPOCH_CLAUSES || observed_qi == 0 {
+        return false;
+    }
+    let retained = retained_qi + promoted_derived;
+    let reclaimed = observed_qi.saturating_sub(retained_qi);
+    reclaimed >= QI_GC_MIN_RECLAIMED_CLAUSES
+        && retained.saturating_mul(100) <= observed_qi.saturating_mul(QI_GC_MAX_RETAIN_PERCENT)
 }
 
 /// Implements CaDiCaL's `Learner` trait to capture conflict clauses containing ¬act.
@@ -250,6 +317,9 @@ impl<'a> CustomExternalPropagator<'a> {
         if !QI_GC_PROFILE.load(Ordering::Relaxed) {
             return;
         }
+        if event == "periodic-decisions" && !QI_GC_PROFILE_PERIODIC.load(Ordering::Relaxed) {
+            return;
+        }
 
         let egraph = self.solver_state.egraph.gc_profile();
         let relevance = self.solver_state.relevancy.profile();
@@ -259,9 +329,28 @@ impl<'a> CustomExternalPropagator<'a> {
             .skip(1)
             .filter(|lit| **lit != 0)
             .count();
-        let (epoch, transitions, epoch_instances, total_instances, epoch_clauses, total_clauses) =
-            self.qi_gc_state.as_ref().map_or((0, 0, 0, 0, 0, 0), |gc| {
+        let (
+            epoch,
+            transitions,
+            epoch_instances,
+            total_instances,
+            epoch_clauses,
+            total_clauses,
+            retained_qi,
+            retired_qi,
+            promoted_derived,
+            tracked_qi,
+            ancestry_nodes,
+            ancestry_edges,
+            live_derived,
+            instance_groups,
+            permanent_instances,
+        ) = self
+            .qi_gc_state
+            .as_ref()
+            .map_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), |gc| {
                 let gc = gc.borrow();
+                let tracker = gc.tracker.profile();
                 (
                     gc.epoch,
                     gc.transitions,
@@ -269,6 +358,15 @@ impl<'a> CustomExternalPropagator<'a> {
                     gc.total_epoch_instantiations,
                     gc.epoch_guarded_clauses,
                     gc.total_guarded_clauses,
+                    gc.total_retained_qi_clauses,
+                    gc.total_retired_qi_clauses,
+                    gc.total_promoted_derived_clauses,
+                    tracker.qi_clauses,
+                    tracker.antecedent_nodes,
+                    tracker.antecedent_edges,
+                    tracker.live_derived,
+                    tracker.instance_groups,
+                    tracker.permanent_instantiations,
                 )
             });
 
@@ -276,7 +374,10 @@ impl<'a> CustomExternalPropagator<'a> {
             "[qi-gc-profile] event={event} elapsed={:.3}s level={} assigned={} \
              decisions={} backtracks={} conflicts={} arith_checks={} \
              epoch={} transitions={} epoch_instances={} total_instances={} \
-             epoch_clauses={} total_clauses={} qi_rounds={} pending_qi={}",
+             epoch_clauses={} total_clauses={} retained_qi={} retired_qi={} \
+             promoted_derived={} tracked_qi={} ancestry_nodes={} ancestry_edges={} \
+             live_derived={} instance_groups={} permanent_instances={} \
+             qi_rounds={} pending_qi={}",
             self.stats.elapsed().as_secs_f64(),
             self.decision_level,
             assigned,
@@ -290,6 +391,15 @@ impl<'a> CustomExternalPropagator<'a> {
             total_instances,
             epoch_clauses,
             total_clauses,
+            retained_qi,
+            retired_qi,
+            promoted_derived,
+            tracked_qi,
+            ancestry_nodes,
+            ancestry_edges,
+            live_derived,
+            instance_groups,
+            permanent_instances,
             self.stats.instantiation_rounds,
             self.pending.is_some(),
         );
@@ -591,23 +701,29 @@ impl<'a> CustomExternalPropagator<'a> {
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
     ) {
         for inst in instances {
-            let (clauses, pre_nnf_body, is_instantiation) = match inst {
+            let (clauses, pre_nnf_body, instantiation_key) = match inst {
                 Instantiation {
                     clauses,
                     pre_nnf_body,
+                    key,
                 } => {
                     self.stats.instantiations += 1;
-                    (clauses, pre_nnf_body, true)
+                    (clauses, pre_nnf_body, Some(key))
                 }
                 Skolemization {
                     clauses,
                     pre_nnf_body,
-                } => (clauses, pre_nnf_body, false),
+                } => (clauses, pre_nnf_body, None),
             };
-            if is_instantiation && let Some(ref gc) = self.qi_gc_state {
+            if let Some(key) = instantiation_key
+                && let Some(ref gc) = self.qi_gc_state
+            {
                 let mut gc = gc.borrow_mut();
                 gc.epoch_instantiations += 1;
                 gc.total_epoch_instantiations += 1;
+                let activation = gc.current_act;
+                gc.tracker
+                    .register_instance(key.clone(), clauses, activation);
             }
             // Register the pre-NNF instance body with relevancy so structural
             // rules see the original connectives (Iff/ITE/Implies) before
@@ -620,7 +736,9 @@ impl<'a> CustomExternalPropagator<'a> {
             // the root after a backtrack past this level.
             self.solver_state.relevancy_register_term(pre_nnf_body, 0);
             for clause in clauses {
-                if let Some(ref gc) = self.qi_gc_state {
+                if instantiation_key.is_some()
+                    && let Some(ref gc) = self.qi_gc_state
+                {
                     let mut gc = gc.borrow_mut();
                     let neg_act = -gc.current_act;
                     gc.epoch_guarded_clauses += 1;
@@ -730,6 +848,17 @@ impl<'a> CustomExternalPropagator<'a> {
         instantiation_limit: Option<usize>,
     ) -> bool {
         debug_assert!(self.pending.is_none());
+        if QI_GC_PROFILE.load(Ordering::Relaxed) {
+            eprintln!(
+                "[qi-gc-profile] qi-match-config scope={:?} require_quantifier_relevance={} \
+                 allow_skolemization={} generation_limit={:?} instantiation_limit={:?}",
+                trigger_match_scope,
+                require_quantifier_relevance,
+                allow_skolemization,
+                generation_limit,
+                instantiation_limit,
+            );
+        }
         self.print_qi_gc_profile("qi-match-start");
         let started = std::time::Instant::now();
         let pending = instantiate_quantifiers(
@@ -784,21 +913,57 @@ impl<'a> CustomExternalPropagator<'a> {
         drop(gc);
         self.print_qi_gc_profile("epoch-transition-start");
 
+        let plan = gc_state.borrow().tracker.plan();
+        let retained_qi_clauses = deduplicate_clauses(plan.qi_clauses);
+        let retained_qi_count = retained_qi_clauses.len();
+        let retired_qi_count = plan.observed_qi_clauses.saturating_sub(retained_qi_count);
+        let ancestry_edges = plan.antecedent_edges;
+        let retained_instantiations = plan.retained_instantiations;
+        let retained_instantiation_count = retained_instantiations.len();
+
+        // Keep every live activation-dependent learned clause. The proof
+        // tracer sees all derived clauses and deletions; the Learner is a
+        // fallback for any 1-UIP clause not present in those callbacks.
+        let learner_derived = {
+            let gc = gc_state.borrow();
+            gc.learned_clauses
+                .iter()
+                .map(|clause| {
+                    clause
+                        .iter()
+                        .copied()
+                        .filter(|lit| *lit != neg_old_act)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let promoted_derived =
+            deduplicate_clauses(plan.derived_clauses.into_iter().chain(learner_derived));
+        let promoted_derived_count = promoted_derived.len();
+
+        qi_gc_trace!(
+            "epoch {}: dependency plan observed_qi={} retained_qi={} retired_qi={} \
+             retained_instances={} promoted_derived={} ancestry_edges={}",
+            epoch,
+            plan.observed_qi_clauses,
+            retained_qi_count,
+            retired_qi_count,
+            retained_instantiation_count,
+            promoted_derived_count,
+            ancestry_edges
+        );
+
         // 1. Permanently retire the old epoch. QI clauses have the shape
         // `¬act ∨ instance`, so asserting `¬act` satisfies any clause CaDiCaL
         // has not physically forgotten.
-        let conflict_count = gc_state.borrow().learned_clauses.len();
         self.queue_theory_clause(retire_activation_unit(old_act), Theory::Background);
 
-        // 2. Re-learn captured conflict clauses without ¬act
-        let mut gc = gc_state.borrow_mut();
-        let learned: Vec<Vec<i32>> = gc.learned_clauses.drain(..).collect();
-        drop(gc);
-        for clause in learned {
-            let promoted: Vec<i32> = clause
-                .into_iter()
-                .filter(|&lit| lit != neg_old_act)
-                .collect();
+        // 2. Preserve propagation strength from the live learned database:
+        // re-add the exact QI antecedents and activation-free consequences.
+        for clause in retained_qi_clauses {
+            self.queue_theory_clause(clause, Theory::Background);
+        }
+        for promoted in promoted_derived {
             if QI_GC_TRACE.load(Ordering::Relaxed) {
                 let terms: Vec<String> = promoted
                     .iter()
@@ -826,14 +991,46 @@ impl<'a> CustomExternalPropagator<'a> {
             self.queue_theory_clause(promoted, Theory::Background);
         }
 
-        // 3. Clear added_instantiations so QI can be re-generated in the next epoch
+        // 3. Keep dedup keys for promoted instance groups. Dropped groups must
+        // become eligible for regeneration; retained groups must not be
+        // materialized and re-added on every epoch.
         let mut gc = gc_state.borrow_mut();
-        let cleared_count = self.solver_state.added_instantiations.len();
+        gc.learned_clauses.clear();
+        gc.tracker.promote_instantiations(&retained_instantiations);
+        let permanent_instantiations = gc
+            .tracker
+            .permanent_instantiations()
+            .cloned()
+            .collect::<Vec<_>>();
+        gc.tracker.clear_epoch();
+        gc.total_retained_qi_clauses += retained_qi_count as u64;
+        gc.total_retired_qi_clauses += retired_qi_count as u64;
+        gc.total_promoted_derived_clauses += promoted_derived_count as u64;
+        let previous_instantiations: usize = self
+            .solver_state
+            .added_instantiations
+            .values()
+            .map(HashSet::len)
+            .sum();
         self.solver_state.added_instantiations.clear();
+        for key in permanent_instantiations {
+            self.solver_state
+                .added_instantiations
+                .entry(key.quantifier_id)
+                .or_default()
+                .insert(key.substitution);
+        }
+        let preserved_instantiations: usize = self
+            .solver_state
+            .added_instantiations
+            .values()
+            .map(HashSet::len)
+            .sum();
         qi_gc_trace!(
-            "epoch {}: cleared {} added_instantiations",
+            "epoch {}: retained {} of {} added_instantiations",
             epoch,
-            cleared_count
+            preserved_instantiations,
+            previous_instantiations
         );
 
         // 4. Start new epoch
@@ -856,12 +1053,33 @@ impl<'a> CustomExternalPropagator<'a> {
         }
 
         qi_gc_trace!(
-            "epoch {}: transition complete. promoted {} conflict clauses. new act={}",
+            "epoch {}: transition complete. retained {} QI clauses and promoted {} derived \
+             clauses. new act={}",
             new_epoch,
-            conflict_count,
+            retained_qi_count,
+            promoted_derived_count,
             new_act
         );
         self.print_qi_gc_profile("epoch-transition-complete");
+    }
+
+    /// A tainted learned clause `-act ∨ C` forces `-act` at level zero when
+    /// every literal in `C` is already false there. In this case the epoch's
+    /// activation-independent consequence must be promoted immediately.
+    fn qi_gc_requires_root_transition(&self, gc: &QiGcState) -> bool {
+        gc.learned_clauses.iter().any(|clause| {
+            activation_consequence_is_false_at_root(&self.assignments, clause, gc.current_act)
+        })
+    }
+
+    fn qi_gc_collection_worthwhile(&self, gc: &QiGcState) -> bool {
+        let plan = gc.tracker.plan();
+        qi_gc_reduction_is_worthwhile(
+            gc.epoch_guarded_clauses,
+            plan.observed_qi_clauses,
+            plan.qi_clauses.len(),
+            plan.derived_clauses.len(),
+        )
     }
 
     /// Add instances from the current partial assignment according to the
@@ -1316,15 +1534,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.queue_relevant_assignment(lit);
         }
 
-        // A learned clause containing `¬act` that reaches level zero requests
-        // a mandatory transition so its activation-independent consequence can
-        // be promoted. Other transitions are resource-threshold driven.
-        let root_qi_conflict = level == 0
-            && self
-                .qi_gc_state
-                .as_ref()
-                .is_some_and(|gc| !gc.borrow().learned_clauses.is_empty());
-        if level == 0 && (self.qi_gc_transition_pending || root_qi_conflict) {
+        // Do not restart an epoch merely because some learned clause mentions
+        // `-act`. Transition immediately only when such a clause forces
+        // `-act` at the root; otherwise require a large, strongly compressible
+        // epoch so collection pays for its root restart.
+        let transition_requested = level == 0
+            && self.qi_gc_state.as_ref().is_some_and(|gc| {
+                let gc = gc.borrow();
+                self.qi_gc_requires_root_transition(&gc) || self.qi_gc_collection_worthwhile(&gc)
+            });
+        if level == 0 && (self.qi_gc_transition_pending || transition_requested) {
             self.qi_gc_transition_pending = false;
             self.qi_gc_force_backtrack = false;
             if let Some(gc_state) = self.qi_gc_state.clone() {
@@ -1599,9 +1818,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         debug_println!(11, 0, "Starting quantifier instantiations");
         // Eager rounds use relevant classes as a cheap source of likely useful
-        // instances. At a complete-model check, widen to all trigger classes:
-        // a filtered round can keep producing a small stream of instances and
-        // indefinitely postpone terms that are needed to refute the model.
+        // instances. At a complete-model check, widen the search to every class
+        // so filtered progress cannot indefinitely postpone a refutation.
         if !self.start_quantifier_instantiation_round(
             true,
             false,
@@ -1795,10 +2013,43 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
 #[cfg(test)]
 mod qi_gc_tests {
-    use super::retire_activation_unit;
+    use super::{
+        activation_consequence_is_false_at_root, qi_gc_reduction_is_worthwhile,
+        retire_activation_unit,
+    };
 
     #[test]
     fn retiring_activation_satisfies_negatively_guarded_epoch_clauses() {
         assert_eq!(retire_activation_unit(17), vec![-17]);
+    }
+
+    #[test]
+    fn root_transition_requires_the_activation_free_consequence_to_be_false() {
+        // Root assignments: variable 1 is true, variable 2 is false.
+        let assignments = vec![0, 1, -1, 0];
+        assert!(activation_consequence_is_false_at_root(
+            &assignments,
+            &[-100, -1, 2],
+            100,
+        ));
+        assert!(!activation_consequence_is_false_at_root(
+            &assignments,
+            &[-100, 1, 2],
+            100,
+        ));
+        assert!(!activation_consequence_is_false_at_root(
+            &assignments,
+            &[-100, 3],
+            100,
+        ));
+    }
+
+    #[test]
+    fn collection_requires_both_scale_and_strong_reduction() {
+        assert!(!qi_gc_reduction_is_worthwhile(5_219, 5_219, 3_624, 574));
+        assert!(!qi_gc_reduction_is_worthwhile(
+            20_000, 20_000, 12_000, 1_000
+        ));
+        assert!(qi_gc_reduction_is_worthwhile(20_000, 20_000, 5_000, 1_000));
     }
 }

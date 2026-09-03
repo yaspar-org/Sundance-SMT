@@ -9,8 +9,15 @@ use cadical_sys::ProofTracer;
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
-    fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], restored: bool) {
+    fn add_original_clause(&mut self, id: u64, _redundant: bool, clause: &[i32], restored: bool) {
         let registered = self.consume_clause_callback_registration(clause);
+        if let Some(ref gc_state) = self.qi_gc_state {
+            let mut gc = gc_state.borrow_mut();
+            let activation = gc.current_act;
+            if gc.tracker.note_gated_qi_clause(id, clause, activation) {
+                return;
+            }
+        }
         if restored || registered {
             return;
         }
@@ -35,21 +42,30 @@ impl ProofTracer for SMTProofTracer {
 
         self.add_sat_clause(clause);
 
-        // Log conflict clauses containing ¬act for QI GC tracing
+        // Track exactly the current epoch's tainted derived clauses. Since no
+        // clause contains +act, resolution cannot remove -act, so this test is
+        // equivalent to "depends on a guarded QI clause."
         if let Some(ref gc_state) = self.qi_gc_state {
+            let mut gc = gc_state.borrow_mut();
+            let activation = gc.current_act;
+            let tainted = gc
+                .tracker
+                .note_derived_clause(id, clause, antecedents, activation);
             if std::env::var("SUNDANCE_QI_GC_TRACE").is_ok() {
-                let gc = gc_state.borrow();
                 let neg_act = -gc.current_act;
-                if clause.contains(&neg_act) {
-                    let terms: Vec<String> = clause.iter().map(|&lit| {
-                        if lit == neg_act {
-                            format!("¬act({})", neg_act)
-                        } else if let Some(desc) = self.lit_to_string(lit) {
-                            format!("{}={}", lit, desc)
-                        } else {
-                            format!("{}", lit)
-                        }
-                    }).collect();
+                if tainted {
+                    let terms: Vec<String> = clause
+                        .iter()
+                        .map(|&lit| {
+                            if lit == neg_act {
+                                format!("¬act({})", neg_act)
+                            } else if let Some(desc) = self.lit_to_string(lit) {
+                                format!("{}={}", lit, desc)
+                            } else {
+                                format!("{}", lit)
+                            }
+                        })
+                        .collect();
                     eprintln!(
                         "[qi-gc] conflict clause (id={}): {:?} antecedents={:?}",
                         id, terms, antecedents
@@ -59,8 +75,11 @@ impl ProofTracer for SMTProofTracer {
         }
     }
 
-    fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {
+    fn delete_clause(&mut self, id: u64, _redundant: bool, clause: &[i32]) {
         self.deleted_clauses += 1;
+        if let Some(ref gc_state) = self.qi_gc_state {
+            gc_state.borrow_mut().tracker.note_deleted_clause(id);
+        }
         self.record_deletion(clause);
     }
 

@@ -13,6 +13,7 @@ pub mod egraphs;
 pub mod log;
 pub mod preprocess;
 mod proof;
+mod qi_gc;
 mod quantifiers;
 pub mod relevancy;
 pub mod solver_state;
