@@ -15,6 +15,25 @@ use yaspar_ir::ast::Local;
 /// Zero means "no decision" when returned from decision methods.
 pub type Lit = i32;
 
+/// A contiguous segment of a circular e-class member list, inclusive at
+/// both ends. The range remains stable when later class lists are spliced
+/// because traversal stops before following the `last` member's link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EClassMemberRange<T> {
+    pub first: T,
+    pub last: T,
+}
+
+/// Information captured immediately before an egraph union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EgraphMergeEvent<T> {
+    pub survivor: T,
+    pub demoted: T,
+    pub survivor_members: EClassMemberRange<T>,
+    pub demoted_members: EClassMemberRange<T>,
+    pub level: usize,
+}
+
 /// Conflict explanation: the equalities that were asserted (and their
 /// congruence consequences) that together violate a disequality.
 /// T is a generic parameter for the Term type that we use
@@ -111,6 +130,17 @@ pub trait EgraphTrait {
     /// Callers must drain before advancing the decision level.
     fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
 
+    /// Enable/disable tracking of ALL merges (direct + congruence) for the
+    /// relevancy propagation consumer.
+    ///
+    /// TODO: merge with `incremental_arithmetic` / `drain_arithmetic_equalities` —
+    /// see the note on `relevancy_merge_queue` in the basic impl.
+    fn set_track_all_merges(&mut self, enabled: bool);
+
+    /// Drain pre-merge events pushed since the last drain. Each event includes
+    /// stable ranges for the two classes and the level at which they merged.
+    fn drain_all_merges(&mut self) -> Vec<EgraphMergeEvent<Self::TermId>>;
+
     // --- Decision level ---
 
     /// Advance the internal decision level by one.
@@ -144,7 +174,19 @@ pub trait EgraphTrait {
     /// Check if two terms are in the same equivalence class.
     fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool;
 
+    /// Return the current class as a stable member-list range.
+    fn class_member_range(&self, term: Self::TermId) -> EClassMemberRange<Self::TermId>;
+
+    /// Return the next member in the circular e-class member list.
+    fn next_class_member(&self, term: Self::TermId) -> Self::TermId;
+
     // --- E-matching ---
+
+    /// Add a registered term to the relevant e-matching candidate index.
+    ///
+    /// Repeated calls retain the earliest relevance level. Implementations
+    /// must undo marks above a later `backtrack_to` target.
+    fn mark_e_matching_term_relevant(&mut self, term: Self::TermId, level: usize);
 
     /// Match a multi-trigger pattern.
     ///
@@ -152,10 +194,15 @@ pub trait EgraphTrait {
     /// - `Some(t)` means the pattern must match in the same equivalence class as `t`
     /// - `None` means the pattern can match any term of the right function
     ///
+    /// When `relevant_only` is true, unpinned root patterns use the incremental
+    /// relevant-candidate index. Ground-pinned recursive matching still sees
+    /// the complete e-class.
+    ///
     /// Returns a list of substitution maps (bound variable `Local` → matched term ID).
     fn match_triggers(
-        &mut self,
-        trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
+        &self,
+        trigger_term_pairs: &[(PatternId, Option<Self::TermId>)],
+        relevant_only: bool,
     ) -> Vec<crate::utils::DeterministicHashMap<Local, Self::TermId>>;
 
     // --- Backtracking ---

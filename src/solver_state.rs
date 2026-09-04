@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
-    Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization, Repr,
-    Term, TermAllocator,
+    ATerm, Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization,
+    Repr, Term, TermAllocator,
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -24,11 +24,14 @@ use crate::debug_println;
 use crate::egraphs::basic::egraph::Egraph;
 use crate::egraphs::traits::EgraphTrait;
 use crate::proof::Theory;
+use crate::relevancy::{
+    RelevancyState, RelevancyTrait, RelevantMergeMembers, relevancy_trace_enabled,
+};
 use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
 
-use crate::utils::DeterministicHashMap;
+use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
 fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     match term.repr() {
@@ -89,6 +92,40 @@ fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     }
 }
 
+fn sat_vars_owned_only_by_retired_terms(
+    reverse_map: &HashMap<i32, u64>,
+    retired_uids: &HashSet<u64>,
+) -> HashSet<i32> {
+    let candidates: HashSet<i32> = reverse_map
+        .iter()
+        .filter_map(|(lit, uid)| retired_uids.contains(uid).then_some(lit.abs()))
+        .collect();
+    candidates
+        .into_iter()
+        .filter(|var| {
+            reverse_map
+                .iter()
+                .all(|(lit, uid)| lit.abs() != *var || retired_uids.contains(uid))
+        })
+        .collect()
+}
+
+fn mark_retired_sat_vars<'a, I>(bitmap: &mut Vec<bool>, vars: I)
+where
+    I: Clone + IntoIterator<Item = &'a i32>,
+{
+    let Some(max_var) = vars.clone().into_iter().copied().max() else {
+        return;
+    };
+    let required_len = max_var as usize + 1;
+    if bitmap.len() < required_len {
+        bitmap.resize(required_len, false);
+    }
+    for var in vars {
+        bitmap[*var as usize] = true;
+    }
+}
+
 /// Solver-level state that wraps the egraph with theory-specific bookkeeping.
 ///
 /// For now, the `Context` (term allocator) is accessed via `self.egraph.context`.
@@ -122,6 +159,25 @@ pub struct SolverState {
     /// Tracks quantifier instantiations to avoid duplicates.
     pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
 
+    /// Profile-only tombstones for substitutions whose QI clauses and term
+    /// closure were collected. Removing a tombstone when e-matching accepts
+    /// the same substitution again measures GC/regeneration churn directly.
+    qi_gc_released_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
+    qi_gc_released_instantiation_events: u64,
+    qi_gc_rediscovered_instantiation_events: u64,
+
+    /// Instantiation depth of terms, keyed by solver UID. Original terms are
+    /// generation 0; a QI-produced term is one deeper than its trigger terms.
+    generation: DeterministicHashMap<u64, u32>,
+
+    /// Generation assigned to terms first registered while materializing the
+    /// current quantifier instance. Zero outside instance materialization.
+    pub(crate) current_instantiation_generation: u32,
+
+    /// Exact solver UIDs first registered by the quantifier instance currently
+    /// being materialized. `None` outside instantiation materialization.
+    current_qi_created_terms: Option<DeterministicHashSet<u64>>,
+
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
 
@@ -140,6 +196,17 @@ pub struct SolverState {
     /// Bidirectional mapping: term UID <-> SAT literal.
     pub cnf_cache: CNFCache,
 
+    /// SAT variables whose only term mappings were reclaimed by QI GC.
+    /// CaDiCaL may still mention these variables in satisfied old clauses, so
+    /// propagator callbacks must ignore them rather than looking up a term.
+    retired_sat_vars: Vec<bool>,
+
+    /// Retired SAT variables that represented only Boolean connective
+    /// structure. Their defining/source clauses may remain in CaDiCaL as
+    /// ordinary unobserved SAT structure after the corresponding Sundance
+    /// e-graph terms are reclaimed.
+    retired_sat_only_vars: Vec<bool>,
+
     /// Whether to instantiate some datatype axioms lazily.
     pub lazy_dt: bool,
 
@@ -156,6 +223,9 @@ pub struct SolverState {
     /// SAT literals for base-case constructor testers (used by cb_decide to prefer base cases)
     pub base_case_tester_lits: Vec<i32>,
 
+    /// Pre-NNF assertion terms for relevancy (preserves Eq/Iff/ITE structure).
+    pub pre_nnf_assertions: Vec<Term>,
+
     // --- Stats counters (harvested into SolverStats at end of solve) ---
     /// Number of datatype accessor axioms generated (selector projection axioms)
     pub stat_dt_accessor_ax: u64,
@@ -163,6 +233,8 @@ pub struct SolverState {
     pub stat_dt_constructor_ax: u64,
     /// Number of datatype case splits (deferred tester clauses)
     pub stat_dt_splits: u64,
+    /// Relevancy propagation state — gates theory solver work.
+    pub relevancy: RelevancyState,
 }
 
 impl SolverState {
@@ -174,6 +246,7 @@ impl SolverState {
         ddsmt: bool,
         eager_skolem: bool,
         infer_triggers: bool,
+        relevancy: bool,
     ) -> Self {
         let egraph = Egraph::new();
         let datatype_info = DatatypeInfo::from_context(&context);
@@ -189,21 +262,31 @@ impl SolverState {
             assertions: vec![],
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
+            qi_gc_released_instantiations: HashMap::default(),
+            qi_gc_released_instantiation_events: 0,
+            qi_gc_rediscovered_instantiation_events: 0,
+            generation: DeterministicHashMap::default(),
+            current_instantiation_generation: 0,
+            current_qi_created_terms: None,
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
             datatype_axioms_applied: HashSet::new(),
             arithmetic_terms: vec![],
             cnf_cache: Default::default(),
+            retired_sat_vars: Vec::new(),
+            retired_sat_only_vars: Vec::new(),
             lazy_dt,
             ddsmt,
             eager_skolem,
             infer_triggers,
             egraph,
             base_case_tester_lits: vec![],
+            pre_nnf_assertions: vec![],
             stat_dt_accessor_ax: 0,
             stat_dt_constructor_ax: 0,
             stat_dt_splits: 0,
+            relevancy: RelevancyState::new(relevancy),
         }
     }
 
@@ -212,6 +295,954 @@ impl SolverState {
             context: &mut self.context,
             cache: &mut self.cnf_cache,
         }
+    }
+
+    pub(crate) fn begin_qi_term_capture(&mut self) {
+        debug_assert!(self.current_qi_created_terms.is_none());
+        self.current_qi_created_terms = Some(DeterministicHashSet::default());
+    }
+
+    pub(crate) fn finish_qi_term_capture(&mut self) -> DeterministicHashSet<u64> {
+        self.current_qi_created_terms
+            .take()
+            .expect("QI term capture must be active")
+    }
+
+    /// Allow an instance whose clauses and owned terms were physically
+    /// collected to be discovered again if its trigger substitution remains
+    /// present in the live e-graph.
+    pub(crate) fn forget_added_instantiation(
+        &mut self,
+        quantifier_id: u64,
+        substitution: &DeterministicHashMap<Local, Term>,
+    ) -> bool {
+        let Some(instantiations) = self.added_instantiations.get_mut(&quantifier_id) else {
+            return false;
+        };
+        let removed = instantiations.remove(substitution);
+        let remove_quantifier_entry = instantiations.is_empty();
+        if remove_quantifier_entry {
+            self.added_instantiations.remove(&quantifier_id);
+        }
+        if removed && std::env::var_os("SUNDANCE_QI_GC_PROFILE").is_some() {
+            self.qi_gc_released_instantiations
+                .entry(quantifier_id)
+                .or_default()
+                .insert(substitution.clone());
+            self.qi_gc_released_instantiation_events += 1;
+        }
+        removed
+    }
+
+    /// Record that ordinary e-matching accepted a substitution after its
+    /// previous materialization had been physically collected.
+    pub(crate) fn note_qi_gc_accepted_instantiation(
+        &mut self,
+        quantifier_id: u64,
+        substitution: &DeterministicHashMap<Local, Term>,
+    ) -> bool {
+        let Some(released) = self.qi_gc_released_instantiations.get_mut(&quantifier_id) else {
+            return false;
+        };
+        let rediscovered = released.remove(substitution);
+        let remove_quantifier_entry = released.is_empty();
+        if remove_quantifier_entry {
+            self.qi_gc_released_instantiations.remove(&quantifier_id);
+        }
+        if rediscovered {
+            self.qi_gc_rediscovered_instantiation_events += 1;
+        }
+        rediscovered
+    }
+
+    pub(crate) fn remember_added_instantiation(
+        &mut self,
+        quantifier_id: u64,
+        substitution: &DeterministicHashMap<Local, Term>,
+    ) -> bool {
+        let rediscovered = self.note_qi_gc_accepted_instantiation(quantifier_id, substitution);
+        self.added_instantiations
+            .entry(quantifier_id)
+            .or_default()
+            .insert(substitution.clone());
+        rediscovered
+    }
+
+    pub(crate) fn qi_gc_instantiation_churn_profile(&self) -> (usize, u64, u64) {
+        (
+            self.qi_gc_released_instantiations
+                .values()
+                .map(HashSet::len)
+                .sum(),
+            self.qi_gc_released_instantiation_events,
+            self.qi_gc_rediscovered_instantiation_events,
+        )
+    }
+
+    fn record_qi_created_term(&mut self, uid: u64) {
+        if let Some(created) = self.current_qi_created_terms.as_mut() {
+            created.insert(uid);
+        }
+    }
+
+    pub(crate) fn collect_registered_term_closure(
+        &self,
+        term: &Term,
+        result: &mut DeterministicHashSet<u64>,
+    ) {
+        if !result.insert(term.uid()) {
+            return;
+        }
+        let (_, subterms) = get_subterms(term);
+        for subterm in subterms {
+            self.collect_registered_term_closure(subterm, result);
+        }
+    }
+
+    pub(crate) fn collect_clause_term_closure(
+        &self,
+        clauses: &[Vec<i32>],
+        result: &mut DeterministicHashSet<u64>,
+    ) {
+        for literal in clauses.iter().flatten() {
+            let Some(uid) = self
+                .cnf_cache
+                .var_map_reverse
+                .get(literal)
+                .or_else(|| self.cnf_cache.var_map_reverse.get(&-*literal))
+            else {
+                continue;
+            };
+            let Some(TermOption::Some(term)) = self.terms_list.get(*uid as usize) else {
+                continue;
+            };
+            self.collect_registered_term_closure(term, result);
+        }
+    }
+
+    fn collect_theory_atom_term_closure(
+        &self,
+        term: &Term,
+        result: &mut DeterministicHashSet<u64>,
+    ) {
+        match term.repr() {
+            ATerm::And(items) | ATerm::Or(items) | ATerm::Xor(items) => {
+                for item in items {
+                    self.collect_theory_atom_term_closure(item, result);
+                }
+            }
+            ATerm::Not(inner) | ATerm::Annotated(inner, _) => {
+                self.collect_theory_atom_term_closure(inner, result);
+            }
+            ATerm::Implies(premises, conclusion) => {
+                for premise in premises {
+                    self.collect_theory_atom_term_closure(premise, result);
+                }
+                self.collect_theory_atom_term_closure(conclusion, result);
+            }
+            ATerm::Ite(condition, then_term, else_term) => {
+                self.collect_theory_atom_term_closure(condition, result);
+                self.collect_theory_atom_term_closure(then_term, result);
+                self.collect_theory_atom_term_closure(else_term, result);
+            }
+            ATerm::Forall(_, _) | ATerm::Exists(_, _) => {}
+            // Equality, predicates, arithmetic relations, datatype testers,
+            // and Boolean constants/variables have independent theory
+            // meaning. Preserve their complete non-Boolean subterm closure.
+            _ => self.collect_registered_term_closure(term, result),
+        }
+    }
+
+    /// Collect only the terms needed to interpret theory atoms in SAT
+    /// clauses. Pure Boolean/Tseitin structure can remain in CaDiCaL after its
+    /// solver-side term representation is retired.
+    pub(crate) fn collect_clause_theory_term_closure(
+        &self,
+        clauses: &[Vec<i32>],
+        result: &mut DeterministicHashSet<u64>,
+    ) {
+        for literal in clauses.iter().flatten() {
+            let Some(uid) = self
+                .cnf_cache
+                .var_map_reverse
+                .get(literal)
+                .or_else(|| self.cnf_cache.var_map_reverse.get(&-*literal))
+            else {
+                continue;
+            };
+            let Some(TermOption::Some(term)) = self.terms_list.get(*uid as usize) else {
+                continue;
+            };
+            self.collect_theory_atom_term_closure(term, result);
+        }
+    }
+
+    /// Quantifier records are future e-matching work, not just annotations on
+    /// their current SAT clauses. Until a quantifier can be reconstructed from
+    /// a retired instance, keep its term, body, guard, and their subterms.
+    pub(crate) fn collect_quantifier_term_closure(&self, result: &mut DeterministicHashSet<u64>) {
+        for quantifier in &self.quantifiers {
+            for uid in [Some(quantifier.id), Some(quantifier.body), quantifier.guard]
+                .into_iter()
+                .flatten()
+            {
+                match self.get_term_safe(uid) {
+                    TermOption::Some(term) | TermOption::Uninitialized(term) => {
+                        self.collect_registered_term_closure(&term, result);
+                    }
+                    TermOption::None => {}
+                }
+            }
+        }
+    }
+
+    pub(crate) fn is_retired_sat_var(&self, var: i32) -> bool {
+        let var = var.unsigned_abs() as usize;
+        if self.retired_sat_vars.get(var).copied().unwrap_or(false) {
+            return true;
+        }
+
+        // Every production tombstone is recorded in the dense bitmap by
+        // `retire_qi_terms`. Keep the slower structural check in debug builds
+        // to catch stale mappings created by tests or future maintenance code
+        // without charging every release-mode assignment callback two hash
+        // lookups.
+        #[cfg(not(debug_assertions))]
+        return false;
+
+        #[cfg(debug_assertions)]
+        let var = var as i32;
+        #[cfg(debug_assertions)]
+        let mut has_mapping = false;
+        #[cfg(debug_assertions)]
+        for lit in [var, -var] {
+            let Some(uid) = self.cnf_cache.var_map_reverse.get(&lit) else {
+                continue;
+            };
+            has_mapping = true;
+            if !self.get_term_safe(*uid).is_none() {
+                return false;
+            }
+        }
+        #[cfg(debug_assertions)]
+        has_mapping
+    }
+
+    pub(crate) fn is_retired_sat_only_var(&self, var: i32) -> bool {
+        self.retired_sat_only_vars
+            .get(var.unsigned_abs() as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn is_sat_only_boolean_structure(term: &Term) -> bool {
+        match term.repr() {
+            ATerm::And(_)
+            | ATerm::Or(_)
+            | ATerm::Xor(_)
+            | ATerm::Not(_)
+            | ATerm::Implies(_, _)
+            | ATerm::Ite(_, _, _) => true,
+            ATerm::Annotated(inner, _) => Self::is_sat_only_boolean_structure(inner),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn retire_qi_terms(
+        &mut self,
+        candidates: &DeterministicHashSet<u64>,
+        pinned: &DeterministicHashSet<u64>,
+    ) -> SolverTermGcReport {
+        let candidate_ids: DeterministicHashMap<u32, u64> = candidates
+            .iter()
+            .filter(|uid| !pinned.contains(uid))
+            .filter_map(|uid| self.id_map.get_by_left(uid).copied().map(|eid| (eid, *uid)))
+            .collect();
+        let egraph_candidates = candidate_ids.keys().copied().collect();
+        let egraph_report = self.egraph.retire_terms(&egraph_candidates);
+        let retired_uids: HashSet<u64> = egraph_report
+            .retired_ids
+            .iter()
+            .filter_map(|eid| candidate_ids.get(eid).copied())
+            .collect();
+        let retired_eids: HashSet<u32> = egraph_report.retired_ids.iter().copied().collect();
+
+        let mut possible_retired_vars =
+            sat_vars_owned_only_by_retired_terms(&self.cnf_cache.var_map_reverse, &retired_uids);
+        let sat_only_candidates: HashSet<i32> = possible_retired_vars
+            .iter()
+            .copied()
+            .filter(|var| {
+                let mapped_terms: Vec<&Term> = self
+                    .cnf_cache
+                    .var_map_reverse
+                    .iter()
+                    .filter_map(|(lit, uid)| {
+                        (lit.abs() == *var && retired_uids.contains(uid))
+                            .then(|| self.terms_list.get(*uid as usize))
+                            .flatten()
+                            .and_then(|slot| match slot {
+                                TermOption::Some(term) | TermOption::Uninitialized(term) => {
+                                    Some(term)
+                                }
+                                TermOption::None => None,
+                            })
+                    })
+                    .collect();
+                !mapped_terms.is_empty()
+                    && mapped_terms
+                        .into_iter()
+                        .all(Self::is_sat_only_boolean_structure)
+            })
+            .collect();
+        for uid in &retired_uids {
+            if let Some(lit) = self.cnf_cache.var_map.remove(uid) {
+                possible_retired_vars.insert(lit.abs());
+            }
+        }
+        self.cnf_cache
+            .var_map_reverse
+            .retain(|_, uid| !retired_uids.contains(uid));
+        let retired_vars: HashSet<i32> = possible_retired_vars
+            .into_iter()
+            .filter(|var| {
+                !self.cnf_cache.var_map_reverse.contains_key(var)
+                    && !self.cnf_cache.var_map_reverse.contains_key(&-*var)
+            })
+            .collect();
+        mark_retired_sat_vars(&mut self.retired_sat_vars, &retired_vars);
+        let retired_sat_only_vars: Vec<i32> = retired_vars
+            .iter()
+            .copied()
+            .filter(|var| sat_only_candidates.contains(var))
+            .collect();
+        mark_retired_sat_vars(&mut self.retired_sat_only_vars, &retired_sat_only_vars);
+
+        for uid in &retired_uids {
+            self.id_map.remove_by_left(uid);
+            if let Some(slot) = self.terms_list.get_mut(*uid as usize) {
+                *slot = TermOption::None;
+            }
+            self.generation.remove(uid);
+            self.term_constructors.remove(uid);
+            self.datatype_axioms_applied.remove(uid);
+        }
+        self.cnf_cache.nnf_cache.retain(|uid, cached| {
+            !retired_uids.contains(uid)
+                && cached
+                    .iter()
+                    .flatten()
+                    .all(|term| !retired_uids.contains(&term.uid()))
+        });
+        self.arithmetic_terms
+            .retain(|uid| !retired_uids.contains(uid));
+        self.nelson_oppen_ineq_literals
+            .retain(|(a, b)| !retired_uids.contains(a) && !retired_uids.contains(b));
+        self.base_case_tester_lits
+            .retain(|lit| !retired_vars.contains(&lit.abs()));
+        self.assertions.retain(|assertion| match assertion {
+            Assertion::Equality { t1, t2, .. } | Assertion::Disequality { t1, t2, .. } => {
+                !retired_uids.contains(t1) && !retired_uids.contains(t2)
+            }
+            Assertion::Distinct { terms, .. } => {
+                terms.iter().all(|uid| !retired_uids.contains(uid))
+            }
+            Assertion::Tester {
+                inner_term, term, ..
+            } => !retired_uids.contains(&inner_term.uid()) && !retired_uids.contains(&term.uid()),
+            Assertion::Other => true,
+        });
+        self.quantifiers.retain(|quantifier| {
+            !retired_uids.contains(&quantifier.id)
+                && !retired_uids.contains(&quantifier.body)
+                && quantifier
+                    .guard
+                    .is_none_or(|guard| !retired_uids.contains(&guard))
+        });
+        self.term_constructors.retain(|uid, constructor| {
+            if retired_uids.contains(uid) {
+                return false;
+            }
+            match constructor {
+                Constructor {
+                    tester_term,
+                    children,
+                    ..
+                } => {
+                    !retired_uids.contains(&tester_term.uid())
+                        && children.iter().all(|uid| !retired_uids.contains(uid))
+                }
+                Uninitialized => true,
+            }
+        });
+        self.pre_nnf_assertions
+            .retain(|term| !retired_uids.contains(&term.uid()));
+
+        let retired_var_indices: HashSet<usize> =
+            retired_vars.iter().map(|var| *var as usize).collect();
+        self.relevancy
+            .retire_terms(&retired_uids, &retired_var_indices, &retired_eids);
+
+        let mut retired_term_uids: Vec<u64> = retired_uids.into_iter().collect();
+        retired_term_uids.sort_unstable();
+        SolverTermGcReport {
+            requested: egraph_report.requested,
+            candidate_classes: egraph_report.candidate_classes,
+            fully_candidate_classes: egraph_report.fully_candidate_classes,
+            retired_classes: egraph_report.retired_classes,
+            pruned_mixed_classes: egraph_report.pruned_mixed_classes,
+            pruned_mixed_class_terms: egraph_report.pruned_mixed_class_terms,
+            retired_terms: retired_term_uids.len(),
+            retired_term_uids,
+            retired_sat_vars: retired_vars.into_iter().collect(),
+            retired_sat_only_vars,
+            predecessor_entries_before: egraph_report.predecessor_entries_before,
+            predecessor_entries_after_compaction: egraph_report
+                .predecessor_entries_after_compaction,
+            predecessor_entries_after_retirement: egraph_report
+                .predecessor_entries_after_retirement,
+            blocked_mixed_class_roots: egraph_report.blocked_mixed_class_roots,
+            blocked_live_parent_terms: egraph_report.blocked_live_parent_terms,
+            blocked_proof_reference_terms: egraph_report.blocked_proof_reference_terms,
+            blocked_disequality_terms: egraph_report.blocked_disequality_terms,
+            blocked_pattern_terms: egraph_report.blocked_pattern_terms,
+            blocked_trigger_head_terms: egraph_report.blocked_trigger_head_terms,
+            blocked_pending_event_terms: egraph_report.blocked_pending_event_terms,
+            missing: egraph_report.missing,
+        }
+    }
+
+    /// Register a pre-NNF term with relevancy: recursively classifies the term
+    /// and all sub-terms, then marks the root as relevant.
+    pub fn relevancy_register_term(&mut self, term: &Term, level: usize) {
+        if relevancy_trace_enabled() {
+            eprint!("[relevancy] register_term: term={} level={}", term, level);
+        }
+        if !self.relevancy.is_enabled() {
+            return;
+        }
+        let mut visited = std::collections::HashSet::new();
+        self.relevancy_classify_recursive(term, &mut visited);
+        if let Some(lit) = self.relevancy_lit_for_term(term) {
+            self.mark_lit_relevant(lit, level);
+        } else if relevancy_trace_enabled() {
+            eprintln!(
+                "[relevancy] WARNING: relevancy_register_term could not find lit for term={}",
+                term
+            );
+        }
+        self.propagate_class_relevancy_from_merges();
+    }
+
+    pub fn relevancy_lit_for_term(&self, term: &Term) -> Option<i32> {
+        let uid = term.uid();
+        // Prefer the NNF-cache path when available. For compound Boolean
+        // terms (Iff, Implies, Ite, etc.), NNF rewrites them into an
+        // Or/And structure, and it's THAT structure's Tseitin lit that
+        // SAT actually assigns during propagation. The term's own uid
+        // may also appear in `var_map` — via `get_or_allocate_lit_for_term`
+        // used for proof tracing — but that lit is a fresh unconnected
+        // SAT variable, not the one SAT actually asserts. Registering
+        // relevancy at that spurious lit means our structural nodes never
+        // fire on the real assignment.
+        //
+        // For atomic terms (App, Global, Local), nnf_cache is either
+        // absent or maps to the term itself, so the outcome is the same.
+        //
+        // Slot [1] = positive polarity — stored NNF term stands for the
+        // input term. Return its lit as-is.
+        // Slot [0] = negative polarity — stored NNF term stands for the
+        // NEGATION of the input term. Return the negated lit so callers
+        // get a lit that represents the input term itself. Without this
+        // flip, callers that further negate (e.g. Implies premises,
+        // Not children) double-flip and install the wrong child in Or
+        // nodes — Or-true single-branch then picks the "premise-is-false"
+        // disjunct even when the premise is true, and the conclusion
+        // never becomes relevant (bug on minimal_inferred_multipattern).
+        if let Some(nnf_entry) = self.cnf_cache.nnf_cache.get(&uid) {
+            if let Some(ref nnf_term) = nnf_entry[1] {
+                if let Some(&lit) = self.cnf_cache.var_map.get(&nnf_term.uid()) {
+                    return Some(lit);
+                }
+            }
+            if let Some(ref nnf_term) = nnf_entry[0] {
+                if let Some(&lit) = self.cnf_cache.var_map.get(&nnf_term.uid()) {
+                    return Some(-lit);
+                }
+            }
+        }
+        if let Some(&lit) = self.cnf_cache.var_map.get(&uid) {
+            return Some(lit);
+        }
+        None
+    }
+
+    fn relevancy_collect_subterm_lits(&self, term: &Term) -> Vec<i32> {
+        let mut lits = Vec::new();
+        let mut stack: Vec<&Term> = Vec::new();
+        match term.repr() {
+            ATerm::App(_, args, _) => {
+                for arg in args {
+                    stack.push(arg);
+                }
+            }
+            ATerm::Not(child) => stack.push(child),
+            ATerm::Or(children) | ATerm::And(children) => {
+                for c in children {
+                    stack.push(c);
+                }
+            }
+            ATerm::Eq(a, b) => {
+                stack.push(a);
+                stack.push(b);
+            }
+            ATerm::Ite(c, t, e) => {
+                stack.push(c);
+                stack.push(t);
+                stack.push(e);
+            }
+            _ => {}
+        }
+        let mut visited = std::collections::HashSet::new();
+        while let Some(t) = stack.pop() {
+            let uid = t.uid();
+            if !visited.insert(uid) {
+                continue;
+            }
+            if let Some(lit) = self.relevancy_lit_for_term(t) {
+                lits.push(lit);
+                continue;
+            }
+            match t.repr() {
+                ATerm::App(_, args, _) => {
+                    for arg in args {
+                        stack.push(arg);
+                    }
+                }
+                ATerm::Not(child) => stack.push(child),
+                ATerm::Or(children) | ATerm::And(children) => {
+                    for c in children {
+                        stack.push(c);
+                    }
+                }
+                ATerm::Eq(a, b) => {
+                    stack.push(a);
+                    stack.push(b);
+                }
+                ATerm::Ite(c, t, e) => {
+                    stack.push(c);
+                    stack.push(t);
+                    stack.push(e);
+                }
+                _ => {}
+            }
+        }
+        lits
+    }
+
+    pub fn relevancy_initialize_from_assertions(&mut self) {
+        if !self.relevancy.is_enabled() {
+            return;
+        }
+        let assertions = self.pre_nnf_assertions.clone();
+        let mut visited = std::collections::HashSet::new();
+        for assertion in &assertions {
+            self.relevancy_classify_recursive(assertion, &mut visited);
+        }
+    }
+
+    fn relevancy_classify_recursive(
+        &mut self,
+        term: &Term,
+        visited: &mut std::collections::HashSet<u64>,
+    ) {
+        let uid = term.uid();
+        if !visited.insert(uid) {
+            return;
+        }
+        let lit = match self.relevancy_lit_for_term(term) {
+            Some(l) => l,
+            None => {
+                if relevancy_trace_enabled() {
+                    eprintln!(
+                        "[relevancy] classify_recursive: no lit for uid={} term={}",
+                        uid, term
+                    );
+                }
+                return;
+            }
+        };
+        if self.relevancy.has_node(lit) {
+            if relevancy_trace_enabled() {
+                eprintln!(
+                    "[relevancy] classify_recursive: already has node for lit={} term={}",
+                    lit, term
+                );
+            }
+            return;
+        }
+
+        let kind = match term.repr() {
+            ATerm::Eq(a, b) => {
+                // If both sides have SAT lits, treat as Iff (semantically
+                // correct for bool-bool Eq; for non-bool Eq the sides are
+                // atoms without direct SAT lits and this falls through to
+                // Atom naturally).
+                //
+                // Do NOT gate on `var_map.contains_key(&uid)`: the Eq's
+                // own uid may end up in var_map via
+                // `get_or_allocate_lit_for_term` (used by proof tracing on
+                // the QI path) with a fresh disconnected lit, which is
+                // not evidence that the Eq was Tseitinized as an atom.
+                let a_lit = self.relevancy_lit_for_term(a);
+                let b_lit = self.relevancy_lit_for_term(b);
+                if let (Some(al), Some(bl)) = (a_lit, b_lit) {
+                    self.relevancy_classify_recursive(a, visited);
+                    self.relevancy_classify_recursive(b, visited);
+                    crate::relevancy::NodeKind::Iff(al, bl)
+                } else {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                }
+            }
+            ATerm::Or(children) => {
+                let child_lits: Vec<i32> = children
+                    .iter()
+                    .filter_map(|c| {
+                        let r = self.relevancy_lit_for_term(c);
+                        if r.is_none() && relevancy_trace_enabled() {
+                            eprintln!(
+                                "[relevancy] Or child has no lit: uid={} term={}",
+                                c.uid(),
+                                c
+                            );
+                        }
+                        r
+                    })
+                    .collect();
+                if child_lits.is_empty() {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                } else {
+                    for c in children {
+                        self.relevancy_classify_recursive(c, visited);
+                    }
+                    crate::relevancy::NodeKind::Or(child_lits)
+                }
+            }
+            ATerm::And(children) => {
+                let child_lits: Vec<i32> = children
+                    .iter()
+                    .filter_map(|c| self.relevancy_lit_for_term(c))
+                    .collect();
+                if child_lits.is_empty() {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                } else {
+                    for c in children {
+                        self.relevancy_classify_recursive(c, visited);
+                    }
+                    crate::relevancy::NodeKind::And(child_lits)
+                }
+            }
+            ATerm::Implies(premises, conclusion) => {
+                // (implies a1 ... an b) = (or (not a1) ... (not an) b)
+                let mut child_lits: Vec<i32> = premises
+                    .iter()
+                    .filter_map(|p| self.relevancy_lit_for_term(p).map(|l| -l))
+                    .collect();
+                if let Some(bl) = self.relevancy_lit_for_term(conclusion) {
+                    child_lits.push(bl);
+                }
+                if child_lits.is_empty() {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                } else {
+                    for p in premises {
+                        self.relevancy_classify_recursive(p, visited);
+                    }
+                    self.relevancy_classify_recursive(conclusion, visited);
+                    crate::relevancy::NodeKind::Or(child_lits)
+                }
+            }
+            ATerm::Not(child) => {
+                self.relevancy_classify_recursive(child, visited);
+                return;
+            }
+            ATerm::Ite(c, t, e) => {
+                let c_lit = self.relevancy_lit_for_term(c);
+                let t_lit = self.relevancy_lit_for_term(t);
+                let e_lit = self.relevancy_lit_for_term(e);
+                if let (Some(cl), Some(tl), Some(el)) = (c_lit, t_lit, e_lit) {
+                    self.relevancy_classify_recursive(c, visited);
+                    self.relevancy_classify_recursive(t, visited);
+                    self.relevancy_classify_recursive(e, visited);
+                    crate::relevancy::NodeKind::Ite {
+                        cond: cl,
+                        then_lit: tl,
+                        else_lit: el,
+                    }
+                } else {
+                    crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term))
+                }
+            }
+            _ => crate::relevancy::NodeKind::Atom(self.relevancy_collect_subterm_lits(term)),
+        };
+
+        // Any branch that resolved to Atom (App/catch-all, or a fallback
+        // from Eq/Or/And/Implies/Ite when a child lacks a lit) still owes
+        // structural classification to any Boolean-connective sub-terms
+        // buried inside. Without that, e.g. `(= P (B (or ...)))` — non-Bool
+        // Eq falls through to Atom, but the `(or ...)` inside never gets
+        // an Or NodeKind, and its child equality never becomes relevant.
+        // Bug on tester-constructor3-reduced3.smt2.
+        if matches!(kind, crate::relevancy::NodeKind::Atom(_)) {
+            self.relevancy_classify_bool_subterms(term, visited);
+        }
+
+        if relevancy_trace_enabled() {
+            eprintln!("[relevancy] classify lit={} term={}", lit, term);
+        }
+        self.relevancy.register_node(lit, kind);
+    }
+
+    /// Recursively call `classify_recursive` on Boolean-connective sub-terms
+    /// reachable from `term`. Used by the App/catch-all classification
+    /// branch to ensure buried Boolean structure gets its own NodeKind.
+    fn relevancy_classify_bool_subterms(
+        &mut self,
+        term: &Term,
+        visited: &mut std::collections::HashSet<u64>,
+    ) {
+        let mut stack: Vec<Term> = Vec::new();
+        match term.repr() {
+            ATerm::App(_, args, _) => {
+                for a in args {
+                    stack.push(a.clone());
+                }
+            }
+            ATerm::Not(child) => stack.push(child.clone()),
+            ATerm::Or(children) | ATerm::And(children) => {
+                for c in children {
+                    stack.push(c.clone());
+                }
+            }
+            ATerm::Eq(a, b) => {
+                stack.push(a.clone());
+                stack.push(b.clone());
+            }
+            ATerm::Ite(c, t, e) => {
+                stack.push(c.clone());
+                stack.push(t.clone());
+                stack.push(e.clone());
+            }
+            _ => {}
+        }
+        while let Some(t) = stack.pop() {
+            match t.repr() {
+                ATerm::Or(_)
+                | ATerm::And(_)
+                | ATerm::Not(_)
+                | ATerm::Eq(_, _)
+                | ATerm::Ite(_, _, _)
+                | ATerm::Implies(_, _) => {
+                    self.relevancy_classify_recursive(&t, visited);
+                }
+                ATerm::App(_, args, _) => {
+                    for a in args {
+                        stack.push(a.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Get the egraph class root for a lit's underlying term, or None if
+    /// the lit has no term (e.g. QI-GC activation literal) or the term
+    /// isn't in the egraph.
+    pub fn class_root_for_lit(&self, lit: i32) -> Option<u32> {
+        use crate::egraphs::EgraphTrait;
+        let uid = *self.cnf_cache.var_map_reverse.get(&lit.abs())?;
+        let eid = *self.id_map.get_by_left(&uid)?;
+        Some(self.egraph.find(eid))
+    }
+
+    /// Mark a literal relevant and run literal/term/e-class propagation to a
+    /// fixpoint. `RelevancyState` owns the event queues; `SolverState` resolves
+    /// those events against terms and the egraph.
+    pub fn mark_lit_relevant(&mut self, lit: i32, level: usize) {
+        use crate::relevancy::RelevancyTrait;
+        let class_root = self.class_root_for_lit(lit);
+        self.relevancy.mark_relevant_root(lit, class_root, level);
+        self.propagate_relevancy();
+    }
+
+    fn propagate_relevant_term(&mut self, term: &Term, level: usize) {
+        use crate::egraphs::EgraphTrait;
+        use crate::relevancy::RelevancyTrait;
+
+        if let Some(&eid) = self.id_map.get_by_left(&term.uid()) {
+            self.egraph.mark_e_matching_term_relevant(eid, level);
+            let root = self.egraph.find(eid);
+            self.relevancy.add_class_relevant(root, level);
+        }
+
+        // A term discovered through an e-class may have a SAT literal even
+        // though its ordinary literal-relevance bit has not been set yet.
+        if let Some(lit) = self.relevancy_lit_for_term(term) {
+            let root = self.class_root_for_lit(lit);
+            self.relevancy.mark_relevant_root(lit, root, level);
+        }
+
+        match term.repr() {
+            ATerm::App(_, args, _) => {
+                for arg in args {
+                    self.relevancy.mark_term_relevant(arg.uid(), level);
+                }
+            }
+            ATerm::Eq(left, right) => {
+                self.relevancy.mark_term_relevant(left.uid(), level);
+                self.relevancy.mark_term_relevant(right.uid(), level);
+            }
+            ATerm::Ite(cond, then_term, else_term) => {
+                self.relevancy.mark_term_relevant(cond.uid(), level);
+                if let Some(cond_lit) = self.relevancy_lit_for_term(cond) {
+                    let branch_level = level.max(
+                        self.relevancy
+                            .lit_assignment_level(cond_lit)
+                            .unwrap_or(level),
+                    );
+                    match self.relevancy.lit_truth(cond_lit) {
+                        Some(true) => self
+                            .relevancy
+                            .mark_term_relevant(then_term.uid(), branch_level),
+                        Some(false) => self
+                            .relevancy
+                            .mark_term_relevant(else_term.uid(), branch_level),
+                        None => self.relevancy.install_term_ite_watch(
+                            term.uid(),
+                            cond_lit,
+                            then_term.uid(),
+                            else_term.uid(),
+                            level,
+                        ),
+                    }
+                } else {
+                    // Constants or otherwise non-CNF conditions are rare here.
+                    // Marking both branches is conservative and keeps theory
+                    // filtering sound when no SAT event can select one.
+                    self.relevancy.mark_term_relevant(then_term.uid(), level);
+                    self.relevancy.mark_term_relevant(else_term.uid(), level);
+                }
+            }
+            ATerm::Distinct(items) | ATerm::Xor(items) => {
+                for item in items {
+                    self.relevancy.mark_term_relevant(item.uid(), level);
+                }
+            }
+            ATerm::Annotated(inner, _) => {
+                self.relevancy.mark_term_relevant(inner.uid(), level);
+            }
+            // Boolean Or/And/Implies/Not structure is handled by NodeKind so
+            // irrelevant branches are not made relevant eagerly.
+            _ => {}
+        }
+    }
+
+    /// Mark every mapped solver term in an inclusive e-class member range.
+    fn mark_egraph_member_range_relevant(
+        &mut self,
+        range: crate::egraphs::EClassMemberRange<u32>,
+        level: usize,
+    ) {
+        use crate::egraphs::EgraphTrait;
+        use crate::relevancy::RelevancyTrait;
+
+        let mut eid = range.first;
+        loop {
+            let next = self.egraph.next_class_member(eid);
+            if let Some(&uid) = self.id_map.get_by_right(&eid) {
+                self.relevancy.mark_term_relevant(uid, level);
+            }
+            if eid == range.last {
+                break;
+            }
+            eid = next;
+        }
+    }
+
+    /// Drain literal, term, and e-class relevance events until no rule creates
+    /// another event. This is deliberately pull-based instead of invoking a
+    /// callback from `RelevancyState`, which avoids re-entrant mutable borrows.
+    pub fn propagate_relevancy(&mut self) {
+        use crate::egraphs::EgraphTrait;
+        use crate::relevancy::RelevancyTrait;
+
+        if !self.relevancy.is_enabled() {
+            return;
+        }
+
+        loop {
+            let lit_events = self.relevancy.drain_lits_for_term_propagation();
+            let term_events = self.relevancy.drain_newly_relevant_terms();
+            let class_events = self.relevancy.drain_newly_relevant_classes();
+            if lit_events.is_empty() && term_events.is_empty() && class_events.is_empty() {
+                break;
+            }
+
+            for event in lit_events {
+                if let Some(&uid) = self.cnf_cache.var_map_reverse.get(&event.lit.abs()) {
+                    self.relevancy.mark_term_relevant(uid, event.level);
+                }
+            }
+
+            for event in term_events {
+                let term = match self.get_term_safe(event.uid) {
+                    TermOption::Some(term) | TermOption::Uninitialized(term) => term,
+                    TermOption::None => continue,
+                };
+                self.propagate_relevant_term(&term, event.level);
+            }
+
+            for event in class_events {
+                let range = self.egraph.class_member_range(event.root);
+                self.mark_egraph_member_range_relevant(range, event.level);
+            }
+        }
+    }
+
+    pub(crate) fn drain_newly_relevant_lits(&mut self) -> Vec<crate::relevancy::RelevantLitEvent> {
+        self.relevancy.drain_newly_relevant_lits()
+    }
+
+    /// Check whether a lit is relevant, either directly or by class.
+    pub fn is_lit_relevant(&self, lit: i32) -> bool {
+        use crate::relevancy::RelevancyTrait;
+        self.relevancy
+            .is_relevant_with_class(lit, self.class_root_for_lit(lit))
+    }
+
+    /// Drain the egraph's all-merges queue and propagate class relevancy only
+    /// through the pre-merge member range that has just become relevant.
+    pub fn propagate_class_relevancy_from_merges(&mut self) {
+        use crate::egraphs::EgraphTrait;
+        use crate::relevancy::RelevancyTrait;
+        let merges = self.egraph.drain_all_merges();
+        if !self.relevancy.is_enabled() {
+            return;
+        }
+        for event in merges {
+            let Some(propagation) = self.relevancy.propagate_class_relevancy(
+                event.survivor,
+                event.demoted,
+                event.level,
+            ) else {
+                continue;
+            };
+            let range = match propagation.members {
+                RelevantMergeMembers::Survivor => event.survivor_members,
+                RelevantMergeMembers::Demoted => event.demoted_members,
+            };
+            self.mark_egraph_member_range_relevant(range, propagation.level);
+        }
+        self.propagate_relevancy();
     }
 
     pub fn is_valid_hash(&self, hash: u32, level: usize) -> bool {
@@ -247,9 +1278,17 @@ impl SolverState {
 
     pub fn get_term_from_lit_safe(&mut self, lit: i32) -> Option<Term> {
         if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
-            Some(self.get_term(*num))
+            match self.get_term_safe(*num) {
+                TermOption::Some(term) | TermOption::Uninitialized(term) => Some(term),
+                TermOption::None => None,
+            }
         } else if let Some(num) = self.cnf_cache.var_map_reverse.get(&-lit) {
-            Some(self.context.not(self.get_term(*num)))
+            match self.get_term_safe(*num) {
+                TermOption::Some(term) | TermOption::Uninitialized(term) => {
+                    Some(self.context.not(term))
+                }
+                TermOption::None => None,
+            }
         } else {
             None
         }
@@ -326,6 +1365,14 @@ impl SolverState {
         } else {
             self.terms_list[num as usize].clone()
         }
+    }
+
+    pub(crate) fn generation_of(&self, uid: u64) -> u32 {
+        self.generation.get(&uid).copied().unwrap_or(0)
+    }
+
+    pub(crate) fn set_generation(&mut self, uid: u64, generation: u32) {
+        self.generation.entry(uid).or_insert(generation);
     }
 
     /// Convert a solver term UID to the corresponding egraph ID.
@@ -419,6 +1466,9 @@ impl SolverState {
         if let TermOption::Some(_) = &self.terms_list[num as usize] {
             return self.to_egraph_id(num);
         }
+        if self.current_instantiation_generation > 0 {
+            self.set_generation(num, self.current_instantiation_generation);
+        }
         // Reuse egraph ID if build_pattern already allocated one for this term
         if let Some(eid) = self.id_map.get_by_left(&num).copied() {
             self.terms_list[num as usize] = TermOption::Some(term.clone());
@@ -433,6 +1483,7 @@ impl SolverState {
         if let Exists(_, _) | Forall(_, _) = term.repr() {
             let egraph_id = self.egraph.register_opaque();
             self.id_map.insert(num, egraph_id);
+            self.record_qi_created_term(num);
             self.register_arithmetic_and_quantifier(term, guard);
             return egraph_id;
         }
@@ -453,6 +1504,7 @@ impl SolverState {
                 .register_term(op, &egraph_children, from_quantifier)
         };
         self.id_map.insert(num, egraph_id);
+        self.record_qi_created_term(num);
         self.register_arithmetic_and_quantifier(term, guard);
         egraph_id
     }
@@ -555,6 +1607,9 @@ impl SolverState {
                     for attr in attrs.iter() {
                         match attr {
                             Attribute::Pattern(s_exprs) => {
+                                if s_exprs.is_empty() {
+                                    panic!("forall has an empty :pattern trigger: {term}");
+                                }
                                 let pattern_ids: Vec<crate::egraphs::repr::PatternId> =
                                     s_exprs.iter().map(|p| self.build_pattern(p)).collect();
                                 trigger_ids.push(pattern_ids);
@@ -634,6 +1689,31 @@ impl SolverState {
             });
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SolverTermGcReport {
+    pub(crate) requested: usize,
+    pub(crate) candidate_classes: usize,
+    pub(crate) fully_candidate_classes: usize,
+    pub(crate) retired_classes: usize,
+    pub(crate) pruned_mixed_classes: usize,
+    pub(crate) pruned_mixed_class_terms: usize,
+    pub(crate) retired_terms: usize,
+    pub(crate) retired_term_uids: Vec<u64>,
+    pub(crate) retired_sat_vars: Vec<i32>,
+    pub(crate) retired_sat_only_vars: Vec<i32>,
+    pub(crate) predecessor_entries_before: usize,
+    pub(crate) predecessor_entries_after_compaction: usize,
+    pub(crate) predecessor_entries_after_retirement: usize,
+    pub(crate) blocked_mixed_class_roots: usize,
+    pub(crate) blocked_live_parent_terms: usize,
+    pub(crate) blocked_proof_reference_terms: usize,
+    pub(crate) blocked_disequality_terms: usize,
+    pub(crate) blocked_pattern_terms: usize,
+    pub(crate) blocked_trigger_head_terms: usize,
+    pub(crate) blocked_pending_event_terms: usize,
+    pub(crate) missing: usize,
 }
 
 impl HasArena for SolverState {
@@ -1003,5 +2083,54 @@ pub fn find_if_eq_diseq<'a>(
             );
             Assertion::Other
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retiring_a_term_marks_every_sat_variable_alias() {
+        let reverse_map = HashMap::from([(5, 42), (6, 42), (-7, 42), (7, 99), (8, 99)]);
+        let retired_uids = HashSet::from([42]);
+
+        assert_eq!(
+            sat_vars_owned_only_by_retired_terms(&reverse_map, &retired_uids),
+            HashSet::from([5, 6])
+        );
+    }
+
+    #[test]
+    fn sat_variable_with_only_tombstoned_term_mappings_is_retired() {
+        let mut solver_state = SolverState::new(Context::new(), true, false, false, false, true);
+        solver_state.cnf_cache.var_map_reverse.insert(5, 42);
+        while solver_state.terms_list.len() <= 42 {
+            solver_state.terms_list.push(TermOption::None);
+        }
+
+        assert!(solver_state.is_retired_sat_var(5));
+        assert!(solver_state.get_term_from_lit_safe(5).is_none());
+    }
+
+    #[test]
+    fn later_low_sat_var_retirement_preserves_high_tombstones() {
+        let mut bitmap = Vec::new();
+
+        mark_retired_sat_vars(&mut bitmap, &[10_603]);
+        mark_retired_sat_vars(&mut bitmap, &[7]);
+
+        assert!(bitmap[10_603]);
+        assert!(bitmap[7]);
+    }
+
+    #[test]
+    fn term_generation_is_first_write_wins() {
+        let mut solver_state = SolverState::new(Context::new(), true, false, false, false, true);
+
+        solver_state.set_generation(42, 1);
+        solver_state.set_generation(42, 7);
+
+        assert_eq!(solver_state.generation_of(42), 1);
     }
 }

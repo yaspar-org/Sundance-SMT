@@ -248,6 +248,8 @@ pub fn learn_exactly_one_tester_clause(
     let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
     vector.extend(tester_cnf);
 
+    solver_state.relevancy_register_term(&tester_or, 0);
+
     for uid in base_case_uids {
         if let Some(&lit) = solver_state.cnf_cache.var_map.get(&uid) {
             solver_state.base_case_tester_lits.push(lit);
@@ -357,13 +359,21 @@ pub fn learn_ctor_selector_clauses(
     let eq_clause = eq_cnf.0[0].0.clone();
     assert_eq!(eq_clause.len(), 1);
 
-    let imp = solver_state.implies(vec![tester_app], eq);
+    let imp = solver_state.implies(vec![tester_app.clone()], eq.clone());
     debug_println!(25, 10, "(assert {})", imp);
     let imp_nnf = imp.nnf(solver_state);
     solver_state.insert_predecessor(&imp_nnf, None, None, from_quantifier);
     let imp_cnf = imp.cnf_tseitin(solver_state);
     let clauses = imp_cnf.0.iter().map(|c| c.0.clone());
     vector.extend(clauses);
+
+    // This is a theory-owned implication. Z3's datatype theory marks both
+    // the recognizer antecedent and generated equality as relevant when it
+    // creates this axiom, rather than relying on Boolean branch selection to
+    // eventually expose the equality.
+    solver_state.relevancy_register_term(&tester_app, 0);
+    solver_state.relevancy_register_term(&eq, 0);
+
     vector
 }
 
@@ -393,11 +403,11 @@ fn learn_tester_for_ctor_app(
     );
     let tester_nnf = tester_app.nnf(solver_state);
     solver_state.insert_predecessor(&tester_nnf, None, None, from_quantifier);
-    tester_nnf
-        .cnf_tseitin(solver_state)
-        .into_iter()
-        .map(|x| x.0)
-        .collect()
+    let cnf = tester_nnf.cnf_tseitin(solver_state);
+
+    solver_state.relevancy_register_term(&tester_app, 0);
+
+    cnf.into_iter().map(|x| x.0).collect()
 }
 
 /// We are learning the clause /\_i=1^k f_i(f(t1, ... tk)) = t_i
@@ -432,6 +442,9 @@ fn learn_selector_ctor_clause(
         let sel_eq_nnf = sel_eq.nnf(solver_state);
         solver_state.insert_predecessor(&sel_eq_nnf, None, None, from_quantifier);
         let sel_eq_cnf = sel_eq.cnf_tseitin(solver_state);
+
+        solver_state.relevancy_register_term(&sel_eq, 0);
+
         let clauses = sel_eq_cnf.into_iter().map(|c| c.0);
         vector.extend(clauses)
     }
@@ -447,7 +460,7 @@ pub fn learn_or_not_term_tester_term(
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     let not_tester_term = solver_state.not(tester_term.clone());
-    let not_term = solver_state.not(term);
+    let not_term = solver_state.not(term.clone());
     let or_not_tester_not_term = solver_state.or(vec![not_tester_term, not_term]);
     solver_state.insert_predecessor(&or_not_tester_not_term, None, None, from_quantifier);
     let tester_cnf = or_not_tester_not_term
@@ -455,6 +468,13 @@ pub fn learn_or_not_term_tester_term(
         .into_iter()
         .map(|x| x.0)
         .collect();
+
+    // Both recognizers caused this theory lemma and must remain visible to
+    // datatype assignment processing. Register the atoms directly instead
+    // of treating the generated clause as user Boolean structure.
+    solver_state.relevancy_register_term(&tester_term, 0);
+    solver_state.relevancy_register_term(&term, 0);
+
     debug_println!(25, 10, "(assert {})", or_not_tester_not_term,);
     debug_println!(12, 2, "This gives us {:?}", tester_cnf);
     tester_cnf

@@ -24,6 +24,9 @@ pub struct SMTProofTracer {
     registered_clause_callbacks: HashMap<Vec<i32>, usize>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
+    /// QI GC shared state — used to track clause IDs and ancestry for GC.
+    pub(crate) qi_gc_state:
+        Option<std::rc::Rc<std::cell::RefCell<crate::cadical_propagator::QiGcState>>>,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -233,12 +236,18 @@ impl SMTProofTracer {
             instantiations_for_smt2: Vec::new(),
             registered_clause_callbacks: HashMap::new(),
             deleted_clauses: 0,
+            qi_gc_state: None,
         }
     }
 
     ////////////////////////////////////////////////////////////////////////////
 
     pub fn push_step(&mut self, clause: &[i32], typ: ProofStepType) {
+        // TODO: re-enable proof production with QI GC. Clauses should only be
+        // added to the proof after they are promoted (garbage collected and re-added).
+        if self.qi_gc_state.is_some() {
+            return;
+        }
         if !is_tautology(clause) {
             self.proof_steps.push(ProofStep {
                 clause: clause.to_vec(),
@@ -315,6 +324,26 @@ impl SMTProofTracer {
     }
 
     /// Returns whether a term with the `literal` (or its negation) has been registered.
+    pub fn lit_to_string(&self, lit: i32) -> Option<String> {
+        if let Some((id, term, polarity)) = self.terms_list.get(&lit) {
+            let _ = id;
+            Some(if *polarity {
+                format!("{}", term)
+            } else {
+                format!("(not {})", term)
+            })
+        } else if let Some((id, term, polarity)) = self.terms_list.get(&-lit) {
+            let _ = id;
+            Some(if *polarity {
+                format!("(not {})", term)
+            } else {
+                format!("{}", term)
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn is_lit_registered(&self, literal: i32) -> bool {
         self.get_lit_info(literal).is_some() || self.get_lit_info(-literal).is_some()
     }

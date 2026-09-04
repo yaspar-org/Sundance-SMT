@@ -5,11 +5,15 @@ use super::datastructures::{CanonicalOp, DisequalTerm, Predecessor};
 use super::proofforest::*;
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use crate::debug_println;
-use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
+use crate::egraphs::traits::{
+    Conflict, EClassMemberRange, EgraphMergeEvent, EgraphResult, EgraphTrait, Lit,
+};
 use crate::log::is_important;
+use crate::relevancy::relevancy_trace_enabled;
 use crate::utils::{
     DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
 };
+use std::cell::Cell;
 use std::default::Default;
 use std::fmt;
 use yaspar_ir::ast::Local;
@@ -21,6 +25,20 @@ type SigKey = (CanonicalOp, Children);
 /// Stores the actual key used, so undo doesn't depend on UF state.
 /// (level, key, term_id, was_inserted)
 type SigTrailEntry = (usize, SigKey, u32, bool);
+
+/// Exact predecessor-map mutation made at one decision level.
+///
+/// The hash stamps make discarded entries logically stale after backtracking,
+/// but retaining every historical copy causes predecessor storage to grow
+/// monotonically. The trail lets the solver reclaim only mutations from
+/// discarded levels without rescanning every predecessor map.
+#[derive(Debug, Clone)]
+struct PredecessorTrailEntry {
+    term: u32,
+    key: u32,
+    previous: Option<Predecessor>,
+    installed: Predecessor,
+}
 
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -200,22 +218,42 @@ impl fmt::Display for Egraph {
 pub struct Egraph {
     /// Next ID to assign
     next_id: u32,
+    /// Tombstoned IDs available for reuse after QI garbage collection.
+    free_ids: Vec<u32>,
     /// Internal term representation per term ID
     terms: Vec<TermSlot>,
     /// Compiled patterns for e-matching (indexed by PatternId)
     compiled_patterns: Vec<Pattern>,
     /// map from vertices (u32) -> ProofForestEdge
     proof_forest: Vec<ProofForestEdge>,
+    /// Circular linked lists of e-class members. For each class root `r`,
+    /// following `member_next` from `r` visits every member exactly once and
+    /// returns to `r`. Merging two classes is a swap of their root links.
+    member_next: Vec<u32>,
     /// keeps track of a stack of "edges" to backtrack on
-    proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u32, ProofForestEdge)>,
+    proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u32, ProofForestEdge, u32, u32)>,
     /// this is a map from terms (u32) -> (term in the same egraph, predecessor of term in same egraph)
     predecessors: Vec<FastDeterministicHashMap<u32, Predecessor>>,
+    /// Exact predecessor-map mutations, grouped by decision level.
+    predecessor_trail: Vec<Vec<PredecessorTrailEntry>>,
     /// number to keep track of the current hash
     predecessor_hash: u32,
     /// mapping from levels -> corresponding hash
     predecessor_level: Vec<u32>,
     /// map from functions (String) -> terms of this function
     function_maps: DeterministicHashMap<String, Vec<(u32, Vec<u32>)>>,
+    /// Function applications that have become relevant at least once. Entries
+    /// are appended once; `e_matching_relevance_levels` determines whether an
+    /// entry is active after backtracking.
+    relevant_function_maps: DeterministicHashMap<String, Vec<(u32, Vec<u32>)>>,
+    /// Earliest active relevance level for each egraph term.
+    e_matching_relevance_levels: Vec<Option<usize>>,
+    /// Terms whose active e-matching relevance level was established at each
+    /// nonzero decision level.
+    e_matching_relevance_trail: Vec<Vec<u32>>,
+    /// Prevent duplicate insertion into `relevant_function_maps` when a term
+    /// becomes relevant again on a later branch.
+    ever_e_matching_relevant: Vec<bool>,
     /// the current decision level of the SAT solver, useful to keep track for backtracking
     decision_level: usize,
     /// keeps track of terms created by quantifier instantiation and their predecessors.
@@ -225,10 +263,18 @@ pub struct Egraph {
     /// valid at that level and don't need refreshing).
     predecessors_created_by_quantifiers:
         DeterministicHashMap<u32, DeterministicHashMap<u32, usize>>,
+    /// Exact dynamic (child, parent) predecessor registrations grouped by the
+    /// lowest decision level at which their current root placement is valid.
+    /// Backtracking moves only affected entries into the target-level bucket,
+    /// avoiding a clone and scan of the complete nested map on every pop.
+    quantifier_predecessor_replay_trail: Vec<Vec<(u32, u32)>>,
     /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()]).
     /// Value is the decision level at which the term was registered; entries added
     /// at or below the backtrack target level are skipped during `backtrack_to`.
     union_to_eclass: DeterministicHashMap<u32, usize>,
+    /// Dynamic terms whose signature/e-class placement must be reconsidered
+    /// when backtracking below their current valid level.
+    union_to_eclass_replay_trail: Vec<Vec<u32>>,
     /// Signature table: maps (op, [find(c1),...,find(cn)]) → term_id.
     /// Maintained in parallel with the existing congruence detection for now.
     sig_table: FastDeterministicHashMap<SigKey, u32>,
@@ -241,8 +287,23 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Pre-merge events from ALL unions (direct or congruence-derived), for
+    /// egraph-driven relevancy propagation. Only populated when
+    /// `track_all_merges` is true.
+    ///
+    /// TODO: merge this with `arithmetic_merge_queue` — they carry the same
+    /// info; the current separation is just because arithmetic gates on the
+    /// arithmetic tag. Unify into one queue with per-consumer draining.
+    relevancy_merge_queue: Vec<EgraphMergeEvent<u32>>,
+    /// Whether to populate `relevancy_merge_queue`.
+    track_all_merges: bool,
     /// Accumulated egraph statistics.
     pub(crate) stats: EgraphStats,
+    /// Low-overhead counters used to diagnose e-matching and QI-GC growth.
+    e_match_calls: Cell<u64>,
+    e_match_candidates_scanned: Cell<u64>,
+    e_match_relevant_candidates_scanned: Cell<u64>,
+    e_match_results: Cell<u64>,
 }
 
 /// Statistics accumulated by the egraph.
@@ -250,6 +311,71 @@ pub struct Egraph {
 pub(crate) struct EgraphStats {
     /// Number of successful equality merges (where roots differed).
     pub(crate) merges: u64,
+    /// Number of incremental predecessor cleanup passes after backtracking.
+    pub(crate) predecessor_gc_runs: u64,
+    /// Historical predecessor entries physically removed by those passes.
+    pub(crate) predecessor_gc_removed: u64,
+    /// Earlier predecessor entries restored after a branch-local replacement.
+    pub(crate) predecessor_gc_restored: u64,
+    /// Enodes physically tombstoned by QI garbage collection.
+    pub(crate) retired_terms: u64,
+    /// Tombstoned enode IDs consumed by later registrations.
+    pub(crate) reused_term_ids: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EgraphGcProfile {
+    pub(crate) registered_terms: usize,
+    pub(crate) reusable_ids: usize,
+    pub(crate) function_entries: usize,
+    pub(crate) relevant_function_entries: usize,
+    pub(crate) active_relevant_terms: usize,
+    pub(crate) predecessor_entries: usize,
+    pub(crate) predecessor_trail_entries: usize,
+    pub(crate) qi_predecessor_entries: usize,
+    pub(crate) union_to_eclass_entries: usize,
+    pub(crate) signature_entries: usize,
+    pub(crate) signature_trail_entries: usize,
+    pub(crate) backtrack_entries: usize,
+    pub(crate) merges: u64,
+    pub(crate) predecessor_gc_runs: u64,
+    pub(crate) predecessor_gc_removed: u64,
+    pub(crate) predecessor_gc_restored: u64,
+    pub(crate) retired_terms: u64,
+    pub(crate) reused_term_ids: u64,
+    pub(crate) e_match_calls: u64,
+    pub(crate) e_match_candidates_scanned: u64,
+    pub(crate) e_match_relevant_candidates_scanned: u64,
+    pub(crate) e_match_results: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct EgraphRetireReport {
+    pub(crate) requested: usize,
+    pub(crate) candidate_classes: usize,
+    pub(crate) fully_candidate_classes: usize,
+    pub(crate) retired_classes: usize,
+    pub(crate) pruned_mixed_classes: usize,
+    pub(crate) pruned_mixed_class_terms: usize,
+    pub(crate) retired_ids: Vec<u32>,
+    pub(crate) predecessor_entries_before: usize,
+    pub(crate) predecessor_entries_after_compaction: usize,
+    pub(crate) predecessor_entries_after_retirement: usize,
+    pub(crate) blocked_mixed_class_roots: usize,
+    pub(crate) blocked_live_parent_terms: usize,
+    pub(crate) blocked_proof_reference_terms: usize,
+    pub(crate) blocked_disequality_terms: usize,
+    pub(crate) blocked_pattern_terms: usize,
+    pub(crate) blocked_trigger_head_terms: usize,
+    pub(crate) blocked_pending_event_terms: usize,
+    pub(crate) missing: usize,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct EgraphPredecessorGcReport {
+    pub(crate) examined_mutations: usize,
+    pub(crate) removed_entries: usize,
+    pub(crate) restored_entries: usize,
 }
 
 impl Default for Egraph {
@@ -262,6 +388,7 @@ impl Egraph {
     pub fn new() -> Self {
         Egraph {
             next_id: 0,
+            free_ids: Vec::new(),
             terms: vec![TermSlot::Empty],
             compiled_patterns: Vec::new(),
             proof_forest: vec![ProofForestEdge::Root {
@@ -271,19 +398,72 @@ impl Egraph {
                 children: DeterministicHashSet::new(),
                 arithmetic: false,
             }],
+            member_next: vec![0],
             proof_forest_backtrack_stack: Vec::new(),
             predecessors: vec![FastDeterministicHashMap::default()],
+            predecessor_trail: vec![Vec::new()],
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
             function_maps: DeterministicHashMap::default(),
+            relevant_function_maps: DeterministicHashMap::default(),
+            e_matching_relevance_levels: vec![None],
+            e_matching_relevance_trail: vec![Vec::new()],
+            ever_e_matching_relevant: vec![false],
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
+            quantifier_predecessor_replay_trail: vec![Vec::new()],
             union_to_eclass: DeterministicHashMap::new(),
+            union_to_eclass_replay_trail: vec![Vec::new()],
             sig_table: FastDeterministicHashMap::default(),
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
+            relevancy_merge_queue: Vec::new(),
+            track_all_merges: false,
             stats: EgraphStats::default(),
+            e_match_calls: Cell::new(0),
+            e_match_candidates_scanned: Cell::new(0),
+            e_match_relevant_candidates_scanned: Cell::new(0),
+            e_match_results: Cell::new(0),
+        }
+    }
+
+    pub(crate) fn gc_profile(&self) -> EgraphGcProfile {
+        EgraphGcProfile {
+            registered_terms: self
+                .terms
+                .iter()
+                .filter(|slot| !matches!(slot, TermSlot::Empty))
+                .count(),
+            reusable_ids: self.free_ids.len(),
+            function_entries: self.function_maps.values().map(Vec::len).sum(),
+            relevant_function_entries: self.relevant_function_maps.values().map(Vec::len).sum(),
+            active_relevant_terms: self
+                .e_matching_relevance_levels
+                .iter()
+                .filter(|level| level.is_some())
+                .count(),
+            predecessor_entries: self.predecessors.iter().map(|entries| entries.len()).sum(),
+            predecessor_trail_entries: self.predecessor_trail.iter().map(Vec::len).sum(),
+            qi_predecessor_entries: self
+                .predecessors_created_by_quantifiers
+                .values()
+                .map(|entries| entries.len())
+                .sum(),
+            union_to_eclass_entries: self.union_to_eclass.len(),
+            signature_entries: self.sig_table.len(),
+            signature_trail_entries: self.sig_trail.len(),
+            backtrack_entries: self.proof_forest_backtrack_stack.len(),
+            merges: self.stats.merges,
+            predecessor_gc_runs: self.stats.predecessor_gc_runs,
+            predecessor_gc_removed: self.stats.predecessor_gc_removed,
+            predecessor_gc_restored: self.stats.predecessor_gc_restored,
+            retired_terms: self.stats.retired_terms,
+            reused_term_ids: self.stats.reused_term_ids,
+            e_match_calls: self.e_match_calls.get(),
+            e_match_candidates_scanned: self.e_match_candidates_scanned.get(),
+            e_match_relevant_candidates_scanned: self.e_match_relevant_candidates_scanned.get(),
+            e_match_results: self.e_match_results.get(),
         }
     }
 
@@ -343,6 +523,7 @@ impl Egraph {
             children: DeterministicHashSet::new(),
             arithmetic: false,
         };
+        self.member_next[id as usize] = id;
 
         // Add to function_maps using the op's string key
         let func_key = op.to_function_map_key();
@@ -374,14 +555,24 @@ impl Egraph {
                     inner_term: child_uid,
                 };
 
-                self.predecessors_created_by_quantifiers
+                let replaced_level = self
+                    .predecessors_created_by_quantifiers
                     .entry(child_uid)
                     .or_default()
                     .insert(id, self.decision_level);
+                // A function application may contain the same child in more
+                // than one argument position. The predecessor map deliberately
+                // deduplicates that (child, parent) pair, so only trail its
+                // first registration.
+                if replaced_level.is_none() && self.decision_level != 0 {
+                    while self.decision_level >= self.quantifier_predecessor_replay_trail.len() {
+                        self.quantifier_predecessor_replay_trail.push(Vec::new());
+                    }
+                    self.quantifier_predecessor_replay_trail[self.decision_level]
+                        .push((child_uid, id));
+                }
 
-                self.predecessors[root as usize]
-                    .entry(id)
-                    .or_insert(root_predecessor);
+                self.add_predecessor(root, id, root_predecessor);
             }
         }
 
@@ -398,10 +589,568 @@ impl Egraph {
         }
 
         if dynamic && !children.is_empty() {
-            self.union_to_eclass.insert(id, self.decision_level);
+            let replaced_level = self.union_to_eclass.insert(id, self.decision_level);
+            debug_assert!(
+                replaced_level.is_none(),
+                "dynamic e-class term registered more than once"
+            );
+            if replaced_level.is_none() && self.decision_level != 0 {
+                while self.decision_level >= self.union_to_eclass_replay_trail.len() {
+                    self.union_to_eclass_replay_trail.push(Vec::new());
+                }
+                self.union_to_eclass_replay_trail[self.decision_level].push(id);
+            }
         }
 
         false
+    }
+
+    fn allocate_id(&mut self) -> u32 {
+        if let Some(id) = self.free_ids.pop() {
+            debug_assert!(matches!(self.terms[id as usize], TermSlot::Empty));
+            self.stats.reused_term_ids += 1;
+            id
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            id
+        }
+    }
+
+    fn collect_pattern_ground_ids(pattern: &Pattern, ids: &mut DeterministicHashSet<u32>) {
+        match pattern {
+            Pattern::Var(_) => {}
+            Pattern::Ground(id) => {
+                ids.insert(*id);
+            }
+            Pattern::App(_, children) => {
+                for child in children {
+                    Self::collect_pattern_ground_ids(child, ids);
+                }
+            }
+        }
+    }
+
+    fn class_members(&self, root: u32) -> Vec<u32> {
+        debug_assert_eq!(self.find(root), root);
+        let mut members = vec![root];
+        let mut member = self.member_next[root as usize];
+        while member != root {
+            members.push(member);
+            assert!(
+                members.len() <= self.next_id as usize,
+                "e-class member list rooted at {root} did not form a cycle"
+            );
+            member = self.member_next[member as usize];
+        }
+        members
+    }
+
+    /// Equalities between live members of arithmetic classes that survive at
+    /// level zero. A rebuilt arithmetic backend can assert these permanently
+    /// instead of depending on historical merge callbacks.
+    pub(crate) fn arithmetic_root_equalities(&self) -> Vec<(u32, u32)> {
+        let mut equalities = Vec::new();
+        for root in 0..self.next_id {
+            if matches!(self.terms[root as usize], TermSlot::Empty) {
+                continue;
+            }
+            let ProofForestEdge::Root {
+                arithmetic: true, ..
+            } = &self.proof_forest[root as usize]
+            else {
+                continue;
+            };
+            let mut member = self.member_next[root as usize];
+            while member != root {
+                debug_assert!(!matches!(self.terms[member as usize], TermSlot::Empty));
+                equalities.push((root, member));
+                member = self.member_next[member as usize];
+            }
+        }
+        equalities
+    }
+
+    /// Restore or remove exact predecessor-map mutations from levels that
+    /// have already been backtracked.
+    pub(crate) fn collect_backtracked_predecessors(&mut self) -> EgraphPredecessorGcReport {
+        let mut report = EgraphPredecessorGcReport::default();
+        for level in (self.decision_level + 1..self.predecessor_trail.len()).rev() {
+            let entries = std::mem::take(&mut self.predecessor_trail[level]);
+            for entry in entries.into_iter().rev() {
+                report.examined_mutations += 1;
+                let predecessors = &mut self.predecessors[entry.term as usize];
+                if predecessors.get(&entry.key) != Some(&entry.installed) {
+                    // A lower-level dynamic predecessor may have been
+                    // re-established after the backtrack. It supersedes the
+                    // discarded branch mutation and must remain installed.
+                    continue;
+                }
+                if let Some(previous) = entry.previous {
+                    predecessors.insert(entry.key, previous);
+                    report.restored_entries += 1;
+                } else {
+                    predecessors.remove(&entry.key);
+                    report.removed_entries += 1;
+                }
+            }
+        }
+        self.stats.predecessor_gc_runs += 1;
+        self.stats.predecessor_gc_removed += report.removed_entries as u64;
+        self.stats.predecessor_gc_restored += report.restored_entries as u64;
+        report
+    }
+
+    /// Rebuild the predecessor index from live level-zero enodes.
+    ///
+    /// This remains a full-compaction fallback for root QI collection. Normal
+    /// SAT backtracks use `collect_backtracked_predecessors` and touch only
+    /// entries mutated on discarded decision levels.
+    fn compact_level_zero_predecessors(&mut self) -> (usize, usize) {
+        assert_eq!(self.decision_level, 0);
+        assert!(
+            self.proof_forest_backtrack_stack.is_empty() && self.sig_trail.is_empty(),
+            "predecessor compaction requires all transient proof state to be backtracked"
+        );
+
+        let before = self.predecessors.iter().map(|entries| entries.len()).sum();
+        let live_parents: Vec<(u32, Vec<u32>)> = self
+            .terms
+            .iter()
+            .enumerate()
+            .filter_map(|(id, slot)| match slot {
+                TermSlot::Term(entry) => Some((id as u32, entry.children.as_slice().to_vec())),
+                TermSlot::Empty | TermSlot::Opaque => None,
+            })
+            .collect();
+
+        for entries in &mut self.predecessors {
+            entries.clear();
+        }
+        for entries in &mut self.predecessor_trail {
+            entries.clear();
+        }
+        for (parent, children) in live_parents {
+            for child in children {
+                debug_assert!(
+                    !matches!(self.terms[child as usize], TermSlot::Empty),
+                    "live parent {} refers to retired child {}",
+                    parent,
+                    child
+                );
+                let predecessor = Predecessor {
+                    level: 0,
+                    hash: 0,
+                    predecessor: parent,
+                    inner_term: child,
+                };
+                self.predecessors[child as usize].insert(parent, predecessor.clone());
+                let root = self.find(child);
+                if root != child {
+                    self.predecessors[root as usize].insert(parent, predecessor);
+                }
+            }
+        }
+
+        let after = self.predecessors.iter().map(|entries| entries.len()).sum();
+        (before, after)
+    }
+
+    /// Physically remove dead QI-created enodes at decision level zero.
+    ///
+    /// Collection can prune dead members from otherwise-live equivalence
+    /// classes. A term remains pinned if it is a class root with surviving
+    /// members, occurs in a trigger or pending merge event, has a surviving
+    /// syntactic parent, or is referenced by a surviving proof/disequality
+    /// edge. This fixed-point closure preserves every path that can still be
+    /// used for congruence, conflict explanation, or e-matching while allowing
+    /// irrelevant leaves in the large Boolean true/false classes to disappear.
+    pub(crate) fn retire_terms(
+        &mut self,
+        candidates: &DeterministicHashSet<u32>,
+    ) -> EgraphRetireReport {
+        let mut report = EgraphRetireReport {
+            requested: candidates.len(),
+            ..EgraphRetireReport::default()
+        };
+        assert_eq!(
+            self.decision_level, 0,
+            "egraph terms may only be retired at decision level zero"
+        );
+        assert!(
+            self.proof_forest_backtrack_stack.is_empty() && self.sig_trail.is_empty(),
+            "egraph retirement requires all transient proof state to be backtracked"
+        );
+
+        (
+            report.predecessor_entries_before,
+            report.predecessor_entries_after_compaction,
+        ) = self.compact_level_zero_predecessors();
+        let mut removable = DeterministicHashSet::default();
+        for &id in candidates {
+            if id as usize >= self.terms.len() || matches!(self.terms[id as usize], TermSlot::Empty)
+            {
+                report.missing += 1;
+            } else {
+                removable.insert(id);
+            }
+        }
+
+        let mut class_members_by_root: DeterministicHashMap<u32, Vec<u32>> =
+            DeterministicHashMap::default();
+        for &id in &removable {
+            let root = self.find(id);
+            class_members_by_root
+                .entry(root)
+                .or_insert_with(|| self.class_members(root));
+        }
+        report.candidate_classes = class_members_by_root.len();
+        for members in class_members_by_root.values() {
+            if members.iter().all(|member| removable.contains(member)) {
+                report.fully_candidate_classes += 1;
+            }
+        }
+
+        let mut pattern_ids = DeterministicHashSet::default();
+        for pattern in &self.compiled_patterns {
+            Self::collect_pattern_ground_ids(pattern, &mut pattern_ids);
+        }
+        for id in pattern_ids {
+            if removable.remove(&id) {
+                report.blocked_pattern_terms += 1;
+            }
+        }
+
+        // Every ground application whose head can match a compiled trigger
+        // remains part of the future e-matching search space even when no live
+        // SAT/theory clause refers to it. Retiring it can make a later
+        // quantifier round incorrectly saturate.
+        let mut trigger_heads = Vec::new();
+        let mut wildcard_trigger = false;
+        for pattern in &self.compiled_patterns {
+            match pattern {
+                Pattern::App(op, _) => {
+                    if !trigger_heads.contains(op) {
+                        trigger_heads.push(op.clone());
+                    }
+                }
+                Pattern::Var(_) => wildcard_trigger = true,
+                Pattern::Ground(_) => {}
+            }
+        }
+        let trigger_head_ids: Vec<u32> = removable
+            .iter()
+            .copied()
+            .filter(|id| {
+                wildcard_trigger
+                    || matches!(
+                        &self.terms[*id as usize],
+                        TermSlot::Term(entry) if trigger_heads.contains(&entry.op)
+                    )
+            })
+            .collect();
+        for id in trigger_head_ids {
+            if removable.remove(&id) {
+                report.blocked_trigger_head_terms += 1;
+            }
+        }
+
+        // Pending class-relevancy events contain pre-merge member ranges.
+        // Keep those ranges stable until their consumer drains them.
+        let mut pending_event_ids = DeterministicHashSet::default();
+        for event in &self.relevancy_merge_queue {
+            pending_event_ids.insert(event.survivor);
+            pending_event_ids.insert(event.demoted);
+            pending_event_ids.extend(self.collect_member_range(event.survivor_members));
+            pending_event_ids.extend(self.collect_member_range(event.demoted_members));
+        }
+        for id in pending_event_ids {
+            if removable.remove(&id) {
+                report.blocked_pending_event_terms += 1;
+            }
+        }
+
+        // Compute the transitive live-reference closure with a work queue.
+        // The old fixed-point loop rescanned every predecessor and proof edge
+        // once per newly blocked layer, which made deep QI term DAGs
+        // quadratic. A term outside `removable` is live; processing it can
+        // make its syntactic children, proof references, disequality
+        // references, or candidate class root live in turn.
+        let mut live_work = Vec::new();
+        let mut live_processed = vec![false; self.terms.len()];
+        let mut predecessor_children_by_parent = vec![Vec::new(); self.terms.len()];
+        for (child, predecessors) in self.predecessors.iter().enumerate() {
+            for parent in predecessors.keys() {
+                if (*parent as usize) < predecessor_children_by_parent.len() {
+                    predecessor_children_by_parent[*parent as usize].push(child as u32);
+                }
+            }
+        }
+        for (id, slot) in self.terms.iter().enumerate() {
+            if !matches!(slot, TermSlot::Empty) && !removable.contains(&(id as u32)) {
+                live_work.push(id as u32);
+            }
+        }
+
+        while let Some(id) = live_work.pop() {
+            if live_processed[id as usize] {
+                continue;
+            }
+            live_processed[id as usize] = true;
+
+            let class_root = self.find(id);
+            if removable.remove(&class_root) {
+                report.blocked_mixed_class_roots += 1;
+                live_work.push(class_root);
+            }
+
+            for &child in &predecessor_children_by_parent[id as usize] {
+                if removable.remove(&child) {
+                    report.blocked_live_parent_terms += 1;
+                    live_work.push(child);
+                }
+            }
+
+            let edge = &self.proof_forest[id as usize];
+            let mut proof_references = Vec::new();
+            match edge {
+                ProofForestEdge::Root { children, .. } => {
+                    proof_references.extend(children.iter().copied());
+                }
+                ProofForestEdge::Equality {
+                    term,
+                    parent,
+                    children,
+                    ..
+                } => {
+                    proof_references.push(*parent);
+                    if let Some((left, right)) = term {
+                        proof_references.push(*left);
+                        proof_references.push(*right);
+                    }
+                    proof_references.extend(children.iter().copied());
+                }
+                ProofForestEdge::Congruence {
+                    pairs,
+                    parent,
+                    children,
+                    ..
+                } => {
+                    proof_references.push(*parent);
+                    for (left, right) in pairs {
+                        proof_references.push(*left);
+                        proof_references.push(*right);
+                    }
+                    proof_references.extend(children.iter().copied());
+                }
+            }
+            for referenced in proof_references {
+                if removable.remove(&referenced) {
+                    report.blocked_proof_reference_terms += 1;
+                    live_work.push(referenced);
+                }
+            }
+
+            for (key, disequality) in edge.disequalities() {
+                if !valid_hash(disequality.hash, disequality.level, &self.predecessor_level) {
+                    continue;
+                }
+                for referenced in [
+                    *key,
+                    disequality.term,
+                    disequality.original_disequality.0,
+                    disequality.original_disequality.1,
+                ] {
+                    if removable.remove(&referenced) {
+                        report.blocked_disequality_terms += 1;
+                        live_work.push(referenced);
+                    }
+                }
+            }
+        }
+
+        for members in class_members_by_root.values() {
+            let retired = members
+                .iter()
+                .filter(|member| removable.contains(member))
+                .count();
+            if retired == members.len() {
+                report.retired_classes += 1;
+            } else if retired > 0 {
+                report.pruned_mixed_classes += 1;
+                report.pruned_mixed_class_terms += retired;
+            }
+        }
+
+        if removable.is_empty() {
+            report.predecessor_entries_after_retirement =
+                report.predecessor_entries_after_compaction;
+            return report;
+        }
+
+        // Splice collected members out of surviving circular class lists.
+        for members in class_members_by_root.values() {
+            let survivors: Vec<u32> = members
+                .iter()
+                .copied()
+                .filter(|member| !removable.contains(member))
+                .collect();
+            if survivors.is_empty() {
+                continue;
+            }
+            debug_assert!(
+                !removable.contains(&members[0]),
+                "surviving class lost its proof root"
+            );
+            for (index, member) in survivors.iter().enumerate() {
+                self.member_next[*member as usize] = survivors[(index + 1) % survivors.len()];
+            }
+        }
+
+        // Verify the closure before making IDs reusable.
+        for (id, edge) in self.proof_forest.iter().enumerate() {
+            if matches!(self.terms[id], TermSlot::Empty) || removable.contains(&(id as u32)) {
+                continue;
+            }
+            match edge {
+                ProofForestEdge::Root { children, .. } => {
+                    debug_assert!(children.iter().all(|child| !removable.contains(child)));
+                }
+                ProofForestEdge::Equality {
+                    term,
+                    parent,
+                    children,
+                    ..
+                } => {
+                    debug_assert!(!removable.contains(parent));
+                    debug_assert!(children.iter().all(|child| !removable.contains(child)));
+                    if let Some((left, right)) = term {
+                        debug_assert!(!removable.contains(left));
+                        debug_assert!(!removable.contains(right));
+                    }
+                }
+                ProofForestEdge::Congruence {
+                    pairs,
+                    parent,
+                    children,
+                    ..
+                } => {
+                    debug_assert!(!removable.contains(parent));
+                    debug_assert!(children.iter().all(|child| !removable.contains(child)));
+                    debug_assert!(pairs.iter().all(|(left, right)| {
+                        !removable.contains(left) && !removable.contains(right)
+                    }));
+                }
+            }
+            debug_assert!(edge.disequalities().iter().all(|(key, disequality)| {
+                !valid_hash(disequality.hash, disequality.level, &self.predecessor_level)
+                    || (!removable.contains(key)
+                        && !removable.contains(&disequality.term)
+                        && !removable.contains(&disequality.original_disequality.0)
+                        && !removable.contains(&disequality.original_disequality.1))
+            }));
+        }
+        for (id, slot) in self.terms.iter().enumerate() {
+            if removable.contains(&(id as u32)) {
+                continue;
+            }
+            if let TermSlot::Term(entry) = slot {
+                debug_assert!(
+                    entry
+                        .children
+                        .as_slice()
+                        .iter()
+                        .all(|child| !removable.contains(child)),
+                    "live enode retained a collected child"
+                );
+            }
+        }
+
+        // Remove stale disequality references before IDs become reusable.
+        for edge in &mut self.proof_forest {
+            edge.disequalities_mut().retain(|key, disequality| {
+                !removable.contains(key)
+                    && !removable.contains(&disequality.term)
+                    && !removable.contains(&disequality.original_disequality.0)
+                    && !removable.contains(&disequality.original_disequality.1)
+            });
+        }
+
+        for entries in self.function_maps.values_mut() {
+            entries.retain(|(id, _)| !removable.contains(id));
+        }
+        self.function_maps.retain(|_, entries| !entries.is_empty());
+        for entries in self.relevant_function_maps.values_mut() {
+            entries.retain(|(id, _)| !removable.contains(id));
+        }
+        self.relevant_function_maps
+            .retain(|_, entries| !entries.is_empty());
+
+        for (id, entries) in self.predecessors.iter_mut().enumerate() {
+            if removable.contains(&(id as u32)) {
+                entries.clear();
+            } else {
+                entries.retain(|parent, predecessor| {
+                    !removable.contains(parent)
+                        && !removable.contains(&predecessor.inner_term)
+                        && !removable.contains(&predecessor.predecessor)
+                });
+            }
+        }
+        self.predecessors_created_by_quantifiers
+            .retain(|child, parents| {
+                if removable.contains(child) {
+                    return false;
+                }
+                parents.retain(|parent, _| !removable.contains(parent));
+                !parents.is_empty()
+            });
+        for entries in &mut self.quantifier_predecessor_replay_trail {
+            entries.retain(|(child, parent)| {
+                !removable.contains(child) && !removable.contains(parent)
+            });
+        }
+        self.union_to_eclass.retain(|id, _| !removable.contains(id));
+        for entries in &mut self.union_to_eclass_replay_trail {
+            entries.retain(|id| !removable.contains(id));
+        }
+        self.sig_table.retain(|(_, children), id| {
+            !removable.contains(id)
+                && !children
+                    .as_slice()
+                    .iter()
+                    .any(|child| removable.contains(child))
+        });
+        self.arithmetic_merge_queue
+            .retain(|(a, b)| !removable.contains(a) && !removable.contains(b));
+        self.relevancy_merge_queue.retain(|event| {
+            !removable.contains(&event.survivor) && !removable.contains(&event.demoted)
+        });
+        for trail in &mut self.e_matching_relevance_trail {
+            trail.retain(|id| !removable.contains(id));
+        }
+
+        let mut retired_ids: Vec<u32> = removable.into_iter().collect();
+        retired_ids.sort_unstable();
+        for &id in &retired_ids {
+            self.terms[id as usize] = TermSlot::Empty;
+            self.proof_forest[id as usize] = ProofForestEdge::Root {
+                size: 1000,
+                child: 0,
+                disequalities: DeterministicHashMap::new(),
+                children: DeterministicHashSet::new(),
+                arithmetic: false,
+            };
+            self.member_next[id as usize] = id;
+            self.e_matching_relevance_levels[id as usize] = None;
+            self.ever_e_matching_relevant[id as usize] = false;
+            self.free_ids.push(id);
+        }
+        self.stats.retired_terms += retired_ids.len() as u64;
+        report.predecessor_entries_after_retirement =
+            self.predecessors.iter().map(|entries| entries.len()).sum();
+        report.retired_ids = retired_ids;
+        report
     }
 
     /// Extract the Op from a Term and its function name string.
@@ -424,6 +1173,56 @@ impl Egraph {
                 self.predecessors.len() * 2,
                 FastDeterministicHashMap::default(),
             );
+            self.member_next.resize(self.member_next.len() * 2, 0);
+            self.e_matching_relevance_levels
+                .resize(self.e_matching_relevance_levels.len() * 2, None);
+            self.ever_e_matching_relevant
+                .resize(self.ever_e_matching_relevant.len() * 2, false);
+        }
+    }
+
+    fn mark_match_term_relevant(&mut self, term: u32, level: usize) {
+        self.ensure_capacity(term);
+        let idx = term as usize;
+        if self.e_matching_relevance_levels[idx].is_some_and(|old| old <= level) {
+            return;
+        }
+
+        if !self.ever_e_matching_relevant[idx] {
+            if let TermSlot::Term(entry) = &self.terms[idx] {
+                let func_key = entry.op.to_function_map_key();
+                if !func_key.is_empty() {
+                    self.relevant_function_maps
+                        .entry(func_key)
+                        .or_default()
+                        .push((term, entry.children.as_slice().to_vec()));
+                }
+            }
+            self.ever_e_matching_relevant[idx] = true;
+        }
+
+        self.e_matching_relevance_levels[idx] = Some(level);
+        if level > 0 {
+            if self.e_matching_relevance_trail.len() <= level {
+                self.e_matching_relevance_trail
+                    .resize_with(level + 1, Vec::new);
+            }
+            self.e_matching_relevance_trail[level].push(term);
+        }
+    }
+
+    fn backtrack_match_relevance(&mut self, level: usize) {
+        if level + 1 < self.e_matching_relevance_trail.len() {
+            for mark_level in ((level + 1)..self.e_matching_relevance_trail.len()).rev() {
+                let terms = std::mem::take(&mut self.e_matching_relevance_trail[mark_level]);
+                for term in terms.into_iter().rev() {
+                    let idx = term as usize;
+                    if self.e_matching_relevance_levels[idx] == Some(mark_level) {
+                        self.e_matching_relevance_levels[idx] = None;
+                    }
+                }
+            }
+            self.e_matching_relevance_trail.truncate(level + 1);
         }
     }
 
@@ -431,8 +1230,7 @@ impl Egraph {
     /// but no op/children/function_maps/predecessors. Used for quantifier terms
     /// that participate in union-find (merged with true/false) but not congruence.
     fn register_opaque_term(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.allocate_id();
         self.ensure_capacity(id);
         self.terms[id as usize] = TermSlot::Opaque;
         self.proof_forest[id as usize] = ProofForestEdge::Root {
@@ -442,6 +1240,7 @@ impl Egraph {
             children: DeterministicHashSet::new(),
             arithmetic: false,
         };
+        self.member_next[id as usize] = id;
         id
     }
 
@@ -462,6 +1261,31 @@ impl Egraph {
             ProofForestEdge::Congruence { parent: p, .. }
             | ProofForestEdge::Equality { parent: p, .. } => self.find(*p),
         }
+    }
+
+    fn member_range_for_root(&self, root: u32) -> EClassMemberRange<u32> {
+        debug_assert_eq!(self.find(root), root);
+        EClassMemberRange {
+            first: self.member_next[root as usize],
+            last: root,
+        }
+    }
+
+    fn collect_member_range(&self, range: EClassMemberRange<u32>) -> Vec<u32> {
+        let mut members = Vec::new();
+        let mut current = range.first;
+        loop {
+            members.push(current);
+            if current == range.last {
+                break;
+            }
+            assert!(
+                members.len() <= self.next_id as usize,
+                "e-class member range did not reach its final member"
+            );
+            current = self.member_next[current as usize];
+        }
+        members
     }
 
     // FIND operation for union-find
@@ -671,11 +1495,15 @@ impl Egraph {
         let new_valid = valid_hash(new_pred.hash, new_pred.level, &self.predecessor_level);
         let new_pred_level = new_pred.level;
         let new_pred_hash = new_pred.hash;
+        let installed = new_pred.clone();
+        let mut previous = None;
+        let mut changed = false;
 
         use std::collections::hash_map::Entry;
         match self.predecessors[term as usize].entry(new_pred_key) {
             Entry::Vacant(slot) => {
                 slot.insert(new_pred);
+                changed = true;
                 debug_println!(
                     11,
                     0,
@@ -700,7 +1528,9 @@ impl Egraph {
                 let orig_predecessor = original.predecessor;
                 let should_replace = (!orig_valid || new_pred_level <= orig_level) && new_valid;
                 if should_replace {
+                    previous = Some(original.clone());
                     slot.insert(new_pred);
+                    changed = true;
                     debug_println!(
                         11,
                         0,
@@ -716,6 +1546,17 @@ impl Egraph {
                 }
                 // Keep-old case: zero inserts, no debug output (matches original).
             }
+        }
+        if changed && new_pred_level != 0 {
+            while new_pred_level >= self.predecessor_trail.len() {
+                self.predecessor_trail.push(Vec::new());
+            }
+            self.predecessor_trail[new_pred_level].push(PredecessorTrailEntry {
+                term,
+                key: new_pred_key,
+                previous,
+                installed,
+            });
         }
     }
 
@@ -890,6 +1731,12 @@ impl Egraph {
 
     /// Undo all egraph operations at levels strictly greater than `level`.
     fn backtrack_to(&mut self, level: usize) {
+        let old_decision_level = self.decision_level;
+        assert!(
+            level <= old_decision_level,
+            "egraph received an upward backtrack from level {old_decision_level} to {level}"
+        );
+        self.backtrack_match_relevance(level);
         self.predecessor_hash += 1;
 
         for i in level + 1..self.decision_level + 1 {
@@ -904,9 +1751,12 @@ impl Egraph {
             if last_level <= level {
                 break;
             }
-            let (_, backtrack_equality, y, y_root) =
+            let (_, backtrack_equality, y, y_root, x_root, merged_y_root) =
                 self.proof_forest_backtrack_stack.pop().unwrap();
             self.proof_forest_backtrack(backtrack_equality, y, y_root);
+            // Swapping the same two links restores both pre-merge cycles.
+            self.member_next
+                .swap(x_root as usize, merged_y_root as usize);
         }
 
         // Replay sig_trail in reverse AFTER UF is restored.
@@ -925,24 +1775,58 @@ impl Egraph {
             }
         }
 
-        // Re-add predecessors created by quantifiers at their new roots.
-        // Skip entries added at or below `level`: their predecessor stamps are
-        // still valid (predecessor_level only got bumped for levels > `level`)
-        // and their roots didn't shift because of any pop above `level`.
-        for (term, parents) in &self.predecessors_created_by_quantifiers.clone() {
-            let current_ancestor = self.find(*term);
-            for (parent, added_at) in parents {
-                if *added_at <= level {
-                    continue;
-                }
-                let predecessor = Predecessor {
-                    level,
-                    hash: self.predecessor_hash,
-                    predecessor: *parent,
-                    inner_term: *term,
-                };
-                self.predecessors[current_ancestor as usize].insert(*parent, predecessor);
+        // Re-add only dynamic predecessors whose current placement was
+        // established above the target level. Move each replayed pair to the
+        // target bucket so later backtracks above that level do no work.
+        let mut queued_predecessor_replays = Vec::new();
+        if level + 1 < self.quantifier_predecessor_replay_trail.len() {
+            for replay_level in level + 1..self.quantifier_predecessor_replay_trail.len() {
+                queued_predecessor_replays.extend(
+                    std::mem::take(&mut self.quantifier_predecessor_replay_trail[replay_level])
+                        .into_iter()
+                        .map(|(term, parent)| (replay_level, term, parent)),
+                );
             }
+            self.quantifier_predecessor_replay_trail.truncate(level + 1);
+        }
+        let mut predecessor_replays = Vec::new();
+        for (replay_level, term, parent) in queued_predecessor_replays {
+            let Some(added_at) = self
+                .predecessors_created_by_quantifiers
+                .get_mut(&term)
+                .and_then(|parents| parents.get_mut(&parent))
+            else {
+                continue;
+            };
+            if *added_at != replay_level || *added_at <= level {
+                continue;
+            }
+            *added_at = level;
+            predecessor_replays.push((term, parent));
+        }
+        predecessor_replays.sort_unstable();
+        if level != 0 {
+            assert!(
+                level < self.quantifier_predecessor_replay_trail.len(),
+                "quantifier predecessor replay trail lost level {level}: \
+                 old_decision_level={old_decision_level} replay_levels={} \
+                 union_replay_levels={} predecessor_trail_levels={}",
+                self.quantifier_predecessor_replay_trail.len(),
+                self.union_to_eclass_replay_trail.len(),
+                self.predecessor_trail.len(),
+            );
+            self.quantifier_predecessor_replay_trail[level]
+                .extend(predecessor_replays.iter().copied());
+        }
+        for (term, parent) in predecessor_replays {
+            let current_ancestor = self.find(term);
+            let predecessor = Predecessor {
+                level,
+                hash: self.predecessor_hash,
+                predecessor: parent,
+                inner_term: term,
+            };
+            self.add_predecessor(current_ancestor, parent, predecessor);
         }
 
         // Any merges left in the arithmetic queue from before this backtrack
@@ -950,15 +1834,37 @@ impl Egraph {
         // them so that only re-fired congruence merges (added by the loop
         // below) survive.
         self.arithmetic_merge_queue.clear();
+        self.relevancy_merge_queue.clear();
 
-        // Re-do union_to_eclass via sig table probe. Entries added at or below
-        // `level` were already reconciled with the sig_table at that level and
-        // their signatures are stable under this backtrack.
-        let union_to_eclass_info = self.union_to_eclass.clone();
-        for (term, added_at) in union_to_eclass_info {
-            if added_at <= level {
+        // Re-do union_to_eclass via sig table probe only for dynamic terms
+        // whose current placement was established above the target level.
+        let mut queued_union_replays = Vec::new();
+        if level + 1 < self.union_to_eclass_replay_trail.len() {
+            for replay_level in level + 1..self.union_to_eclass_replay_trail.len() {
+                queued_union_replays.extend(
+                    std::mem::take(&mut self.union_to_eclass_replay_trail[replay_level])
+                        .into_iter()
+                        .map(|term| (replay_level, term)),
+                );
+            }
+            self.union_to_eclass_replay_trail.truncate(level + 1);
+        }
+        let mut union_replays = Vec::new();
+        for (replay_level, term) in queued_union_replays {
+            let Some(added_at) = self.union_to_eclass.get_mut(&term) else {
+                continue;
+            };
+            if *added_at != replay_level || *added_at <= level {
                 continue;
             }
+            *added_at = level;
+            union_replays.push(term);
+        }
+        union_replays.sort_unstable();
+        if level != 0 {
+            self.union_to_eclass_replay_trail[level].extend(union_replays.iter().copied());
+        }
+        for term in union_replays {
             if let Some(sig) = self.compute_signature(term) {
                 if let Some(&existing) = self.sig_table.get(&sig) {
                     if self.find(existing) != self.find(term) {
@@ -973,7 +1879,9 @@ impl Egraph {
         // Clear at level 0
         if level == 0 {
             self.predecessors_created_by_quantifiers = DeterministicHashMap::new();
+            self.quantifier_predecessor_replay_trail = vec![Vec::new()];
             self.union_to_eclass = DeterministicHashMap::new();
+            self.union_to_eclass_replay_trail = vec![Vec::new()];
             self.proof_forest_backtrack_stack = vec![];
             self.sig_trail.clear();
         }
@@ -1180,6 +2088,16 @@ impl Egraph {
             (x, y, x_root, y_root)
         };
 
+        if self.track_all_merges {
+            self.relevancy_merge_queue.push(EgraphMergeEvent {
+                survivor: x_root,
+                demoted: y_root,
+                survivor_members: self.member_range_for_root(x_root),
+                demoted_members: self.member_range_for_root(y_root),
+                level,
+            });
+        }
+
         // `mark_arithmetic` runs *after* `register_term` in
         // `insert_predecessor`, so a congruence merge here can precede tagging
         // on one side. If either root is tagged, queue the merge and upgrade
@@ -1231,8 +2149,14 @@ impl Egraph {
                 proof_parent.clone(),
                 y_root,
                 y_root_parent.clone(),
+                x_root,
+                y_root,
             ));
         }
+
+        // Splice the two circular member lists in O(1). This list is
+        // independent of proof-tree orientation, so use the pre-merge roots.
+        self.member_next.swap(x_root as usize, y_root as usize);
 
         // Perform the union first so we can check for disequality violations early.
         debug_println!(
@@ -1455,30 +2379,33 @@ impl Egraph {
     /// Match a list of (pattern, ground_hint) pairs against the egraph.
     /// Returns all valid variable assignments.
     fn match_patterns(
-        &mut self,
+        &self,
         assignment: &mut DeterministicHashMap<Local, u32>,
         pattern_term_pairs: &[(PatternId, Option<u32>)],
+        relevant_only: bool,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
         if pattern_term_pairs.is_empty() {
             return vec![assignment.clone()];
         }
         let (pattern_id, ground_hint) = pattern_term_pairs[0];
-        let pattern = self.compiled_patterns[pattern_id].clone();
+        let pattern = &self.compiled_patterns[pattern_id];
         self.match_pattern_recursive(
             assignment,
-            &pattern,
+            pattern,
             ground_hint,
-            &pattern_term_pairs[1..].to_vec(),
+            &pattern_term_pairs[1..],
+            relevant_only,
         )
     }
 
     /// Match a single pattern against an optional ground term, then continue with remaining pairs.
     fn match_pattern_recursive(
-        &mut self,
+        &self,
         assignment: &mut DeterministicHashMap<Local, u32>,
         pattern: &Pattern,
         ground_hint: Option<u32>,
-        remaining: &Vec<(PatternId, Option<u32>)>,
+        remaining: &[(PatternId, Option<u32>)],
+        relevant_only: bool,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
         match pattern {
             Pattern::Var(name) => {
@@ -1487,19 +2414,19 @@ impl Egraph {
                     None => {
                         assignment.insert(name.clone(), ground);
 
-                        self.match_patterns(assignment, remaining)
+                        self.match_patterns(assignment, remaining, relevant_only)
                     }
                     Some(v) if self.find(*v) == self.find(ground) => {
-                        self.match_patterns(assignment, remaining)
+                        self.match_patterns(assignment, remaining, relevant_only)
                     }
                     Some(_) => vec![],
                 }
             }
             Pattern::Ground(egraph_id) => match ground_hint {
                 Some(ground) if self.find(*egraph_id) == self.find(ground) => {
-                    self.match_patterns(assignment, remaining)
+                    self.match_patterns(assignment, remaining, relevant_only)
                 }
-                None => self.match_patterns(assignment, remaining),
+                None => self.match_patterns(assignment, remaining, relevant_only),
                 _ => vec![],
             },
             Pattern::App(op, sub_patterns) => {
@@ -1510,6 +2437,7 @@ impl Egraph {
                     sub_patterns,
                     remaining,
                     assignment,
+                    relevant_only,
                 )
             }
         }
@@ -1517,41 +2445,78 @@ impl Egraph {
 
     /// Find all function applications matching the given op, then recurse into sub-patterns.
     fn find_assignments_on_pattern(
-        &mut self,
+        &self,
         ground_hint: Option<u32>,
         func_name: &str,
         sub_patterns: &[Pattern],
-        remaining: &Vec<(PatternId, Option<u32>)>,
+        remaining: &[(PatternId, Option<u32>)],
         assignment: &mut DeterministicHashMap<Local, u32>,
+        relevant_only: bool,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
-        let function_terms = match self.function_maps.get(func_name) {
-            Some(terms) => terms.clone(),
+        let ground_root = ground_hint.map(|t| self.find(t));
+        let function_map = if relevant_only && ground_root.is_none() {
+            &self.relevant_function_maps
+        } else {
+            &self.function_maps
+        };
+        let function_terms = match function_map.get(func_name) {
+            Some(terms) => terms,
             None => return vec![],
         };
 
         let mut list_assignments = Vec::new();
         let mut considered_function_terms = DeterministicHashSet::default();
-        let ground_root = ground_hint.map(|t| self.find(t));
 
         for (i, subterms) in function_terms {
+            self.e_match_candidates_scanned
+                .set(self.e_match_candidates_scanned.get() + 1);
+            if relevant_only && ground_root.is_none() {
+                self.e_match_relevant_candidates_scanned
+                    .set(self.e_match_relevant_candidates_scanned.get() + 1);
+            }
             if subterms.len() != sub_patterns.len() {
                 continue;
             }
 
-            let i_root = self.find(i);
+            if relevant_only
+                && ground_root.is_none()
+                && self.e_matching_relevance_levels[*i as usize].is_none()
+            {
+                continue;
+            }
+            let i_root = self.find(*i);
+            if relevancy_trace_enabled() && relevant_only && ground_root.is_none() {
+                eprintln!(
+                    "[relevancy] e-match indexed candidate func={} term_id={} class={} children={:?}",
+                    func_name, i, i_root, subterms
+                );
+            }
             if ground_root.is_none() || ground_root.unwrap() == i_root {
-                let subterms_canonical: Vec<u32> = subterms.iter().map(|s| self.find(*s)).collect();
+                // With relevancy filtering, distinct relevant enodes in the
+                // same e-class can become visible at different times and can
+                // carry different syntactic substitutions (notably for
+                // Boolean terms whose SAT value is not represented as an
+                // egraph merge). Preserve those enodes here and let the
+                // quantifier-level substitution set remove true duplicates.
+                // Without filtering, retain the existing canonical e-class
+                // deduplication behavior.
+                let dedup_subterms: Vec<u32> = if relevant_only {
+                    subterms.clone()
+                } else {
+                    subterms.iter().map(|s| self.find(*s)).collect()
+                };
 
-                if considered_function_terms.contains(&subterms_canonical) {
+                if considered_function_terms.contains(&dedup_subterms) {
                     continue;
                 }
-                considered_function_terms.insert(subterms_canonical);
+                considered_function_terms.insert(dedup_subterms);
 
                 let new_assignments = self.match_subpatterns(
                     &mut assignment.clone(),
                     sub_patterns,
-                    &subterms,
+                    subterms,
                     remaining,
+                    relevant_only,
                 );
                 list_assignments.extend(new_assignments);
             }
@@ -1561,14 +2526,15 @@ impl Egraph {
 
     /// Match sub-patterns against ground subterms, then continue with remaining pattern pairs.
     fn match_subpatterns(
-        &mut self,
+        &self,
         assignment: &mut DeterministicHashMap<Local, u32>,
         sub_patterns: &[Pattern],
         ground_subterms: &[u32],
-        remaining: &Vec<(PatternId, Option<u32>)>,
+        remaining: &[(PatternId, Option<u32>)],
+        relevant_only: bool,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
         if sub_patterns.is_empty() {
-            return self.match_patterns(assignment, remaining);
+            return self.match_patterns(assignment, remaining, relevant_only);
         }
         let pattern = &sub_patterns[0];
         let ground = ground_subterms[0];
@@ -1579,16 +2545,32 @@ impl Egraph {
             Pattern::Var(name) => match assignment.get(name) {
                 None => {
                     assignment.insert(name.clone(), ground);
-                    self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
+                    self.match_subpatterns(
+                        assignment,
+                        rest_patterns,
+                        rest_grounds,
+                        remaining,
+                        relevant_only,
+                    )
                 }
-                Some(v) if self.find(*v) == self.find(ground) => {
-                    self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
-                }
+                Some(v) if self.find(*v) == self.find(ground) => self.match_subpatterns(
+                    assignment,
+                    rest_patterns,
+                    rest_grounds,
+                    remaining,
+                    relevant_only,
+                ),
                 Some(_) => vec![],
             },
             Pattern::Ground(egraph_id) => {
                 if self.find(*egraph_id) == self.find(ground) {
-                    self.match_subpatterns(assignment, rest_patterns, rest_grounds, remaining)
+                    self.match_subpatterns(
+                        assignment,
+                        rest_patterns,
+                        rest_grounds,
+                        remaining,
+                        relevant_only,
+                    )
                 } else {
                     vec![]
                 }
@@ -1596,7 +2578,7 @@ impl Egraph {
             Pattern::App(op, children) => {
                 let func_name = op.to_function_map_key();
                 let function_terms = match self.function_maps.get(&func_name) {
-                    Some(terms) => terms.clone(),
+                    Some(terms) => terms,
                     None => return vec![],
                 };
 
@@ -1605,10 +2587,15 @@ impl Egraph {
                 let mut considered = DeterministicHashSet::default();
 
                 for (i, subterms) in function_terms {
+                    self.e_match_candidates_scanned
+                        .set(self.e_match_candidates_scanned.get() + 1);
                     if subterms.len() != children.len() {
                         continue;
                     }
-                    let i_root = self.find(i);
+                    let i_root = self.find(*i);
+                    // Here ground_root is pinned by the parent match, so
+                    // any candidate with a matching class root is a valid
+                    // sub-match — no need for the class_filter guard.
                     if ground_root == i_root {
                         let subterms_canonical: Vec<u32> =
                             subterms.iter().map(|s| self.find(*s)).collect();
@@ -1621,8 +2608,9 @@ impl Egraph {
                         let sub_results = self.match_subpatterns(
                             &mut sub_assignment,
                             children,
-                            &subterms,
-                            &vec![],
+                            subterms,
+                            &[],
+                            relevant_only,
                         );
                         for mut sub in sub_results {
                             let more = self.match_subpatterns(
@@ -1630,6 +2618,7 @@ impl Egraph {
                                 rest_patterns,
                                 rest_grounds,
                                 remaining,
+                                relevant_only,
                             );
                             list_assignments.extend(more);
                         }
@@ -1638,6 +2627,292 @@ impl Egraph {
                 list_assignments
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Egraph;
+    use crate::egraphs::EgraphTrait;
+    use crate::egraphs::repr::{Op, Pattern};
+    use crate::utils::DeterministicHashSet;
+
+    fn class_members(egraph: &Egraph, start: u32) -> Vec<u32> {
+        let mut members = vec![start];
+        let mut current = egraph.member_next[start as usize];
+        while current != start {
+            assert!(
+                members.len() <= egraph.next_id as usize,
+                "e-class member cycle did not return to its start"
+            );
+            members.push(current);
+            current = egraph.member_next[current as usize];
+        }
+        members
+    }
+
+    #[test]
+    fn member_lists_splice_and_backtrack_with_unions() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_opaque();
+        let b = egraph.register_opaque();
+        let c = egraph.register_opaque();
+        egraph.set_track_all_merges(true);
+
+        assert_eq!(class_members(&egraph, a), vec![a]);
+        assert_eq!(class_members(&egraph, b), vec![b]);
+        assert_eq!(class_members(&egraph, c), vec![c]);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        assert_eq!(class_members(&egraph, a), vec![a, b]);
+
+        assert!(egraph.assert_equal(a, c).conflict.is_none());
+        assert_eq!(class_members(&egraph, a), vec![a, c, b]);
+
+        let events = egraph.drain_all_merges();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            egraph.collect_member_range(events[0].survivor_members),
+            vec![a]
+        );
+        assert_eq!(
+            egraph.collect_member_range(events[0].demoted_members),
+            vec![b]
+        );
+        assert_eq!(
+            egraph.collect_member_range(events[1].survivor_members),
+            vec![b, a]
+        );
+        assert_eq!(
+            egraph.collect_member_range(events[1].demoted_members),
+            vec![c]
+        );
+        assert_eq!(events[0].level, 1);
+        assert_eq!(events[1].level, 1);
+
+        egraph.backtrack_to(0);
+        assert_eq!(class_members(&egraph, a), vec![a]);
+        assert_eq!(class_members(&egraph, b), vec![b]);
+        assert_eq!(class_members(&egraph, c), vec![c]);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        egraph.backtrack_to(0);
+        assert!(egraph.drain_all_merges().is_empty());
+    }
+
+    #[test]
+    fn relevant_match_candidates_are_incremental_and_backtrackable() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_constant(Op::Constant("a".to_owned()));
+        let b = egraph.register_constant(Op::Constant("b".to_owned()));
+        let fa = egraph.register_term(Op::App("f".to_owned()), &[a], false);
+        let fb = egraph.register_term(Op::App("f".to_owned()), &[b], false);
+        let fa_pattern = egraph.compile_pattern(Pattern::App(
+            Op::App("f".to_owned()),
+            vec![Pattern::Ground(a)],
+        ));
+        let fb_pattern = egraph.compile_pattern(Pattern::App(
+            Op::App("f".to_owned()),
+            vec![Pattern::Ground(b)],
+        ));
+
+        egraph.notify_new_decision_level();
+        egraph.mark_e_matching_term_relevant(fa, 1);
+
+        assert_eq!(egraph.match_triggers(&[(fa_pattern, None)], true).len(), 1);
+        assert!(
+            egraph
+                .match_triggers(&[(fb_pattern, None)], true)
+                .is_empty()
+        );
+        assert_eq!(egraph.match_triggers(&[(fb_pattern, None)], false).len(), 1);
+
+        egraph.mark_e_matching_term_relevant(fb, 1);
+        assert_eq!(egraph.match_triggers(&[(fb_pattern, None)], true).len(), 1);
+
+        egraph.backtrack_to(0);
+        assert!(
+            egraph
+                .match_triggers(&[(fa_pattern, None)], true)
+                .is_empty()
+        );
+        assert!(
+            egraph
+                .match_triggers(&[(fb_pattern, None)], true)
+                .is_empty()
+        );
+
+        egraph.notify_new_decision_level();
+        egraph.mark_e_matching_term_relevant(fb, 1);
+        egraph.mark_e_matching_term_relevant(fb, 0);
+        egraph.backtrack_to(0);
+        assert_eq!(egraph.match_triggers(&[(fb_pattern, None)], true).len(), 1);
+    }
+
+    #[test]
+    fn retirement_removes_complete_dead_subgraphs_and_reuses_ids() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_constant(Op::Constant("a".to_owned()));
+        let fa = egraph.register_term(Op::App("f".to_owned()), &[a], false);
+        let gfa = egraph.register_term(Op::App("g".to_owned()), &[fa], false);
+        egraph.backtrack_to(0);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([fa]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.blocked_live_parent_terms, 1);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([fa, gfa]));
+        assert_eq!(report.retired_ids, vec![fa, gfa]);
+        assert_eq!(egraph.gc_profile().registered_terms, 1);
+        assert_eq!(egraph.gc_profile().function_entries, 1);
+        assert_eq!(egraph.gc_profile().reusable_ids, 2);
+
+        let ha = egraph.register_term(Op::App("h".to_owned()), &[a], false);
+        assert_eq!(ha, gfa);
+        assert_eq!(egraph.gc_profile().reusable_ids, 1);
+    }
+
+    #[test]
+    fn retirement_removes_complete_merged_classes_atomically() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_term(Op::App("a".to_owned()), &[], false);
+        let b = egraph.register_term(Op::App("b".to_owned()), &[], false);
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        assert_eq!(egraph.find(a), egraph.find(b));
+        egraph.backtrack_to(0);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([a, b]));
+        assert_eq!(report.candidate_classes, 1);
+        assert_eq!(report.fully_candidate_classes, 1);
+        assert_eq!(report.retired_classes, 1);
+        assert_eq!(report.retired_ids, vec![a, b]);
+        assert_eq!(egraph.gc_profile().registered_terms, 0);
+    }
+
+    #[test]
+    fn retirement_prunes_dead_leaf_from_a_live_merged_class() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_term(Op::App("a".to_owned()), &[], false);
+        let b = egraph.register_term(Op::App("b".to_owned()), &[], false);
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        egraph.backtrack_to(0);
+
+        let root = egraph.find(a);
+        let leaf = if root == a { b } else { a };
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([root]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.candidate_classes, 1);
+        assert_eq!(report.fully_candidate_classes, 0);
+        assert_eq!(report.blocked_mixed_class_roots, 1);
+        assert_eq!(egraph.gc_profile().registered_terms, 2);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([leaf]));
+        assert_eq!(report.retired_ids, vec![leaf]);
+        assert_eq!(report.pruned_mixed_classes, 1);
+        assert_eq!(report.pruned_mixed_class_terms, 1);
+        assert_eq!(egraph.class_members(root), vec![root]);
+        assert_eq!(egraph.gc_profile().registered_terms, 1);
+    }
+
+    #[test]
+    fn retirement_propagates_parent_closure_across_merged_classes() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_term(Op::App("a".to_owned()), &[], false);
+        let b = egraph.register_term(Op::App("b".to_owned()), &[], false);
+        let fa = egraph.register_term(Op::App("f".to_owned()), &[a], false);
+        let fb = egraph.register_term(Op::App("g".to_owned()), &[b], false);
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        assert!(egraph.assert_equal(fa, fb).conflict.is_none());
+        egraph.backtrack_to(0);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([a, b]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.blocked_live_parent_terms, 2);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([a, b, fa, fb]));
+        assert_eq!(report.retired_classes, 2);
+        assert_eq!(report.retired_ids, vec![a, b, fa, fb]);
+    }
+
+    #[test]
+    fn retirement_compacts_backtracked_predecessor_copies() {
+        let mut egraph = Egraph::new();
+        let x = egraph.register_term(Op::App("x".to_owned()), &[], false);
+        let y = egraph.register_term(Op::App("y".to_owned()), &[], false);
+        let fx = egraph.register_term(Op::App("f".to_owned()), &[x], false);
+        let fy = egraph.register_term(Op::App("f".to_owned()), &[y], false);
+        let baseline = egraph.gc_profile().predecessor_entries;
+        assert_eq!(baseline, 2);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(x, y).conflict.is_none());
+        assert_eq!(egraph.find(fx), egraph.find(fy));
+        egraph.backtrack_to(0);
+        assert_ne!(egraph.find(fx), egraph.find(fy));
+
+        let grown = egraph.gc_profile().predecessor_entries;
+        assert!(grown > baseline);
+        let report = egraph.retire_terms(&DeterministicHashSet::default());
+        assert_eq!(report.predecessor_entries_before, grown);
+        assert_eq!(report.predecessor_entries_after_compaction, baseline);
+        assert_eq!(report.predecessor_entries_after_retirement, baseline);
+
+        // Reconstructed root edges must still trigger congruence on the next
+        // branch; compaction changes storage, not equality behavior.
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(x, y).conflict.is_none());
+        assert_eq!(egraph.find(fx), egraph.find(fy));
+    }
+
+    #[test]
+    fn incremental_predecessor_gc_reclaims_backtracked_copies() {
+        let mut egraph = Egraph::new();
+        let x = egraph.register_term(Op::App("x".to_owned()), &[], false);
+        let y = egraph.register_term(Op::App("y".to_owned()), &[], false);
+        let fx = egraph.register_term(Op::App("f".to_owned()), &[x], false);
+        let fy = egraph.register_term(Op::App("f".to_owned()), &[y], false);
+        let baseline = egraph.gc_profile().predecessor_entries;
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(x, y).conflict.is_none());
+        assert_eq!(egraph.find(fx), egraph.find(fy));
+        egraph.backtrack_to(0);
+        assert!(egraph.gc_profile().predecessor_entries > baseline);
+
+        let report = egraph.collect_backtracked_predecessors();
+        assert!(report.examined_mutations > 0);
+        assert!(report.removed_entries + report.restored_entries > 0);
+        assert_eq!(egraph.gc_profile().predecessor_entries, baseline);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(x, y).conflict.is_none());
+        assert_eq!(egraph.find(fx), egraph.find(fy));
+    }
+
+    #[test]
+    fn retirement_keeps_terms_referenced_by_compiled_patterns() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_constant(Op::Constant("a".to_owned()));
+        let _ = egraph.compile_pattern(Pattern::Ground(a));
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([a]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.blocked_pattern_terms, 1);
+    }
+
+    #[test]
+    fn retirement_keeps_terms_with_compiled_trigger_heads() {
+        let mut egraph = Egraph::new();
+        let fa = egraph.register_term(Op::App("f".to_owned()), &[], false);
+        let _ = egraph.compile_pattern(Pattern::App(Op::App("f".to_owned()), vec![]));
+        egraph.backtrack_to(0);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([fa]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.blocked_trigger_head_terms, 1);
+        assert_eq!(egraph.gc_profile().registered_terms, 1);
     }
 }
 
@@ -1663,8 +2938,7 @@ impl EgraphTrait for Egraph {
         children: &[Self::TermId],
         dynamic: bool,
     ) -> Self::TermId {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.allocate_id();
         self.register_term_internal(id, op, children, dynamic);
         id
     }
@@ -1673,8 +2947,7 @@ impl EgraphTrait for Egraph {
         // TODO: currently relies on Op::Constant variant to distinguish constants
         // from other 0-arity terms. If Op is unified in the future, this method
         // should mark the term as a constant via a separate mechanism.
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.allocate_id();
         self.register_term_internal(id, op, &[], false);
         id
     }
@@ -1726,6 +2999,17 @@ impl EgraphTrait for Egraph {
         std::mem::take(&mut self.arithmetic_merge_queue)
     }
 
+    fn set_track_all_merges(&mut self, enabled: bool) {
+        self.track_all_merges = enabled;
+        if !enabled {
+            self.relevancy_merge_queue.clear();
+        }
+    }
+
+    fn drain_all_merges(&mut self) -> Vec<EgraphMergeEvent<Self::TermId>> {
+        std::mem::take(&mut self.relevancy_merge_queue)
+    }
+
     fn notify_new_decision_level(&mut self) {
         assert!(
             self.arithmetic_merge_queue.is_empty(),
@@ -1735,6 +3019,15 @@ impl EgraphTrait for Egraph {
         while self.decision_level >= self.predecessor_level.len() {
             self.predecessor_level
                 .resize(self.predecessor_level.len() * 2, 0);
+        }
+        while self.decision_level >= self.predecessor_trail.len() {
+            self.predecessor_trail.push(Vec::new());
+        }
+        while self.decision_level >= self.quantifier_predecessor_replay_trail.len() {
+            self.quantifier_predecessor_replay_trail.push(Vec::new());
+        }
+        while self.decision_level >= self.union_to_eclass_replay_trail.len() {
+            self.union_to_eclass_replay_trail.push(Vec::new());
         }
         self.predecessor_level[self.decision_level] = self.predecessor_hash;
     }
@@ -1764,12 +3057,29 @@ impl EgraphTrait for Egraph {
         self.find(t1) == self.find(t2)
     }
 
+    fn class_member_range(&self, term: Self::TermId) -> EClassMemberRange<Self::TermId> {
+        self.member_range_for_root(self.find(term))
+    }
+
+    fn next_class_member(&self, term: Self::TermId) -> Self::TermId {
+        self.member_next[term as usize]
+    }
+
+    fn mark_e_matching_term_relevant(&mut self, term: Self::TermId, level: usize) {
+        self.mark_match_term_relevant(term, level);
+    }
+
     fn match_triggers(
-        &mut self,
-        trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
+        &self,
+        trigger_term_pairs: &[(PatternId, Option<Self::TermId>)],
+        relevant_only: bool,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
+        self.e_match_calls.set(self.e_match_calls.get() + 1);
         let mut assignment = DeterministicHashMap::default();
-        self.match_patterns(&mut assignment, &trigger_term_pairs)
+        let results = self.match_patterns(&mut assignment, trigger_term_pairs, relevant_only);
+        self.e_match_results
+            .set(self.e_match_results.get() + results.len() as u64);
+        results
     }
 
     fn backtrack_to(&mut self, level: usize) {

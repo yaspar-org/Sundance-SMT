@@ -6,7 +6,7 @@ use clap::Parser;
 use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
-use sundance_smt::config::Args;
+use sundance_smt::config::{Args, resolve_relevancy_level};
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
 use sundance_smt::theory_check::reject_unsupported_theories;
@@ -62,6 +62,15 @@ fn main() -> Result<(), String> {
         .type_check(&mut context)
         .map_err(|e| format!("Error checking typed commands: {e}"))?;
 
+    let declared_logic = typed_commands.iter().find_map(|command| {
+        if let alg::Command::SetLogic(logic) = command.repr() {
+            Some(logic.to_string())
+        } else {
+            None
+        }
+    });
+    let relevancy_level = resolve_relevancy_level(args.relevancy, declared_logic.as_deref());
+
     let mut assertions: Vec<Term> = typed_commands
         .iter()
         .filter_map(|c| {
@@ -96,6 +105,7 @@ fn main() -> Result<(), String> {
         args.ddsmt,
         args.eager_skolem,
         args.infer_triggers,
+        relevancy_level.is_enabled(),
     );
 
     solver_state.register_bool_constants(&true_term, &false_term);
@@ -111,6 +121,10 @@ fn main() -> Result<(), String> {
         debug_println!(10, 0, "Expanded form: {}", expanded_term);
 
         let skolemized_term = expanded_term;
+
+        solver_state
+            .pre_nnf_assertions
+            .push(skolemized_term.clone());
 
         let nnf_term = skolemized_term.nnf(&mut solver_state);
         debug_println!(12, 0, "NNF form: {}", nnf_term,);
@@ -197,6 +211,8 @@ fn main() -> Result<(), String> {
         args.max_arith_conflicts_per_round,
         args.batch_cap,
         args.eager_qi,
+        args.qi_gc,
+        relevancy_level,
     );
 
     match return_value {
