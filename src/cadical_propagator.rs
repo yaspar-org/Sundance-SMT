@@ -28,7 +28,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use yaspar_ir::ast::{ATerm, Repr, TermAllocator};
 
 // --- QI Garbage Collection ---
@@ -247,6 +247,7 @@ struct QiGcCollectionAnalysis {
     reclaimable_qi: usize,
     epoch_owned_terms: usize,
     candidate_terms: usize,
+    term_analysis_skipped: bool,
     worthwhile: bool,
     term_gc_worthwhile: bool,
     trigger: QiGcCollectionTrigger,
@@ -423,20 +424,38 @@ fn qi_gc_collection_analysis(
     root_satisfied_instances: usize,
     root_satisfied_qi: usize,
     collectible_theory: usize,
+    allow_term_analysis: bool,
 ) -> QiGcCollectionAnalysis {
-    let plan = gc.tracker.plan();
-    let observed_qi = plan.observed_qi_clauses;
-    let support_qi = plan.retained_qi_clause_ids.len();
-    let promoted_derived = plan.derived_clauses.len();
+    let analysis_started = Instant::now();
+    let summary_started = Instant::now();
+    let observed_qi = gc.tracker.observed_qi_clause_count();
+    let support_qi = if QI_GC_PROFILE.load(Ordering::Relaxed) {
+        gc.tracker.retained_qi_clause_count()
+    } else {
+        0
+    };
+    let promoted_derived = gc.tracker.live_derived_clause_count();
+    let epoch_owned_terms = gc.tracker.epoch_owned_term_count();
+    let summary_duration = summary_started.elapsed();
     let retained_qi = observed_qi.saturating_sub(collectible_qi);
-    let transition_pinned_terms = qi_gc_pinned_term_uids(gc, solver_state);
-    let candidate_terms = plan
-        .epoch_owned_term_uids
-        .difference(&transition_pinned_terms)
-        .count();
-    let epoch_owned_terms = plan.epoch_owned_term_uids.len();
+    let (candidate_terms, pinning_duration, candidate_duration) = if allow_term_analysis {
+        let pinning_started = Instant::now();
+        let transition_pinned_terms = qi_gc_pinned_term_uids(gc, solver_state);
+        let pinning_duration = pinning_started.elapsed();
+        let candidate_started = Instant::now();
+        let candidate_terms = gc
+            .tracker
+            .unpinned_epoch_owned_term_count(&transition_pinned_terms);
+        (
+            candidate_terms,
+            pinning_duration,
+            candidate_started.elapsed(),
+        )
+    } else {
+        (0, Duration::ZERO, Duration::ZERO)
+    };
     let trigger = qi_gc_collection_trigger(gc.epoch_guarded_clauses, observed_qi, collectible_qi);
-    QiGcCollectionAnalysis {
+    let analysis = QiGcCollectionAnalysis {
         observed_qi,
         support_qi,
         retained_qi,
@@ -449,16 +468,28 @@ fn qi_gc_collection_analysis(
         reclaimable_qi: collectible_qi,
         epoch_owned_terms,
         candidate_terms,
+        term_analysis_skipped: !allow_term_analysis,
         worthwhile: matches!(
             trigger,
             QiGcCollectionTrigger::AbsoluteBatch | QiGcCollectionTrigger::GarbageToLiveRatio
         ),
-        term_gc_worthwhile: qi_gc_term_reduction_is_worthwhile(
-            gc.epoch_guarded_clauses,
-            candidate_terms,
-        ),
+        term_gc_worthwhile: allow_term_analysis
+            && qi_gc_term_reduction_is_worthwhile(gc.epoch_guarded_clauses, candidate_terms),
         trigger,
+    };
+    if QI_GC_PROFILE.load(Ordering::Relaxed) {
+        eprintln!(
+            "[qi-gc-profile] collection-analysis-timing summary_duration={:.6}s \
+             pinning_duration={:.6}s candidate_duration={:.6}s \
+             term_analysis_skipped={} total_duration={:.6}s",
+            summary_duration.as_secs_f64(),
+            pinning_duration.as_secs_f64(),
+            candidate_duration.as_secs_f64(),
+            !allow_term_analysis,
+            analysis_started.elapsed().as_secs_f64(),
+        );
     }
+    analysis
 }
 
 /// Implements CaDiCaL's `Learner` trait to capture conflict clauses containing ¬act.
@@ -3094,6 +3125,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 root_satisfied_instances,
                 root_satisfied_qi,
                 collectible_theory,
+                !collection_in_flight,
             );
             // Term ownership is independent from source-clause ancestry:
             // terms outside every live clause/theory closure can be reclaimed
@@ -3123,7 +3155,7 @@ impl<'a> CustomExternalPropagator<'a> {
                  root_satisfied_qi={} collectible_theory={} epoch_owned_terms={} \
                  candidate_terms={} \
                  pending_clause_registrations={} worthwhile={} term_gc_worthwhile={} \
-                 collection_in_flight={} trigger={:?}",
+                 term_analysis_skipped={} collection_in_flight={} trigger={:?}",
                 epoch,
                 self.decision_level,
                 epoch_clauses,
@@ -3142,6 +3174,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 pending_registrations,
                 analysis.worthwhile,
                 analysis.term_gc_worthwhile,
+                analysis.term_analysis_skipped,
                 collection_in_flight,
                 analysis.trigger,
             );
@@ -3227,6 +3260,9 @@ impl<'a> CustomExternalPropagator<'a> {
                 .map(|group| group.clauses.len())
                 .sum::<usize>();
             let collectible_theory = gc.tracker.collectible_forgettable_theory_clause_ids().len();
+            let collection_in_flight = !gc.pending_retired_qi_clause_ids.is_empty()
+                || !gc.pending_retired_qi_clause_contents.is_empty()
+                || !gc.pending_requested_theory_clause_ids.is_empty();
             let analysis = qi_gc_collection_analysis(
                 &gc,
                 self.solver_state,
@@ -3235,10 +3271,8 @@ impl<'a> CustomExternalPropagator<'a> {
                 root_satisfied_instances,
                 root_satisfied_qi,
                 collectible_theory,
+                !collection_in_flight,
             );
-            let collection_in_flight = !gc.pending_retired_qi_clause_ids.is_empty()
-                || !gc.pending_retired_qi_clause_contents.is_empty()
-                || !gc.pending_requested_theory_clause_ids.is_empty();
             let term_gc_scheduled = analysis.term_gc_worthwhile && !collection_in_flight;
             if term_gc_scheduled {
                 gc.targeted_term_gc_pending = true;
