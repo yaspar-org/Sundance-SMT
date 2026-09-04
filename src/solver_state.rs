@@ -21,7 +21,10 @@ use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
+#[cfg(not(feature = "semper-egraph"))]
 use crate::egraphs::basic::egraph::Egraph;
+#[cfg(feature = "semper-egraph")]
+use crate::egraphs::semper::SemperEgraph as Egraph;
 use crate::egraphs::traits::EgraphTrait;
 use crate::proof::Theory;
 use crate::solver_types::{
