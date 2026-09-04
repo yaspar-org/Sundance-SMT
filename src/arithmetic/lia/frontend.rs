@@ -122,6 +122,7 @@ const NEG_SYMBOL: &str = "-";
 const MULT_SYMBOL: &str = "*";
 const REAL_DIV_SYMBOL: &str = "/";
 const INT_DIV_SYMBOL: &str = "div";
+const INT_MOD_SYMBOL: &str = "mod";
 const TO_REAL_SYMBOL: &str = "to_real";
 // Note: to_int and is_int are not supported
 
@@ -243,6 +244,11 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                     // SMT-LIB integer division (Euclidean): (div e n) = q
                     // where e = n * q + r, 0 <= r < |n|
                     debug_assert!(args.len() == 2, "chainable division is not supported");
+                    // If this term was already converted, its constraints are already in
+                    // the context; just reuse the quotient variable.
+                    if let Some(q) = ctx.get_term(term.clone()) {
+                        return Ok(LinExpr(vec![Addend::term(Rational::ONE, q)]));
+                    }
                     let e1 = convert_linear_term(ctx, &args[0])?;
                     let e2 = convert_linear_term(ctx, &args[1])?;
                     if let Some(n) = e2.is_constant() {
@@ -290,6 +296,80 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                     } else {
                         Err(FrontendError(
                             "non-linear integer division is not supported".to_string(),
+                        ))
+                    }
+                }
+                INT_MOD_SYMBOL => {
+                    // SMT-LIB integer modulus (Euclidean): (mod e n) = r
+                    // where e = n * q + r, 0 <= r < |n|
+                    debug_assert!(args.len() == 2, "chainable modulus is not supported");
+                    // If this term was already converted, its constraints are already in
+                    // the context; just reuse the remainder variable.
+                    if let Some(r) = ctx.get_term(term.clone()) {
+                        return Ok(LinExpr(vec![Addend::term(Rational::ONE, r)]));
+                    }
+                    let e1 = convert_linear_term(ctx, &args[0])?;
+                    let e2 = convert_linear_term(ctx, &args[1])?;
+                    if let Some(n) = e2.is_constant() {
+                        if n.is_zero() {
+                            return Err(FrontendError("integer modulus by zero".to_string()));
+                        }
+                        // The remainder variable is associated with the mod term itself, so
+                        // that it is reported in models; the quotient is auxiliary.
+                        let r = ctx.allocate_term(term.clone(), None, app_sort.clone());
+                        let q = ctx.allocate_var(
+                            &format!("$mod_quotient_{}", ctx.num_variables()),
+                            VarType::Int,
+                        );
+                        let abs_n = if n < Rational::ZERO {
+                            -n.clone()
+                        } else {
+                            n.clone()
+                        };
+                        // Constraint 1: e - n*q - r = 0  (i.e., e = n*q + r)
+                        let rel_eq = Rel::from_addends_lhs_rhs(
+                            e1.0.iter()
+                                .cloned()
+                                .chain([
+                                    Addend::term(-n.clone(), q),
+                                    Addend::term(-Rational::ONE, r),
+                                ])
+                                .collect(),
+                            Constraint::Eq,
+                            vec![Addend::Constant(Rational::ZERO)],
+                        );
+                        let slack_eq = ctx.allocate_var(
+                            &format!("$mod_slack_eq_{}", ctx.num_variables()),
+                            VarType::Real,
+                        );
+                        ctx.push_relation(rel_eq, slack_eq);
+                        // Constraint 2: r >= 0
+                        let rel_ge = Rel::from_addends_lhs_rhs(
+                            vec![Addend::term(Rational::ONE, r)],
+                            Constraint::Ge,
+                            vec![Addend::Constant(Rational::ZERO)],
+                        );
+                        let slack_ge = ctx.allocate_var(
+                            &format!("$mod_slack_ge_{}", ctx.num_variables()),
+                            VarType::Real,
+                        );
+                        ctx.push_relation(rel_ge, slack_ge);
+                        // Constraint 3: r <= |n| - 1  (i.e., r < |n|)
+                        let rel_le = Rel::from_addends_lhs_rhs(
+                            vec![Addend::term(Rational::ONE, r)],
+                            Constraint::Le,
+                            vec![Addend::Constant(abs_n - Rational::ONE)],
+                        );
+                        let slack_le = ctx.allocate_var(
+                            &format!("$mod_slack_le_{}", ctx.num_variables()),
+                            VarType::Real,
+                        );
+                        ctx.push_relation(rel_le, slack_le);
+                        // Return r as the result expression
+                        Ok(LinExpr(vec![Addend::term(Rational::ONE, r)]))
+                    } else {
+                        Err(FrontendError(
+                            "non-linear integer modulus is not supported".to_string(),
                         ))
                     }
                 }
@@ -839,6 +919,179 @@ mod tests {
         let ctx = convert_smt(smt).unwrap();
         // Should produce 3 relations: the inequality (1 <= q) and two Euclidean constraints
         assert_eq!(ctx.num_relations(), 3);
+    }
+
+    /// A repeated `div` term must not push its Euclidean constraints twice.
+    ///
+    /// Before the fix, the second occurrence of `(div x 2)` reused the existing
+    /// quotient variable but still pushed a second, redundant copy of both
+    /// Euclidean constraints (6 relations instead of 4), each with its own fresh
+    /// slack variable — extra tableau rows and slack columns for no added
+    /// information.
+    #[test]
+    fn test_repeated_div_term_shares_constraints() {
+        let smt = r#"
+            (set-logic QF_LIA)
+            (declare-fun x () Int)
+            (assert (= 1 (div x 2)))
+            (assert (<= (div x 2) 1))
+        "#;
+        let ctx = convert_smt(smt).unwrap();
+        // 2 input relations + 2 Euclidean constraints from the single (div x 2) term
+        assert_eq!(ctx.num_relations(), 4);
+        // Every relation must own a distinct slack variable
+        let slacks: Vec<Var> = ctx.get_relations().map(|(_, v)| *v).collect();
+        let unique: std::collections::BTreeSet<Var> = slacks.iter().copied().collect();
+        assert_eq!(
+            slacks.len(),
+            unique.len(),
+            "relations must not share slack variables: {slacks:?}"
+        );
+    }
+
+    #[test]
+    fn test_constant_integer_modulus() {
+        // (mod x 2) introduces a fresh remainder variable r and quotient q with
+        // Euclidean constraints: x - 2q - r = 0, r >= 0 and r <= 1
+        // The equality (= 1 (mod x 2)) means r = 1
+        let smt = r#"
+            (set-logic QF_LIA)
+            (declare-fun x () Int)
+            (assert (= 1 (mod x 2)))
+        "#;
+        let ctx = convert_smt(smt).unwrap();
+        // Should produce 4 relations: the equality (1 = r) and three Euclidean constraints
+        assert_eq!(ctx.num_relations(), 4);
+
+        // Test a non-linear modulus
+        let smt = r#"
+            (set-logic QF_LIA)
+            (declare-fun x () Int)
+            (assert (= 1 (mod 3 x)))
+        "#;
+        assert!(convert_smt(smt).is_err());
+
+        // Test modulus by a constant polynomial
+        let smt = r#"
+            (set-logic QF_LIA)
+            (declare-fun x () Int)
+            (declare-fun y () Int)
+            (assert (<= 1 (mod x (+ 5 (+ y (- y))))))
+        "#;
+        let ctx = convert_smt(smt).unwrap();
+        // Should produce 4 relations: the inequality (1 <= r) and three Euclidean constraints
+        assert_eq!(ctx.num_relations(), 4);
+    }
+
+    /// A repeated `mod` term must not push its Euclidean constraints twice.
+    #[test]
+    fn test_repeated_mod_term_shares_constraints() {
+        let smt = r#"
+            (set-logic QF_LIA)
+            (declare-fun x () Int)
+            (assert (= 1 (mod x 2)))
+            (assert (<= (mod x 2) 1))
+        "#;
+        let ctx = convert_smt(smt).unwrap();
+        // 2 input relations + 3 Euclidean constraints from the single (mod x 2) term
+        assert_eq!(ctx.num_relations(), 5);
+        // Every relation must own a distinct slack variable
+        let slacks: Vec<Var> = ctx.get_relations().map(|(_, v)| *v).collect();
+        let unique: std::collections::BTreeSet<Var> = slacks.iter().copied().collect();
+        assert_eq!(
+            slacks.len(),
+            unique.len(),
+            "relations must not share slack variables: {slacks:?}"
+        );
+    }
+
+    /// `(mod x n)` follows SMT-LIB Euclidean semantics: the remainder is
+    /// non-negative and strictly below `|n|`.
+    #[test]
+    fn test_int_mod_euclidean_semantics_sat() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const x Int)
+(assert (= x 7))
+(assert (= (mod x 3) 1))  ; 7 = 3*2 + 1
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)));
+    }
+
+    /// The remainder of `(mod 7 3)` is uniquely 1; any other value is infeasible.
+    #[test]
+    fn test_int_mod_constant_unsat_wrong_remainder() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const r Int)
+(assert (= r (mod 7 3)))
+(assert (= r 2))  ; 7 - 3q = 2 has no integer solution q
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)));
+    }
+
+    /// Euclidean modulus of a negative numerator is non-negative:
+    /// `(mod (- 1) 3)`: -1 = 3*(-1) + 2, so the remainder is 2 (not -1).
+    #[test]
+    fn test_int_mod_negative_numerator_nonnegative() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const r Int)
+(assert (= r (mod (- 1) 3)))
+(assert (= r 2))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)));
+    }
+
+    /// Euclidean modulus by a negative denominator is still non-negative and
+    /// bounded by `|n|`: `(mod 9 (- 2))`: 9 = (-2)*(-4) + 1, so the remainder is 1.
+    #[test]
+    fn test_int_mod_negative_denominator_nonnegative() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const r Int)
+(assert (= r (mod 9 (- 2))))
+(assert (= r 1))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(matches!(result, SolverDecisionApi::FEASIBLE(_)));
+    }
+
+    /// A negative remainder is never a solution, even though `9 = (-2)*(-5) + (-1)`
+    /// holds over the integers.
+    #[test]
+    fn test_int_mod_negative_remainder_unsat() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const r Int)
+(assert (= r (mod 9 (- 2))))
+(assert (= r (- 1)))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)));
+    }
+
+    #[test]
+    fn test_mod_zero_by_c() {
+        // Modulus by a non-constant denominator is rejected, mirroring `div`
+        let smt_input = r#"
+(declare-fun C () Int)
+(assert (= C 1))
+(assert (= 1 (mod 0 C)))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default());
+        assert!(result.is_err_and(
+            |e| e == FrontendError("non-linear integer modulus is not supported".to_string())
+        ));
     }
 
     // ---------------------------------------------------------------------
