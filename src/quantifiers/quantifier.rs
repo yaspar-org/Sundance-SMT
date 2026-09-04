@@ -79,6 +79,10 @@ impl PendingInstantiations {
         self.deferred_instantiations.is_empty() && self.deferred_skolemizations.is_empty()
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.deferred_instantiations.len() + self.deferred_skolemizations.len()
+    }
+
     pub(crate) fn skolemized_quantifier_idxs(&self) -> &[usize] {
         &self.skolemized_quantifier_idxs
     }

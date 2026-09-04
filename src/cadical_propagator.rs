@@ -1017,6 +1017,21 @@ impl<'a> CustomExternalPropagator<'a> {
         );
         drop(gc);
         self.print_qi_gc_profile("epoch-transition-start");
+        debug_assert!(!self.materializing_quantifiers);
+        let dropped_pending_qi = self.pending.take().map_or(0, |pending| pending.len());
+        if dropped_pending_qi != 0 {
+            qi_gc_trace!(
+                "epoch {}: discarded {} old-generation pending QI items",
+                epoch,
+                dropped_pending_qi
+            );
+            if QI_GC_PROFILE.load(Ordering::Relaxed) {
+                eprintln!(
+                    "[qi-gc-profile] transition-discarded-pending epoch={} items={}",
+                    epoch, dropped_pending_qi
+                );
+            }
+        }
 
         let QiGcPlan {
             retained_instances,
@@ -1025,7 +1040,7 @@ impl<'a> CustomExternalPropagator<'a> {
             observed_qi_clauses,
             antecedent_edges,
             retained_term_uids,
-            mut permanent_term_uids,
+            permanent_term_uids,
             epoch_owned_term_uids,
         } = gc_state.borrow().tracker.plan();
         let retained_instance_count = retained_instances.len();
@@ -1037,6 +1052,9 @@ impl<'a> CustomExternalPropagator<'a> {
             + retained_orphan_count;
         let retired_qi_count = observed_qi_clauses.saturating_sub(retained_qi_count);
         let support_term_count = retained_term_uids.difference(&permanent_term_uids).count();
+        let permanent_epoch_terms_before = permanent_term_uids
+            .intersection(&epoch_owned_term_uids)
+            .count();
 
         // Keep every live activation-dependent learned clause. The proof
         // tracer sees all derived clauses and deletions; the Learner is a
@@ -1057,6 +1075,13 @@ impl<'a> CustomExternalPropagator<'a> {
         let promoted_derived =
             deduplicate_clauses(derived_clauses.into_iter().chain(learner_derived));
         let promoted_derived_count = promoted_derived.len();
+        let migrated_derived: Vec<Vec<i32>> = promoted_derived
+            .iter()
+            .filter(|clause| !clause.is_empty())
+            .cloned()
+            .collect();
+        let migrated_derived_count = migrated_derived.len();
+        let promotes_empty_clause = migrated_derived_count != promoted_derived_count;
         let mut pinned_term_uids = retained_term_uids;
         self.solver_state
             .collect_clause_term_closure(&retained_orphan_clauses, &mut pinned_term_uids);
@@ -1064,15 +1089,18 @@ impl<'a> CustomExternalPropagator<'a> {
         self.solver_state
             .collect_clause_term_closure(&promoted_derived, &mut promoted_term_uids);
         pinned_term_uids.extend(promoted_term_uids.iter().copied());
-        permanent_term_uids.extend(promoted_term_uids);
+        let permanent_epoch_terms_after = permanent_term_uids
+            .intersection(&epoch_owned_term_uids)
+            .count();
         let mut retired_candidate_term_uids = epoch_owned_term_uids.clone();
         retired_candidate_term_uids.retain(|uid| !pinned_term_uids.contains(uid));
 
         qi_gc_trace!(
             "epoch {}: dependency plan observed_qi={} migrated_qi={} retired_qi={} \
              migrated_instances={} migrated_orphans={} support_clause_terms={} \
-             permanent_terms={} pinned_terms={} retire_term_candidates={} \
-             promoted_derived={} ancestry_edges={}",
+             epoch_owned_terms={} permanent_terms={} permanent_epoch_terms_before={} \
+             permanent_epoch_terms_after={} pinned_terms={} retire_term_candidates={} \
+             promoted_derived={} migrated_derived={} promotes_empty={} ancestry_edges={}",
             epoch,
             observed_qi_clauses,
             retained_qi_count,
@@ -1080,18 +1108,25 @@ impl<'a> CustomExternalPropagator<'a> {
             retained_instance_count,
             retained_orphan_count,
             support_term_count,
+            epoch_owned_term_uids.len(),
             permanent_term_uids.len(),
+            permanent_epoch_terms_before,
+            permanent_epoch_terms_after,
             pinned_term_uids.len(),
             retired_candidate_term_uids.len(),
             promoted_derived_count,
+            migrated_derived_count,
+            promotes_empty_clause,
             antecedent_edges
         );
         if QI_GC_PROFILE.load(Ordering::Relaxed) {
             eprintln!(
                 "[qi-gc-profile] migration-plan epoch={} observed_qi={} migrated_qi={} \
                  retired_qi={} migrated_instances={} migrated_orphans={} \
-                 support_clause_terms={} permanent_terms={} pinned_terms={} \
-                 retire_term_candidates={} promoted_derived={} ancestry_edges={}",
+                 support_clause_terms={} epoch_owned_terms={} permanent_terms={} \
+                 permanent_epoch_terms_before={} permanent_epoch_terms_after={} \
+                 pinned_terms={} retire_term_candidates={} promoted_derived={} \
+                 migrated_derived={} promotes_empty={} ancestry_edges={}",
                 epoch,
                 observed_qi_clauses,
                 retained_qi_count,
@@ -1099,10 +1134,15 @@ impl<'a> CustomExternalPropagator<'a> {
                 retained_instance_count,
                 retained_orphan_count,
                 support_term_count,
+                epoch_owned_term_uids.len(),
                 permanent_term_uids.len(),
+                permanent_epoch_terms_before,
+                permanent_epoch_terms_after,
                 pinned_term_uids.len(),
                 retired_candidate_term_uids.len(),
                 promoted_derived_count,
+                migrated_derived_count,
+                promotes_empty_clause,
                 antecedent_edges
             );
         }
@@ -1112,11 +1152,13 @@ impl<'a> CustomExternalPropagator<'a> {
         // has not physically forgotten.
         self.queue_theory_clause(retire_activation_unit(old_act), Theory::Background);
 
-        // 2. Preserve activation-free consequences from the live learned
-        // database. Their exact supporting QI groups are migrated below, so
-        // the SAT state keeps its propagation strength without pinning those
-        // groups permanently.
-        for promoted in promoted_derived {
+        // 2. A promoted empty clause is a permanent UNSAT proof. Non-empty
+        // learned consequences are migrated below under the next activation:
+        // they remain active, but CaDiCaL and a later epoch may collect them.
+        if promotes_empty_clause {
+            self.queue_theory_clause(Vec::new(), Theory::Background);
+        }
+        for promoted in &migrated_derived {
             if QI_GC_TRACE.load(Ordering::Relaxed) {
                 let terms: Vec<String> = promoted
                     .iter()
@@ -1134,14 +1176,10 @@ impl<'a> CustomExternalPropagator<'a> {
                     })
                     .collect();
                 eprintln!(
-                    "[qi-gc] epoch {}: promoting conflict clause: {:?}",
+                    "[qi-gc] epoch {}: migrating conflict clause: {:?}",
                     epoch, terms
                 );
             }
-            // A learned unit `¬act` promotes to the empty clause: the QI epoch
-            // proved the permanent problem UNSAT. Dropping it would discard
-            // the proof and restart an unbounded instantiation sequence.
-            self.queue_theory_clause(promoted, Theory::Background);
         }
 
         // 3. Reclaim the solver/egraph state owned only by discarded
@@ -1288,8 +1326,9 @@ impl<'a> CustomExternalPropagator<'a> {
         // 5. Allocate and initialize the new epoch.
         gc.epoch += 1;
         gc.transitions += 1;
-        gc.epoch_guarded_clauses = retained_qi_count as u64;
-        gc.total_guarded_clauses += retained_qi_count as u64;
+        let migrated_clause_count = retained_qi_count + migrated_derived_count;
+        gc.epoch_guarded_clauses = migrated_clause_count as u64;
+        gc.total_guarded_clauses += migrated_clause_count as u64;
         gc.epoch_instantiations = retained_instance_count as u64;
         gc.collection_check_pending = false;
 
@@ -1308,7 +1347,7 @@ impl<'a> CustomExternalPropagator<'a> {
         // 6. Re-add migrated support as forgettable clauses guarded by the
         // new activation. Group registrations were installed first so proof
         // callbacks recover exact instance ownership.
-        let mut migrated_guarded_clauses = Vec::with_capacity(retained_qi_count);
+        let mut migrated_guarded_clauses = Vec::with_capacity(migrated_clause_count);
         for instance in retained_instances {
             for mut clause in instance.clauses {
                 clause.push(-new_act);
@@ -1319,7 +1358,11 @@ impl<'a> CustomExternalPropagator<'a> {
             clause.push(-new_act);
             migrated_guarded_clauses.push(clause);
         }
-        debug_assert_eq!(migrated_guarded_clauses.len(), retained_qi_count);
+        for mut clause in migrated_derived {
+            clause.push(-new_act);
+            migrated_guarded_clauses.push(clause);
+        }
+        debug_assert_eq!(migrated_guarded_clauses.len(), migrated_clause_count);
         for guarded in migrated_guarded_clauses {
             self.proof_tracer
                 .borrow_mut()
@@ -1333,24 +1376,26 @@ impl<'a> CustomExternalPropagator<'a> {
         }
 
         qi_gc_trace!(
-            "epoch {}: transition complete. migrated {} QI clauses, retired {}, promoted {} \
-             derived clauses, carried {} epoch terms, pending registrations={}. new act={}",
+            "epoch {}: transition complete. migrated {} QI clauses and {} derived clauses, \
+             retired {}, carried {} epoch terms, pending registrations={}. new act={}",
             new_epoch,
             retained_qi_count,
+            migrated_derived_count,
             retired_qi_count,
-            promoted_derived_count,
             carried_epoch_term_uids.len(),
             pending_registrations,
             new_act
         );
         if QI_GC_PROFILE.load(Ordering::Relaxed) {
             eprintln!(
-                "[qi-gc-profile] migration-complete epoch={} migrated_qi={} retired_qi={} \
-                 promoted_derived={} carried_epoch_terms={} pending_registrations={} new_act={}",
+                "[qi-gc-profile] migration-complete epoch={} migrated_qi={} \
+                 migrated_derived={} retired_qi={} promotes_empty={} carried_epoch_terms={} \
+                 pending_registrations={} new_act={}",
                 new_epoch,
                 retained_qi_count,
+                migrated_derived_count,
                 retired_qi_count,
-                promoted_derived_count,
+                promotes_empty_clause,
                 carried_epoch_term_uids.len(),
                 pending_registrations,
                 new_act
