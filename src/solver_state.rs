@@ -183,13 +183,13 @@ pub struct SolverState {
     /// SAT variables whose only term mappings were reclaimed by QI GC.
     /// CaDiCaL may still mention these variables in satisfied old clauses, so
     /// propagator callbacks must ignore them rather than looking up a term.
-    retired_sat_vars: DeterministicHashSet<i32>,
+    retired_sat_vars: Vec<bool>,
 
     /// Retired SAT variables that represented only Boolean connective
     /// structure. Their defining/source clauses may remain in CaDiCaL as
     /// ordinary unobserved SAT structure after the corresponding Sundance
     /// e-graph terms are reclaimed.
-    retired_sat_only_vars: DeterministicHashSet<i32>,
+    retired_sat_only_vars: Vec<bool>,
 
     /// Whether to instantiate some datatype axioms lazily.
     pub lazy_dt: bool,
@@ -258,8 +258,8 @@ impl SolverState {
             datatype_axioms_applied: HashSet::new(),
             arithmetic_terms: vec![],
             cnf_cache: Default::default(),
-            retired_sat_vars: DeterministicHashSet::default(),
-            retired_sat_only_vars: DeterministicHashSet::default(),
+            retired_sat_vars: Vec::new(),
+            retired_sat_only_vars: Vec::new(),
             lazy_dt,
             ddsmt,
             eager_skolem,
@@ -481,11 +481,24 @@ impl SolverState {
     }
 
     pub(crate) fn is_retired_sat_var(&self, var: i32) -> bool {
-        let var = var.abs();
-        if self.retired_sat_vars.contains(&var) {
+        let var = var.unsigned_abs() as usize;
+        if self.retired_sat_vars.get(var).copied().unwrap_or(false) {
             return true;
         }
+
+        // Every production tombstone is recorded in the dense bitmap by
+        // `retire_qi_terms`. Keep the slower structural check in debug builds
+        // to catch stale mappings created by tests or future maintenance code
+        // without charging every release-mode assignment callback two hash
+        // lookups.
+        #[cfg(not(debug_assertions))]
+        return false;
+
+        #[cfg(debug_assertions)]
+        let var = var as i32;
+        #[cfg(debug_assertions)]
         let mut has_mapping = false;
+        #[cfg(debug_assertions)]
         for lit in [var, -var] {
             let Some(uid) = self.cnf_cache.var_map_reverse.get(&lit) else {
                 continue;
@@ -495,11 +508,15 @@ impl SolverState {
                 return false;
             }
         }
+        #[cfg(debug_assertions)]
         has_mapping
     }
 
     pub(crate) fn is_retired_sat_only_var(&self, var: i32) -> bool {
-        self.retired_sat_only_vars.contains(&var.abs())
+        self.retired_sat_only_vars
+            .get(var.unsigned_abs() as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn is_sat_only_boolean_structure(term: &Term) -> bool {
@@ -577,14 +594,24 @@ impl SolverState {
                     && !self.cnf_cache.var_map_reverse.contains_key(&-*var)
             })
             .collect();
-        self.retired_sat_vars.extend(retired_vars.iter().copied());
+        if let Some(max_var) = retired_vars.iter().copied().max() {
+            self.retired_sat_vars.resize(max_var as usize + 1, false);
+            for var in &retired_vars {
+                self.retired_sat_vars[*var as usize] = true;
+            }
+        }
         let retired_sat_only_vars: Vec<i32> = retired_vars
             .iter()
             .copied()
             .filter(|var| sat_only_candidates.contains(var))
             .collect();
-        self.retired_sat_only_vars
-            .extend(retired_sat_only_vars.iter().copied());
+        if let Some(max_var) = retired_sat_only_vars.iter().copied().max() {
+            self.retired_sat_only_vars
+                .resize(max_var as usize + 1, false);
+            for var in &retired_sat_only_vars {
+                self.retired_sat_only_vars[*var as usize] = true;
+            }
+        }
 
         for uid in &retired_uids {
             self.id_map.remove_by_left(uid);
