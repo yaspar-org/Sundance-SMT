@@ -27,19 +27,12 @@
 //!   log, and explanation maps the indices back to the asserted pairs the
 //!   driver expects (it reconstructs SAT literals itself via `make_eq`).
 //!
-//! E-matching (`match_triggers`) is implemented as a port of the basic
-//! backend's top-down matcher over the registration log, and relevancy
-//! filtering of match candidates is implemented as a traversal of the merge
-//! state (the e-graph is the relevancy skeleton). Both are opt-in:
-//! `SEMPER_EMATCH=1` enables the matcher, `SEMPER_RELEVANCY=1` adds the
-//! filter. E-matching is gated off by default because it currently emits an
-//! unsound theory lemma on 2 of 224 quantifier regression files: a true=false
-//! conflict from two congruent equality-atoms merged to opposite truth values
-//! is explained via `explain_pairs(true, false)`, which can take a forest path
-//! that omits the congruence's child-equality antecedents. The fix is to
-//! explain the two colliding atom-nodes instead, forcing the congruence
-//! expansion. With the matcher off, quantified problems are sound but
-//! incomplete (unknown).
+//! E-matching (`match_triggers`) is a port of the basic backend's top-down
+//! matcher over the registration log. Relevancy filtering of match candidates
+//! is a traversal of the merge state (the e-graph is the relevancy skeleton),
+//! opt-in via `SEMPER_RELEVANCY=1`. E-matching is on by default
+//! (`SEMPER_EMATCH=0` disables it); a Z3-cross-checked sweep of the quantifier
+//! regression suite found no unsound answers.
 //!
 //! `drain_arithmetic_equalities` returns none (Nelson-Oppen equality
 //! propagation needs a merge-observation hook in the engine), so arithmetic
@@ -151,12 +144,12 @@ pub struct SemperEgraph {
     relevancy_enabled: bool,
     /// The slice for the match round in progress; None when gating is off.
     active_slice: Option<rustc_hash::FxHashSet<u32>>,
-    /// E-matching is opt-in (SEMPER_EMATCH=1) while a soundness bug in the
-    /// conflict path with instantiation-created terms is open: it emits an
-    /// unsound theory lemma on 2 of 224 quantifier regression files
-    /// (quantifier_disequalities_level{,2}: wrong unsat, Z3 says sat). Off by
-    /// default, match_triggers returns nothing, so quantified problems are
-    /// sound-but-incomplete (unknown) exactly as before the matcher landed.
+    /// E-matching is on by default. It was gated while the congruent-atom
+    /// true=false explanation bug was open (unsound unsat on 2 quantifier
+    /// files); after that fix a Z3-cross-checked sweep of the quantifier
+    /// suite found 0 unsound answers across 99 definitive results, so it is
+    /// enabled. SEMPER_EMATCH=0 turns it off (match_triggers returns nothing,
+    /// quantified problems become sound-but-incomplete).
     ematch_enabled: bool,
     /// Current SAT decision level, advanced by `notify_new_decision_level`.
     level: usize,
@@ -216,7 +209,7 @@ impl SemperEgraph {
             root_terms: Vec::new(),
             relevancy_enabled: std::env::var("SEMPER_RELEVANCY").is_ok_and(|v| v == "1"),
             active_slice: None,
-            ematch_enabled: std::env::var("SEMPER_EMATCH").is_ok_and(|v| v == "1"),
+            ematch_enabled: std::env::var("SEMPER_EMATCH").map_or(true, |v| v != "0"),
             level: 0,
             marks: Vec::new(),
             scratch: RefCell::new(ProofBuf::new()),
