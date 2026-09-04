@@ -143,6 +143,13 @@ pub struct SolverState {
     /// Tracks quantifier instantiations to avoid duplicates.
     pub added_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
 
+    /// Profile-only tombstones for substitutions whose QI clauses and term
+    /// closure were collected. Removing a tombstone when e-matching accepts
+    /// the same substitution again measures GC/regeneration churn directly.
+    qi_gc_released_instantiations: HashMap<u64, HashSet<DeterministicHashMap<Local, Term>>>,
+    qi_gc_released_instantiation_events: u64,
+    qi_gc_rediscovered_instantiation_events: u64,
+
     /// Instantiation depth of terms, keyed by solver UID. Original terms are
     /// generation 0; a QI-produced term is one deeper than its trigger terms.
     generation: DeterministicHashMap<u64, u32>,
@@ -177,6 +184,12 @@ pub struct SolverState {
     /// CaDiCaL may still mention these variables in satisfied old clauses, so
     /// propagator callbacks must ignore them rather than looking up a term.
     retired_sat_vars: DeterministicHashSet<i32>,
+
+    /// Retired SAT variables that represented only Boolean connective
+    /// structure. Their defining/source clauses may remain in CaDiCaL as
+    /// ordinary unobserved SAT structure after the corresponding Sundance
+    /// e-graph terms are reclaimed.
+    retired_sat_only_vars: DeterministicHashSet<i32>,
 
     /// Whether to instantiate some datatype axioms lazily.
     pub lazy_dt: bool,
@@ -233,6 +246,9 @@ impl SolverState {
             assertions: vec![],
             quantifiers: vec![],
             added_instantiations: HashMap::default(),
+            qi_gc_released_instantiations: HashMap::default(),
+            qi_gc_released_instantiation_events: 0,
+            qi_gc_rediscovered_instantiation_events: 0,
             generation: DeterministicHashMap::default(),
             current_instantiation_generation: 0,
             current_qi_created_terms: None,
@@ -243,6 +259,7 @@ impl SolverState {
             arithmetic_terms: vec![],
             cnf_cache: Default::default(),
             retired_sat_vars: DeterministicHashSet::default(),
+            retired_sat_only_vars: DeterministicHashSet::default(),
             lazy_dt,
             ddsmt,
             eager_skolem,
@@ -273,6 +290,77 @@ impl SolverState {
         self.current_qi_created_terms
             .take()
             .expect("QI term capture must be active")
+    }
+
+    /// Allow an instance whose clauses and owned terms were physically
+    /// collected to be discovered again if its trigger substitution remains
+    /// present in the live e-graph.
+    pub(crate) fn forget_added_instantiation(
+        &mut self,
+        quantifier_id: u64,
+        substitution: &DeterministicHashMap<Local, Term>,
+    ) -> bool {
+        let Some(instantiations) = self.added_instantiations.get_mut(&quantifier_id) else {
+            return false;
+        };
+        let removed = instantiations.remove(substitution);
+        let remove_quantifier_entry = instantiations.is_empty();
+        if remove_quantifier_entry {
+            self.added_instantiations.remove(&quantifier_id);
+        }
+        if removed && std::env::var_os("SUNDANCE_QI_GC_PROFILE").is_some() {
+            self.qi_gc_released_instantiations
+                .entry(quantifier_id)
+                .or_default()
+                .insert(substitution.clone());
+            self.qi_gc_released_instantiation_events += 1;
+        }
+        removed
+    }
+
+    /// Record that ordinary e-matching accepted a substitution after its
+    /// previous materialization had been physically collected.
+    pub(crate) fn note_qi_gc_accepted_instantiation(
+        &mut self,
+        quantifier_id: u64,
+        substitution: &DeterministicHashMap<Local, Term>,
+    ) -> bool {
+        let Some(released) = self.qi_gc_released_instantiations.get_mut(&quantifier_id) else {
+            return false;
+        };
+        let rediscovered = released.remove(substitution);
+        let remove_quantifier_entry = released.is_empty();
+        if remove_quantifier_entry {
+            self.qi_gc_released_instantiations.remove(&quantifier_id);
+        }
+        if rediscovered {
+            self.qi_gc_rediscovered_instantiation_events += 1;
+        }
+        rediscovered
+    }
+
+    pub(crate) fn remember_added_instantiation(
+        &mut self,
+        quantifier_id: u64,
+        substitution: &DeterministicHashMap<Local, Term>,
+    ) -> bool {
+        let rediscovered = self.note_qi_gc_accepted_instantiation(quantifier_id, substitution);
+        self.added_instantiations
+            .entry(quantifier_id)
+            .or_default()
+            .insert(substitution.clone());
+        rediscovered
+    }
+
+    pub(crate) fn qi_gc_instantiation_churn_profile(&self) -> (usize, u64, u64) {
+        (
+            self.qi_gc_released_instantiations
+                .values()
+                .map(HashSet::len)
+                .sum(),
+            self.qi_gc_released_instantiation_events,
+            self.qi_gc_rediscovered_instantiation_events,
+        )
     }
 
     fn record_qi_created_term(&mut self, uid: u64) {
@@ -316,6 +404,82 @@ impl SolverState {
         }
     }
 
+    fn collect_theory_atom_term_closure(
+        &self,
+        term: &Term,
+        result: &mut DeterministicHashSet<u64>,
+    ) {
+        match term.repr() {
+            ATerm::And(items) | ATerm::Or(items) | ATerm::Xor(items) => {
+                for item in items {
+                    self.collect_theory_atom_term_closure(item, result);
+                }
+            }
+            ATerm::Not(inner) | ATerm::Annotated(inner, _) => {
+                self.collect_theory_atom_term_closure(inner, result);
+            }
+            ATerm::Implies(premises, conclusion) => {
+                for premise in premises {
+                    self.collect_theory_atom_term_closure(premise, result);
+                }
+                self.collect_theory_atom_term_closure(conclusion, result);
+            }
+            ATerm::Ite(condition, then_term, else_term) => {
+                self.collect_theory_atom_term_closure(condition, result);
+                self.collect_theory_atom_term_closure(then_term, result);
+                self.collect_theory_atom_term_closure(else_term, result);
+            }
+            ATerm::Forall(_, _) | ATerm::Exists(_, _) => {}
+            // Equality, predicates, arithmetic relations, datatype testers,
+            // and Boolean constants/variables have independent theory
+            // meaning. Preserve their complete non-Boolean subterm closure.
+            _ => self.collect_registered_term_closure(term, result),
+        }
+    }
+
+    /// Collect only the terms needed to interpret theory atoms in SAT
+    /// clauses. Pure Boolean/Tseitin structure can remain in CaDiCaL after its
+    /// solver-side term representation is retired.
+    pub(crate) fn collect_clause_theory_term_closure(
+        &self,
+        clauses: &[Vec<i32>],
+        result: &mut DeterministicHashSet<u64>,
+    ) {
+        for literal in clauses.iter().flatten() {
+            let Some(uid) = self
+                .cnf_cache
+                .var_map_reverse
+                .get(literal)
+                .or_else(|| self.cnf_cache.var_map_reverse.get(&-*literal))
+            else {
+                continue;
+            };
+            let Some(TermOption::Some(term)) = self.terms_list.get(*uid as usize) else {
+                continue;
+            };
+            self.collect_theory_atom_term_closure(term, result);
+        }
+    }
+
+    /// Quantifier records are future e-matching work, not just annotations on
+    /// their current SAT clauses. Until a quantifier can be reconstructed from
+    /// a retired instance, keep its term, body, guard, and their subterms.
+    pub(crate) fn collect_quantifier_term_closure(&self, result: &mut DeterministicHashSet<u64>) {
+        for quantifier in &self.quantifiers {
+            for uid in [Some(quantifier.id), Some(quantifier.body), quantifier.guard]
+                .into_iter()
+                .flatten()
+            {
+                match self.get_term_safe(uid) {
+                    TermOption::Some(term) | TermOption::Uninitialized(term) => {
+                        self.collect_registered_term_closure(&term, result);
+                    }
+                    TermOption::None => {}
+                }
+            }
+        }
+    }
+
     pub(crate) fn is_retired_sat_var(&self, var: i32) -> bool {
         let var = var.abs();
         if self.retired_sat_vars.contains(&var) {
@@ -332,6 +496,23 @@ impl SolverState {
             }
         }
         has_mapping
+    }
+
+    pub(crate) fn is_retired_sat_only_var(&self, var: i32) -> bool {
+        self.retired_sat_only_vars.contains(&var.abs())
+    }
+
+    fn is_sat_only_boolean_structure(term: &Term) -> bool {
+        match term.repr() {
+            ATerm::And(_)
+            | ATerm::Or(_)
+            | ATerm::Xor(_)
+            | ATerm::Not(_)
+            | ATerm::Implies(_, _)
+            | ATerm::Ite(_, _, _) => true,
+            ATerm::Annotated(inner, _) => Self::is_sat_only_boolean_structure(inner),
+            _ => false,
+        }
     }
 
     pub(crate) fn retire_qi_terms(
@@ -355,6 +536,32 @@ impl SolverState {
 
         let mut possible_retired_vars =
             sat_vars_owned_only_by_retired_terms(&self.cnf_cache.var_map_reverse, &retired_uids);
+        let sat_only_candidates: HashSet<i32> = possible_retired_vars
+            .iter()
+            .copied()
+            .filter(|var| {
+                let mapped_terms: Vec<&Term> = self
+                    .cnf_cache
+                    .var_map_reverse
+                    .iter()
+                    .filter_map(|(lit, uid)| {
+                        (lit.abs() == *var && retired_uids.contains(uid))
+                            .then(|| self.terms_list.get(*uid as usize))
+                            .flatten()
+                            .and_then(|slot| match slot {
+                                TermOption::Some(term) | TermOption::Uninitialized(term) => {
+                                    Some(term)
+                                }
+                                TermOption::None => None,
+                            })
+                    })
+                    .collect();
+                !mapped_terms.is_empty()
+                    && mapped_terms
+                        .into_iter()
+                        .all(Self::is_sat_only_boolean_structure)
+            })
+            .collect();
         for uid in &retired_uids {
             if let Some(lit) = self.cnf_cache.var_map.remove(uid) {
                 possible_retired_vars.insert(lit.abs());
@@ -371,6 +578,13 @@ impl SolverState {
             })
             .collect();
         self.retired_sat_vars.extend(retired_vars.iter().copied());
+        let retired_sat_only_vars: Vec<i32> = retired_vars
+            .iter()
+            .copied()
+            .filter(|var| sat_only_candidates.contains(var))
+            .collect();
+        self.retired_sat_only_vars
+            .extend(retired_sat_only_vars.iter().copied());
 
         for uid in &retired_uids {
             self.id_map.remove_by_left(uid);
@@ -441,17 +655,27 @@ impl SolverState {
         retired_term_uids.sort_unstable();
         SolverTermGcReport {
             requested: egraph_report.requested,
+            candidate_classes: egraph_report.candidate_classes,
+            fully_candidate_classes: egraph_report.fully_candidate_classes,
+            retired_classes: egraph_report.retired_classes,
+            pruned_mixed_classes: egraph_report.pruned_mixed_classes,
+            pruned_mixed_class_terms: egraph_report.pruned_mixed_class_terms,
             retired_terms: retired_term_uids.len(),
             retired_term_uids,
             retired_sat_vars: retired_vars.into_iter().collect(),
+            retired_sat_only_vars,
             predecessor_entries_before: egraph_report.predecessor_entries_before,
             predecessor_entries_after_compaction: egraph_report
                 .predecessor_entries_after_compaction,
             predecessor_entries_after_retirement: egraph_report
                 .predecessor_entries_after_retirement,
-            blocked_non_singleton: egraph_report.blocked_non_singleton,
-            blocked_live_parent: egraph_report.blocked_live_parent,
-            blocked_pattern: egraph_report.blocked_pattern,
+            blocked_mixed_class_roots: egraph_report.blocked_mixed_class_roots,
+            blocked_live_parent_terms: egraph_report.blocked_live_parent_terms,
+            blocked_proof_reference_terms: egraph_report.blocked_proof_reference_terms,
+            blocked_disequality_terms: egraph_report.blocked_disequality_terms,
+            blocked_pattern_terms: egraph_report.blocked_pattern_terms,
+            blocked_trigger_head_terms: egraph_report.blocked_trigger_head_terms,
+            blocked_pending_event_terms: egraph_report.blocked_pending_event_terms,
             missing: egraph_report.missing,
         }
     }
@@ -1438,15 +1662,25 @@ impl SolverState {
 #[derive(Debug, Default)]
 pub(crate) struct SolverTermGcReport {
     pub(crate) requested: usize,
+    pub(crate) candidate_classes: usize,
+    pub(crate) fully_candidate_classes: usize,
+    pub(crate) retired_classes: usize,
+    pub(crate) pruned_mixed_classes: usize,
+    pub(crate) pruned_mixed_class_terms: usize,
     pub(crate) retired_terms: usize,
     pub(crate) retired_term_uids: Vec<u64>,
     pub(crate) retired_sat_vars: Vec<i32>,
+    pub(crate) retired_sat_only_vars: Vec<i32>,
     pub(crate) predecessor_entries_before: usize,
     pub(crate) predecessor_entries_after_compaction: usize,
     pub(crate) predecessor_entries_after_retirement: usize,
-    pub(crate) blocked_non_singleton: usize,
-    pub(crate) blocked_live_parent: usize,
-    pub(crate) blocked_pattern: usize,
+    pub(crate) blocked_mixed_class_roots: usize,
+    pub(crate) blocked_live_parent_terms: usize,
+    pub(crate) blocked_proof_reference_terms: usize,
+    pub(crate) blocked_disequality_terms: usize,
+    pub(crate) blocked_pattern_terms: usize,
+    pub(crate) blocked_trigger_head_terms: usize,
+    pub(crate) blocked_pending_event_terms: usize,
     pub(crate) missing: usize,
 }
 

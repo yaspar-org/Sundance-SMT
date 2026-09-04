@@ -42,7 +42,37 @@ fn note_qi_gc_clause_removed(tracer: &mut SMTProofTracer, id: u64, clause: &[i32
     {
         gc.total_deleted_retired_activation_clauses += 1;
     }
-    gc.tracker.note_deleted_clause(id);
+    if gc.pending_retired_qi_clause_ids.is_empty()
+        && gc.pending_retired_qi_clause_contents.is_empty()
+        && let Some(started) = gc.in_search_collection_started.take()
+    {
+        let expected = std::mem::take(&mut gc.in_search_collection_expected_qi_clauses);
+        if std::env::var("SUNDANCE_QI_GC_PROFILE").is_ok() {
+            eprintln!(
+                "[qi-gc-profile] sat-collect-in-search duration={:.6}s \
+                 reclaimed_retired_qi={} total_physically_collected_qi={}",
+                started.elapsed().as_secs_f64(),
+                expected,
+                gc.total_physically_collected_qi_clauses,
+            );
+        }
+    }
+    let released_epoch_term_owner = gc.tracker.note_deleted_clause(id);
+    if gc.pending_requested_theory_clause_ids.remove(&id) {
+        gc.total_physically_collected_theory_clauses += 1;
+        if std::env::var("SUNDANCE_QI_GC_PROFILE").is_ok() {
+            eprintln!(
+                "[qi-gc-profile] theory-clause-collected id={} \
+                 pending_theory={} total_collected_theory={}",
+                id,
+                gc.pending_requested_theory_clause_ids.len(),
+                gc.total_physically_collected_theory_clauses,
+            );
+        }
+    }
+    if released_epoch_term_owner {
+        gc.targeted_term_gc_pending = true;
+    }
 }
 
 /// An implementation of the cadical-sys `ProofTracer` trait,
@@ -54,6 +84,7 @@ impl ProofTracer for SMTProofTracer {
         if let Some(ref gc_state) = self.qi_gc_state {
             let mut gc = gc_state.borrow_mut();
             let activation = gc.current_act;
+            gc.tracker.note_permanent_clause_added(id, clause);
             if gc.tracker.note_gated_qi_clause(id, clause, activation) {
                 return;
             }

@@ -235,11 +235,14 @@ pub(crate) fn instantiate_quantifiers(
                         quantifier.id, subs
                     );
                 }
-                solver_state
-                    .added_instantiations
-                    .entry(quantifier.id)
-                    .or_default()
-                    .insert(subs.clone());
+                let rediscovered_after_gc =
+                    solver_state.remember_added_instantiation(quantifier.id, &subs);
+                if rediscovered_after_gc && relevancy_trace_enabled() {
+                    eprintln!(
+                        "[relevancy] quantifier {} rediscovered collected substitution {:?}",
+                        quantifier.id, subs
+                    );
+                }
 
                 let term = solver_state.get_term(body);
                 let substitution_key = subs.clone();
@@ -300,6 +303,55 @@ pub(crate) fn materialize_next(
     }
 
     None
+}
+
+/// Rebuild an exact previously collected instantiation from its quantifier
+/// identity and substitution. The old CNF/e-graph closure may already have
+/// been reclaimed; the retained AST terms are registered again as needed.
+pub(crate) fn rematerialize_instantiation(
+    key: &QiInstantiationKey,
+    solver_state: &mut SolverState,
+    proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+) -> Vec<QuantifierInstance> {
+    let quantifier = solver_state
+        .quantifiers
+        .iter()
+        .find(|quantifier| quantifier.id == key.quantifier_id)
+        .cloned()
+        .expect("collected quantifier instance lost its source quantifier");
+    let literal = solver_state.get_lit_from_u64(quantifier.id);
+    assert_ne!(
+        literal, 0,
+        "collected quantifier instance lost its source literal"
+    );
+
+    let body = solver_state.get_term(quantifier.body);
+    let substitution = Substitution::new(key.substitution.clone());
+    let substituted_term = body.subst(&substitution, &mut solver_state.context);
+    let generation = key
+        .substitution
+        .values()
+        .map(|term| solver_state.generation_of(term.uid()))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let ddsmt = solver_state.ddsmt;
+    let lazy_dt = solver_state.lazy_dt;
+
+    process_deferred_instantiations(
+        vec![DeferredInstantiation {
+            substituted_term,
+            substitution: key.substitution.clone(),
+            is_exists: quantifier.polarity == Polarity::Existential,
+            literal,
+            quantifier_id: quantifier.id,
+            generation,
+        }],
+        solver_state,
+        proof_tracer,
+        ddsmt,
+        lazy_dt,
+    )
 }
 
 fn process_deferred_skolemizations(
@@ -496,6 +548,9 @@ fn process_deferred_instantiations(
         let created_terms = solver_state.finish_qi_term_capture();
         let mut clause_terms = DeterministicHashSet::default();
         solver_state.collect_clause_term_closure(&clauses, &mut clause_terms);
+        for term in substitution.values() {
+            solver_state.collect_registered_term_closure(term, &mut clause_terms);
+        }
 
         results.push(QuantifierInstance::Instantiation {
             clauses,

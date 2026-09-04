@@ -116,7 +116,9 @@ fn main() -> Result<(), String> {
 
         let skolemized_term = expanded_term;
 
-        solver_state.pre_nnf_assertions.push(skolemized_term.clone());
+        solver_state
+            .pre_nnf_assertions
+            .push(skolemized_term.clone());
 
         let nnf_term = skolemized_term.nnf(&mut solver_state);
         debug_println!(12, 0, "NNF form: {}", nnf_term,);

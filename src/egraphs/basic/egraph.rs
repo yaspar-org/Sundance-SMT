@@ -309,6 +309,10 @@ pub(crate) struct EgraphStats {
     pub(crate) predecessor_gc_removed: u64,
     /// Earlier predecessor entries restored after a branch-local replacement.
     pub(crate) predecessor_gc_restored: u64,
+    /// Enodes physically tombstoned by QI garbage collection.
+    pub(crate) retired_terms: u64,
+    /// Tombstoned enode IDs consumed by later registrations.
+    pub(crate) reused_term_ids: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -329,6 +333,8 @@ pub(crate) struct EgraphGcProfile {
     pub(crate) predecessor_gc_runs: u64,
     pub(crate) predecessor_gc_removed: u64,
     pub(crate) predecessor_gc_restored: u64,
+    pub(crate) retired_terms: u64,
+    pub(crate) reused_term_ids: u64,
     pub(crate) e_match_calls: u64,
     pub(crate) e_match_candidates_scanned: u64,
     pub(crate) e_match_relevant_candidates_scanned: u64,
@@ -338,13 +344,22 @@ pub(crate) struct EgraphGcProfile {
 #[derive(Debug, Default)]
 pub(crate) struct EgraphRetireReport {
     pub(crate) requested: usize,
+    pub(crate) candidate_classes: usize,
+    pub(crate) fully_candidate_classes: usize,
+    pub(crate) retired_classes: usize,
+    pub(crate) pruned_mixed_classes: usize,
+    pub(crate) pruned_mixed_class_terms: usize,
     pub(crate) retired_ids: Vec<u32>,
     pub(crate) predecessor_entries_before: usize,
     pub(crate) predecessor_entries_after_compaction: usize,
     pub(crate) predecessor_entries_after_retirement: usize,
-    pub(crate) blocked_non_singleton: usize,
-    pub(crate) blocked_live_parent: usize,
-    pub(crate) blocked_pattern: usize,
+    pub(crate) blocked_mixed_class_roots: usize,
+    pub(crate) blocked_live_parent_terms: usize,
+    pub(crate) blocked_proof_reference_terms: usize,
+    pub(crate) blocked_disequality_terms: usize,
+    pub(crate) blocked_pattern_terms: usize,
+    pub(crate) blocked_trigger_head_terms: usize,
+    pub(crate) blocked_pending_event_terms: usize,
     pub(crate) missing: usize,
 }
 
@@ -433,6 +448,8 @@ impl Egraph {
             predecessor_gc_runs: self.stats.predecessor_gc_runs,
             predecessor_gc_removed: self.stats.predecessor_gc_removed,
             predecessor_gc_restored: self.stats.predecessor_gc_restored,
+            retired_terms: self.stats.retired_terms,
+            reused_term_ids: self.stats.reused_term_ids,
             e_match_calls: self.e_match_calls.get(),
             e_match_candidates_scanned: self.e_match_candidates_scanned.get(),
             e_match_relevant_candidates_scanned: self.e_match_relevant_candidates_scanned.get(),
@@ -559,6 +576,7 @@ impl Egraph {
     fn allocate_id(&mut self) -> u32 {
         if let Some(id) = self.free_ids.pop() {
             debug_assert!(matches!(self.terms[id as usize], TermSlot::Empty));
+            self.stats.reused_term_ids += 1;
             id
         } else {
             let id = self.next_id;
@@ -567,32 +585,33 @@ impl Egraph {
         }
     }
 
-    fn pattern_references(pattern: &Pattern, ids: &DeterministicHashSet<u32>) -> bool {
+    fn collect_pattern_ground_ids(pattern: &Pattern, ids: &mut DeterministicHashSet<u32>) {
         match pattern {
-            Pattern::Var(_) => false,
-            Pattern::Ground(id) => ids.contains(id),
-            Pattern::App(_, children) => children
-                .iter()
-                .any(|child| Self::pattern_references(child, ids)),
+            Pattern::Var(_) => {}
+            Pattern::Ground(id) => {
+                ids.insert(*id);
+            }
+            Pattern::App(_, children) => {
+                for child in children {
+                    Self::collect_pattern_ground_ids(child, ids);
+                }
+            }
         }
     }
 
-    fn is_collectible_singleton(&self, id: u32) -> bool {
-        if id as usize >= self.terms.len() || matches!(self.terms[id as usize], TermSlot::Empty) {
-            return false;
+    fn class_members(&self, root: u32) -> Vec<u32> {
+        debug_assert_eq!(self.find(root), root);
+        let mut members = vec![root];
+        let mut member = self.member_next[root as usize];
+        while member != root {
+            members.push(member);
+            assert!(
+                members.len() <= self.next_id as usize,
+                "e-class member list rooted at {root} did not form a cycle"
+            );
+            member = self.member_next[member as usize];
         }
-        if self.find(id) != id || self.member_next[id as usize] != id {
-            return false;
-        }
-        matches!(
-            &self.proof_forest[id as usize],
-            ProofForestEdge::Root {
-                size: 1,
-                disequalities,
-                children,
-                ..
-            } if disequalities.is_empty() && children.is_empty()
-        )
+        members
     }
 
     /// Equalities between live members of arithmetic classes that survive at
@@ -707,11 +726,13 @@ impl Egraph {
 
     /// Physically remove dead QI-created enodes at decision level zero.
     ///
-    /// Collection is deliberately conservative. A candidate must be a
-    /// completely isolated singleton class, must not occur in a compiled
-    /// trigger pattern, and every live syntactic parent must also be retired
-    /// in this batch. The returned IDs are safe for the solver-level owner to
-    /// forget and are reused by future registrations.
+    /// Collection can prune dead members from otherwise-live equivalence
+    /// classes. A term remains pinned if it is a class root with surviving
+    /// members, occurs in a trigger or pending merge event, has a surviving
+    /// syntactic parent, or is referenced by a surviving proof/disequality
+    /// edge. This fixed-point closure preserves every path that can still be
+    /// used for congruence, conflict explanation, or e-matching while allowing
+    /// irrelevant leaves in the large Boolean true/false classes to disappear.
     pub(crate) fn retire_terms(
         &mut self,
         candidates: &DeterministicHashSet<u32>,
@@ -738,39 +759,108 @@ impl Egraph {
             if id as usize >= self.terms.len() || matches!(self.terms[id as usize], TermSlot::Empty)
             {
                 report.missing += 1;
-            } else if self.is_collectible_singleton(id) {
-                removable.insert(id);
             } else {
-                report.blocked_non_singleton += 1;
+                removable.insert(id);
             }
         }
 
-        let pattern_referenced = self
-            .compiled_patterns
+        let mut class_members_by_root: DeterministicHashMap<u32, Vec<u32>> =
+            DeterministicHashMap::default();
+        for &id in &removable {
+            let root = self.find(id);
+            class_members_by_root
+                .entry(root)
+                .or_insert_with(|| self.class_members(root));
+        }
+        report.candidate_classes = class_members_by_root.len();
+        for members in class_members_by_root.values() {
+            if members.iter().all(|member| removable.contains(member)) {
+                report.fully_candidate_classes += 1;
+            }
+        }
+
+        let mut pattern_ids = DeterministicHashSet::default();
+        for pattern in &self.compiled_patterns {
+            Self::collect_pattern_ground_ids(pattern, &mut pattern_ids);
+        }
+        for id in pattern_ids {
+            if removable.remove(&id) {
+                report.blocked_pattern_terms += 1;
+            }
+        }
+
+        // Every ground application whose head can match a compiled trigger
+        // remains part of the future e-matching search space even when no live
+        // SAT/theory clause refers to it. Retiring it can make a later
+        // quantifier round incorrectly saturate.
+        let mut trigger_heads = Vec::new();
+        let mut wildcard_trigger = false;
+        for pattern in &self.compiled_patterns {
+            match pattern {
+                Pattern::App(op, _) => {
+                    if !trigger_heads.contains(op) {
+                        trigger_heads.push(op.clone());
+                    }
+                }
+                Pattern::Var(_) => wildcard_trigger = true,
+                Pattern::Ground(_) => {}
+            }
+        }
+        let trigger_head_ids: Vec<u32> = removable
             .iter()
-            .any(|pattern| Self::pattern_references(pattern, &removable));
-        if pattern_referenced {
-            let pattern_ids: Vec<u32> = removable
+            .copied()
+            .filter(|id| {
+                wildcard_trigger
+                    || matches!(
+                        &self.terms[*id as usize],
+                        TermSlot::Term(entry) if trigger_heads.contains(&entry.op)
+                    )
+            })
+            .collect();
+        for id in trigger_head_ids {
+            if removable.remove(&id) {
+                report.blocked_trigger_head_terms += 1;
+            }
+        }
+
+        // Pending class-relevancy events contain pre-merge member ranges.
+        // Keep those ranges stable until their consumer drains them.
+        let mut pending_event_ids = DeterministicHashSet::default();
+        for event in &self.relevancy_merge_queue {
+            pending_event_ids.insert(event.survivor);
+            pending_event_ids.insert(event.demoted);
+            pending_event_ids.extend(self.collect_member_range(event.survivor_members));
+            pending_event_ids.extend(self.collect_member_range(event.demoted_members));
+        }
+        for id in pending_event_ids {
+            if removable.remove(&id) {
+                report.blocked_pending_event_terms += 1;
+            }
+        }
+
+        // Compute the transitive live-reference closure. Blocking a term can
+        // expose its parent/proof edge as live, which can pin another
+        // candidate on the next iteration.
+        loop {
+            let mut changed = false;
+
+            // A root can only disappear when its complete class disappears.
+            let mixed_roots: Vec<u32> = class_members_by_root
                 .iter()
-                .copied()
-                .filter(|id| {
-                    let singleton = DeterministicHashSet::from_iter([*id]);
-                    self.compiled_patterns
-                        .iter()
-                        .any(|pattern| Self::pattern_references(pattern, &singleton))
+                .filter_map(|(root, members)| {
+                    (removable.contains(root)
+                        && members.iter().any(|member| !removable.contains(member)))
+                    .then_some(*root)
                 })
                 .collect();
-            for id in pattern_ids {
-                removable.remove(&id);
-                report.blocked_pattern += 1;
+            for root in mixed_roots {
+                if removable.remove(&root) {
+                    report.blocked_mixed_class_roots += 1;
+                    changed = true;
+                }
             }
-        }
 
-        // If a candidate's parent survives, the child must survive too.
-        // Iterate to a fixed point because blocking a parent can in turn pin
-        // its candidate children.
-        loop {
-            let blocked: Vec<u32> = removable
+            let parent_blocked: Vec<u32> = removable
                 .iter()
                 .copied()
                 .filter(|id| {
@@ -781,12 +871,124 @@ impl Egraph {
                     })
                 })
                 .collect();
-            if blocked.is_empty() {
+            for id in parent_blocked {
+                if removable.remove(&id) {
+                    report.blocked_live_parent_terms += 1;
+                    changed = true;
+                }
+            }
+
+            let mut proof_blocked = DeterministicHashSet::default();
+            let mut disequality_blocked = DeterministicHashSet::default();
+            for (id, edge) in self.proof_forest.iter().enumerate() {
+                if matches!(self.terms[id], TermSlot::Empty) || removable.contains(&(id as u32)) {
+                    continue;
+                }
+
+                match edge {
+                    ProofForestEdge::Root { children, .. } => {
+                        proof_blocked.extend(
+                            children
+                                .iter()
+                                .copied()
+                                .filter(|child| removable.contains(child)),
+                        );
+                    }
+                    ProofForestEdge::Equality {
+                        term,
+                        parent,
+                        children,
+                        ..
+                    } => {
+                        if removable.contains(parent) {
+                            proof_blocked.insert(*parent);
+                        }
+                        if let Some((left, right)) = term {
+                            if removable.contains(left) {
+                                proof_blocked.insert(*left);
+                            }
+                            if removable.contains(right) {
+                                proof_blocked.insert(*right);
+                            }
+                        }
+                        proof_blocked.extend(
+                            children
+                                .iter()
+                                .copied()
+                                .filter(|child| removable.contains(child)),
+                        );
+                    }
+                    ProofForestEdge::Congruence {
+                        pairs,
+                        parent,
+                        children,
+                        ..
+                    } => {
+                        if removable.contains(parent) {
+                            proof_blocked.insert(*parent);
+                        }
+                        for (left, right) in pairs {
+                            if removable.contains(left) {
+                                proof_blocked.insert(*left);
+                            }
+                            if removable.contains(right) {
+                                proof_blocked.insert(*right);
+                            }
+                        }
+                        proof_blocked.extend(
+                            children
+                                .iter()
+                                .copied()
+                                .filter(|child| removable.contains(child)),
+                        );
+                    }
+                }
+
+                for (key, disequality) in edge.disequalities() {
+                    if !valid_hash(disequality.hash, disequality.level, &self.predecessor_level) {
+                        continue;
+                    }
+                    for referenced in [
+                        *key,
+                        disequality.term,
+                        disequality.original_disequality.0,
+                        disequality.original_disequality.1,
+                    ] {
+                        if removable.contains(&referenced) {
+                            disequality_blocked.insert(referenced);
+                        }
+                    }
+                }
+            }
+
+            for id in proof_blocked {
+                if removable.remove(&id) {
+                    report.blocked_proof_reference_terms += 1;
+                    changed = true;
+                }
+            }
+            for id in disequality_blocked {
+                if removable.remove(&id) {
+                    report.blocked_disequality_terms += 1;
+                    changed = true;
+                }
+            }
+
+            if !changed {
                 break;
             }
-            report.blocked_live_parent += blocked.len();
-            for id in blocked {
-                removable.remove(&id);
+        }
+
+        for members in class_members_by_root.values() {
+            let retired = members
+                .iter()
+                .filter(|member| removable.contains(member))
+                .count();
+            if retired == members.len() {
+                report.retired_classes += 1;
+            } else if retired > 0 {
+                report.pruned_mixed_classes += 1;
+                report.pruned_mixed_class_terms += retired;
             }
         }
 
@@ -794,6 +996,94 @@ impl Egraph {
             report.predecessor_entries_after_retirement =
                 report.predecessor_entries_after_compaction;
             return report;
+        }
+
+        // Splice collected members out of surviving circular class lists.
+        for members in class_members_by_root.values() {
+            let survivors: Vec<u32> = members
+                .iter()
+                .copied()
+                .filter(|member| !removable.contains(member))
+                .collect();
+            if survivors.is_empty() {
+                continue;
+            }
+            debug_assert!(
+                !removable.contains(&members[0]),
+                "surviving class lost its proof root"
+            );
+            for (index, member) in survivors.iter().enumerate() {
+                self.member_next[*member as usize] = survivors[(index + 1) % survivors.len()];
+            }
+        }
+
+        // Verify the closure before making IDs reusable.
+        for (id, edge) in self.proof_forest.iter().enumerate() {
+            if matches!(self.terms[id], TermSlot::Empty) || removable.contains(&(id as u32)) {
+                continue;
+            }
+            match edge {
+                ProofForestEdge::Root { children, .. } => {
+                    debug_assert!(children.iter().all(|child| !removable.contains(child)));
+                }
+                ProofForestEdge::Equality {
+                    term,
+                    parent,
+                    children,
+                    ..
+                } => {
+                    debug_assert!(!removable.contains(parent));
+                    debug_assert!(children.iter().all(|child| !removable.contains(child)));
+                    if let Some((left, right)) = term {
+                        debug_assert!(!removable.contains(left));
+                        debug_assert!(!removable.contains(right));
+                    }
+                }
+                ProofForestEdge::Congruence {
+                    pairs,
+                    parent,
+                    children,
+                    ..
+                } => {
+                    debug_assert!(!removable.contains(parent));
+                    debug_assert!(children.iter().all(|child| !removable.contains(child)));
+                    debug_assert!(pairs.iter().all(|(left, right)| {
+                        !removable.contains(left) && !removable.contains(right)
+                    }));
+                }
+            }
+            debug_assert!(edge.disequalities().iter().all(|(key, disequality)| {
+                !valid_hash(disequality.hash, disequality.level, &self.predecessor_level)
+                    || (!removable.contains(key)
+                        && !removable.contains(&disequality.term)
+                        && !removable.contains(&disequality.original_disequality.0)
+                        && !removable.contains(&disequality.original_disequality.1))
+            }));
+        }
+        for (id, slot) in self.terms.iter().enumerate() {
+            if removable.contains(&(id as u32)) {
+                continue;
+            }
+            if let TermSlot::Term(entry) = slot {
+                debug_assert!(
+                    entry
+                        .children
+                        .as_slice()
+                        .iter()
+                        .all(|child| !removable.contains(child)),
+                    "live enode retained a collected child"
+                );
+            }
+        }
+
+        // Remove stale disequality references before IDs become reusable.
+        for edge in &mut self.proof_forest {
+            edge.disequalities_mut().retain(|key, disequality| {
+                !removable.contains(key)
+                    && !removable.contains(&disequality.term)
+                    && !removable.contains(&disequality.original_disequality.0)
+                    && !removable.contains(&disequality.original_disequality.1)
+            });
         }
 
         for entries in self.function_maps.values_mut() {
@@ -858,6 +1148,7 @@ impl Egraph {
             self.ever_e_matching_relevant[id as usize] = false;
             self.free_ids.push(id);
         }
+        self.stats.retired_terms += retired_ids.len() as u64;
         report.predecessor_entries_after_retirement =
             self.predecessors.iter().map(|entries| entries.len()).sum();
         report.retired_ids = retired_ids;
@@ -982,7 +1273,6 @@ impl Egraph {
         }
     }
 
-    #[cfg(test)]
     fn collect_member_range(&self, range: EClassMemberRange<u32>) -> Vec<u32> {
         let mut members = Vec::new();
         let mut current = range.first;
@@ -2411,7 +2701,7 @@ mod tests {
 
         let report = egraph.retire_terms(&DeterministicHashSet::from_iter([fa]));
         assert!(report.retired_ids.is_empty());
-        assert_eq!(report.blocked_live_parent, 1);
+        assert_eq!(report.blocked_live_parent_terms, 1);
 
         let report = egraph.retire_terms(&DeterministicHashSet::from_iter([fa, gfa]));
         assert_eq!(report.retired_ids, vec![fa, gfa]);
@@ -2422,6 +2712,68 @@ mod tests {
         let ha = egraph.register_term(Op::App("h".to_owned()), &[a], false);
         assert_eq!(ha, gfa);
         assert_eq!(egraph.gc_profile().reusable_ids, 1);
+    }
+
+    #[test]
+    fn retirement_removes_complete_merged_classes_atomically() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_term(Op::App("a".to_owned()), &[], false);
+        let b = egraph.register_term(Op::App("b".to_owned()), &[], false);
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        assert_eq!(egraph.find(a), egraph.find(b));
+        egraph.backtrack_to(0);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([a, b]));
+        assert_eq!(report.candidate_classes, 1);
+        assert_eq!(report.fully_candidate_classes, 1);
+        assert_eq!(report.retired_classes, 1);
+        assert_eq!(report.retired_ids, vec![a, b]);
+        assert_eq!(egraph.gc_profile().registered_terms, 0);
+    }
+
+    #[test]
+    fn retirement_prunes_dead_leaf_from_a_live_merged_class() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_term(Op::App("a".to_owned()), &[], false);
+        let b = egraph.register_term(Op::App("b".to_owned()), &[], false);
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        egraph.backtrack_to(0);
+
+        let root = egraph.find(a);
+        let leaf = if root == a { b } else { a };
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([root]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.candidate_classes, 1);
+        assert_eq!(report.fully_candidate_classes, 0);
+        assert_eq!(report.blocked_mixed_class_roots, 1);
+        assert_eq!(egraph.gc_profile().registered_terms, 2);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([leaf]));
+        assert_eq!(report.retired_ids, vec![leaf]);
+        assert_eq!(report.pruned_mixed_classes, 1);
+        assert_eq!(report.pruned_mixed_class_terms, 1);
+        assert_eq!(egraph.class_members(root), vec![root]);
+        assert_eq!(egraph.gc_profile().registered_terms, 1);
+    }
+
+    #[test]
+    fn retirement_propagates_parent_closure_across_merged_classes() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_term(Op::App("a".to_owned()), &[], false);
+        let b = egraph.register_term(Op::App("b".to_owned()), &[], false);
+        let fa = egraph.register_term(Op::App("f".to_owned()), &[a], false);
+        let fb = egraph.register_term(Op::App("g".to_owned()), &[b], false);
+        assert!(egraph.assert_equal(a, b).conflict.is_none());
+        assert!(egraph.assert_equal(fa, fb).conflict.is_none());
+        egraph.backtrack_to(0);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([a, b]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.blocked_live_parent_terms, 2);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([a, b, fa, fb]));
+        assert_eq!(report.retired_classes, 2);
+        assert_eq!(report.retired_ids, vec![a, b, fa, fb]);
     }
 
     #[test]
@@ -2487,7 +2839,20 @@ mod tests {
 
         let report = egraph.retire_terms(&DeterministicHashSet::from_iter([a]));
         assert!(report.retired_ids.is_empty());
-        assert_eq!(report.blocked_pattern, 1);
+        assert_eq!(report.blocked_pattern_terms, 1);
+    }
+
+    #[test]
+    fn retirement_keeps_terms_with_compiled_trigger_heads() {
+        let mut egraph = Egraph::new();
+        let fa = egraph.register_term(Op::App("f".to_owned()), &[], false);
+        let _ = egraph.compile_pattern(Pattern::App(Op::App("f".to_owned()), vec![]));
+        egraph.backtrack_to(0);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([fa]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.blocked_trigger_head_terms, 1);
+        assert_eq!(egraph.gc_profile().registered_terms, 1);
     }
 }
 
