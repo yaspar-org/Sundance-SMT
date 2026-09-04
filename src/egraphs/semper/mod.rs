@@ -140,7 +140,15 @@ pub struct SemperEgraph {
     /// match_triggers computes the relevant cone of the current assignment
     /// (Z3's witness rules, read off the merge state: a gate's truth value
     /// is whether its root is the true or false class) and skips candidates
-    /// outside it. Off by default so regression comparisons are unaffected.
+    /// outside it. Off by default: on the quantifier regression suite the
+    /// cone covers 99.6% of all terms (the problems are small and densely
+    /// connected, so almost everything is relevant), it prunes 0% of 76843
+    /// e-matching candidates, and it costs about 3% (50.6s vs 49.1s) with no
+    /// change in files solved. The witness rules are correct (per-file slice
+    /// ratio ranges down to 0.75, so pruning does happen where there is
+    /// don't-care structure); this corpus just has almost none. Revive when a
+    /// workload is measured to be match-dominated with large irrelevant
+    /// subformulas — the regime where Z3's relevancy pays off.
     relevancy_enabled: bool,
     /// The slice for the match round in progress; None when gating is off.
     active_slice: Option<rustc_hash::FxHashSet<u32>>,
