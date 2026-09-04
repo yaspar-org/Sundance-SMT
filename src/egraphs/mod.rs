@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod basic;
+#[cfg(feature = "semper-egraph")]
+pub mod semper;
 pub mod traits;
 
 // Public re-exports (stable interface)
