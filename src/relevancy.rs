@@ -7,7 +7,7 @@
 //! The classification of terms into NodeKinds is done by SolverState; this module
 //! only handles the propagation of relevancy through the registered structure.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static RELEVANCY_TRACE: AtomicBool = AtomicBool::new(false);
@@ -272,6 +272,111 @@ impl RelevancyState {
                 + self.newly_relevant_terms.len()
                 + self.newly_relevant_classes.len(),
             trail_entries: self.trail_by_level.iter().map(Vec::len).sum(),
+        }
+    }
+
+    pub(crate) fn retire_terms(
+        &mut self,
+        term_uids: &HashSet<u64>,
+        sat_vars: &HashSet<usize>,
+        egraph_ids: &HashSet<u32>,
+    ) {
+        for &idx in sat_vars {
+            if idx >= self.node_kinds.len() {
+                continue;
+            }
+            self.node_kinds[idx] = None;
+            self.node_polarity[idx] = 1;
+            self.relevant[idx] = false;
+            self.relevance_levels[idx] = None;
+            self.branch_choices[idx] = None;
+            self.branch_levels[idx] = None;
+            self.assignments[idx] = 0;
+            self.assignment_levels[idx] = None;
+            self.watches_on_true[idx].clear();
+            self.watches_on_false[idx].clear();
+            self.cond_watches_on_true[idx].clear();
+            self.cond_watches_on_false[idx].clear();
+            self.term_ite_watches[idx].clear();
+        }
+
+        for watches in self
+            .watches_on_true
+            .iter_mut()
+            .chain(self.watches_on_false.iter_mut())
+        {
+            watches.retain(|watch| {
+                !sat_vars.contains(&watch.parent_idx)
+                    && !sat_vars.contains(&(watch.target.unsigned_abs() as usize))
+            });
+        }
+        for watches in self
+            .cond_watches_on_true
+            .iter_mut()
+            .chain(self.cond_watches_on_false.iter_mut())
+        {
+            watches.retain(|watch| !sat_vars.contains(&watch.parent_idx));
+        }
+        for watches in &mut self.term_ite_watches {
+            watches.retain(|watch| {
+                !term_uids.contains(&watch.parent_uid)
+                    && !term_uids.contains(&watch.then_uid)
+                    && !term_uids.contains(&watch.else_uid)
+                    && !sat_vars.contains(&(watch.cond.unsigned_abs() as usize))
+            });
+        }
+
+        self.queue
+            .retain(|(lit, _)| !sat_vars.contains(&(lit.unsigned_abs() as usize)));
+        self.lits_for_term_propagation
+            .retain(|event| !sat_vars.contains(&(event.lit.unsigned_abs() as usize)));
+        self.newly_relevant_lits
+            .retain(|event| !sat_vars.contains(&(event.lit.unsigned_abs() as usize)));
+        self.relevant_term_levels
+            .retain(|uid, _| !term_uids.contains(uid));
+        self.newly_relevant_terms
+            .retain(|event| !term_uids.contains(&event.uid));
+        self.class_relevant
+            .retain(|root| !egraph_ids.contains(root));
+        self.class_relevance_levels
+            .retain(|root, _| !egraph_ids.contains(root));
+        self.newly_relevant_classes
+            .retain(|event| !egraph_ids.contains(&event.root));
+
+        for trail in &mut self.trail_by_level {
+            trail.retain(|entry| match entry {
+                RelevancyTrailEntry::RelevantLit(idx)
+                | RelevancyTrailEntry::BranchChoice(idx)
+                | RelevancyTrailEntry::Assignment(idx) => !sat_vars.contains(idx),
+                RelevancyTrailEntry::RelevantTerm(uid) => !term_uids.contains(uid),
+                RelevancyTrailEntry::RelevantClass(root) => !egraph_ids.contains(root),
+                RelevancyTrailEntry::LitWatch {
+                    idx,
+                    parent_idx,
+                    target,
+                    ..
+                } => {
+                    !sat_vars.contains(idx)
+                        && !sat_vars.contains(parent_idx)
+                        && !sat_vars.contains(&(target.unsigned_abs() as usize))
+                }
+                RelevancyTrailEntry::CondWatch {
+                    idx, parent_idx, ..
+                } => !sat_vars.contains(idx) && !sat_vars.contains(parent_idx),
+                RelevancyTrailEntry::TermIteWatch {
+                    idx,
+                    parent_uid,
+                    cond,
+                    then_uid,
+                    else_uid,
+                } => {
+                    !sat_vars.contains(idx)
+                        && !sat_vars.contains(&(cond.unsigned_abs() as usize))
+                        && !term_uids.contains(parent_uid)
+                        && !term_uids.contains(then_uid)
+                        && !term_uids.contains(else_uid)
+                }
+            });
         }
     }
 

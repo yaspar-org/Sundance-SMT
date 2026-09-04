@@ -204,6 +204,8 @@ impl fmt::Display for Egraph {
 pub struct Egraph {
     /// Next ID to assign
     next_id: u32,
+    /// Tombstoned IDs available for reuse after QI garbage collection.
+    free_ids: Vec<u32>,
     /// Internal term representation per term ID
     terms: Vec<TermSlot>,
     /// Compiled patterns for e-matching (indexed by PatternId)
@@ -290,6 +292,7 @@ pub(crate) struct EgraphStats {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EgraphGcProfile {
     pub(crate) registered_terms: usize,
+    pub(crate) reusable_ids: usize,
     pub(crate) function_entries: usize,
     pub(crate) relevant_function_entries: usize,
     pub(crate) active_relevant_terms: usize,
@@ -305,6 +308,16 @@ pub(crate) struct EgraphGcProfile {
     pub(crate) e_match_results: u64,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct EgraphRetireReport {
+    pub(crate) requested: usize,
+    pub(crate) retired_ids: Vec<u32>,
+    pub(crate) blocked_non_singleton: usize,
+    pub(crate) blocked_live_parent: usize,
+    pub(crate) blocked_pattern: usize,
+    pub(crate) missing: usize,
+}
+
 impl Default for Egraph {
     fn default() -> Self {
         Self::new()
@@ -315,6 +328,7 @@ impl Egraph {
     pub fn new() -> Self {
         Egraph {
             next_id: 0,
+            free_ids: Vec::new(),
             terms: vec![TermSlot::Empty],
             compiled_patterns: Vec::new(),
             proof_forest: vec![ProofForestEdge::Root {
@@ -358,6 +372,7 @@ impl Egraph {
                 .iter()
                 .filter(|slot| !matches!(slot, TermSlot::Empty))
                 .count(),
+            reusable_ids: self.free_ids.len(),
             function_entries: self.function_maps.values().map(Vec::len).sum(),
             relevant_function_entries: self.relevant_function_maps.values().map(Vec::len).sum(),
             active_relevant_terms: self
@@ -500,6 +515,197 @@ impl Egraph {
         false
     }
 
+    fn allocate_id(&mut self) -> u32 {
+        if let Some(id) = self.free_ids.pop() {
+            debug_assert!(matches!(self.terms[id as usize], TermSlot::Empty));
+            id
+        } else {
+            let id = self.next_id;
+            self.next_id += 1;
+            id
+        }
+    }
+
+    fn pattern_references(pattern: &Pattern, ids: &DeterministicHashSet<u32>) -> bool {
+        match pattern {
+            Pattern::Var(_) => false,
+            Pattern::Ground(id) => ids.contains(id),
+            Pattern::App(_, children) => children
+                .iter()
+                .any(|child| Self::pattern_references(child, ids)),
+        }
+    }
+
+    fn is_collectible_singleton(&self, id: u32) -> bool {
+        if id as usize >= self.terms.len() || matches!(self.terms[id as usize], TermSlot::Empty) {
+            return false;
+        }
+        if self.find(id) != id || self.member_next[id as usize] != id {
+            return false;
+        }
+        matches!(
+            &self.proof_forest[id as usize],
+            ProofForestEdge::Root {
+                size: 1,
+                disequalities,
+                children,
+                arithmetic: false,
+                ..
+            } if disequalities.is_empty() && children.is_empty()
+        )
+    }
+
+    /// Physically remove dead QI-created enodes at decision level zero.
+    ///
+    /// Collection is deliberately conservative. A candidate must be a
+    /// completely isolated singleton class, must not occur in a compiled
+    /// trigger pattern, and every live syntactic parent must also be retired
+    /// in this batch. The returned IDs are safe for the solver-level owner to
+    /// forget and are reused by future registrations.
+    pub(crate) fn retire_terms(
+        &mut self,
+        candidates: &DeterministicHashSet<u32>,
+    ) -> EgraphRetireReport {
+        assert_eq!(
+            self.decision_level, 0,
+            "egraph terms may only be retired at decision level zero"
+        );
+        assert!(
+            self.proof_forest_backtrack_stack.is_empty() && self.sig_trail.is_empty(),
+            "egraph retirement requires all transient proof state to be backtracked"
+        );
+
+        let mut report = EgraphRetireReport {
+            requested: candidates.len(),
+            ..EgraphRetireReport::default()
+        };
+        let mut removable = DeterministicHashSet::default();
+        for &id in candidates {
+            if id as usize >= self.terms.len() || matches!(self.terms[id as usize], TermSlot::Empty)
+            {
+                report.missing += 1;
+            } else if self.is_collectible_singleton(id) {
+                removable.insert(id);
+            } else {
+                report.blocked_non_singleton += 1;
+            }
+        }
+
+        let pattern_referenced = self
+            .compiled_patterns
+            .iter()
+            .any(|pattern| Self::pattern_references(pattern, &removable));
+        if pattern_referenced {
+            let pattern_ids: Vec<u32> = removable
+                .iter()
+                .copied()
+                .filter(|id| {
+                    let singleton = DeterministicHashSet::from_iter([*id]);
+                    self.compiled_patterns
+                        .iter()
+                        .any(|pattern| Self::pattern_references(pattern, &singleton))
+                })
+                .collect();
+            for id in pattern_ids {
+                removable.remove(&id);
+                report.blocked_pattern += 1;
+            }
+        }
+
+        // If a candidate's parent survives, the child must survive too.
+        // Iterate to a fixed point because blocking a parent can in turn pin
+        // its candidate children.
+        loop {
+            let blocked: Vec<u32> = removable
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.predecessors[*id as usize].keys().any(|parent| {
+                        (*parent as usize) < self.terms.len()
+                            && !matches!(self.terms[*parent as usize], TermSlot::Empty)
+                            && !removable.contains(parent)
+                    })
+                })
+                .collect();
+            if blocked.is_empty() {
+                break;
+            }
+            report.blocked_live_parent += blocked.len();
+            for id in blocked {
+                removable.remove(&id);
+            }
+        }
+
+        if removable.is_empty() {
+            return report;
+        }
+
+        for entries in self.function_maps.values_mut() {
+            entries.retain(|(id, _)| !removable.contains(id));
+        }
+        self.function_maps.retain(|_, entries| !entries.is_empty());
+        for entries in self.relevant_function_maps.values_mut() {
+            entries.retain(|(id, _)| !removable.contains(id));
+        }
+        self.relevant_function_maps
+            .retain(|_, entries| !entries.is_empty());
+
+        for (id, entries) in self.predecessors.iter_mut().enumerate() {
+            if removable.contains(&(id as u32)) {
+                entries.clear();
+            } else {
+                entries.retain(|parent, predecessor| {
+                    !removable.contains(parent)
+                        && !removable.contains(&predecessor.inner_term)
+                        && !removable.contains(&predecessor.predecessor)
+                });
+            }
+        }
+        self.predecessors_created_by_quantifiers
+            .retain(|child, parents| {
+                if removable.contains(child) {
+                    return false;
+                }
+                parents.retain(|parent, _| !removable.contains(parent));
+                !parents.is_empty()
+            });
+        self.union_to_eclass.retain(|id, _| !removable.contains(id));
+        self.sig_table.retain(|(_, children), id| {
+            !removable.contains(id)
+                && !children
+                    .as_slice()
+                    .iter()
+                    .any(|child| removable.contains(child))
+        });
+        self.arithmetic_merge_queue
+            .retain(|(a, b)| !removable.contains(a) && !removable.contains(b));
+        self.relevancy_merge_queue.retain(|event| {
+            !removable.contains(&event.survivor) && !removable.contains(&event.demoted)
+        });
+        for trail in &mut self.e_matching_relevance_trail {
+            trail.retain(|id| !removable.contains(id));
+        }
+
+        let mut retired_ids: Vec<u32> = removable.into_iter().collect();
+        retired_ids.sort_unstable();
+        for &id in &retired_ids {
+            self.terms[id as usize] = TermSlot::Empty;
+            self.proof_forest[id as usize] = ProofForestEdge::Root {
+                size: 1000,
+                child: 0,
+                disequalities: DeterministicHashMap::new(),
+                children: DeterministicHashSet::new(),
+                arithmetic: false,
+            };
+            self.member_next[id as usize] = id;
+            self.e_matching_relevance_levels[id as usize] = None;
+            self.ever_e_matching_relevant[id as usize] = false;
+            self.free_ids.push(id);
+        }
+        report.retired_ids = retired_ids;
+        report
+    }
+
     /// Extract the Op from a Term and its function name string.
     /// Ensure storage is allocated for the given term ID without fully registering it.
     /// Used for quantifier body subterms that are opaque to the egraph.
@@ -577,8 +783,7 @@ impl Egraph {
     /// but no op/children/function_maps/predecessors. Used for quantifier terms
     /// that participate in union-find (merged with true/false) but not congruence.
     fn register_opaque_term(&mut self) -> u32 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.allocate_id();
         self.ensure_capacity(id);
         self.terms[id as usize] = TermSlot::Opaque;
         self.proof_forest[id as usize] = ProofForestEdge::Root {
@@ -1905,6 +2110,7 @@ mod tests {
     use super::Egraph;
     use crate::egraphs::EgraphTrait;
     use crate::egraphs::repr::{Op, Pattern};
+    use crate::utils::DeterministicHashSet;
 
     fn class_members(egraph: &Egraph, start: u32) -> Vec<u32> {
         let mut members = vec![start];
@@ -2019,6 +2225,40 @@ mod tests {
         egraph.backtrack_to(0);
         assert_eq!(egraph.match_triggers(&[(fb_pattern, None)], true).len(), 1);
     }
+
+    #[test]
+    fn retirement_removes_complete_dead_subgraphs_and_reuses_ids() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_constant(Op::Constant("a".to_owned()));
+        let fa = egraph.register_term(Op::App("f".to_owned()), &[a], false);
+        let gfa = egraph.register_term(Op::App("g".to_owned()), &[fa], false);
+        egraph.backtrack_to(0);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([fa]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.blocked_live_parent, 1);
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([fa, gfa]));
+        assert_eq!(report.retired_ids, vec![fa, gfa]);
+        assert_eq!(egraph.gc_profile().registered_terms, 1);
+        assert_eq!(egraph.gc_profile().function_entries, 1);
+        assert_eq!(egraph.gc_profile().reusable_ids, 2);
+
+        let ha = egraph.register_term(Op::App("h".to_owned()), &[a], false);
+        assert_eq!(ha, gfa);
+        assert_eq!(egraph.gc_profile().reusable_ids, 1);
+    }
+
+    #[test]
+    fn retirement_keeps_terms_referenced_by_compiled_patterns() {
+        let mut egraph = Egraph::new();
+        let a = egraph.register_constant(Op::Constant("a".to_owned()));
+        let _ = egraph.compile_pattern(Pattern::Ground(a));
+
+        let report = egraph.retire_terms(&DeterministicHashSet::from_iter([a]));
+        assert!(report.retired_ids.is_empty());
+        assert_eq!(report.blocked_pattern, 1);
+    }
 }
 
 /// Checks if the hash is still valid at the given level
@@ -2043,8 +2283,7 @@ impl EgraphTrait for Egraph {
         children: &[Self::TermId],
         dynamic: bool,
     ) -> Self::TermId {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.allocate_id();
         self.register_term_internal(id, op, children, dynamic);
         id
     }
@@ -2053,8 +2292,7 @@ impl EgraphTrait for Egraph {
         // TODO: currently relies on Op::Constant variant to distinguish constants
         // from other 0-arity terms. If Op is unified in the future, this method
         // should mark the term as a constant via a separate mechanism.
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = self.allocate_id();
         self.register_term_internal(id, op, &[], false);
         id
     }

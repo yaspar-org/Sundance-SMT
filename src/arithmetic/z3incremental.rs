@@ -113,6 +113,27 @@ impl Z3IncrementalState {
         }
     }
 
+    /// Remove metadata for reclaimed non-arithmetic SAT variables. Arithmetic
+    /// egraph IDs are deliberately not reclaimed while this persistent Z3
+    /// context can still contain level-0 definitions using their names.
+    pub(crate) fn retire_non_arithmetic_terms(&mut self, retired_sat_vars: &[i32]) {
+        let retired: DeterministicHashSet<i32> =
+            retired_sat_vars.iter().map(|var| var.abs()).collect();
+        debug_assert!(
+            self.active_lits
+                .iter()
+                .all(|lit| !retired.contains(&lit.abs())),
+            "cannot retire a SAT variable that is still active in Z3"
+        );
+        self.tracker_by_abs_lit
+            .retain(|var, _| !retired.contains(var));
+        self.non_arithmetic_lits
+            .retain(|var| !retired.contains(var));
+        for lits in &mut self.lits_by_level {
+            lits.retain(|lit| !retired.contains(&lit.abs()));
+        }
+    }
+
     /// Ensure `push_counts` and per-level tracking vectors are indexed up to
     /// `self.current_level`.
     fn ensure_level_slot(&mut self) {

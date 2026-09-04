@@ -95,6 +95,8 @@ pub(crate) struct QiGcState {
     pub total_retained_qi_clauses: u64,
     pub total_retired_qi_clauses: u64,
     pub total_promoted_derived_clauses: u64,
+    pub total_retired_terms: u64,
+    pub total_retired_sat_vars: u64,
 }
 
 fn retire_activation_unit(activation: i32) -> Vec<i32> {
@@ -339,6 +341,8 @@ impl<'a> CustomExternalPropagator<'a> {
             retained_qi,
             retired_qi,
             promoted_derived,
+            retired_terms,
+            retired_sat_vars,
             tracked_qi,
             ancestry_nodes,
             ancestry_edges,
@@ -347,7 +351,7 @@ impl<'a> CustomExternalPropagator<'a> {
             permanent_instances,
             permanent_terms,
         ) = self.qi_gc_state.as_ref().map_or(
-            (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             |gc| {
                 let gc = gc.borrow();
                 let tracker = gc.tracker.profile();
@@ -361,6 +365,8 @@ impl<'a> CustomExternalPropagator<'a> {
                     gc.total_retained_qi_clauses,
                     gc.total_retired_qi_clauses,
                     gc.total_promoted_derived_clauses,
+                    gc.total_retired_terms,
+                    gc.total_retired_sat_vars,
                     tracker.qi_clauses,
                     tracker.antecedent_nodes,
                     tracker.antecedent_edges,
@@ -377,7 +383,8 @@ impl<'a> CustomExternalPropagator<'a> {
              decisions={} backtracks={} conflicts={} arith_checks={} \
              epoch={} transitions={} epoch_instances={} total_instances={} \
              epoch_clauses={} total_clauses={} retained_qi={} retired_qi={} \
-             promoted_derived={} tracked_qi={} ancestry_nodes={} ancestry_edges={} \
+             promoted_derived={} retired_terms={} retired_sat_vars={} tracked_qi={} \
+             ancestry_nodes={} ancestry_edges={} \
              live_derived={} instance_groups={} permanent_instances={} permanent_terms={} \
              qi_rounds={} pending_qi={}",
             self.stats.elapsed().as_secs_f64(),
@@ -396,6 +403,8 @@ impl<'a> CustomExternalPropagator<'a> {
             retained_qi,
             retired_qi,
             promoted_derived,
+            retired_terms,
+            retired_sat_vars,
             tracked_qi,
             ancestry_nodes,
             ancestry_edges,
@@ -407,11 +416,12 @@ impl<'a> CustomExternalPropagator<'a> {
             self.pending.is_some(),
         );
         eprintln!(
-            "[qi-gc-profile] egraph terms={} function_entries={} relevant_entries={} \
+            "[qi-gc-profile] egraph terms={} reusable_ids={} function_entries={} relevant_entries={} \
              active_relevant_terms={} predecessors={} qi_predecessors={} union_terms={} \
              signatures={} backtrack_entries={} merges={} match_calls={} \
              match_candidates={} relevant_match_candidates={} match_results={}",
             egraph.registered_terms,
+            egraph.reusable_ids,
             egraph.function_entries,
             egraph.relevant_function_entries,
             egraph.active_relevant_terms,
@@ -554,6 +564,9 @@ impl<'a> CustomExternalPropagator<'a> {
                 return;
             }
         }
+        if self.solver_state.is_retired_sat_var(lit) {
+            return;
+        }
         if self.proof_tracer.borrow().is_lit_registered(lit) {
             debug_println!(
                 19,
@@ -684,6 +697,12 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
+        if let Some(gc) = &self.qi_gc_state {
+            let mut pinned = DeterministicHashSet::default();
+            self.solver_state
+                .collect_clause_term_closure(std::slice::from_ref(&clause), &mut pinned);
+            gc.borrow_mut().tracker.pin_permanent_terms(pinned);
+        }
         self.proof_tracer
             .borrow_mut()
             .add_theory_clause(&clause, theory);
@@ -738,6 +757,16 @@ impl<'a> CustomExternalPropagator<'a> {
                     created_terms,
                     referenced_terms,
                 );
+            }
+            if instantiation_key.is_none()
+                && let Some(ref gc) = self.qi_gc_state
+            {
+                let mut pinned = DeterministicHashSet::default();
+                self.solver_state
+                    .collect_registered_term_closure(pre_nnf_body, &mut pinned);
+                self.solver_state
+                    .collect_clause_term_closure(clauses, &mut pinned);
+                gc.borrow_mut().tracker.pin_permanent_terms(pinned);
             }
             // Register the pre-NNF instance body with relevancy so structural
             // rules see the original connectives (Iff/ITE/Implies) before
@@ -934,7 +963,7 @@ impl<'a> CustomExternalPropagator<'a> {
         let ancestry_edges = plan.antecedent_edges;
         let retained_instantiations = plan.retained_instantiations;
         let retained_term_uids = plan.retained_term_uids;
-        let retired_candidate_term_uids = plan.retired_candidate_term_uids;
+        let mut retired_candidate_term_uids = plan.retired_candidate_term_uids;
         let retained_instantiation_count = retained_instantiations.len();
 
         // Keep every live activation-dependent learned clause. The proof
@@ -956,6 +985,12 @@ impl<'a> CustomExternalPropagator<'a> {
         let promoted_derived =
             deduplicate_clauses(plan.derived_clauses.into_iter().chain(learner_derived));
         let promoted_derived_count = promoted_derived.len();
+        let mut pinned_term_uids = retained_term_uids.clone();
+        self.solver_state
+            .collect_clause_term_closure(&retained_qi_clauses, &mut pinned_term_uids);
+        self.solver_state
+            .collect_clause_term_closure(&promoted_derived, &mut pinned_term_uids);
+        retired_candidate_term_uids.retain(|uid| !pinned_term_uids.contains(uid));
 
         qi_gc_trace!(
             "epoch {}: dependency plan observed_qi={} retained_qi={} retired_qi={} \
@@ -1010,7 +1045,44 @@ impl<'a> CustomExternalPropagator<'a> {
             self.queue_theory_clause(promoted, Theory::Background);
         }
 
-        // 3. Keep dedup keys for promoted instance groups. Dropped groups must
+        // 3. Reclaim the solver/egraph state owned only by discarded
+        // instances. The egraph performs a second structural safety check and
+        // returns only isolated terms that were physically tombstoned.
+        let term_gc = self
+            .solver_state
+            .retire_qi_terms(&retired_candidate_term_uids, &pinned_term_uids);
+        for var in &term_gc.retired_sat_vars {
+            let idx = *var as usize;
+            if idx < self.assignments.len() {
+                self.assignments[idx] = 0;
+                self.theory_processed_levels[idx] = None;
+                self.theory_assignment_pending[idx] = false;
+            }
+            self.fixed_literals.remove(var);
+            self.fixed_literals.remove(&-*var);
+        }
+        self.pending_relevant_assignments
+            .retain(|lit| !self.solver_state.is_retired_sat_var(*lit));
+
+        #[cfg(feature = "z3-solver")]
+        if let Some(z3) = self.z3_incremental.as_mut() {
+            z3.retire_non_arithmetic_terms(&term_gc.retired_sat_vars);
+        }
+
+        qi_gc_trace!(
+            "epoch {}: term GC requested={} retired_terms={} retired_sat_vars={} \
+             blocked_non_singleton={} blocked_live_parent={} blocked_pattern={} missing={}",
+            epoch,
+            term_gc.requested,
+            term_gc.retired_terms,
+            term_gc.retired_sat_vars.len(),
+            term_gc.blocked_non_singleton,
+            term_gc.blocked_live_parent,
+            term_gc.blocked_pattern,
+            term_gc.missing
+        );
+
+        // 4. Keep dedup keys for promoted instance groups. Dropped groups must
         // become eligible for regeneration; retained groups must not be
         // materialized and re-added on every epoch.
         let mut gc = gc_state.borrow_mut();
@@ -1026,6 +1098,8 @@ impl<'a> CustomExternalPropagator<'a> {
         gc.total_retained_qi_clauses += retained_qi_count as u64;
         gc.total_retired_qi_clauses += retired_qi_count as u64;
         gc.total_promoted_derived_clauses += promoted_derived_count as u64;
+        gc.total_retired_terms += term_gc.retired_terms as u64;
+        gc.total_retired_sat_vars += term_gc.retired_sat_vars.len() as u64;
         let previous_instantiations: usize = self
             .solver_state
             .added_instantiations
@@ -1053,13 +1127,13 @@ impl<'a> CustomExternalPropagator<'a> {
             previous_instantiations
         );
 
-        // 4. Start new epoch
+        // 5. Start new epoch
         gc.epoch += 1;
         gc.transitions += 1;
         gc.epoch_guarded_clauses = 0;
         gc.epoch_instantiations = 0;
 
-        // 5. Allocate new activation literal
+        // 6. Allocate new activation literal
         let new_act = self.solver_state.cnf_cache.next_var;
         self.solver_state.cnf_cache.next_var += 1;
         gc.current_act = new_act;
@@ -1185,6 +1259,9 @@ impl<'a> CustomExternalPropagator<'a> {
     /// filtering still suppresses pure Boolean/Tseitin structure and inactive
     /// quantifiers, which have no independent theory effect.
     fn is_theory_atom(&mut self, lit: i32) -> bool {
+        if self.solver_state.is_retired_sat_var(lit) {
+            return false;
+        }
         let term = self.solver_state.get_term_from_lit(lit.abs());
         !matches!(
             term.repr(),
@@ -1201,6 +1278,9 @@ impl<'a> CustomExternalPropagator<'a> {
 
     fn queue_relevant_assignment(&mut self, lit: i32) {
         let idx = lit.unsigned_abs() as usize;
+        if self.solver_state.is_retired_sat_var(lit) {
+            return;
+        }
         if self
             .qi_gc_state
             .as_ref()
@@ -1274,6 +1354,9 @@ impl<'a> CustomExternalPropagator<'a> {
             let idx = lit.unsigned_abs() as usize;
             self.ensure_theory_assignment_capacity(idx);
             self.theory_assignment_pending[idx] = false;
+            if self.solver_state.is_retired_sat_var(lit) {
+                continue;
+            }
 
             let assignment = self.assignments[idx];
             if assignment == 0 || self.theory_processed_levels[idx].is_some() {
@@ -1352,6 +1435,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     self.record_sat_assignment(*lit);
                     continue;
                 }
+            }
+            if self.solver_state.is_retired_sat_var(*lit) {
+                self.record_sat_assignment(*lit);
+                continue;
             }
 
             debug_println!(
@@ -1589,6 +1676,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         continue;
                     }
                 }
+                if self.solver_state.is_retired_sat_var(id) {
+                    continue;
+                }
                 if !self.trail_atoms.contains_key(&id) {
                     let atom = format!("{}", self.solver_state.get_term_from_lit(id));
                     self.trail_atoms.insert(id, atom);
@@ -1605,6 +1695,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         if gc.borrow().activation_lits.contains(&x.abs()) {
                             return None;
                         }
+                    }
+                    if self.solver_state.is_retired_sat_var(*x) {
+                        return None;
                     }
                     Some(self.solver_state.get_term_from_lit(*x))
                 })
@@ -1645,6 +1738,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 if gc.borrow().activation_lits.contains(&term.abs()) {
                     continue;
                 }
+            }
+            if self.solver_state.is_retired_sat_var(*term) {
+                continue;
             }
             let (u64_val, polarity) = self.solver_state.get_u64_from_lit_with_polarity(*term);
             debug_println!(

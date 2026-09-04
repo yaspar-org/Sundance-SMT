@@ -242,6 +242,10 @@ impl QiGcTracker {
         self.permanent_instantiations.iter()
     }
 
+    pub(crate) fn pin_permanent_terms(&mut self, term_uids: impl IntoIterator<Item = u64>) {
+        self.permanent_term_uids.extend(term_uids);
+    }
+
     pub(crate) fn clear_epoch(&mut self) {
         self.instance_groups.clear();
         self.pending_clause_groups.clear();

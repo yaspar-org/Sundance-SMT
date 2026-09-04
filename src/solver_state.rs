@@ -155,6 +155,11 @@ pub struct SolverState {
     /// Bidirectional mapping: term UID <-> SAT literal.
     pub cnf_cache: CNFCache,
 
+    /// SAT variables whose only term mappings were reclaimed by QI GC.
+    /// CaDiCaL may still mention these variables in satisfied old clauses, so
+    /// propagator callbacks must ignore them rather than looking up a term.
+    retired_sat_vars: DeterministicHashSet<i32>,
+
     /// Whether to instantiate some datatype axioms lazily.
     pub lazy_dt: bool,
 
@@ -219,6 +224,7 @@ impl SolverState {
             datatype_axioms_applied: HashSet::new(),
             arithmetic_terms: vec![],
             cnf_cache: Default::default(),
+            retired_sat_vars: DeterministicHashSet::default(),
             lazy_dt,
             ddsmt,
             eager_skolem,
@@ -277,13 +283,135 @@ impl SolverState {
         result: &mut DeterministicHashSet<u64>,
     ) {
         for literal in clauses.iter().flatten() {
-            let Some(uid) = self.cnf_cache.var_map_reverse.get(&literal.abs()) else {
+            let Some(uid) = self
+                .cnf_cache
+                .var_map_reverse
+                .get(literal)
+                .or_else(|| self.cnf_cache.var_map_reverse.get(&-*literal))
+            else {
                 continue;
             };
             let Some(TermOption::Some(term)) = self.terms_list.get(*uid as usize) else {
                 continue;
             };
             self.collect_registered_term_closure(term, result);
+        }
+    }
+
+    pub(crate) fn is_retired_sat_var(&self, var: i32) -> bool {
+        self.retired_sat_vars.contains(&var.abs())
+    }
+
+    pub(crate) fn retire_qi_terms(
+        &mut self,
+        candidates: &DeterministicHashSet<u64>,
+        pinned: &DeterministicHashSet<u64>,
+    ) -> SolverTermGcReport {
+        let candidate_ids: DeterministicHashMap<u32, u64> = candidates
+            .iter()
+            .filter(|uid| !pinned.contains(uid))
+            .filter_map(|uid| self.id_map.get_by_left(uid).copied().map(|eid| (eid, *uid)))
+            .collect();
+        let egraph_candidates = candidate_ids.keys().copied().collect();
+        let egraph_report = self.egraph.retire_terms(&egraph_candidates);
+        let retired_uids: HashSet<u64> = egraph_report
+            .retired_ids
+            .iter()
+            .filter_map(|eid| candidate_ids.get(eid).copied())
+            .collect();
+        let retired_eids: HashSet<u32> = egraph_report.retired_ids.iter().copied().collect();
+
+        let mut possible_retired_vars = HashSet::new();
+        for uid in &retired_uids {
+            if let Some(lit) = self.cnf_cache.var_map.remove(uid) {
+                possible_retired_vars.insert(lit.abs());
+            }
+        }
+        self.cnf_cache
+            .var_map_reverse
+            .retain(|_, uid| !retired_uids.contains(uid));
+        let retired_vars: HashSet<i32> = possible_retired_vars
+            .into_iter()
+            .filter(|var| {
+                !self.cnf_cache.var_map_reverse.contains_key(var)
+                    && !self.cnf_cache.var_map_reverse.contains_key(&-*var)
+            })
+            .collect();
+        self.retired_sat_vars.extend(retired_vars.iter().copied());
+
+        for uid in &retired_uids {
+            self.id_map.remove_by_left(uid);
+            if let Some(slot) = self.terms_list.get_mut(*uid as usize) {
+                *slot = TermOption::None;
+            }
+            self.generation.remove(uid);
+            self.term_constructors.remove(uid);
+            self.datatype_axioms_applied.remove(uid);
+        }
+        self.cnf_cache.nnf_cache.retain(|uid, cached| {
+            !retired_uids.contains(uid)
+                && cached
+                    .iter()
+                    .flatten()
+                    .all(|term| !retired_uids.contains(&term.uid()))
+        });
+        self.arithmetic_terms
+            .retain(|uid| !retired_uids.contains(uid));
+        self.nelson_oppen_ineq_literals
+            .retain(|(a, b)| !retired_uids.contains(a) && !retired_uids.contains(b));
+        self.base_case_tester_lits
+            .retain(|lit| !retired_vars.contains(&lit.abs()));
+        self.assertions.retain(|assertion| match assertion {
+            Assertion::Equality { t1, t2, .. } | Assertion::Disequality { t1, t2, .. } => {
+                !retired_uids.contains(t1) && !retired_uids.contains(t2)
+            }
+            Assertion::Distinct { terms, .. } => {
+                terms.iter().all(|uid| !retired_uids.contains(uid))
+            }
+            Assertion::Tester {
+                inner_term, term, ..
+            } => !retired_uids.contains(&inner_term.uid()) && !retired_uids.contains(&term.uid()),
+            Assertion::Other => true,
+        });
+        self.quantifiers.retain(|quantifier| {
+            !retired_uids.contains(&quantifier.id)
+                && !retired_uids.contains(&quantifier.body)
+                && quantifier
+                    .guard
+                    .is_none_or(|guard| !retired_uids.contains(&guard))
+        });
+        self.term_constructors.retain(|uid, constructor| {
+            if retired_uids.contains(uid) {
+                return false;
+            }
+            match constructor {
+                Constructor {
+                    tester_term,
+                    children,
+                    ..
+                } => {
+                    !retired_uids.contains(&tester_term.uid())
+                        && children.iter().all(|uid| !retired_uids.contains(uid))
+                }
+                Uninitialized => true,
+            }
+        });
+        self.pre_nnf_assertions
+            .retain(|term| !retired_uids.contains(&term.uid()));
+
+        let retired_var_indices: HashSet<usize> =
+            retired_vars.iter().map(|var| *var as usize).collect();
+        self.relevancy
+            .retire_terms(&retired_uids, &retired_var_indices, &retired_eids);
+
+        SolverTermGcReport {
+            requested: egraph_report.requested,
+            retired_terms: retired_uids.len(),
+            retired_sat_vars: retired_vars.into_iter().collect(),
+            blocked_non_singleton: egraph_report.blocked_non_singleton,
+            blocked_live_parent: egraph_report.blocked_live_parent,
+            blocked_pattern: egraph_report.blocked_pattern,
+            missing: egraph_report.missing,
         }
     }
 
@@ -1256,6 +1384,17 @@ impl SolverState {
             });
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SolverTermGcReport {
+    pub(crate) requested: usize,
+    pub(crate) retired_terms: usize,
+    pub(crate) retired_sat_vars: Vec<i32>,
+    pub(crate) blocked_non_singleton: usize,
+    pub(crate) blocked_live_parent: usize,
+    pub(crate) blocked_pattern: usize,
+    pub(crate) missing: usize,
 }
 
 impl HasArena for SolverState {
