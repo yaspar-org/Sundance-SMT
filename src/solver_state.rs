@@ -110,6 +110,22 @@ fn sat_vars_owned_only_by_retired_terms(
         .collect()
 }
 
+fn mark_retired_sat_vars<'a, I>(bitmap: &mut Vec<bool>, vars: I)
+where
+    I: Clone + IntoIterator<Item = &'a i32>,
+{
+    let Some(max_var) = vars.clone().into_iter().copied().max() else {
+        return;
+    };
+    let required_len = max_var as usize + 1;
+    if bitmap.len() < required_len {
+        bitmap.resize(required_len, false);
+    }
+    for var in vars {
+        bitmap[*var as usize] = true;
+    }
+}
+
 /// Solver-level state that wraps the egraph with theory-specific bookkeeping.
 ///
 /// For now, the `Context` (term allocator) is accessed via `self.egraph.context`.
@@ -594,24 +610,13 @@ impl SolverState {
                     && !self.cnf_cache.var_map_reverse.contains_key(&-*var)
             })
             .collect();
-        if let Some(max_var) = retired_vars.iter().copied().max() {
-            self.retired_sat_vars.resize(max_var as usize + 1, false);
-            for var in &retired_vars {
-                self.retired_sat_vars[*var as usize] = true;
-            }
-        }
+        mark_retired_sat_vars(&mut self.retired_sat_vars, &retired_vars);
         let retired_sat_only_vars: Vec<i32> = retired_vars
             .iter()
             .copied()
             .filter(|var| sat_only_candidates.contains(var))
             .collect();
-        if let Some(max_var) = retired_sat_only_vars.iter().copied().max() {
-            self.retired_sat_only_vars
-                .resize(max_var as usize + 1, false);
-            for var in &retired_sat_only_vars {
-                self.retired_sat_only_vars[*var as usize] = true;
-            }
-        }
+        mark_retired_sat_vars(&mut self.retired_sat_only_vars, &retired_sat_only_vars);
 
         for uid in &retired_uids {
             self.id_map.remove_by_left(uid);
@@ -2106,6 +2111,17 @@ mod tests {
 
         assert!(solver_state.is_retired_sat_var(5));
         assert!(solver_state.get_term_from_lit_safe(5).is_none());
+    }
+
+    #[test]
+    fn later_low_sat_var_retirement_preserves_high_tombstones() {
+        let mut bitmap = Vec::new();
+
+        mark_retired_sat_vars(&mut bitmap, &[10_603]);
+        mark_retired_sat_vars(&mut bitmap, &[7]);
+
+        assert!(bitmap[10_603]);
+        assert!(bitmap[7]);
     }
 
     #[test]
