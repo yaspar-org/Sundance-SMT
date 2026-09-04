@@ -312,6 +312,9 @@ pub(crate) struct EgraphGcProfile {
 pub(crate) struct EgraphRetireReport {
     pub(crate) requested: usize,
     pub(crate) retired_ids: Vec<u32>,
+    pub(crate) predecessor_entries_before: usize,
+    pub(crate) predecessor_entries_after_compaction: usize,
+    pub(crate) predecessor_entries_after_retirement: usize,
     pub(crate) blocked_non_singleton: usize,
     pub(crate) blocked_live_parent: usize,
     pub(crate) blocked_pattern: usize,
@@ -579,6 +582,61 @@ impl Egraph {
         equalities
     }
 
+    /// Rebuild the predecessor index from live level-zero enodes.
+    ///
+    /// Merges copy predecessor entries to new roots and keep the old maps for
+    /// backtracking. Hash stamps make those copies logically stale after a
+    /// backtrack, but their storage otherwise grows monotonically. QI
+    /// collection already requires a fully backtracked level-zero egraph, so
+    /// it can safely discard the history and reconstruct only the syntactic
+    /// and current-root edges needed by future congruence closure.
+    fn compact_level_zero_predecessors(&mut self) -> (usize, usize) {
+        assert_eq!(self.decision_level, 0);
+        assert!(
+            self.proof_forest_backtrack_stack.is_empty() && self.sig_trail.is_empty(),
+            "predecessor compaction requires all transient proof state to be backtracked"
+        );
+
+        let before = self.predecessors.iter().map(|entries| entries.len()).sum();
+        let live_parents: Vec<(u32, Vec<u32>)> = self
+            .terms
+            .iter()
+            .enumerate()
+            .filter_map(|(id, slot)| match slot {
+                TermSlot::Term(entry) => Some((id as u32, entry.children.as_slice().to_vec())),
+                TermSlot::Empty | TermSlot::Opaque => None,
+            })
+            .collect();
+
+        for entries in &mut self.predecessors {
+            entries.clear();
+        }
+        for (parent, children) in live_parents {
+            for child in children {
+                debug_assert!(
+                    !matches!(self.terms[child as usize], TermSlot::Empty),
+                    "live parent {} refers to retired child {}",
+                    parent,
+                    child
+                );
+                let predecessor = Predecessor {
+                    level: 0,
+                    hash: 0,
+                    predecessor: parent,
+                    inner_term: child,
+                };
+                self.predecessors[child as usize].insert(parent, predecessor.clone());
+                let root = self.find(child);
+                if root != child {
+                    self.predecessors[root as usize].insert(parent, predecessor);
+                }
+            }
+        }
+
+        let after = self.predecessors.iter().map(|entries| entries.len()).sum();
+        (before, after)
+    }
+
     /// Physically remove dead QI-created enodes at decision level zero.
     ///
     /// Collection is deliberately conservative. A candidate must be a
@@ -603,6 +661,10 @@ impl Egraph {
             requested: candidates.len(),
             ..EgraphRetireReport::default()
         };
+        (
+            report.predecessor_entries_before,
+            report.predecessor_entries_after_compaction,
+        ) = self.compact_level_zero_predecessors();
         let mut removable = DeterministicHashSet::default();
         for &id in candidates {
             if id as usize >= self.terms.len() || matches!(self.terms[id as usize], TermSlot::Empty)
@@ -661,6 +723,8 @@ impl Egraph {
         }
 
         if removable.is_empty() {
+            report.predecessor_entries_after_retirement =
+                report.predecessor_entries_after_compaction;
             return report;
         }
 
@@ -726,6 +790,8 @@ impl Egraph {
             self.ever_e_matching_relevant[id as usize] = false;
             self.free_ids.push(id);
         }
+        report.predecessor_entries_after_retirement =
+            self.predecessors.iter().map(|entries| entries.len()).sum();
         report.retired_ids = retired_ids;
         report
     }
@@ -2271,6 +2337,36 @@ mod tests {
         let ha = egraph.register_term(Op::App("h".to_owned()), &[a], false);
         assert_eq!(ha, gfa);
         assert_eq!(egraph.gc_profile().reusable_ids, 1);
+    }
+
+    #[test]
+    fn retirement_compacts_backtracked_predecessor_copies() {
+        let mut egraph = Egraph::new();
+        let x = egraph.register_term(Op::App("x".to_owned()), &[], false);
+        let y = egraph.register_term(Op::App("y".to_owned()), &[], false);
+        let fx = egraph.register_term(Op::App("f".to_owned()), &[x], false);
+        let fy = egraph.register_term(Op::App("f".to_owned()), &[y], false);
+        let baseline = egraph.gc_profile().predecessor_entries;
+        assert_eq!(baseline, 2);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(x, y).conflict.is_none());
+        assert_eq!(egraph.find(fx), egraph.find(fy));
+        egraph.backtrack_to(0);
+        assert_ne!(egraph.find(fx), egraph.find(fy));
+
+        let grown = egraph.gc_profile().predecessor_entries;
+        assert!(grown > baseline);
+        let report = egraph.retire_terms(&DeterministicHashSet::default());
+        assert_eq!(report.predecessor_entries_before, grown);
+        assert_eq!(report.predecessor_entries_after_compaction, baseline);
+        assert_eq!(report.predecessor_entries_after_retirement, baseline);
+
+        // Reconstructed root edges must still trigger congruence on the next
+        // branch; compaction changes storage, not equality behavior.
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(x, y).conflict.is_none());
+        assert_eq!(egraph.find(fx), egraph.find(fy));
     }
 
     #[test]

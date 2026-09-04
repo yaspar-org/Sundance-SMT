@@ -1505,11 +1505,16 @@ impl<'a> CustomExternalPropagator<'a> {
 
         qi_gc_trace!(
             "epoch {}: term GC requested={} retired_terms={} retired_sat_vars={} \
-             blocked_non_singleton={} blocked_live_parent={} blocked_pattern={} missing={}",
+             predecessors_before={} predecessors_after_compaction={} \
+             predecessors_after_retirement={} blocked_non_singleton={} \
+             blocked_live_parent={} blocked_pattern={} missing={}",
             epoch,
             term_gc.requested,
             term_gc.retired_terms,
             term_gc.retired_sat_vars.len(),
+            term_gc.predecessor_entries_before,
+            term_gc.predecessor_entries_after_compaction,
+            term_gc.predecessor_entries_after_retirement,
             term_gc.blocked_non_singleton,
             term_gc.blocked_live_parent,
             term_gc.blocked_pattern,
@@ -1527,10 +1532,15 @@ impl<'a> CustomExternalPropagator<'a> {
         if QI_GC_PROFILE.load(Ordering::Relaxed) {
             eprintln!(
                 "[qi-gc-profile] term-gc requested={} retired_terms={} retired_sat_vars={} \
-                 blocked_non_singleton={} blocked_live_parent={} blocked_pattern={} missing={}",
+                 predecessors_before={} predecessors_after_compaction={} \
+                 predecessors_after_retirement={} blocked_non_singleton={} \
+                 blocked_live_parent={} blocked_pattern={} missing={}",
                 term_gc.requested,
                 term_gc.retired_terms,
                 term_gc.retired_sat_vars.len(),
+                term_gc.predecessor_entries_before,
+                term_gc.predecessor_entries_after_compaction,
+                term_gc.predecessor_entries_after_retirement,
                 term_gc.blocked_non_singleton,
                 term_gc.blocked_live_parent,
                 term_gc.blocked_pattern,

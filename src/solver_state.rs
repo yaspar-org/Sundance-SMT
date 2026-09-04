@@ -444,6 +444,11 @@ impl SolverState {
             retired_terms: retired_term_uids.len(),
             retired_term_uids,
             retired_sat_vars: retired_vars.into_iter().collect(),
+            predecessor_entries_before: egraph_report.predecessor_entries_before,
+            predecessor_entries_after_compaction: egraph_report
+                .predecessor_entries_after_compaction,
+            predecessor_entries_after_retirement: egraph_report
+                .predecessor_entries_after_retirement,
             blocked_non_singleton: egraph_report.blocked_non_singleton,
             blocked_live_parent: egraph_report.blocked_live_parent,
             blocked_pattern: egraph_report.blocked_pattern,
@@ -1436,6 +1441,9 @@ pub(crate) struct SolverTermGcReport {
     pub(crate) retired_terms: usize,
     pub(crate) retired_term_uids: Vec<u64>,
     pub(crate) retired_sat_vars: Vec<i32>,
+    pub(crate) predecessor_entries_before: usize,
+    pub(crate) predecessor_entries_after_compaction: usize,
+    pub(crate) predecessor_entries_after_retirement: usize,
     pub(crate) blocked_non_singleton: usize,
     pub(crate) blocked_live_parent: usize,
     pub(crate) blocked_pattern: usize,
