@@ -263,10 +263,18 @@ pub struct Egraph {
     /// valid at that level and don't need refreshing).
     predecessors_created_by_quantifiers:
         DeterministicHashMap<u32, DeterministicHashMap<u32, usize>>,
+    /// Exact dynamic (child, parent) predecessor registrations grouped by the
+    /// lowest decision level at which their current root placement is valid.
+    /// Backtracking moves only affected entries into the target-level bucket,
+    /// avoiding a clone and scan of the complete nested map on every pop.
+    quantifier_predecessor_replay_trail: Vec<Vec<(u32, u32)>>,
     /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()]).
     /// Value is the decision level at which the term was registered; entries added
     /// at or below the backtrack target level are skipped during `backtrack_to`.
     union_to_eclass: DeterministicHashMap<u32, usize>,
+    /// Dynamic terms whose signature/e-class placement must be reconsidered
+    /// when backtracking below their current valid level.
+    union_to_eclass_replay_trail: Vec<Vec<u32>>,
     /// Signature table: maps (op, [find(c1),...,find(cn)]) → term_id.
     /// Maintained in parallel with the existing congruence detection for now.
     sig_table: FastDeterministicHashMap<SigKey, u32>,
@@ -403,7 +411,9 @@ impl Egraph {
             ever_e_matching_relevant: vec![false],
             decision_level: 0,
             predecessors_created_by_quantifiers: DeterministicHashMap::new(),
+            quantifier_predecessor_replay_trail: vec![Vec::new()],
             union_to_eclass: DeterministicHashMap::new(),
+            union_to_eclass_replay_trail: vec![Vec::new()],
             sig_table: FastDeterministicHashMap::default(),
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
@@ -545,10 +555,22 @@ impl Egraph {
                     inner_term: child_uid,
                 };
 
-                self.predecessors_created_by_quantifiers
+                let replaced_level = self
+                    .predecessors_created_by_quantifiers
                     .entry(child_uid)
                     .or_default()
                     .insert(id, self.decision_level);
+                // A function application may contain the same child in more
+                // than one argument position. The predecessor map deliberately
+                // deduplicates that (child, parent) pair, so only trail its
+                // first registration.
+                if replaced_level.is_none() && self.decision_level != 0 {
+                    while self.decision_level >= self.quantifier_predecessor_replay_trail.len() {
+                        self.quantifier_predecessor_replay_trail.push(Vec::new());
+                    }
+                    self.quantifier_predecessor_replay_trail[self.decision_level]
+                        .push((child_uid, id));
+                }
 
                 self.add_predecessor(root, id, root_predecessor);
             }
@@ -567,7 +589,17 @@ impl Egraph {
         }
 
         if dynamic && !children.is_empty() {
-            self.union_to_eclass.insert(id, self.decision_level);
+            let replaced_level = self.union_to_eclass.insert(id, self.decision_level);
+            debug_assert!(
+                replaced_level.is_none(),
+                "dynamic e-class term registered more than once"
+            );
+            if replaced_level.is_none() && self.decision_level != 0 {
+                while self.decision_level >= self.union_to_eclass_replay_trail.len() {
+                    self.union_to_eclass_replay_trail.push(Vec::new());
+                }
+                self.union_to_eclass_replay_trail[self.decision_level].push(id);
+            }
         }
 
         false
@@ -1115,7 +1147,15 @@ impl Egraph {
                 parents.retain(|parent, _| !removable.contains(parent));
                 !parents.is_empty()
             });
+        for entries in &mut self.quantifier_predecessor_replay_trail {
+            entries.retain(|(child, parent)| {
+                !removable.contains(child) && !removable.contains(parent)
+            });
+        }
         self.union_to_eclass.retain(|id, _| !removable.contains(id));
+        for entries in &mut self.union_to_eclass_replay_trail {
+            entries.retain(|id| !removable.contains(id));
+        }
         self.sig_table.retain(|(_, children), id| {
             !removable.contains(id)
                 && !children
@@ -1772,24 +1812,49 @@ impl Egraph {
             }
         }
 
-        // Re-add predecessors created by quantifiers at their new roots.
-        // Skip entries added at or below `level`: their predecessor stamps are
-        // still valid (predecessor_level only got bumped for levels > `level`)
-        // and their roots didn't shift because of any pop above `level`.
-        for (term, parents) in &self.predecessors_created_by_quantifiers.clone() {
-            let current_ancestor = self.find(*term);
-            for (parent, added_at) in parents {
-                if *added_at <= level {
-                    continue;
-                }
-                let predecessor = Predecessor {
-                    level,
-                    hash: self.predecessor_hash,
-                    predecessor: *parent,
-                    inner_term: *term,
-                };
-                self.add_predecessor(current_ancestor, *parent, predecessor);
+        // Re-add only dynamic predecessors whose current placement was
+        // established above the target level. Move each replayed pair to the
+        // target bucket so later backtracks above that level do no work.
+        let mut queued_predecessor_replays = Vec::new();
+        if level + 1 < self.quantifier_predecessor_replay_trail.len() {
+            for replay_level in level + 1..self.quantifier_predecessor_replay_trail.len() {
+                queued_predecessor_replays.extend(
+                    std::mem::take(&mut self.quantifier_predecessor_replay_trail[replay_level])
+                        .into_iter()
+                        .map(|(term, parent)| (replay_level, term, parent)),
+                );
             }
+            self.quantifier_predecessor_replay_trail.truncate(level + 1);
+        }
+        let mut predecessor_replays = Vec::new();
+        for (replay_level, term, parent) in queued_predecessor_replays {
+            let Some(added_at) = self
+                .predecessors_created_by_quantifiers
+                .get_mut(&term)
+                .and_then(|parents| parents.get_mut(&parent))
+            else {
+                continue;
+            };
+            if *added_at != replay_level || *added_at <= level {
+                continue;
+            }
+            *added_at = level;
+            predecessor_replays.push((term, parent));
+        }
+        predecessor_replays.sort_unstable();
+        if level != 0 {
+            self.quantifier_predecessor_replay_trail[level]
+                .extend(predecessor_replays.iter().copied());
+        }
+        for (term, parent) in predecessor_replays {
+            let current_ancestor = self.find(term);
+            let predecessor = Predecessor {
+                level,
+                hash: self.predecessor_hash,
+                predecessor: parent,
+                inner_term: term,
+            };
+            self.add_predecessor(current_ancestor, parent, predecessor);
         }
 
         // Any merges left in the arithmetic queue from before this backtrack
@@ -1799,14 +1864,35 @@ impl Egraph {
         self.arithmetic_merge_queue.clear();
         self.relevancy_merge_queue.clear();
 
-        // Re-do union_to_eclass via sig table probe. Entries added at or below
-        // `level` were already reconciled with the sig_table at that level and
-        // their signatures are stable under this backtrack.
-        let union_to_eclass_info = self.union_to_eclass.clone();
-        for (term, added_at) in union_to_eclass_info {
-            if added_at <= level {
+        // Re-do union_to_eclass via sig table probe only for dynamic terms
+        // whose current placement was established above the target level.
+        let mut queued_union_replays = Vec::new();
+        if level + 1 < self.union_to_eclass_replay_trail.len() {
+            for replay_level in level + 1..self.union_to_eclass_replay_trail.len() {
+                queued_union_replays.extend(
+                    std::mem::take(&mut self.union_to_eclass_replay_trail[replay_level])
+                        .into_iter()
+                        .map(|term| (replay_level, term)),
+                );
+            }
+            self.union_to_eclass_replay_trail.truncate(level + 1);
+        }
+        let mut union_replays = Vec::new();
+        for (replay_level, term) in queued_union_replays {
+            let Some(added_at) = self.union_to_eclass.get_mut(&term) else {
+                continue;
+            };
+            if *added_at != replay_level || *added_at <= level {
                 continue;
             }
+            *added_at = level;
+            union_replays.push(term);
+        }
+        union_replays.sort_unstable();
+        if level != 0 {
+            self.union_to_eclass_replay_trail[level].extend(union_replays.iter().copied());
+        }
+        for term in union_replays {
             if let Some(sig) = self.compute_signature(term) {
                 if let Some(&existing) = self.sig_table.get(&sig) {
                     if self.find(existing) != self.find(term) {
@@ -1821,7 +1907,9 @@ impl Egraph {
         // Clear at level 0
         if level == 0 {
             self.predecessors_created_by_quantifiers = DeterministicHashMap::new();
+            self.quantifier_predecessor_replay_trail = vec![Vec::new()];
             self.union_to_eclass = DeterministicHashMap::new();
+            self.union_to_eclass_replay_trail = vec![Vec::new()];
             self.proof_forest_backtrack_stack = vec![];
             self.sig_trail.clear();
         }
@@ -2962,6 +3050,12 @@ impl EgraphTrait for Egraph {
         }
         while self.decision_level >= self.predecessor_trail.len() {
             self.predecessor_trail.push(Vec::new());
+        }
+        while self.decision_level >= self.quantifier_predecessor_replay_trail.len() {
+            self.quantifier_predecessor_replay_trail.push(Vec::new());
+        }
+        while self.decision_level >= self.union_to_eclass_replay_trail.len() {
+            self.union_to_eclass_replay_trail.push(Vec::new());
         }
         self.predecessor_level[self.decision_level] = self.predecessor_hash;
     }
