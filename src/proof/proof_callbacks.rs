@@ -35,8 +35,12 @@ fn note_qi_gc_clause_removed(tracer: &mut SMTProofTracer, id: u64, clause: &[i32
     if matched_id || matched_content {
         gc.total_physically_collected_qi_clauses += 1;
     }
-    if gc.tracker.is_qi_source_clause(id) && !matched_id {
-        gc.tracker.note_naturally_deleted_qi_clause(id);
+    if gc.tracker.is_qi_source_clause(id) {
+        if matched_id {
+            gc.tracker.note_targeted_deleted_qi_clause(id);
+        } else {
+            gc.tracker.note_naturally_deleted_qi_clause(id);
+        }
     }
     if gc
         .retired_activations
