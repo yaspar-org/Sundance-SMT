@@ -92,6 +92,24 @@ fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     }
 }
 
+fn sat_vars_owned_only_by_retired_terms(
+    reverse_map: &HashMap<i32, u64>,
+    retired_uids: &HashSet<u64>,
+) -> HashSet<i32> {
+    let candidates: HashSet<i32> = reverse_map
+        .iter()
+        .filter_map(|(lit, uid)| retired_uids.contains(uid).then_some(lit.abs()))
+        .collect();
+    candidates
+        .into_iter()
+        .filter(|var| {
+            reverse_map
+                .iter()
+                .all(|(lit, uid)| lit.abs() != *var || retired_uids.contains(uid))
+        })
+        .collect()
+}
+
 /// Solver-level state that wraps the egraph with theory-specific bookkeeping.
 ///
 /// For now, the `Context` (term allocator) is accessed via `self.egraph.context`.
@@ -299,7 +317,21 @@ impl SolverState {
     }
 
     pub(crate) fn is_retired_sat_var(&self, var: i32) -> bool {
-        self.retired_sat_vars.contains(&var.abs())
+        let var = var.abs();
+        if self.retired_sat_vars.contains(&var) {
+            return true;
+        }
+        let mut has_mapping = false;
+        for lit in [var, -var] {
+            let Some(uid) = self.cnf_cache.var_map_reverse.get(&lit) else {
+                continue;
+            };
+            has_mapping = true;
+            if !self.get_term_safe(*uid).is_none() {
+                return false;
+            }
+        }
+        has_mapping
     }
 
     pub(crate) fn retire_qi_terms(
@@ -321,7 +353,8 @@ impl SolverState {
             .collect();
         let retired_eids: HashSet<u32> = egraph_report.retired_ids.iter().copied().collect();
 
-        let mut possible_retired_vars = HashSet::new();
+        let mut possible_retired_vars =
+            sat_vars_owned_only_by_retired_terms(&self.cnf_cache.var_map_reverse, &retired_uids);
         for uid in &retired_uids {
             if let Some(lit) = self.cnf_cache.var_map.remove(uid) {
                 possible_retired_vars.insert(lit.abs());
@@ -984,9 +1017,17 @@ impl SolverState {
 
     pub fn get_term_from_lit_safe(&mut self, lit: i32) -> Option<Term> {
         if let Some(num) = self.cnf_cache.var_map_reverse.get(&lit) {
-            Some(self.get_term(*num))
+            match self.get_term_safe(*num) {
+                TermOption::Some(term) | TermOption::Uninitialized(term) => Some(term),
+                TermOption::None => None,
+            }
         } else if let Some(num) = self.cnf_cache.var_map_reverse.get(&-lit) {
-            Some(self.context.not(self.get_term(*num)))
+            match self.get_term_safe(*num) {
+                TermOption::Some(term) | TermOption::Uninitialized(term) => {
+                    Some(self.context.not(term))
+                }
+                TermOption::None => None,
+            }
         } else {
             None
         }
@@ -1774,6 +1815,29 @@ pub fn find_if_eq_diseq<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retiring_a_term_marks_every_sat_variable_alias() {
+        let reverse_map = HashMap::from([(5, 42), (6, 42), (-7, 42), (7, 99), (8, 99)]);
+        let retired_uids = HashSet::from([42]);
+
+        assert_eq!(
+            sat_vars_owned_only_by_retired_terms(&reverse_map, &retired_uids),
+            HashSet::from([5, 6])
+        );
+    }
+
+    #[test]
+    fn sat_variable_with_only_tombstoned_term_mappings_is_retired() {
+        let mut solver_state = SolverState::new(Context::new(), true, false, false, false, true);
+        solver_state.cnf_cache.var_map_reverse.insert(5, 42);
+        while solver_state.terms_list.len() <= 42 {
+            solver_state.terms_list.push(TermOption::None);
+        }
+
+        assert!(solver_state.is_retired_sat_var(5));
+        assert!(solver_state.get_term_from_lit_safe(5).is_none());
+    }
 
     #[test]
     fn term_generation_is_first_write_wins() {
