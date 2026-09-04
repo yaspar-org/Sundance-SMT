@@ -244,6 +244,11 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                     // SMT-LIB integer division (Euclidean): (div e n) = q
                     // where e = n * q + r, 0 <= r < |n|
                     debug_assert!(args.len() == 2, "chainable division is not supported");
+                    // If this term was already converted, its constraints are already in
+                    // the context; just reuse the quotient variable.
+                    if let Some(q) = ctx.get_term(term.clone()) {
+                        return Ok(LinExpr(vec![Addend::term(Rational::ONE, q)]));
+                    }
                     let e1 = convert_linear_term(ctx, &args[0])?;
                     let e2 = convert_linear_term(ctx, &args[1])?;
                     if let Some(n) = e2.is_constant() {
@@ -916,6 +921,34 @@ mod tests {
         assert_eq!(ctx.num_relations(), 3);
     }
 
+    /// A repeated `div` term must not push its Euclidean constraints twice.
+    ///
+    /// Before the fix, the second occurrence of `(div x 2)` reused the existing
+    /// quotient variable but still pushed a second, redundant copy of both
+    /// Euclidean constraints (6 relations instead of 4), each with its own fresh
+    /// slack variable — extra tableau rows and slack columns for no added
+    /// information.
+    #[test]
+    fn test_repeated_div_term_shares_constraints() {
+        let smt = r#"
+            (set-logic QF_LIA)
+            (declare-fun x () Int)
+            (assert (= 1 (div x 2)))
+            (assert (<= (div x 2) 1))
+        "#;
+        let ctx = convert_smt(smt).unwrap();
+        // 2 input relations + 2 Euclidean constraints from the single (div x 2) term
+        assert_eq!(ctx.num_relations(), 4);
+        // Every relation must own a distinct slack variable
+        let slacks: Vec<Var> = ctx.get_relations().map(|(_, v)| *v).collect();
+        let unique: std::collections::BTreeSet<Var> = slacks.iter().copied().collect();
+        assert_eq!(
+            slacks.len(),
+            unique.len(),
+            "relations must not share slack variables: {slacks:?}"
+        );
+    }
+
     #[test]
     fn test_constant_integer_modulus() {
         // (mod x 2) introduces a fresh remainder variable r and quotient q with
@@ -962,6 +995,14 @@ mod tests {
         let ctx = convert_smt(smt).unwrap();
         // 2 input relations + 3 Euclidean constraints from the single (mod x 2) term
         assert_eq!(ctx.num_relations(), 5);
+        // Every relation must own a distinct slack variable
+        let slacks: Vec<Var> = ctx.get_relations().map(|(_, v)| *v).collect();
+        let unique: std::collections::BTreeSet<Var> = slacks.iter().copied().collect();
+        assert_eq!(
+            slacks.len(),
+            unique.len(),
+            "relations must not share slack variables: {slacks:?}"
+        );
     }
 
     /// `(mod x n)` follows SMT-LIB Euclidean semantics: the remainder is
