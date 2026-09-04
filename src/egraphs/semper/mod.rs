@@ -622,6 +622,19 @@ impl SemperEgraph {
     // pruned, so already-justified structure is skipped and only live
     // don't-care-free decisions are produced.
 
+    /// Seed a relevancy root from an `assert_equal`/`assert_disequal` whose
+    /// shape is "Boolean atom asserted to a truth value": exactly when one
+    /// endpoint is the true or false constant, the other endpoint is the
+    /// asserted atom and becomes a root. Plain term equalities seed nothing.
+    fn seed_root_if_boolean(&mut self, t1: u32, t2: u32) {
+        let is_tf = |t: u32| Some(t) == self.true_term || Some(t) == self.false_term;
+        if is_tf(t2) && !is_tf(t1) {
+            self.root_terms.push(t1);
+        } else if is_tf(t1) && !is_tf(t2) {
+            self.root_terms.push(t2);
+        }
+    }
+
     fn bool_value(&self, t: u32, tr: Option<ENodeId>, fr: Option<ENodeId>) -> Option<bool> {
         let r = self.eg.find_const(self.node(t));
         if Some(r) == tr {
@@ -644,45 +657,97 @@ impl SemperEgraph {
         if !visited.insert((t, want)) {
             return None;
         }
-        match self.bool_value(t, tr, fr) {
-            // Already carries the wanted value: this branch is justified.
-            // Assigned the other way: nothing to decide here toward `want`.
-            Some(_) => return None,
-            None => {}
+        // Bail only when the node is already assigned OPPOSITE to what we want:
+        // that branch is decided against us, nothing here helps. A node assigned
+        // TOWARD `want` is not a dead end — an assigned-true `and` still has
+        // unassigned children that must become true, and those are the relevant
+        // decisions. So we do not return here on a matching assignment; each
+        // gate below decides whether descending is still productive.
+        let val = self.bool_value(t, tr, fr);
+        if val == Some(!want) {
+            return None;
         }
+        let is_true = |c: u32| self.bool_value(c, tr, fr) == Some(true);
+        let is_false = |c: u32| self.bool_value(c, tr, fr) == Some(false);
         let (op, children) = match &self.reg_log[t as usize] {
             RegEvent::Term { op, children } => (op.clone(), children.clone()),
             RegEvent::Opaque => return None,
         };
         match op {
-            // Monotone gates: children inherit the parent's desired polarity.
-            Op::And | Op::Or => {
-                for &c in &children {
-                    if let Some(d) = self.suggest_rec(c, want, tr, fr, visited) {
-                        return Some(d);
+            Op::And => {
+                if want {
+                    // Every child must be true: descend all, deciding the
+                    // unassigned ones true.
+                    children
+                        .iter()
+                        .find_map(|&c| self.suggest_rec(c, true, tr, fr, visited))
+                } else {
+                    // One false child suffices: if one is already false the
+                    // gate is justified (the rest are don't-cares); else decide
+                    // the first undetermined child false.
+                    if children.iter().any(|&c| is_false(c)) {
+                        None
+                    } else {
+                        children
+                            .iter()
+                            .find_map(|&c| self.suggest_rec(c, false, tr, fr, visited))
                     }
                 }
-                None
+            }
+            Op::Or => {
+                if want {
+                    // One true child suffices: already-true child justifies the
+                    // gate and masks the rest (relevancy); else decide one true.
+                    if children.iter().any(|&c| is_true(c)) {
+                        None
+                    } else {
+                        children
+                            .iter()
+                            .find_map(|&c| self.suggest_rec(c, true, tr, fr, visited))
+                    }
+                } else {
+                    // Every child must be false.
+                    children
+                        .iter()
+                        .find_map(|&c| self.suggest_rec(c, false, tr, fr, visited))
+                }
             }
             // Negation flips the desired polarity.
             Op::Not => children
                 .first()
                 .and_then(|&c| self.suggest_rec(c, !want, tr, fr, visited)),
-            // (=> a b) = (or (not a) b): antecedent wants !want, consequent wants want.
-            Op::Implies if children.len() == 2 => self
-                .suggest_rec(children[0], !want, tr, fr, visited)
-                .or_else(|| self.suggest_rec(children[1], want, tr, fr, visited)),
-            // ite(c, th, el): decide the condition first if it is open, else
-            // descend the taken branch. The condition's phase is a free
-            // choice; true is a fine default (a decision, not a commitment).
+            // (=> a b) = (or (not a) b).
+            Op::Implies if children.len() == 2 => {
+                let (a, b) = (children[0], children[1]);
+                if want {
+                    if is_false(a) || is_true(b) {
+                        None
+                    } else {
+                        self.suggest_rec(a, false, tr, fr, visited)
+                            .or_else(|| self.suggest_rec(b, true, tr, fr, visited))
+                    }
+                } else {
+                    self.suggest_rec(a, true, tr, fr, visited)
+                        .or_else(|| self.suggest_rec(b, false, tr, fr, visited))
+                }
+            }
+            // ite(c, th, el): decide the condition first if open, else descend
+            // the taken branch. The condition's phase is a free choice.
             Op::Ite if children.len() == 3 => match self.bool_value(children[0], tr, fr) {
                 None => self.suggest_rec(children[0], true, tr, fr, visited),
                 Some(true) => self.suggest_rec(children[1], want, tr, fr, visited),
                 Some(false) => self.suggest_rec(children[2], want, tr, fr, visited),
             },
-            // Leaf atom (Eq / App / Distinct / Constant): unassigned by the
-            // check above, so it is the decision, with the resolved phase.
-            _ => Some((t, want)),
+            // Leaf atom (Eq / App / Distinct / Constant). Decide it only if it
+            // is unassigned; an atom already assigned toward `want` needs no
+            // decision.
+            _ => {
+                if val.is_none() {
+                    Some((t, want))
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -921,9 +986,17 @@ impl EgraphTrait for SemperEgraph {
             self.node(t2),
             Justification::Assumption { lit: word },
         );
+        // Seed the relevancy roots only with genuine top-level Boolean
+        // assertions: the driver asserts an atom's truth by merging its node
+        // with the true/false constant, so an assert_equal at level 0 with one
+        // constant endpoint means "this Boolean atom is asserted", and the
+        // other endpoint IS that atom. A plain equality like (= x0 x1) reaches
+        // assert_equal as its two term sides, which are NOT Boolean atoms and
+        // must not seed the cone (that seeded from constants and marked
+        // everything relevant); its own atom node is seeded separately by the
+        // true/false merge.
         if self.level == 0 {
-            self.root_terms.push(t1);
-            self.root_terms.push(t2);
+            self.seed_root_if_boolean(t1, t2);
         }
         if merged.is_none() {
             // Already equal: no class changed, so no rebuild is needed and
@@ -940,8 +1013,7 @@ impl EgraphTrait for SemperEgraph {
         let r1 = self.eg.find_const(self.node(t1));
         let r2 = self.eg.find_const(self.node(t2));
         if self.level == 0 {
-            self.root_terms.push(t1);
-            self.root_terms.push(t2);
+            self.seed_root_if_boolean(t1, t2);
         }
         self.diseqs.push((t1, t2, lit));
         self.diseq_roots.push((r1, r2));
