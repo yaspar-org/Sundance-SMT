@@ -34,6 +34,14 @@ pub(crate) struct QiCollectibleInstanceGroup {
 }
 
 #[derive(Debug, Default)]
+pub(crate) struct QiNaturalSourceCompaction {
+    pub(crate) removed_clauses: Vec<Vec<i32>>,
+    pub(crate) affected_instances: Vec<(u64, QiRetainedInstance)>,
+    pub(crate) removed_instance_groups: usize,
+    pub(crate) promoted_derived_roots: usize,
+}
+
+#[derive(Debug, Default)]
 pub(crate) struct QiGcSolverRebuildPlan {
     /// QI source clauses that remain unsatisfied after hardening the current
     /// level-zero assignment. These are re-added through the external-clause
@@ -130,6 +138,9 @@ pub(crate) struct QiGcTracker {
     /// Clauses already deleted by CaDiCaL. QI clause ownership remains in
     /// `qi_clause_groups` so live derived ancestry can still reach its source.
     deleted_clause_ids: DeterministicHashSet<u64>,
+    /// QI source clauses CaDiCaL deleted through ordinary redundant-clause
+    /// reduction rather than an exact clause-ID request from Sundance.
+    naturally_deleted_qi_clause_ids: DeterministicHashSet<u64>,
     /// Terms whose lifetime is owned by the current guarded epoch.
     epoch_owned_term_uids: DeterministicHashSet<u64>,
     /// Terms that must remain alive independently of a deletable SAT clause.
@@ -145,6 +156,17 @@ pub(crate) struct QiGcTracker {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct QiGcTrackerProfile {
     pub(crate) qi_clauses: usize,
+    pub(crate) naturally_deleted_qi_clauses: usize,
+    pub(crate) fully_naturally_deleted_instance_groups: usize,
+    pub(crate) fully_naturally_deleted_instance_clauses: usize,
+    pub(crate) partially_naturally_deleted_instance_groups: usize,
+    pub(crate) fully_naturally_deleted_created_terms: usize,
+    pub(crate) fully_naturally_deleted_clause_terms: usize,
+    pub(crate) naturally_reduced_to_units_instance_groups: usize,
+    pub(crate) naturally_reduced_nonunit_clauses: usize,
+    pub(crate) naturally_reduced_surviving_unit_clauses: usize,
+    pub(crate) naturally_reduced_created_terms: usize,
+    pub(crate) naturally_reduced_clause_terms: usize,
     pub(crate) antecedent_nodes: usize,
     pub(crate) antecedent_edges: usize,
     pub(crate) live_derived: usize,
@@ -328,6 +350,123 @@ impl QiGcTracker {
         released_epoch_term_owner
     }
 
+    pub(crate) fn is_qi_source_clause(&self, id: u64) -> bool {
+        self.qi_clause_groups.contains_key(&id)
+    }
+
+    pub(crate) fn note_naturally_deleted_qi_clause(&mut self, id: u64) {
+        debug_assert!(self.is_qi_source_clause(id));
+        self.naturally_deleted_qi_clause_ids.insert(id);
+    }
+
+    pub(crate) fn naturally_deleted_qi_clause_count(&self) -> usize {
+        self.naturally_deleted_qi_clause_ids.len()
+    }
+
+    /// Discard source-clause ownership after CaDiCaL has independently
+    /// removed the redundant external clauses. Unlike targeted collection,
+    /// this does not release the instance's duplicate-suppression key or
+    /// create a model obligation: CaDiCaL's clause database already preserves
+    /// the removed lemma's consequences. Surviving clauses (usually units)
+    /// remain attached to the original instance.
+    pub(crate) fn compact_naturally_deleted_qi_sources(
+        &mut self,
+        activation: i32,
+    ) -> QiNaturalSourceCompaction {
+        if self.naturally_deleted_qi_clause_ids.is_empty() {
+            return QiNaturalSourceCompaction::default();
+        }
+
+        let pending_groups: DeterministicHashSet<u64> = self
+            .pending_clause_groups
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+        let mut deleted_ids: Vec<u64> = self
+            .naturally_deleted_qi_clause_ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.qi_clause_groups
+                    .get(id)
+                    .is_some_and(|group_id| !pending_groups.contains(group_id))
+            })
+            .collect();
+        deleted_ids.sort_unstable();
+
+        let mut removed_clauses = Vec::with_capacity(deleted_ids.len());
+        let mut affected_groups = DeterministicHashSet::default();
+        for id in deleted_ids {
+            let Some(group_id) = self.qi_clause_groups.remove(&id) else {
+                self.naturally_deleted_qi_clause_ids.remove(&id);
+                continue;
+            };
+            affected_groups.insert(group_id);
+            if let Some(clause) = self.qi_clause_contents.remove(&id) {
+                removed_clauses.push(clause);
+            }
+            self.deleted_clause_ids.remove(&id);
+            self.naturally_deleted_qi_clause_ids.remove(&id);
+        }
+
+        let mut live_clauses_by_group = DeterministicHashMap::<u64, Vec<Vec<i32>>>::default();
+        for (&id, &group_id) in &self.qi_clause_groups {
+            if affected_groups.contains(&group_id) && !self.deleted_clause_ids.contains(&id) {
+                if let Some(clause) = self.qi_clause_contents.get(&id) {
+                    live_clauses_by_group
+                        .entry(group_id)
+                        .or_default()
+                        .push(Self::strip_activation(clause, activation));
+                }
+            }
+        }
+        for clauses in live_clauses_by_group.values_mut() {
+            clauses.sort();
+        }
+
+        let mut affected_instances = Vec::new();
+        let mut removed_instance_groups = 0usize;
+        let mut ordered_groups: Vec<u64> = affected_groups.into_iter().collect();
+        ordered_groups.sort_unstable();
+        for group_id in ordered_groups {
+            let live_clauses = live_clauses_by_group.remove(&group_id).unwrap_or_default();
+            if live_clauses.is_empty() {
+                if let Some(instance) = self.instance_groups.remove(&group_id) {
+                    self.gc_protected_instance_keys.remove(&instance.key);
+                    removed_instance_groups += 1;
+                }
+                continue;
+            }
+            if let Some(instance) = self.instance_groups.get_mut(&group_id) {
+                instance.clauses = live_clauses;
+                affected_instances.push((group_id, instance.clone()));
+            }
+        }
+
+        // Surviving learned clauses are theory-valid consequences. Once their
+        // naturally deleted source IDs are gone, retain the clauses directly
+        // instead of preserving historical ancestry through absent sources.
+        let promoted_derived_roots = self.promote_live_derived_roots();
+
+        QiNaturalSourceCompaction {
+            removed_clauses,
+            affected_instances,
+            removed_instance_groups,
+            promoted_derived_roots,
+        }
+    }
+
+    pub(crate) fn update_instance_clause_terms(
+        &mut self,
+        group_id: u64,
+        clause_terms: DeterministicHashSet<u64>,
+    ) {
+        if let Some(instance) = self.instance_groups.get_mut(&group_id) {
+            instance.clause_terms = clause_terms;
+        }
+    }
+
     pub(crate) fn live_qi_clauses(&self) -> Vec<(u64, Vec<i32>)> {
         self.qi_clause_contents
             .iter()
@@ -475,6 +614,7 @@ impl QiGcTracker {
                 self.qi_clause_groups.remove(&id);
                 self.qi_clause_contents.remove(&id);
                 self.deleted_clause_ids.remove(&id);
+                self.naturally_deleted_qi_clause_ids.remove(&id);
             }
 
             let mut live_clauses: Vec<Vec<i32>> = clause_ids
@@ -558,11 +698,12 @@ impl QiGcTracker {
         self.antecedents.clear();
         self.live_derived.clear();
         self.deleted_clause_ids.clear();
+        self.naturally_deleted_qi_clause_ids.clear();
 
         let mut source_clauses = Vec::new();
         let mut root_satisfied_source_clauses = 0;
         let mut root_satisfied_instance_groups = 0;
-        let mut root_satisfied_instances = Vec::new();
+        let root_satisfied_instances = Vec::new();
         let mut retired_instances = Vec::new();
         let mut retired_instance_source_clauses = 0;
         let mut empty_groups = Vec::new();
@@ -585,7 +726,13 @@ impl QiGcTracker {
                 if self.gc_protected_instance_keys.contains(&instance.key) {
                     instance.clauses.clear();
                 } else {
-                    root_satisfied_instances.push(instance.key.clone());
+                    // The caller hardens every current level-zero assignment
+                    // in the fresh SAT solver. A clause satisfied by one of
+                    // those permanent units cannot become active again, so
+                    // retain its duplicate-suppression key and discard only
+                    // the tracker ownership. Releasing the key here would
+                    // rematerialize an instance that is already permanently
+                    // satisfied in the rebuilt solver.
                     empty_groups.push(group_id);
                 }
                 continue;
@@ -1001,13 +1148,102 @@ impl QiGcTracker {
         self.antecedents.clear();
         self.live_derived.clear();
         self.deleted_clause_ids.clear();
+        self.naturally_deleted_qi_clause_ids.clear();
         self.epoch_owned_term_uids.clear();
         self.gc_protected_instance_keys.clear();
     }
 
     pub(crate) fn profile(&self) -> QiGcTrackerProfile {
+        let pending_groups: DeterministicHashSet<u64> = self
+            .pending_clause_groups
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+        let mut clause_ids_by_group = DeterministicHashMap::<u64, Vec<u64>>::default();
+        for (&id, &group_id) in &self.qi_clause_groups {
+            clause_ids_by_group.entry(group_id).or_default().push(id);
+        }
+        let mut fully_naturally_deleted_instance_groups = 0usize;
+        let mut fully_naturally_deleted_instance_clauses = 0usize;
+        let mut partially_naturally_deleted_instance_groups = 0usize;
+        let mut fully_naturally_deleted_created_terms = DeterministicHashSet::default();
+        let mut fully_naturally_deleted_clause_terms = DeterministicHashSet::default();
+        let mut naturally_reduced_to_units_instance_groups = 0usize;
+        let mut naturally_reduced_nonunit_clauses = 0usize;
+        let mut naturally_reduced_surviving_unit_clauses = 0usize;
+        let mut naturally_reduced_created_terms = DeterministicHashSet::default();
+        let mut naturally_reduced_clause_terms = DeterministicHashSet::default();
+        for (&group_id, instance) in &self.instance_groups {
+            if pending_groups.contains(&group_id) {
+                continue;
+            }
+            let Some(clause_ids) = clause_ids_by_group.get(&group_id) else {
+                continue;
+            };
+            if clause_ids.len() != instance.clauses.len() {
+                continue;
+            }
+            let naturally_deleted = clause_ids
+                .iter()
+                .filter(|id| self.naturally_deleted_qi_clause_ids.contains(id))
+                .count();
+            let nonunit_ids: Vec<u64> = clause_ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.qi_clause_contents
+                        .get(id)
+                        .is_some_and(|clause| clause.len() >= 2)
+                })
+                .collect();
+            let naturally_deleted_nonunits = nonunit_ids
+                .iter()
+                .filter(|id| self.naturally_deleted_qi_clause_ids.contains(id))
+                .count();
+            let surviving_units = clause_ids
+                .iter()
+                .filter(|id| {
+                    !self.deleted_clause_ids.contains(id)
+                        && self
+                            .qi_clause_contents
+                            .get(id)
+                            .is_some_and(|clause| clause.len() < 2)
+                })
+                .count();
+            if naturally_deleted == clause_ids.len() {
+                fully_naturally_deleted_instance_groups += 1;
+                fully_naturally_deleted_instance_clauses += clause_ids.len();
+                fully_naturally_deleted_created_terms
+                    .extend(instance.created_terms.iter().copied());
+                fully_naturally_deleted_clause_terms.extend(instance.clause_terms.iter().copied());
+            } else if naturally_deleted != 0 {
+                partially_naturally_deleted_instance_groups += 1;
+            }
+            if !nonunit_ids.is_empty()
+                && naturally_deleted_nonunits == nonunit_ids.len()
+                && surviving_units != 0
+            {
+                naturally_reduced_to_units_instance_groups += 1;
+                naturally_reduced_nonunit_clauses += naturally_deleted_nonunits;
+                naturally_reduced_surviving_unit_clauses += surviving_units;
+                naturally_reduced_created_terms.extend(instance.created_terms.iter().copied());
+                naturally_reduced_clause_terms.extend(instance.clause_terms.iter().copied());
+            }
+        }
         QiGcTrackerProfile {
             qi_clauses: self.qi_clause_groups.len() + self.orphan_qi_clauses.len(),
+            naturally_deleted_qi_clauses: self.naturally_deleted_qi_clause_ids.len(),
+            fully_naturally_deleted_instance_groups,
+            fully_naturally_deleted_instance_clauses,
+            partially_naturally_deleted_instance_groups,
+            fully_naturally_deleted_created_terms: fully_naturally_deleted_created_terms.len(),
+            fully_naturally_deleted_clause_terms: fully_naturally_deleted_clause_terms.len(),
+            naturally_reduced_to_units_instance_groups,
+            naturally_reduced_nonunit_clauses,
+            naturally_reduced_surviving_unit_clauses,
+            naturally_reduced_created_terms: naturally_reduced_created_terms.len(),
+            naturally_reduced_clause_terms: naturally_reduced_clause_terms.len(),
             antecedent_nodes: self.antecedents.len(),
             antecedent_edges: self.antecedents.values().map(Vec::len).sum(),
             live_derived: self.live_derived.len(),
@@ -1549,5 +1785,62 @@ mod tests {
         assert!(plan.retired_instances[0].clause_terms.is_empty());
         assert_eq!(tracker.profile().instance_groups, 0);
         assert_eq!(tracker.pending_clause_registrations(), 0);
+    }
+
+    #[test]
+    fn passive_compaction_preserves_surviving_unit_and_duplicate_key() {
+        let mut tracker = QiGcTracker::default();
+        let key = QiInstantiationKey {
+            quantifier_id: 7,
+            substitution: DeterministicHashMap::default(),
+        };
+        tracker.register_instance(
+            key.clone(),
+            &[vec![1], vec![2, 3]],
+            0,
+            &DeterministicHashSet::from_iter([10, 11]),
+            &DeterministicHashSet::from_iter([10, 11, 12]),
+        );
+        assert!(tracker.note_gated_qi_clause(50, &[1], 0));
+        assert!(tracker.note_gated_qi_clause(51, &[2, 3], 0));
+        assert!(tracker.note_derived_clause(60, &[4, 5], &[51], 0));
+
+        tracker.note_naturally_deleted_qi_clause(51);
+        assert!(!tracker.note_deleted_clause(51));
+        let compacted = tracker.compact_naturally_deleted_qi_sources(0);
+
+        assert_eq!(compacted.removed_clauses, vec![vec![2, 3]]);
+        assert_eq!(compacted.affected_instances.len(), 1);
+        assert_eq!(compacted.affected_instances[0].0, 0);
+        assert_eq!(compacted.affected_instances[0].1.key, key);
+        assert_eq!(compacted.affected_instances[0].1.clauses, vec![vec![1]]);
+        assert_eq!(compacted.removed_instance_groups, 0);
+        assert_eq!(compacted.promoted_derived_roots, 1);
+        assert_eq!(tracker.profile().qi_clauses, 1);
+        assert_eq!(tracker.profile().instance_groups, 1);
+        assert_eq!(tracker.naturally_deleted_qi_clause_count(), 0);
+        assert_eq!(tracker.antecedents.get(&60), Some(&Vec::new()));
+    }
+
+    #[test]
+    fn solver_rebuild_does_not_reactivate_root_satisfied_instance() {
+        let mut tracker = QiGcTracker::default();
+        let key = QiInstantiationKey {
+            quantifier_id: 9,
+            substitution: DeterministicHashMap::default(),
+        };
+        tracker.register_instance(
+            key,
+            &[vec![1, 2]],
+            0,
+            &DeterministicHashSet::from_iter([10]),
+            &DeterministicHashSet::from_iter([10]),
+        );
+        assert!(tracker.note_gated_qi_clause(50, &[1, 2], 0));
+
+        let plan = tracker.prepare_for_solver_rebuild(&[0, 1, 0], &DeterministicHashSet::default());
+        assert_eq!(plan.root_satisfied_instance_groups, 1);
+        assert!(plan.root_satisfied_instances.is_empty());
+        assert_eq!(tracker.profile().instance_groups, 0);
     }
 }

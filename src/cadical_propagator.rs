@@ -52,6 +52,10 @@ const QI_GC_MIN_RETIRED_SAT_VARS_FOR_REBUILD: usize = QI_GC_MIN_RECLAIMED_TERMS;
 /// costs. Require at least a quarter of the normal absolute batch before the
 /// garbage/live ratio is allowed to trigger collection.
 const QI_GC_MIN_PROPORTIONAL_RECLAIMED_CLAUSES: usize = QI_GC_MIN_RECLAIMED_CLAUSES / 4;
+/// Passive source bookkeeping has no SAT-side urgency. Batch ordinary
+/// CaDiCaL deletions so removing clause multisets and recomputing instance
+/// closures is amortized across a useful amount of reclaimed ownership.
+const QI_GC_MIN_NATURAL_SOURCE_COMPACTION_CLAUSES: usize = 500;
 /// Once garbage is at least half the size of the surviving QI source set,
 /// rebuilding reduces that set by at least one third. This is the collector's
 /// amortization rule; it prevents dead ownership from growing indefinitely
@@ -167,6 +171,11 @@ pub(crate) struct QiGcState {
     pub total_physically_collected_qi_clauses: u64,
     pub total_physically_collected_qi_clause_ids: u64,
     pub total_physically_collected_qi_clause_contents: u64,
+    /// QI clauses CaDiCaL removed through ordinary clause reduction and
+    /// Sundance subsequently removed from ownership and term-pinning state.
+    pub total_naturally_compacted_qi_clauses: u64,
+    pub total_naturally_compacted_qi_groups: u64,
+    pub total_naturally_removed_qi_groups: u64,
     /// Forgettable theory lemmas requested alongside a QI collection because
     /// they pin terms owned by the retiring epoch.
     pub pending_requested_theory_clause_ids: HashSet<u64>,
@@ -762,6 +771,9 @@ impl<'a> CustomExternalPropagator<'a> {
             physically_collected_qi,
             physically_collected_qi_ids,
             physically_collected_qi_contents,
+            naturally_compacted_qi_clauses,
+            naturally_compacted_qi_groups,
+            naturally_removed_qi_groups,
             retired_activations,
             observed_retirement_units,
             deleted_retired_activation_clauses,
@@ -773,7 +785,8 @@ impl<'a> CustomExternalPropagator<'a> {
             permanent_terms,
         ) = self.qi_gc_state.as_ref().map_or(
             (
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0,
             ),
             |gc| {
                 let gc = gc.borrow();
@@ -799,6 +812,9 @@ impl<'a> CustomExternalPropagator<'a> {
                     gc.total_physically_collected_qi_clauses,
                     gc.total_physically_collected_qi_clause_ids,
                     gc.total_physically_collected_qi_clause_contents,
+                    gc.total_naturally_compacted_qi_clauses,
+                    gc.total_naturally_compacted_qi_groups,
+                    gc.total_naturally_removed_qi_groups,
                     gc.retired_activations.len(),
                     gc.observed_retirement_units.len(),
                     gc.total_deleted_retired_activation_clauses,
@@ -823,7 +839,9 @@ impl<'a> CustomExternalPropagator<'a> {
              total_unobserved_sat_vars={} \
              pending_sat_gc_ids={} pending_sat_gc_contents={} \
              physically_collected_qi={} physically_collected_qi_ids={} \
-             physically_collected_qi_contents={} retired_activations={} \
+             physically_collected_qi_contents={} naturally_compacted_qi={} \
+             naturally_compacted_groups={} naturally_removed_groups={} \
+             retired_activations={} \
              observed_retirement_units={} deleted_retired_activation_clauses={} \
              ancestry_nodes={} ancestry_edges={} \
              live_derived={} instance_groups={} permanent_terms={} \
@@ -857,6 +875,9 @@ impl<'a> CustomExternalPropagator<'a> {
             physically_collected_qi,
             physically_collected_qi_ids,
             physically_collected_qi_contents,
+            naturally_compacted_qi_clauses,
+            naturally_compacted_qi_groups,
+            naturally_removed_qi_groups,
             retired_activations,
             observed_retirement_units,
             deleted_retired_activation_clauses,
@@ -940,6 +961,25 @@ impl<'a> CustomExternalPropagator<'a> {
                 gc.total_permanently_satisfied_qi_instances,
                 tracker.gc_protected_instances,
                 gc.total_gc_protected_qi_instances,
+            );
+            eprintln!(
+                "[qi-gc-profile] natural-source-gc deleted_clauses={} \
+                 fully_deleted_groups={} fully_deleted_group_clauses={} \
+                 partially_deleted_groups={} fully_deleted_created_terms={} \
+                 fully_deleted_clause_terms={} reduced_to_units_groups={} \
+                 reduced_nonunit_clauses={} surviving_unit_clauses={} \
+                 reduced_created_terms={} reduced_clause_terms={}",
+                tracker.naturally_deleted_qi_clauses,
+                tracker.fully_naturally_deleted_instance_groups,
+                tracker.fully_naturally_deleted_instance_clauses,
+                tracker.partially_naturally_deleted_instance_groups,
+                tracker.fully_naturally_deleted_created_terms,
+                tracker.fully_naturally_deleted_clause_terms,
+                tracker.naturally_reduced_to_units_instance_groups,
+                tracker.naturally_reduced_nonunit_clauses,
+                tracker.naturally_reduced_surviving_unit_clauses,
+                tracker.naturally_reduced_created_terms,
+                tracker.naturally_reduced_clause_terms,
             );
             eprintln!(
                 "[qi-gc-profile] predecessor-gc total_compactions={} \
@@ -2441,6 +2481,108 @@ impl<'a> CustomExternalPropagator<'a> {
         })
     }
 
+    /// Remove QI source ownership that is already absent from CaDiCaL due to
+    /// ordinary redundant-clause reduction. This is passive bookkeeping GC:
+    /// it preserves duplicate-suppression keys and every surviving source
+    /// clause, so it neither changes the SAT search nor creates obligations
+    /// that can be rematerialized.
+    fn compact_naturally_deleted_qi_sources(&mut self, force: bool) -> bool {
+        let Some(gc_state) = self.qi_gc_state.clone() else {
+            return false;
+        };
+        if !force
+            && gc_state
+                .borrow()
+                .tracker
+                .naturally_deleted_qi_clause_count()
+                < QI_GC_MIN_NATURAL_SOURCE_COMPACTION_CLAUSES
+        {
+            return false;
+        }
+        let (epoch, report) = {
+            let mut gc = gc_state.borrow_mut();
+            let activation = gc.current_act;
+            let report = gc.tracker.compact_naturally_deleted_qi_sources(activation);
+            (gc.epoch, report)
+        };
+        if report.removed_clauses.is_empty() {
+            return false;
+        }
+
+        let affected_group_count = report.affected_instances.len() + report.removed_instance_groups;
+        let old_clause_term_references = report
+            .affected_instances
+            .iter()
+            .map(|(_, instance)| instance.clause_terms.len())
+            .sum::<usize>();
+        let mut updated_clause_terms = Vec::with_capacity(report.affected_instances.len());
+        let mut new_clause_term_references = 0usize;
+        for (group_id, instance) in &report.affected_instances {
+            let mut clause_terms = DeterministicHashSet::default();
+            self.solver_state
+                .collect_clause_term_closure(&instance.clauses, &mut clause_terms);
+            for term in instance.key.substitution.values() {
+                self.solver_state
+                    .collect_registered_term_closure(term, &mut clause_terms);
+            }
+            new_clause_term_references += clause_terms.len();
+            updated_clause_terms.push((*group_id, clause_terms));
+        }
+
+        {
+            let mut gc = gc_state.borrow_mut();
+            for (group_id, clause_terms) in updated_clause_terms {
+                gc.tracker
+                    .update_instance_clause_terms(group_id, clause_terms);
+            }
+            gc.total_naturally_compacted_qi_clauses += report.removed_clauses.len() as u64;
+            gc.total_naturally_compacted_qi_groups += affected_group_count as u64;
+            gc.total_naturally_removed_qi_groups += report.removed_instance_groups as u64;
+            gc.total_promoted_derived_clauses += report.promoted_derived_roots as u64;
+            gc.targeted_term_gc_pending = true;
+        }
+
+        let removed_active = remove_clause_multiset(
+            &mut self.active_forgettable_clauses,
+            &report.removed_clauses,
+        );
+        let removed_queued =
+            remove_clause_multiset(&mut self.forgettable_queue, &report.removed_clauses);
+        qi_gc_trace!(
+            "epoch {}: passively compacted naturally deleted QI sources \
+             clauses={} groups={} removed_groups={} promoted_derived_roots={} \
+             active_removed={} queued_removed={} clause_term_refs={}=>{}",
+            epoch,
+            report.removed_clauses.len(),
+            affected_group_count,
+            report.removed_instance_groups,
+            report.promoted_derived_roots,
+            removed_active,
+            removed_queued,
+            old_clause_term_references,
+            new_clause_term_references,
+        );
+        if QI_GC_PROFILE.load(Ordering::Relaxed) {
+            eprintln!(
+                "[qi-gc-profile] natural-source-compaction epoch={} level={} \
+                 clauses={} groups={} removed_groups={} promoted_derived_roots={} \
+                 active_removed={} queued_removed={} clause_term_refs_before={} \
+                 clause_term_refs_after={}",
+                epoch,
+                self.decision_level,
+                report.removed_clauses.len(),
+                affected_group_count,
+                report.removed_instance_groups,
+                report.promoted_derived_roots,
+                removed_active,
+                removed_queued,
+                old_clause_term_references,
+                new_clause_term_references,
+            );
+        }
+        true
+    }
+
     /// Complete bookkeeping only after CaDiCaL has reported deletion of every
     /// source clause in the requested instance groups.
     fn finish_targeted_qi_collection_if_ready(&mut self) -> bool {
@@ -3070,6 +3212,10 @@ impl<'a> CustomExternalPropagator<'a> {
         let Some(gc_state) = self.qi_gc_state.clone() else {
             return;
         };
+        if !gc_state.borrow().collection_check_pending {
+            return;
+        }
+        self.compact_naturally_deleted_qi_sources(false);
         let (
             epoch,
             epoch_clauses,
@@ -3079,9 +3225,6 @@ impl<'a> CustomExternalPropagator<'a> {
             collection_in_flight,
         ) = {
             let mut gc = gc_state.borrow_mut();
-            if !gc.collection_check_pending {
-                return;
-            }
             let pending_registrations = gc.tracker.pending_clause_registrations();
             if pending_registrations != 0 {
                 if QI_GC_PROFILE.load(Ordering::Relaxed) {
@@ -3870,6 +4013,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         self.solver_state.propagate_class_relevancy_from_merges();
         if level == 0 {
             self.finish_targeted_qi_collection_if_ready();
+            self.compact_naturally_deleted_qi_sources(true);
             self.run_targeted_qi_term_gc_if_pending();
         }
         self.sync_new_vars();
@@ -3942,6 +4086,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
         self.finish_targeted_qi_collection_if_ready();
+        self.compact_naturally_deleted_qi_sources(false);
         self.eager_attempted_since_model = false;
         self.reset_eager_qi_for_level();
 
