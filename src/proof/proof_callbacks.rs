@@ -5,6 +5,46 @@ use crate::debug_println;
 use crate::proof::{Theory, proof_tracer::SMTProofTracer};
 use cadical_sys::ProofTracer;
 
+fn note_qi_gc_clause_removed(tracer: &mut SMTProofTracer, id: u64, clause: &[i32]) {
+    let Some(ref gc_state) = tracer.qi_gc_state else {
+        return;
+    };
+    let mut gc = gc_state.borrow_mut();
+    let matched_id = gc.pending_retired_qi_clause_ids.remove(&id);
+    if matched_id {
+        gc.total_physically_collected_qi_clause_ids += 1;
+    }
+
+    let mut normalized = clause.to_vec();
+    normalized.sort_unstable();
+    normalized.dedup();
+    let matched_content =
+        if let Some(count) = gc.pending_retired_qi_clause_contents.get_mut(&normalized) {
+            *count -= 1;
+            let remove = *count == 0;
+            if remove {
+                gc.pending_retired_qi_clause_contents.remove(&normalized);
+            }
+            true
+        } else {
+            false
+        };
+    if matched_content {
+        gc.total_physically_collected_qi_clause_contents += 1;
+    }
+    if matched_id || matched_content {
+        gc.total_physically_collected_qi_clauses += 1;
+    }
+    if gc
+        .retired_activations
+        .iter()
+        .any(|act| clause.contains(&-*act))
+    {
+        gc.total_deleted_retired_activation_clauses += 1;
+    }
+    gc.tracker.note_deleted_clause(id);
+}
+
 /// An implementation of the cadical-sys `ProofTracer` trait,
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
@@ -77,9 +117,7 @@ impl ProofTracer for SMTProofTracer {
 
     fn delete_clause(&mut self, id: u64, _redundant: bool, clause: &[i32]) {
         self.deleted_clauses += 1;
-        if let Some(ref gc_state) = self.qi_gc_state {
-            gc_state.borrow_mut().tracker.note_deleted_clause(id);
-        }
+        note_qi_gc_clause_removed(self, id, clause);
         self.record_deletion(clause);
     }
 

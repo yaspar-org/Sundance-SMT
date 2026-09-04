@@ -21,7 +21,7 @@ use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator, Learner};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,6 +80,11 @@ pub(crate) struct QiGcState {
     pub activation_lits: HashSet<i32>,
     /// Conflict clauses captured by the Learner that contain ¬act.
     pub learned_clauses: Vec<Vec<i32>>,
+    /// Learned clauses that cannot depend on the current guarded QI
+    /// generation (resolution cannot remove `-act` in this encoding).  A SAT
+    /// rebuild replays these clauses so collection does not discard search
+    /// knowledge unrelated to the retired epoch.
+    pub safe_learned_clauses: Vec<Vec<i32>>,
     /// Buffer for the clause currently being received literal-by-literal from Learner.
     pub learner_buf: Vec<i32>,
     /// Epoch counter.
@@ -100,6 +105,21 @@ pub(crate) struct QiGcState {
     pub total_promoted_derived_clauses: u64,
     pub total_retired_terms: u64,
     pub total_retired_sat_vars: u64,
+    /// Old guarded QI clauses that still physically exist inside CaDiCaL
+    /// after their activation was retired, and the number later deleted by
+    /// ordinary SAT clause-database reduction.
+    pub pending_retired_qi_clause_ids: HashSet<u64>,
+    pub pending_retired_qi_clause_contents: DeterministicHashMap<Vec<i32>, usize>,
+    pub total_physically_collected_qi_clauses: u64,
+    pub total_physically_collected_qi_clause_ids: u64,
+    pub total_physically_collected_qi_clause_contents: u64,
+    /// Activation literals retired by permanent `-act` units.  Tracking the
+    /// first root assignment and every deleted clause that still contains a
+    /// retired activation distinguishes delayed SAT collection from stale
+    /// clause-ID bookkeeping.
+    pub retired_activations: HashSet<i32>,
+    pub observed_retirement_units: HashSet<i32>,
+    pub total_deleted_retired_activation_clauses: u64,
     /// A completed matching round added enough guarded clauses that the next
     /// safe SAT decision callback should evaluate an exact collection plan.
     pub collection_check_pending: bool,
@@ -232,13 +252,9 @@ impl Learner for QiGcLearner {
                 );
                 let clause = state.learner_buf.clone();
                 state.learned_clauses.push(clause);
-            } else if QI_GC_TRACE.load(Ordering::Relaxed) && !state.learner_buf.is_empty() {
-                eprintln!(
-                    "[qi-gc] learner: clause (len={}) does NOT contain ¬act={}: {:?}",
-                    state.learner_buf.len(),
-                    neg_act,
-                    &state.learner_buf[..state.learner_buf.len().min(5)]
-                );
+            } else if !state.learner_buf.is_empty() {
+                let clause = state.learner_buf.clone();
+                state.safe_learned_clauses.push(clause);
             }
             state.learner_buf.clear();
         } else {
@@ -344,6 +360,14 @@ pub struct CustomExternalPropagator<'a> {
     pub qi_gc_state: Option<Rc<RefCell<QiGcState>>>,
     /// Separate queue for forgettable QI clauses (served with is_forgettable=true).
     pub forgettable_queue: Vec<Vec<i32>>,
+    /// Complete current-epoch clauses, retained after the callback queue has
+    /// destructively drained them. A fresh CaDiCaL instance replays exactly
+    /// this set after dropping the old redundant clause database.
+    pub active_forgettable_clauses: Vec<Vec<i32>>,
+    /// Short activation-independent learned clauses replayed only across the
+    /// current rebuild. They are intentionally generational: the next solver
+    /// exports a fresh useful subset rather than accumulating them forever.
+    pub rebuild_learned_clauses: Vec<Vec<i32>>,
     /// Whether the clause currently being drained via cb_add_external_clause_lit is forgettable.
     pub draining_forgettable: bool,
     /// Track whether the next notify_assignment is a decision literal.
@@ -353,6 +377,18 @@ pub struct CustomExternalPropagator<'a> {
     /// A root backtrack should perform exactly one requested epoch transition.
     /// Ordinary CaDiCaL backtracks to level zero do not collect QI state.
     pub qi_gc_transition_pending: bool,
+    /// Shared stop request consumed by the outer solve loop. The transition is
+    /// completed inside callbacks, then CaDiCaL is replaced between solve calls.
+    pub qi_gc_rebuild_requested: Option<Rc<Cell<bool>>>,
+    /// Root assignments hardened into a rebuilt solver. Their theory effects
+    /// already exist at level zero and must not be applied a second time when
+    /// the fresh solver reports the unit trail.
+    pub qi_gc_root_replay: Vec<i8>,
+    pub qi_gc_root_replay_pending: usize,
+    /// Last polarity CaDiCaL assigned to each external variable. CaDiCaL's
+    /// public `copy` operation preserves clauses and preprocessing flags but
+    /// not phase-saving state, so a physical rebuild replays these hints.
+    pub qi_gc_phase_hints: Vec<i8>,
     /// Decision level at which each currently assigned SAT literal was last
     /// applied to the theory solvers. A `None` entry means either irrelevant
     /// or waiting in `pending_relevant_assignments`.
@@ -394,6 +430,14 @@ impl<'a> CustomExternalPropagator<'a> {
             promoted_derived,
             retired_terms,
             retired_sat_vars,
+            pending_sat_gc,
+            pending_sat_gc_contents,
+            physically_collected_qi,
+            physically_collected_qi_ids,
+            physically_collected_qi_contents,
+            retired_activations,
+            observed_retirement_units,
+            deleted_retired_activation_clauses,
             tracked_qi,
             ancestry_nodes,
             ancestry_edges,
@@ -401,7 +445,9 @@ impl<'a> CustomExternalPropagator<'a> {
             instance_groups,
             permanent_terms,
         ) = self.qi_gc_state.as_ref().map_or(
-            (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            (
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ),
             |gc| {
                 let gc = gc.borrow();
                 let tracker = gc.tracker.profile();
@@ -417,6 +463,16 @@ impl<'a> CustomExternalPropagator<'a> {
                     gc.total_promoted_derived_clauses,
                     gc.total_retired_terms,
                     gc.total_retired_sat_vars,
+                    gc.pending_retired_qi_clause_ids.len(),
+                    gc.pending_retired_qi_clause_contents
+                        .values()
+                        .sum::<usize>(),
+                    gc.total_physically_collected_qi_clauses,
+                    gc.total_physically_collected_qi_clause_ids,
+                    gc.total_physically_collected_qi_clause_contents,
+                    gc.retired_activations.len(),
+                    gc.observed_retirement_units.len(),
+                    gc.total_deleted_retired_activation_clauses,
                     tracker.qi_clauses,
                     tracker.antecedent_nodes,
                     tracker.antecedent_edges,
@@ -433,6 +489,10 @@ impl<'a> CustomExternalPropagator<'a> {
              epoch={} transitions={} epoch_instances={} total_instances={} \
              epoch_clauses={} total_clauses={} retained_qi={} retired_qi={} \
              promoted_derived={} retired_terms={} retired_sat_vars={} tracked_qi={} \
+             pending_sat_gc_ids={} pending_sat_gc_contents={} \
+             physically_collected_qi={} physically_collected_qi_ids={} \
+             physically_collected_qi_contents={} retired_activations={} \
+             observed_retirement_units={} deleted_retired_activation_clauses={} \
              ancestry_nodes={} ancestry_edges={} \
              live_derived={} instance_groups={} permanent_terms={} \
              qi_rounds={} pending_qi={}",
@@ -455,6 +515,14 @@ impl<'a> CustomExternalPropagator<'a> {
             retired_terms,
             retired_sat_vars,
             tracked_qi,
+            pending_sat_gc,
+            pending_sat_gc_contents,
+            physically_collected_qi,
+            physically_collected_qi_ids,
+            physically_collected_qi_contents,
+            retired_activations,
+            observed_retirement_units,
+            deleted_retired_activation_clauses,
             ancestry_nodes,
             ancestry_edges,
             live_derived,
@@ -766,6 +834,166 @@ impl<'a> CustomExternalPropagator<'a> {
         self.stats.dt_splits = self.solver_state.stat_dt_splits;
     }
 
+    /// Prepare the propagator for replacement of the SAT solver. Every
+    /// current root assignment is a sound consequence of the old level-zero
+    /// clause database, so harden it as a unit in the new solver. Activation
+    /// literals have no theory meaning and are intentionally omitted.
+    pub fn prepare_for_solver_rebuild(&mut self) -> Vec<i32> {
+        // CaDiCaL checks its terminator periodically, so it can enter a few
+        // decision levels after the transition requested a stop. The old SAT
+        // solver is about to be discarded; explicitly return every Sundance
+        // theory component to the root before snapshotting the replay units.
+        if self.decision_level != 0 {
+            if QI_GC_PROFILE.load(Ordering::Relaxed) {
+                eprintln!(
+                    "[qi-gc-profile] sat-rebuild-backtrack from_level={}",
+                    self.decision_level
+                );
+            }
+            ExternalPropagator::notify_backtrack(self, 0);
+        }
+        debug_assert_eq!(self.decision_level, 0);
+
+        let activation_lits = self
+            .qi_gc_state
+            .as_ref()
+            .map(|gc| gc.borrow().activation_lits.clone())
+            .unwrap_or_default();
+        self.qi_gc_root_replay.clear();
+        self.qi_gc_root_replay.resize(self.assignments.len(), 0);
+        self.qi_gc_root_replay_pending = 0;
+
+        let mut root_units = Vec::new();
+        for idx in 1..self.assignments.len() {
+            if activation_lits.contains(&(idx as i32)) {
+                self.assignments[idx] = 0;
+                self.theory_processed_levels[idx] = None;
+                self.theory_assignment_pending[idx] = false;
+                continue;
+            }
+            let assignment = self.assignments[idx];
+            if assignment.abs() != 1 || self.solver_state.is_retired_sat_var(idx as i32) {
+                continue;
+            }
+            let sign = assignment.signum() as i8;
+            self.qi_gc_root_replay[idx] = sign;
+            self.qi_gc_root_replay_pending += 1;
+            root_units.push(if sign > 0 { idx as i32 } else { -(idx as i32) });
+        }
+
+        self.pending_relevant_assignments.clear();
+        self.theory_assignment_pending.fill(false);
+        self.forgettable_queue = self.active_forgettable_clauses.clone();
+        self.forgettable_queue
+            .extend(self.rebuild_learned_clauses.iter().cloned());
+        self.draining_forgettable = false;
+        self.next_is_decision = false;
+        root_units
+    }
+
+    /// Point callback-side operations at the fresh solver and observe only
+    /// live Sundance terms plus the current activation literal.
+    pub fn attach_rebuilt_solver(&mut self, solver: &mut CaDiCal) {
+        self.solver = solver as *mut CaDiCal;
+        self.last_observed_var = 1;
+        self.sync_new_vars();
+        if let Some(ref gc) = self.qi_gc_state {
+            solver.add_observed_var(gc.borrow().current_act);
+        }
+    }
+
+    pub fn replay_sat_phase_hints(&self, solver: &mut CaDiCal) -> usize {
+        let activation_lits = self
+            .qi_gc_state
+            .as_ref()
+            .map(|gc| gc.borrow().activation_lits.clone())
+            .unwrap_or_default();
+        let limit = self.qi_gc_phase_hints.len().min(solver.vars() as usize + 1);
+        let mut replayed = 0;
+        for idx in 1..limit {
+            let sign = self.qi_gc_phase_hints[idx];
+            if sign == 0
+                || activation_lits.contains(&(idx as i32))
+                || self.solver_state.is_retired_sat_var(idx as i32)
+            {
+                continue;
+            }
+            solver.phase(if sign > 0 { idx as i32 } else { -(idx as i32) });
+            replayed += 1;
+        }
+        replayed
+    }
+
+    pub fn queued_retired_activation_clauses(&self) -> usize {
+        let retired_activations = self
+            .qi_gc_state
+            .as_ref()
+            .map(|gc| gc.borrow().retired_activations.clone())
+            .unwrap_or_default();
+        let contains_retired_activation = |clause: &&Vec<i32>| {
+            clause
+                .iter()
+                .any(|lit| retired_activations.contains(&lit.abs()))
+        };
+        self.forgettable_queue
+            .iter()
+            .filter(contains_retired_activation)
+            .count()
+            + self
+                .disequalities
+                .borrow()
+                .iter()
+                .filter(contains_retired_activation)
+                .count()
+    }
+
+    fn consume_replayed_root_assignment(&mut self, lit: i32) -> bool {
+        if self.decision_level != 0 {
+            return false;
+        }
+        let idx = lit.unsigned_abs() as usize;
+        let Some(expected) = self.qi_gc_root_replay.get_mut(idx) else {
+            return false;
+        };
+        if *expected == 0 {
+            return false;
+        }
+        assert_eq!(
+            *expected,
+            lit.signum() as i8,
+            "rebuilt CaDiCaL replayed root variable {} with the opposite polarity",
+            idx
+        );
+        *expected = 0;
+        self.qi_gc_root_replay_pending -= 1;
+        if self.qi_gc_root_replay_pending == 0 && QI_GC_PROFILE.load(Ordering::Relaxed) {
+            eprintln!("[qi-gc-profile] sat-rebuild-root-replay complete=true");
+        }
+        true
+    }
+
+    fn assert_root_replay_complete(&self) {
+        if self.qi_gc_root_replay_pending == 0 {
+            return;
+        }
+        let missing: Vec<i32> = self
+            .qi_gc_root_replay
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter_map(|(idx, sign)| match sign {
+                1 => Some(idx as i32),
+                -1 => Some(-(idx as i32)),
+                _ => None,
+            })
+            .take(16)
+            .collect();
+        panic!(
+            "rebuilt CaDiCaL reached a search callback before replaying {} root assignments; first missing: {:?}",
+            self.qi_gc_root_replay_pending, missing
+        );
+    }
+
     fn apply_instances(
         &mut self,
         instances: &[crate::quantifiers::quantifier::QuantifierInstance],
@@ -859,6 +1087,7 @@ impl<'a> CustomExternalPropagator<'a> {
                     self.proof_tracer
                         .borrow_mut()
                         .register_clause_for_cadical_callback(&guarded);
+                    self.active_forgettable_clauses.push(guarded.clone());
                     self.forgettable_queue.push(guarded);
                 } else {
                     self.queue_external_clause(clause.clone());
@@ -1003,8 +1232,8 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     /// Epoch transition for QI garbage collection. Called on backtrack to level 0.
-    /// Promotes activation-free consequences, migrates their live QI support
-    /// under a fresh activation literal, and retires the remainder.
+    /// Promotes activation-free consequences, rebuilds the SAT solver without
+    /// the old guarded clauses, and retires terms owned only by the old epoch.
     fn trigger_epoch_transition(&mut self, gc_state: &Rc<RefCell<QiGcState>>) {
         let gc = gc_state.borrow_mut();
         let old_act = gc.current_act;
@@ -1043,14 +1272,22 @@ impl<'a> CustomExternalPropagator<'a> {
             permanent_term_uids,
             epoch_owned_term_uids,
         } = gc_state.borrow().tracker.plan();
-        let retained_instance_count = retained_instances.len();
+        let live_qi_clauses = gc_state.borrow().tracker.live_qi_clauses();
+        let live_qi_clause_count = live_qi_clauses.len();
+        let support_instance_count = retained_instances.len();
         let retained_orphan_count = retained_orphan_clauses.len();
-        let retained_qi_count = retained_instances
+        let support_qi_count = retained_instances
             .iter()
             .map(|instance| instance.clauses.len())
             .sum::<usize>()
             + retained_orphan_count;
-        let retired_qi_count = observed_qi_clauses.saturating_sub(retained_qi_count);
+        // Quantifier instantiations are globally valid SMT lemmas. A learned
+        // clause `-act ∨ C` that depends on them therefore has a globally
+        // valid activation-free summary `C`. Retain these summaries directly
+        // and collect every guarded support clause instead of replaying the
+        // entire resolution ancestry in the next epoch.
+        let retained_qi_count = 0;
+        let retired_qi_count = observed_qi_clauses;
         let support_term_count = retained_term_uids.difference(&permanent_term_uids).count();
         let permanent_epoch_terms_before = permanent_term_uids
             .intersection(&epoch_owned_term_uids)
@@ -1059,19 +1296,23 @@ impl<'a> CustomExternalPropagator<'a> {
         // Keep every live activation-dependent learned clause. The proof
         // tracer sees all derived clauses and deletions; the Learner is a
         // fallback for any 1-UIP clause not present in those callbacks.
-        let learner_derived = {
+        let (learner_derived, safe_learned) = {
             let gc = gc_state.borrow();
-            gc.learned_clauses
-                .iter()
-                .map(|clause| {
-                    clause
-                        .iter()
-                        .copied()
-                        .filter(|lit| *lit != neg_old_act)
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
+            (
+                gc.learned_clauses
+                    .iter()
+                    .map(|clause| {
+                        clause
+                            .iter()
+                            .copied()
+                            .filter(|lit| *lit != neg_old_act)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>(),
+                gc.safe_learned_clauses.clone(),
+            )
         };
+        let safe_learned_count = safe_learned.len();
         let promoted_derived =
             deduplicate_clauses(derived_clauses.into_iter().chain(learner_derived));
         let promoted_derived_count = promoted_derived.len();
@@ -1082,9 +1323,7 @@ impl<'a> CustomExternalPropagator<'a> {
             .collect();
         let migrated_derived_count = migrated_derived.len();
         let promotes_empty_clause = migrated_derived_count != promoted_derived_count;
-        let mut pinned_term_uids = retained_term_uids;
-        self.solver_state
-            .collect_clause_term_closure(&retained_orphan_clauses, &mut pinned_term_uids);
+        let mut pinned_term_uids = permanent_term_uids.clone();
         let mut promoted_term_uids = DeterministicHashSet::default();
         self.solver_state
             .collect_clause_term_closure(&promoted_derived, &mut promoted_term_uids);
@@ -1097,15 +1336,17 @@ impl<'a> CustomExternalPropagator<'a> {
 
         qi_gc_trace!(
             "epoch {}: dependency plan observed_qi={} migrated_qi={} retired_qi={} \
-             migrated_instances={} migrated_orphans={} support_clause_terms={} \
+             support_instances={} support_qi={} migrated_orphans={} support_clause_terms={} \
              epoch_owned_terms={} permanent_terms={} permanent_epoch_terms_before={} \
              permanent_epoch_terms_after={} pinned_terms={} retire_term_candidates={} \
-             promoted_derived={} migrated_derived={} promotes_empty={} ancestry_edges={}",
+             promoted_derived={} migrated_derived={} safe_learned={} \
+             live_qi_in_sat={} promotes_empty={} ancestry_edges={}",
             epoch,
             observed_qi_clauses,
             retained_qi_count,
             retired_qi_count,
-            retained_instance_count,
+            support_instance_count,
+            support_qi_count,
             retained_orphan_count,
             support_term_count,
             epoch_owned_term_uids.len(),
@@ -1116,22 +1357,26 @@ impl<'a> CustomExternalPropagator<'a> {
             retired_candidate_term_uids.len(),
             promoted_derived_count,
             migrated_derived_count,
+            safe_learned_count,
+            live_qi_clause_count,
             promotes_empty_clause,
             antecedent_edges
         );
         if QI_GC_PROFILE.load(Ordering::Relaxed) {
             eprintln!(
                 "[qi-gc-profile] migration-plan epoch={} observed_qi={} migrated_qi={} \
-                 retired_qi={} migrated_instances={} migrated_orphans={} \
+                 retired_qi={} support_instances={} support_qi={} migrated_orphans={} \
                  support_clause_terms={} epoch_owned_terms={} permanent_terms={} \
                  permanent_epoch_terms_before={} permanent_epoch_terms_after={} \
                  pinned_terms={} retire_term_candidates={} promoted_derived={} \
-                 migrated_derived={} promotes_empty={} ancestry_edges={}",
+                 migrated_derived={} safe_learned={} live_qi_in_sat={} \
+                 promotes_empty={} ancestry_edges={}",
                 epoch,
                 observed_qi_clauses,
                 retained_qi_count,
                 retired_qi_count,
-                retained_instance_count,
+                support_instance_count,
+                support_qi_count,
                 retained_orphan_count,
                 support_term_count,
                 epoch_owned_term_uids.len(),
@@ -1142,19 +1387,24 @@ impl<'a> CustomExternalPropagator<'a> {
                 retired_candidate_term_uids.len(),
                 promoted_derived_count,
                 migrated_derived_count,
+                safe_learned_count,
+                live_qi_clause_count,
                 promotes_empty_clause,
                 antecedent_edges
             );
         }
 
-        // 1. Permanently retire the old epoch. QI clauses have the shape
-        // `¬act ∨ instance`, so asserting `¬act` satisfies any clause CaDiCaL
-        // has not physically forgotten.
-        self.queue_theory_clause(retire_activation_unit(old_act), Theory::Background);
+        // 1. Retire the old epoch. A fresh-solver rebuild drops every old
+        // guarded clause directly. The in-place path instead fixes `-act` at
+        // level zero so CaDiCaL's collector can recognize those clauses as
+        // satisfied.
+        if self.qi_gc_rebuild_requested.is_none() {
+            self.queue_theory_clause(retire_activation_unit(old_act), Theory::Background);
+        }
 
         // 2. A promoted empty clause is a permanent UNSAT proof. Non-empty
-        // learned consequences are migrated below under the next activation:
-        // they remain active, but CaDiCaL and a later epoch may collect them.
+        // activation-free learned consequences are replayed into the fresh
+        // solver below.
         if promotes_empty_clause {
             self.queue_theory_clause(Vec::new(), Theory::Background);
         }
@@ -1200,6 +1450,18 @@ impl<'a> CustomExternalPropagator<'a> {
         }
         self.pending_relevant_assignments
             .retain(|lit| !self.solver_state.is_retired_sat_var(*lit));
+        let activation_lits = gc_state.borrow().activation_lits.clone();
+        self.rebuild_learned_clauses = deduplicate_clauses(
+            safe_learned
+                .into_iter()
+                .chain(migrated_derived.iter().cloned())
+                .filter(|clause| {
+                    clause.iter().all(|lit| {
+                        !activation_lits.contains(&lit.abs())
+                            && !self.solver_state.is_retired_sat_var(*lit)
+                    })
+                }),
+        );
 
         #[cfg(feature = "z3-solver")]
         let z3_rebuild = if self.z3_incremental.is_some() {
@@ -1282,12 +1544,12 @@ impl<'a> CustomExternalPropagator<'a> {
         carried_epoch_term_uids
             .retain(|uid| !retired_term_uids.contains(uid) && !permanent_term_uids.contains(uid));
 
-        // 4. Start a new generation. Live QI groups are guarded by the new
-        // activation instead of being re-added permanently. Terms that the
-        // egraph conservatively refused to retire remain owned by this new
-        // epoch so a later collection can try again.
+        // 4. Start a new generation. Terms that the egraph conservatively
+        // refused to retire remain owned by this new epoch so a later
+        // collection can try again.
         let mut gc = gc_state.borrow_mut();
         gc.learned_clauses.clear();
+        gc.safe_learned_clauses.clear();
         gc.tracker.clear_epoch();
         gc.tracker
             .set_epoch_owned_terms(carried_epoch_term_uids.iter().copied());
@@ -1296,6 +1558,13 @@ impl<'a> CustomExternalPropagator<'a> {
         gc.total_promoted_derived_clauses += promoted_derived_count as u64;
         gc.total_retired_terms += term_gc.retired_terms as u64;
         gc.total_retired_sat_vars += term_gc.retired_sat_vars.len() as u64;
+        gc.retired_activations.insert(old_act);
+        for (id, clause) in live_qi_clauses {
+            gc.pending_retired_qi_clause_ids.insert(id);
+            *gc.pending_retired_qi_clause_contents
+                .entry(clause)
+                .or_default() += 1;
+        }
         let previous_instantiations: usize = self
             .solver_state
             .added_instantiations
@@ -1303,13 +1572,6 @@ impl<'a> CustomExternalPropagator<'a> {
             .map(HashSet::len)
             .sum();
         self.solver_state.added_instantiations.clear();
-        for instance in &retained_instances {
-            self.solver_state
-                .added_instantiations
-                .entry(instance.key.quantifier_id)
-                .or_default()
-                .insert(instance.key.substitution.clone());
-        }
         let preserved_instantiations: usize = self
             .solver_state
             .added_instantiations
@@ -1326,48 +1588,36 @@ impl<'a> CustomExternalPropagator<'a> {
         // 5. Allocate and initialize the new epoch.
         gc.epoch += 1;
         gc.transitions += 1;
-        let migrated_clause_count = retained_qi_count + migrated_derived_count;
+        let migrated_clause_count = retained_qi_count;
         gc.epoch_guarded_clauses = migrated_clause_count as u64;
         gc.total_guarded_clauses += migrated_clause_count as u64;
-        gc.epoch_instantiations = retained_instance_count as u64;
+        gc.epoch_instantiations = 0;
         gc.collection_check_pending = false;
 
         let new_act = self.solver_state.cnf_cache.next_var;
         self.solver_state.cnf_cache.next_var += 1;
         gc.current_act = new_act;
         gc.activation_lits.insert(new_act);
-        for instance in &retained_instances {
-            gc.tracker
-                .register_retained_instance(instance.clone(), new_act);
-        }
         let new_epoch = gc.epoch;
         let pending_registrations = gc.tracker.pending_clause_registrations();
         drop(gc);
 
-        // 6. Re-add migrated support as forgettable clauses guarded by the
-        // new activation. Group registrations were installed first so proof
-        // callbacks recover exact instance ownership.
-        let mut migrated_guarded_clauses = Vec::with_capacity(migrated_clause_count);
-        for instance in retained_instances {
-            for mut clause in instance.clauses {
-                clause.push(-new_act);
-                migrated_guarded_clauses.push(clause);
-            }
-        }
-        for mut clause in retained_orphan_clauses {
-            clause.push(-new_act);
-            migrated_guarded_clauses.push(clause);
-        }
-        for mut clause in migrated_derived {
-            clause.push(-new_act);
-            migrated_guarded_clauses.push(clause);
-        }
+        // 6. Queue the activation-free consequences for the fresh solver.
+        // New quantifier instantiations will be guarded by the new activation.
+        let migrated_guarded_clauses = Vec::with_capacity(migrated_clause_count);
         debug_assert_eq!(migrated_guarded_clauses.len(), migrated_clause_count);
+        self.active_forgettable_clauses = migrated_guarded_clauses.clone();
         for guarded in migrated_guarded_clauses {
             self.proof_tracer
                 .borrow_mut()
                 .register_clause_for_cadical_callback(&guarded);
             self.forgettable_queue.push(guarded);
+        }
+        for learned in &self.rebuild_learned_clauses {
+            self.proof_tracer
+                .borrow_mut()
+                .register_clause_for_cadical_callback(learned);
+            self.forgettable_queue.push(learned.clone());
         }
 
         // Observe the new activation literal so CaDiCaL knows it exists.
@@ -1390,18 +1640,22 @@ impl<'a> CustomExternalPropagator<'a> {
             eprintln!(
                 "[qi-gc-profile] migration-complete epoch={} migrated_qi={} \
                  migrated_derived={} retired_qi={} promotes_empty={} carried_epoch_terms={} \
-                 pending_registrations={} new_act={}",
+                 retained_learned={} pending_registrations={} new_act={}",
                 new_epoch,
                 retained_qi_count,
                 migrated_derived_count,
                 retired_qi_count,
                 promotes_empty_clause,
                 carried_epoch_term_uids.len(),
+                self.rebuild_learned_clauses.len(),
                 pending_registrations,
                 new_act
             );
         }
         self.print_qi_gc_profile("epoch-transition-complete");
+        if let Some(requested) = &self.qi_gc_rebuild_requested {
+            requested.set(true);
+        }
     }
 
     /// A tainted learned clause `-act ∨ C` forces `-act` at level zero when
@@ -1425,6 +1679,14 @@ impl<'a> CustomExternalPropagator<'a> {
         let Some(gc_state) = self.qi_gc_state.clone() else {
             return;
         };
+        {
+            let gc = gc_state.borrow();
+            if !gc.pending_retired_qi_clause_ids.is_empty()
+                || !gc.pending_retired_qi_clause_contents.is_empty()
+            {
+                return;
+            }
+        }
         let (epoch, epoch_clauses, pending_registrations, analysis) = {
             let mut gc = gc_state.borrow_mut();
             if !gc.collection_check_pending {
@@ -1547,12 +1809,14 @@ impl<'a> CustomExternalPropagator<'a> {
         self.assignments.resize(new_len, 0);
         self.theory_processed_levels.resize(new_len, None);
         self.theory_assignment_pending.resize(new_len, false);
+        self.qi_gc_phase_hints.resize(new_len, 0);
     }
 
     fn record_sat_assignment(&mut self, lit: i32) {
         let idx = lit.unsigned_abs() as usize;
         self.ensure_theory_assignment_capacity(idx);
         let sign = if lit > 0 { 1 } else { -1 };
+        self.qi_gc_phase_hints[idx] = sign as i8;
         let encoded = ((self.decision_level + 1) as i32) * sign;
         let old = self.assignments[idx];
         debug_assert!(
@@ -1565,6 +1829,40 @@ impl<'a> CustomExternalPropagator<'a> {
         }
         if old == 0 || encoded.abs() < old.abs() {
             self.assignments[idx] = encoded;
+        }
+    }
+
+    fn trace_first_observed_assignment_after_decision(&mut self, lit: i32) {
+        if !self.next_is_decision {
+            return;
+        }
+        self.next_is_decision = false;
+        if !QI_GC_TRACE.load(Ordering::Relaxed) {
+            return;
+        }
+
+        let is_activation = self
+            .qi_gc_state
+            .as_ref()
+            .is_some_and(|gc| gc.borrow().activation_lits.contains(&lit.abs()));
+        if is_activation {
+            eprintln!(
+                "[qi-gc] first observed assignment after decision level {}: lit={} term=<activation>",
+                self.decision_level, lit,
+            );
+        } else if self.solver_state.is_retired_sat_var(lit) {
+            eprintln!(
+                "[qi-gc] first observed assignment after decision level {}: lit={} term=<retired>",
+                self.decision_level, lit,
+            );
+        } else {
+            eprintln!(
+                "[qi-gc] first observed assignment after decision level {}: lit={} term={} relevant={}",
+                self.decision_level,
+                lit,
+                self.solver_state.get_term_from_lit(lit),
+                self.solver_state.is_lit_relevant(lit),
+            );
         }
     }
 
@@ -1743,9 +2041,27 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         );
         debug_println!(16, 0, "{}", self.solver_state.egraph);
         for lit in lits {
+            self.trace_first_observed_assignment_after_decision(*lit);
+            if self.consume_replayed_root_assignment(*lit) {
+                continue;
+            }
             // Skip activation literals — they have no term in the egraph.
             if let Some(ref gc) = self.qi_gc_state {
                 if gc.borrow().activation_lits.contains(&lit.abs()) {
+                    let mut gc = gc.borrow_mut();
+                    if *lit < 0
+                        && gc.retired_activations.contains(&lit.abs())
+                        && gc.observed_retirement_units.insert(lit.abs())
+                        && QI_GC_PROFILE.load(Ordering::Relaxed)
+                    {
+                        eprintln!(
+                            "[qi-gc-profile] retirement-unit-observed act={} lit={} level={}",
+                            lit.abs(),
+                            lit,
+                            self.decision_level
+                        );
+                    }
+                    drop(gc);
                     self.record_sat_assignment(*lit);
                     continue;
                 }
@@ -1763,17 +2079,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.decision_level,
                 self.solver_state.get_term_from_lit(*lit)
             );
-
-            // Log decisions
-            if self.next_is_decision && QI_GC_TRACE.load(Ordering::Relaxed) {
-                self.next_is_decision = false;
-                eprintln!(
-                    "[qi-gc] decision level {}: lit={} term={}",
-                    self.decision_level,
-                    lit,
-                    self.solver_state.get_term_from_lit(*lit)
-                );
-            }
 
             self.record_sat_assignment(*lit);
 
@@ -1962,7 +2267,10 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         let transition_requested = level == 0
             && self.qi_gc_state.as_ref().is_some_and(|gc| {
                 let gc = gc.borrow();
-                self.qi_gc_requires_root_transition(&gc) || self.qi_gc_collection_worthwhile(&gc)
+                gc.pending_retired_qi_clause_ids.is_empty()
+                    && gc.pending_retired_qi_clause_contents.is_empty()
+                    && (self.qi_gc_requires_root_transition(&gc)
+                        || self.qi_gc_collection_worthwhile(&gc))
             });
         if level == 0 && (self.qi_gc_transition_pending || transition_requested) {
             self.qi_gc_transition_pending = false;
@@ -1977,6 +2285,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        self.assert_root_replay_complete();
         self.eager_attempted_since_model = false;
         self.reset_eager_qi_for_level();
 
@@ -2289,6 +2598,16 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
+        if self
+            .qi_gc_rebuild_requested
+            .as_ref()
+            .is_some_and(|requested| requested.get())
+        {
+            return 0;
+        }
+
+        self.assert_root_replay_complete();
+
         // QI GC: force backtrack to level 0 if scheduled (triggers epoch transition)
         if self.qi_gc_force_backtrack {
             self.qi_gc_force_backtrack = false;
@@ -2363,6 +2682,20 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "PROPAGATOR: Checking for external clauses (forgettable: {})",
             is_forgettable
         );
+
+        // An epoch transition has already built the exact replay queues and
+        // requested replacement of this SAT solver. Do not let the old solver
+        // consume those clauses before it is discarded: doing so gives them
+        // obsolete clause IDs and makes the dependency tracker observe the
+        // migrated generation twice.
+        if self
+            .qi_gc_rebuild_requested
+            .as_ref()
+            .is_some_and(|requested| requested.get())
+        {
+            self.draining_forgettable = false;
+            return false;
+        }
 
         // Serve guarded QI clauses as forgettable.
         if !self.forgettable_queue.is_empty() {

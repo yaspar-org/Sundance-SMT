@@ -13,8 +13,8 @@ use crate::proof::{SMTProofTracer, Theory};
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
-use cadical_sys::{CaDiCal, Status, Terminator};
-use std::cell::RefCell;
+use cadical_sys::{CaDiCal, ClauseIterator, Status, Terminator};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -22,12 +22,35 @@ use std::time::Instant;
 use yaspar_ir::ast::{FunctionMeta, Sig, SortDef, Str};
 
 struct DeadlineTerminator {
-    deadline: Instant,
+    deadline: Option<Instant>,
+    qi_gc_rebuild_requested: Rc<Cell<bool>>,
 }
 
 impl Terminator for DeadlineTerminator {
     fn terminated(&mut self) -> bool {
-        Instant::now() >= self.deadline
+        self.qi_gc_rebuild_requested.get()
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+}
+
+impl DeadlineTerminator {
+    fn timed_out(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+}
+
+#[derive(Default)]
+struct ClauseCollector {
+    clauses: Vec<Vec<i32>>,
+}
+
+impl ClauseIterator for ClauseCollector {
+    fn clause(&mut self, clause: &[i32]) -> bool {
+        self.clauses.push(clause.to_vec());
+        true
     }
 }
 
@@ -66,17 +89,6 @@ pub fn cdcl_decision_procedure(
     // Connect the proof tracer (must be done in CONFIGURING state)
     solver.connect_proof_tracer1(&mut *proof_tracer.borrow_mut(), true); // true for antecedents
 
-    let mut terminator = if timeout > 0 {
-        Some(DeadlineTerminator {
-            deadline: Instant::now() + std::time::Duration::from_secs(timeout),
-        })
-    } else {
-        None
-    };
-    if let Some(ref mut t) = terminator {
-        solver.connect_terminator(t);
-    }
-
     #[cfg(feature = "z3-solver")]
     let using_z3_incremental = matches!(arithmetic, ArithSolver::Z3Incremental);
     #[cfg(not(feature = "z3-solver"))]
@@ -94,6 +106,14 @@ pub fn cdcl_decision_procedure(
     init_qi_gc_trace();
     crate::relevancy::init_relevancy_trace();
     let qi_gc_active = qi_gc && eager_qi == 0;
+    let qi_gc_rebuild_requested = Rc::new(Cell::new(false));
+    let mut terminator = (timeout > 0 || qi_gc_active).then(|| DeadlineTerminator {
+        deadline: (timeout > 0).then(|| Instant::now() + std::time::Duration::from_secs(timeout)),
+        qi_gc_rebuild_requested: Rc::clone(&qi_gc_rebuild_requested),
+    });
+    if let Some(ref mut t) = terminator {
+        solver.connect_terminator(t);
+    }
     let qi_gc_state: Option<Rc<RefCell<QiGcState>>> = if qi_gc_active {
         let act_var = solver_state.cnf_cache.next_var;
         solver_state.cnf_cache.next_var += 1;
@@ -104,6 +124,7 @@ pub fn cdcl_decision_procedure(
             current_act: act_var,
             activation_lits: initial_activation_lits,
             learned_clauses: Vec::new(),
+            safe_learned_clauses: Vec::new(),
             learner_buf: Vec::new(),
             epoch: 0,
             epoch_guarded_clauses: 0,
@@ -117,6 +138,14 @@ pub fn cdcl_decision_procedure(
             total_promoted_derived_clauses: 0,
             total_retired_terms: 0,
             total_retired_sat_vars: 0,
+            pending_retired_qi_clause_ids: std::collections::HashSet::new(),
+            pending_retired_qi_clause_contents: Default::default(),
+            total_physically_collected_qi_clauses: 0,
+            total_physically_collected_qi_clause_ids: 0,
+            total_physically_collected_qi_clause_contents: 0,
+            retired_activations: std::collections::HashSet::new(),
+            observed_retirement_units: std::collections::HashSet::new(),
+            total_deleted_retired_activation_clauses: 0,
             collection_check_pending: false,
         }));
         proof_tracer.borrow_mut().qi_gc_state = Some(Rc::clone(&state));
@@ -184,10 +213,16 @@ pub fn cdcl_decision_procedure(
         trail_atoms: std::collections::HashMap::new(),
         qi_gc_state,
         forgettable_queue: Vec::new(),
+        active_forgettable_clauses: Vec::new(),
+        rebuild_learned_clauses: Vec::new(),
         draining_forgettable: false,
         next_is_decision: false,
         qi_gc_force_backtrack: false,
         qi_gc_transition_pending: false,
+        qi_gc_rebuild_requested: qi_gc_active.then(|| Rc::clone(&qi_gc_rebuild_requested)),
+        qi_gc_root_replay: Vec::new(),
+        qi_gc_root_replay_pending: 0,
+        qi_gc_phase_hints: vec![0, 0],
         theory_processed_levels: vec![None, None],
         pending_relevant_assignments: std::collections::VecDeque::new(),
         theory_assignment_pending: vec![false, false],
@@ -231,7 +266,26 @@ pub fn cdcl_decision_procedure(
         }
     }
 
-    let result = solve(&mut solver);
+    let result = loop {
+        let result = solve(&mut solver);
+        let rebuild_requested = qi_gc_rebuild_requested.replace(false);
+        if result != Status::UNKNOWN
+            || !rebuild_requested
+            || terminator
+                .as_ref()
+                .is_some_and(DeadlineTerminator::timed_out)
+        {
+            break result;
+        }
+
+        rebuild_cadical_after_qi_gc(
+            &mut solver,
+            &mut propagator,
+            &proof_tracer,
+            terminator.as_mut(),
+            qi_gc_learner.as_mut(),
+        );
+    };
 
     // Disconnect the learner before dropping the propagator
     if qi_gc_learner.is_some() {
@@ -338,4 +392,119 @@ fn add_clause_to_proof_and_solver(
 
 fn solve(solver: &mut CaDiCal) -> Status {
     solver.solve()
+}
+
+fn rebuild_cadical_after_qi_gc(
+    solver: &mut CaDiCal,
+    propagator: &mut CustomExternalPropagator<'_>,
+    proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+    terminator: Option<&mut DeadlineTerminator>,
+    learner: Option<&mut QiGcLearner>,
+) {
+    let started = Instant::now();
+    let old_vars = solver.vars();
+    let old_active = solver.active();
+    let old_irredundant = solver.irredundant();
+    let old_redundant = solver.redundant();
+    let pending_retired_qi = propagator.qi_gc_state.as_ref().map_or(0, |gc| {
+        gc.borrow()
+            .pending_retired_qi_clause_contents
+            .values()
+            .sum::<usize>()
+    });
+    let queued_retired_activation_clauses = propagator.queued_retired_activation_clauses();
+    assert_eq!(
+        queued_retired_activation_clauses, 0,
+        "SAT rebuild queue still contains clauses from a retired activation epoch"
+    );
+
+    let root_units = propagator.prepare_for_solver_rebuild();
+
+    // CaDiCaL's copy operation only transfers irredundant clauses. Disconnect
+    // callbacks first so the source can be dropped after the copy without
+    // retaining stale raw pointers. Root assignments that were represented
+    // only by learned units are added explicitly below.
+    solver.disconnect_external_propagator();
+    if learner.is_some() {
+        solver.disconnect_learner();
+    }
+    if terminator.is_some() {
+        solver.disconnect_terminator();
+    }
+    solver.disconnect_proof_tracer1();
+
+    let mut copied = ClauseCollector::default();
+    assert!(solver.traverse_clauses(&mut copied));
+
+    let mut fresh = CaDiCal::new();
+    {
+        let mut tracer = proof_tracer.borrow_mut();
+        for clause in &copied.clauses {
+            tracer.register_clause_for_cadical_callback(clause);
+        }
+        for &unit in &root_units {
+            tracer.register_clause_for_cadical_callback(&[unit]);
+        }
+        fresh.connect_proof_tracer1(&mut *tracer, true);
+    }
+    CaDiCal::copy(solver, &mut fresh);
+    for &unit in &root_units {
+        fresh.clause6(&[unit]);
+    }
+    let replayed_phases = propagator.replay_sat_phase_hints(&mut fresh);
+
+    if let Some(terminator) = terminator {
+        fresh.connect_terminator(terminator);
+    }
+    if let Some(learner) = learner {
+        fresh.connect_learner(learner);
+    }
+    fresh.connect_external_propagator(propagator);
+
+    *solver = fresh;
+    propagator.attach_rebuilt_solver(solver);
+
+    if let Some(gc) = &propagator.qi_gc_state {
+        let mut gc = gc.borrow_mut();
+        let collected_ids = gc.pending_retired_qi_clause_ids.len();
+        let collected_contents = gc
+            .pending_retired_qi_clause_contents
+            .values()
+            .sum::<usize>();
+        gc.total_physically_collected_qi_clauses += collected_ids.max(collected_contents) as u64;
+        gc.total_physically_collected_qi_clause_ids += collected_ids as u64;
+        gc.total_physically_collected_qi_clause_contents += collected_contents as u64;
+        gc.pending_retired_qi_clause_ids.clear();
+        gc.pending_retired_qi_clause_contents.clear();
+    }
+
+    let new_vars = solver.vars();
+    let new_active = solver.active();
+    let new_irredundant = solver.irredundant();
+    let new_redundant = solver.redundant();
+    eprintln!(
+        "[qi-gc-profile] sat-rebuild duration={:.6}s copied_irredundant={} root_units={} \
+         vars_before={} vars_after={} active_before={} active_after={} \
+         irredundant_before={} irredundant_after={} redundant_before={} redundant_after={} \
+         replay_forgettable={} replay_learned={} replay_permanent={} replayed_phases={} \
+         queued_retired_activation_clauses={} \
+         reclaimed_retired_qi={}",
+        started.elapsed().as_secs_f64(),
+        copied.clauses.len(),
+        root_units.len(),
+        old_vars,
+        new_vars,
+        old_active,
+        new_active,
+        old_irredundant,
+        new_irredundant,
+        old_redundant,
+        new_redundant,
+        propagator.active_forgettable_clauses.len(),
+        propagator.rebuild_learned_clauses.len(),
+        propagator.disequalities.borrow().len(),
+        replayed_phases,
+        queued_retired_activation_clauses,
+        pending_retired_qi,
+    );
 }

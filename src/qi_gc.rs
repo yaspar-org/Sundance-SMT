@@ -57,6 +57,10 @@ pub(crate) struct QiGcTracker {
     pending_clause_groups: DeterministicHashMap<Vec<i32>, Vec<u64>>,
     /// Guarded QI clause ID -> instance group ID.
     qi_clause_groups: DeterministicHashMap<u64, u64>,
+    /// Exact normalized external form of every guarded QI clause.  CaDiCaL
+    /// can replace a simplified external clause with a fresh clause ID, so
+    /// GC diagnostics retain both identity- and content-based accounting.
+    qi_clause_contents: DeterministicHashMap<u64, Vec<i32>>,
     /// Fallback for a guarded QI clause whose registration callback could not
     /// be paired with an instance group.
     orphan_qi_clauses: DeterministicHashMap<u64, Vec<i32>>,
@@ -65,6 +69,9 @@ pub(crate) struct QiGcTracker {
     antecedents: DeterministicHashMap<u64, Vec<u64>>,
     /// Tainted derived clauses CaDiCaL has not deleted.
     live_derived: DeterministicHashMap<u64, Vec<i32>>,
+    /// Clauses already deleted by CaDiCaL. QI clause ownership remains in
+    /// `qi_clause_groups` so live derived ancestry can still reach its source.
+    deleted_clause_ids: DeterministicHashSet<u64>,
     /// Terms whose lifetime is owned by the current guarded epoch.
     epoch_owned_term_uids: DeterministicHashSet<u64>,
     /// Terms referenced by permanent clauses from earlier transitions.
@@ -159,6 +166,7 @@ impl QiGcTracker {
             self.orphan_qi_clauses
                 .insert(id, Self::strip_activation(clause, activation));
         }
+        self.qi_clause_contents.insert(id, key);
         true
     }
 
@@ -179,7 +187,16 @@ impl QiGcTracker {
     }
 
     pub(crate) fn note_deleted_clause(&mut self, id: u64) {
+        self.deleted_clause_ids.insert(id);
         self.live_derived.remove(&id);
+    }
+
+    pub(crate) fn live_qi_clauses(&self) -> Vec<(u64, Vec<i32>)> {
+        self.qi_clause_contents
+            .iter()
+            .filter(|(id, _)| !self.deleted_clause_ids.contains(id))
+            .map(|(id, clause)| (*id, clause.clone()))
+            .collect()
     }
 
     pub(crate) fn plan(&self) -> QiGcPlan {
@@ -244,9 +261,11 @@ impl QiGcTracker {
         self.instance_groups.clear();
         self.pending_clause_groups.clear();
         self.qi_clause_groups.clear();
+        self.qi_clause_contents.clear();
         self.orphan_qi_clauses.clear();
         self.antecedents.clear();
         self.live_derived.clear();
+        self.deleted_clause_ids.clear();
         self.epoch_owned_term_uids.clear();
     }
 
