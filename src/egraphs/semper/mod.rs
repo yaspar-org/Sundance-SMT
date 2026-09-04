@@ -44,6 +44,7 @@ use semi_persistent_egraph::id::ENodeId;
 use semi_persistent_egraph::model::MachineLit;
 use semi_persistent_egraph::union_find::{Justification, ProofBuf};
 use semi_persistent_egraph::{EGraph31, EGraphToken, IndexLike};
+use std::cell::RefCell;
 use std::fmt;
 use yaspar_ir::ast::Local;
 
@@ -95,11 +96,41 @@ pub struct SemperEgraph {
     asserts: Vec<(u32, u32)>,
     /// Asserted disequalities with the literal that asserted each.
     diseqs: Vec<(u32, u32, Lit)>,
+    /// Cached class roots per disequality, making the per-assert violation
+    /// check O(1) for the common entry: two distinct roots stay distinct
+    /// until one is absorbed, and testing "still a root" is one parent read
+    /// (`find_const` on a root terminates immediately). Entries are stamped
+    /// with `epoch`; a restore bumps it, because a cached root above the
+    /// restore point may name a deleted or re-minted node.
+    diseq_roots: Vec<(ENodeId, ENodeId)>,
+    diseq_epoch: Vec<u64>,
+    epoch: u64,
+    /// Conflict reporting is edge-triggered: a violated disequality is
+    /// reported once, not on every subsequent assertion while it stays
+    /// violated. Re-reporting queued a duplicate of the same theory clause
+    /// per assertion until the backtrack — 24% more clauses than the basic
+    /// backend on eq_diamond14 (10906 vs 8781), with the cost showing up as
+    /// CaDiCaL clause-addition and propagation time. Cleared on backtrack;
+    /// a violation that survives one (possible under chronological
+    /// backtracking) is re-reported once, which is sound — the clause is
+    /// already in the solver either way.
+    reported_diseqs: rustc_hash::FxHashSet<usize>,
+    reported_tf: bool,
     /// `register_eq` watches. Recorded for the future propagation hook; the
     /// driver does not consume `EgraphResult::propagations` yet.
     eq_watches: Vec<(u32, u32, Lit)>,
     patterns: Vec<Pattern<u32>>,
-    marks: Vec<LevelMark>,
+    /// Current SAT decision level, advanced by `notify_new_decision_level`.
+    level: usize,
+    /// Materialized scopes, tagged with the level that first mutated the
+    /// e-graph. Marking is lazy: a decision level that only does Boolean
+    /// work never takes a token, so it costs nothing here — the engine's
+    /// `mark` is time-O(parent-frame captures) across every sub-container,
+    /// and CaDiCaL opens a level per decision. A level with no mark needs no
+    /// undo: the state at its end equals the state at the last mark below it.
+    marks: Vec<(usize, LevelMark)>,
+    /// Scratch for proof extraction, reused across explanations.
+    scratch: RefCell<ProofBuf<ENodeId>>,
     arithmetic_terms: Vec<u32>,
     incremental_arith: bool,
     /// The driver's true/false constants, captured at registration. Their
@@ -135,9 +166,16 @@ impl SemperEgraph {
             opaque_count: 0,
             asserts: Vec::new(),
             diseqs: Vec::new(),
+            diseq_roots: Vec::new(),
+            diseq_epoch: Vec::new(),
+            epoch: 0,
+            reported_diseqs: rustc_hash::FxHashSet::default(),
+            reported_tf: false,
             eq_watches: Vec::new(),
             patterns: Vec::new(),
+            level: 0,
             marks: Vec::new(),
+            scratch: RefCell::new(ProofBuf::new()),
             arithmetic_terms: Vec::new(),
             incremental_arith: false,
             true_term: None,
@@ -213,10 +251,29 @@ impl SemperEgraph {
         driver_id
     }
 
+    /// Take a token for the current level if it has none yet. Every mutating
+    /// entry point calls this first, which is what makes marking lazy.
+    fn ensure_scope(&mut self) {
+        if self.level == 0 {
+            return;
+        }
+        if self.marks.last().is_some_and(|&(l, _)| l >= self.level) {
+            return;
+        }
+        let mark = LevelMark {
+            token: self.eg.mark(ShrinkPolicy::Never),
+            asserts_len: self.asserts.len(),
+            diseqs_len: self.diseqs.len(),
+            reg_len: self.reg_log.len(),
+        };
+        self.marks.push((self.level, mark));
+    }
+
     /// The asserted-equality pairs whose merges (closed under congruence)
     /// force `find(a) == find(b)`.
     fn explain_pairs(&self, a: u32, b: u32) -> Vec<(u32, u32)> {
-        let mut buf = ProofBuf::new();
+        let mut buf = self.scratch.borrow_mut();
+        buf.steps.clear();
         let ok = self.eg.explain_deep(self.node(a), self.node(b), &mut buf);
         debug_assert!(ok, "explain_pairs on unequal classes");
         let mut pairs: Vec<(u32, u32)> = buf
@@ -234,30 +291,49 @@ impl SemperEgraph {
 
     /// Scan the disequality log for one violated by the current classes.
     /// The true/false pair is checked first: its merge is the deepest
-    /// possible conflict and carries no asserting literal.
-    fn violated_diseq(&self) -> Option<Conflict<u32>> {
-        if let (Some(t), Some(f)) = (self.true_term, self.false_term)
+    /// possible conflict and carries no asserting literal. The per-entry
+    /// cost is two parent reads in the common case, via the cached roots.
+    fn violated_diseq(&mut self) -> Option<Conflict<u32>> {
+        if !self.reported_tf
+            && let (Some(t), Some(f)) = (self.true_term, self.false_term)
             && self.eg.find_const(self.node(t)) == self.eg.find_const(self.node(f))
         {
+            self.reported_tf = true;
             return Some(Conflict {
                 equalities: self.explain_pairs(t, f),
                 disequality: (t, f),
                 diseq_lit: None,
             });
         }
-        for &(t1, t2, lit) in &self.diseqs {
-            if self.eg.find_const(self.node(t1)) == self.eg.find_const(self.node(t2)) {
+        for i in 0..self.diseqs.len() {
+            if self.reported_diseqs.contains(&i) {
+                continue;
+            }
+            let (t1, t2, lit) = self.diseqs[i];
+            let (r1, r2) = if self.diseq_epoch[i] == self.epoch {
+                // Two distinct roots stay distinct until one is absorbed;
+                // find_const on a still-live root is a single parent read.
+                self.diseq_roots[i]
+            } else {
+                (self.node(t1), self.node(t2))
+            };
+            let nr1 = self.eg.find_const(r1);
+            let nr2 = self.eg.find_const(r2);
+            if nr1 == nr2 {
+                self.reported_diseqs.insert(i);
                 return Some(Conflict {
                     equalities: self.explain_pairs(t1, t2),
                     disequality: (t1, t2),
                     diseq_lit: Some(lit),
                 });
             }
+            self.diseq_roots[i] = (nr1, nr2);
+            self.diseq_epoch[i] = self.epoch;
         }
         None
     }
 
-    fn result_after_merge(&self) -> EgraphResult<u32> {
+    fn result_after_merge(&mut self) -> EgraphResult<u32> {
         match self.violated_diseq() {
             Some(c) => EgraphResult::with_conflict(c),
             None => EgraphResult::ok(),
@@ -273,6 +349,7 @@ impl EgraphTrait for SemperEgraph {
         // Hash-consing plus build-time child canonicalization make every
         // registration "dynamic": a term congruent to an existing one under
         // the current classes interns to that node.
+        self.ensure_scope();
         self.push_registration(RegEvent::Term {
             op,
             children: children.to_vec(),
@@ -285,6 +362,7 @@ impl EgraphTrait for SemperEgraph {
             Op::Constant(s) if s == "false" => Some(false),
             _ => None,
         };
+        self.ensure_scope();
         let id = self.push_registration(RegEvent::Term {
             op,
             children: Vec::new(),
@@ -298,6 +376,7 @@ impl EgraphTrait for SemperEgraph {
     }
 
     fn register_opaque(&mut self) -> u32 {
+        self.ensure_scope();
         self.opaque_count += 1;
         self.push_registration(RegEvent::Opaque)
     }
@@ -312,6 +391,7 @@ impl EgraphTrait for SemperEgraph {
     }
 
     fn register_boolean_term(&mut self, op: Op, children: &[u32], _lit: Lit) -> u32 {
+        self.ensure_scope();
         self.push_registration(RegEvent::Term {
             op,
             children: children.to_vec(),
@@ -333,15 +413,13 @@ impl EgraphTrait for SemperEgraph {
     }
 
     fn notify_new_decision_level(&mut self) {
-        self.marks.push(LevelMark {
-            token: self.eg.mark(ShrinkPolicy::Never),
-            asserts_len: self.asserts.len(),
-            diseqs_len: self.diseqs.len(),
-            reg_len: self.reg_log.len(),
-        });
+        // Lazy: the token is taken by the first mutation at this level, if
+        // any (see `ensure_scope`).
+        self.level += 1;
     }
 
     fn assert_equal(&mut self, t1: u32, t2: u32) -> EgraphResult<u32> {
+        self.ensure_scope();
         let idx = self.asserts.len();
         self.asserts.push((t1, t2));
         let word = u32::try_from(idx).expect("assertion log exceeds the index word");
@@ -350,16 +428,25 @@ impl EgraphTrait for SemperEgraph {
             self.node(t2),
             Justification::Assumption { lit: word },
         );
-        if merged.is_some() {
-            self.stats.merges += 1;
+        if merged.is_none() {
+            // Already equal: no class changed, so no rebuild is needed and
+            // no disequality can have become violated.
+            return EgraphResult::ok();
         }
+        self.stats.merges += 1;
         self.eg.rebuild();
         self.result_after_merge()
     }
 
     fn assert_disequal(&mut self, t1: u32, t2: u32, lit: Lit) -> EgraphResult<u32> {
+        self.ensure_scope();
+        let r1 = self.eg.find_const(self.node(t1));
+        let r2 = self.eg.find_const(self.node(t2));
         self.diseqs.push((t1, t2, lit));
-        if self.eg.find_const(self.node(t1)) == self.eg.find_const(self.node(t2)) {
+        self.diseq_roots.push((r1, r2));
+        self.diseq_epoch.push(self.epoch);
+        if r1 == r2 {
+            self.reported_diseqs.insert(self.diseqs.len() - 1);
             return EgraphResult::with_conflict(Conflict {
                 equalities: self.explain_pairs(t1, t2),
                 disequality: (t1, t2),
@@ -405,21 +492,33 @@ impl EgraphTrait for SemperEgraph {
     }
 
     fn backtrack_to(&mut self, level: usize) {
-        if self.marks.len() <= level {
+        self.level = level;
+        self.reported_diseqs.clear();
+        self.reported_tf = false;
+        // Marks are level-ascending; the first one above the target is the
+        // restore point, and it also undoes every deeper mark (ancestor
+        // restore). No mark above the target means no e-graph mutation
+        // happened there: nothing to undo.
+        let pos = self.marks.partition_point(|&(l, _)| l <= level);
+        if pos == self.marks.len() {
             return;
         }
-        let mark = self
+        let (_, mark) = self
             .marks
-            .drain(level..)
+            .drain(pos..)
             .next()
             .expect("guarded by the length check above");
         self.eg.restore(mark.token);
+        // Cached disequality roots may name nodes deleted by the restore.
+        self.epoch += 1;
         // The restore may have dropped ops registered in the popped scopes;
         // the cache would hand out their dangling ids, so it is cleared and
         // repopulated from the registry on demand.
         self.ops.clear();
         self.asserts.truncate(mark.asserts_len);
         self.diseqs.truncate(mark.diseqs_len);
+        self.diseq_roots.truncate(mark.diseqs_len);
+        self.diseq_epoch.truncate(mark.diseqs_len);
         // Terms registered above the restore point were deleted with it, but
         // the driver's id maps still name them: replay their registrations
         // into the restored graph and repair the table entries.
@@ -462,7 +561,7 @@ impl fmt::Display for SemperEgraph {
             self.terms.len(),
             self.asserts.len(),
             self.diseqs.len(),
-            self.marks.len()
+            self.level
         )
     }
 }
@@ -554,6 +653,34 @@ mod tests {
         let fc = e.register_term(Op::App("f".to_string()), &[c], false);
         assert!(e.assert_equal(a, c).conflict.is_none());
         assert!(e.are_equal(fa, fc));
+    }
+
+    #[test]
+    fn levels_without_writes_take_no_token_and_backtrack_correctly() {
+        let mut e = SemperEgraph::new();
+        let a = constant(&mut e, "a");
+        let b = constant(&mut e, "b");
+        let c = constant(&mut e, "c");
+        // Levels 1 and 2 do only Boolean work (no e-graph calls); the first
+        // mutation happens at level 3.
+        e.notify_new_decision_level();
+        e.notify_new_decision_level();
+        e.notify_new_decision_level();
+        assert!(e.assert_equal(a, b).conflict.is_none());
+        assert_eq!(e.marks.len(), 1, "only the mutating level takes a token");
+        // Backtracking to an empty level above the mark undoes level 3's
+        // merge (the state at level 2's end equals the pre-mark state).
+        e.backtrack_to(2);
+        assert!(!e.are_equal(a, b));
+        assert!(e.marks.is_empty());
+        // Backtracking through levels that never materialized is a no-op.
+        e.backtrack_to(0);
+        assert!(!e.are_equal(a, b));
+        // The next scope works normally.
+        e.notify_new_decision_level();
+        assert!(e.assert_equal(b, c).conflict.is_none());
+        e.backtrack_to(0);
+        assert!(!e.are_equal(b, c));
     }
 
     #[test]
