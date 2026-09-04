@@ -18,10 +18,7 @@ bundled-z3 = ["z3-solver", "z3/bundled"]
 local-z3 = ["z3-solver"]
 
 [dependencies]
-# Temporary: yaspar-ir 2.7.6 (single-term :no-pattern) is not yet published to
-# crates.io; pin to the main checkpoint until it is released, then restore the
-# `version = "=2.7.6"` crates.io pin.
-yaspar-ir = { git = "https://github.com/yaspar-org/yaspar-ir.git", rev = "483d34188b9b6b728386da158ba672e816ed077b", features = ["no-pattern"] }
+yaspar-ir = { version = "=2.7.6", features = ["no-pattern"] }
 sat-interface = "0.1.1"
 # Pin the elevate fork until upstream cadical-sys exposes CaDiCaL's elevate option.
 cadical-sys = { git = "https://github.com/amarshah1/cadical-sys.git", rev = "2f234ec95dd36ca74057691cf2fd4e8766a3c40f" }
