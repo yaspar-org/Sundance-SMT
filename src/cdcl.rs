@@ -479,6 +479,15 @@ fn rebuild_cadical_after_qi_gc(
     );
 
     propagator.begin_qi_gc_maintenance();
+    // Establish a root-propagation fixpoint before snapshotting units and live
+    // source ownership. This also physically releases clauses already marked
+    // as garbage before the fresh solver's replay set is constructed.
+    solver.backtrack_to_root();
+    assert_eq!(
+        propagator.decision_level, 0,
+        "SAT rebuild must return Sundance to level zero"
+    );
+    solver.collect_garbage();
     let mut root_units = propagator.prepare_for_solver_rebuild();
     propagator.run_targeted_qi_term_gc_during_maintenance();
     root_units.retain(|lit| {

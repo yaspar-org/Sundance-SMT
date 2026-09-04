@@ -209,10 +209,8 @@ pub(crate) struct QiGcState {
     /// active CDCL loop.
     pub in_search_collection_started: Option<Instant>,
     pub in_search_collection_expected_qi_clauses: usize,
-    /// Epoch-owned terms are currently eligible for e-graph retirement.
-    /// Source-clause collection can expose more terms, but pure Boolean
-    /// structure may already be collectible while its SAT clauses remain.
-    /// E-graph retirement is performed only at a natural level-zero backtrack.
+    /// Epoch-owned terms are currently eligible for e-graph retirement at a
+    /// level-zero safepoint.
     pub targeted_term_gc_pending: bool,
     /// Predecessor compaction is folded into actual term collection at an
     /// existing level-zero safepoint; these counters measure its effect.
@@ -2716,6 +2714,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 );
             }
         }
+        self.request_sat_rebuild_if_ready();
         true
     }
 
@@ -2723,6 +2722,30 @@ impl<'a> CustomExternalPropagator<'a> {
         self.qi_gc_state
             .as_ref()
             .map_or(0, |gc| gc.borrow().compact_qi_obligations.len())
+    }
+
+    /// A SAT replacement may start only after every requested source/theory
+    /// deletion has completed, so the replay snapshot and source ownership
+    /// describe the same clause database.
+    fn request_sat_rebuild_if_ready(&self) -> bool {
+        if self.qi_gc_maintenance_in_progress {
+            return false;
+        }
+        let Some(gc_state) = &self.qi_gc_state else {
+            return false;
+        };
+        let ready = {
+            let gc = gc_state.borrow();
+            gc.pending_unobserve_sat_vars.len() >= QI_GC_MIN_RETIRED_SAT_VARS_FOR_REBUILD
+                && gc.pending_retired_qi_clause_ids.is_empty()
+                && gc.pending_retired_qi_clause_contents.is_empty()
+                && gc.pending_requested_theory_clause_ids.is_empty()
+        };
+        if ready && let Some(requested) = &self.qi_gc_rebuild_requested {
+            requested.set(true);
+            return true;
+        }
+        false
     }
 
     fn release_compact_qi_obligations_for_model_matching(&mut self) -> usize {
@@ -3106,24 +3129,26 @@ impl<'a> CustomExternalPropagator<'a> {
         }
         let compact_qi_obligations = self.compact_qi_obligations();
         let pending_unobserve_sat_vars = gc_state.borrow().pending_unobserve_sat_vars.len();
+        let rebuild_requested = !during_maintenance && self.request_sat_rebuild_if_ready();
         if !during_maintenance
-            && pending_unobserve_sat_vars >= QI_GC_MIN_RETIRED_SAT_VARS_FOR_REBUILD
-            && let Some(requested) = &self.qi_gc_rebuild_requested
-        {
-            // `remove_observed_var` is only legal between CaDiCaL solve
-            // calls. Ask the terminator to yield only after enough dormant
-            // variables have accumulated to amortize a full solver rebuild.
-            requested.set(true);
-        } else if !during_maintenance
             && !term_gc.retired_sat_vars.is_empty()
+            && !rebuild_requested
             && QI_GC_PROFILE.load(Ordering::Relaxed)
         {
+            let collection_in_flight = {
+                let gc = gc_state.borrow();
+                !gc.pending_retired_qi_clause_ids.is_empty()
+                    || !gc.pending_retired_qi_clause_contents.is_empty()
+                    || !gc.pending_requested_theory_clause_ids.is_empty()
+            };
             eprintln!(
                 "[qi-gc-profile] sat-rebuild-deferred newly_retired_sat_vars={} \
-                 pending_unobserve_sat_vars={} threshold={}",
+                 pending_unobserve_sat_vars={} threshold={} \
+                 clause_collection_in_flight={}",
                 term_gc.retired_sat_vars.len(),
                 pending_unobserve_sat_vars,
                 QI_GC_MIN_RETIRED_SAT_VARS_FOR_REBUILD,
+                collection_in_flight,
             );
         }
         let post_retire_duration = post_retire_started.elapsed();
@@ -3674,13 +3699,18 @@ impl<'a> CustomExternalPropagator<'a> {
                 "[qi-gc] first observed assignment after decision level {}: lit={} term=<retired>",
                 self.decision_level, lit,
             );
-        } else {
+        } else if let Some(term) = self.solver_state.get_term_from_lit_safe(lit) {
             eprintln!(
                 "[qi-gc] first observed assignment after decision level {}: lit={} term={} relevant={}",
                 self.decision_level,
                 lit,
-                self.solver_state.get_term_from_lit(lit),
+                term,
                 self.solver_state.is_lit_relevant(lit),
+            );
+        } else {
+            eprintln!(
+                "[qi-gc] first observed assignment after decision level {}: lit={} term=<unmapped>",
+                self.decision_level, lit,
             );
         }
     }
@@ -3894,6 +3924,30 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 self.record_sat_assignment(*lit);
                 continue;
             }
+            if self.solver_state.get_term_from_lit_safe(*lit).is_none() {
+                if QI_GC_PROFILE.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "[qi-gc-profile] unmapped-observed-assignment lit={} level={} \
+                         maintenance={} pending_rebuild={}",
+                        lit,
+                        self.decision_level,
+                        self.qi_gc_maintenance_in_progress,
+                        self.qi_gc_rebuild_requested
+                            .as_ref()
+                            .is_some_and(|requested| requested.get()),
+                    );
+                }
+                assert!(
+                    self.qi_gc_maintenance_in_progress,
+                    "CaDiCaL reported non-retired unmapped observed literal {lit} outside GC maintenance"
+                );
+                // `disconnect_external_propagator` removes observed variables
+                // one by one and can report assignments caused by that
+                // process. The old solver is already being discarded, so an
+                // unmapped callback has no theory effect to replay.
+                self.record_sat_assignment(*lit);
+                continue;
+            }
 
             debug_println!(
                 7,
@@ -4005,6 +4059,11 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     }
 
     fn notify_backtrack(&mut self, level: usize) {
+        assert!(
+            level <= self.decision_level,
+            "propagator received an upward backtrack from level {} to {level}",
+            self.decision_level
+        );
         self.stats.backtracks += 1;
         qi_gc_trace!(
             "backtrack: level {} -> level {}",
