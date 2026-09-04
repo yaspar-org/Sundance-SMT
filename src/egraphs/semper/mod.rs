@@ -335,22 +335,97 @@ impl SemperEgraph {
             .collect()
     }
 
-    /// Scan the disequality log for one violated by the current classes.
-    /// The true/false pair is checked first: its merge is the deepest
-    /// possible conflict and carries no asserting literal. The per-entry
-    /// cost is two parent reads in the common case, via the cached roots.
-    fn violated_diseq(&mut self) -> Option<Conflict<u32>> {
-        if !self.reported_tf
-            && let (Some(t), Some(f)) = (self.true_term, self.false_term)
-            && self.eg.find_const(self.node(t)) == self.eg.find_const(self.node(f))
-        {
-            self.reported_tf = true;
-            return Some(Conflict {
-                equalities: self.explain_pairs(t, f),
-                disequality: (t, f),
-                diseq_lit: None,
-            });
+    /// Explain a true=false collision completely.
+    ///
+    /// The base forest path names the atoms merged to true and to false, but
+    /// when those atoms are two syntactically different equality terms that
+    /// hash-consed to one node, the path has no congruence edge to expand and
+    /// so omits why they are the same node: their arguments are equal. This
+    /// recovers those argument equalities. For each true-side atom and
+    /// false-side atom that resolve to the same engine node, it explains their
+    /// arguments pairwise (matched by class, so the commutative Eq orientation
+    /// is handled), appending those antecedents. The argument equalities
+    /// themselves go through ordinary congruence with real forest edges, so
+    /// `explain_pairs` on them is complete.
+    fn explain_true_false(&self, t: u32, f: u32) -> Vec<(u32, u32)> {
+        let mut out = self.explain_pairs(t, f);
+        let tf = [t, f];
+        // The atoms merged directly to true / false, read off the base leaves.
+        let side = |constant: u32| -> Vec<u32> {
+            out.iter()
+                .filter_map(|&(a, b)| {
+                    if b == constant && a != constant {
+                        Some(a)
+                    } else if a == constant && b != constant {
+                        Some(b)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let true_atoms = side(t);
+        let false_atoms = side(f);
+        let mut extra: Vec<(u32, u32)> = Vec::new();
+        for &x in &true_atoms {
+            for &y in &false_atoms {
+                if x == y || self.node(x) != self.node(y) {
+                    continue;
+                }
+                // x and y are congruent equality atoms sharing one node. Match
+                // their arguments by class and explain each matched pair.
+                let cx = self.reg_children(x).to_vec();
+                let cy = self.reg_children(y).to_vec();
+                if cx.len() != cy.len() {
+                    continue;
+                }
+                for (i, &a) in cx.iter().enumerate() {
+                    // Prefer the positional partner; fall back to any
+                    // class-matching one (commutative orientation).
+                    let partner = if self.eg.find_const(self.node(a))
+                        == self.eg.find_const(self.node(cy[i]))
+                    {
+                        Some(cy[i])
+                    } else {
+                        cy.iter().copied().find(|&b| {
+                            self.eg.find_const(self.node(a)) == self.eg.find_const(self.node(b))
+                        })
+                    };
+                    if let Some(b) = partner
+                        && a != b
+                    {
+                        extra.extend(self.explain_pairs(a, b));
+                    }
+                }
+            }
         }
+        out.extend(extra);
+        // Drop any incidental references to the true/false constants and dedup.
+        out.retain(|&(a, b)| !tf.contains(&a) || !tf.contains(&b));
+        let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        out.retain(|&p| seen.insert(p));
+        out
+    }
+
+    /// Scan the disequality log for one violated by the current classes.
+    ///
+    /// The specific disequalities are checked BEFORE the built-in true/false
+    /// pair, and this order is load-bearing for soundness. Two equality atoms
+    /// that are syntactically different but whose arguments have merged
+    /// hash-cons to one engine node; asserting them to opposite truth values
+    /// then merges that node with both true and false. Explaining that
+    /// true=false collision directly walks a forest path of just the two
+    /// atom=truth-value assumptions (there is no congruence edge to expand,
+    /// because congruent terms share a node), which OMITS the argument
+    /// equalities that made the atoms congruent and yields an unsound clause.
+    /// Every such collision is backed by a specific disequality (the atom
+    /// asserted false registered one on its sides), and explaining THAT pair
+    /// walks the argument merges, so checking specific disequalities first
+    /// produces the complete, sound antecedent set. The true/false check
+    /// stays as a fallback for collisions no specific disequality covers
+    /// (e.g. non-equality Boolean terms). Per-entry cost is two parent reads
+    /// via the cached roots.
+    fn violated_diseq(&mut self) -> Option<Conflict<u32>> {
         for i in 0..self.diseqs.len() {
             if self.reported_diseqs.contains(&i) {
                 continue;
@@ -375,6 +450,17 @@ impl SemperEgraph {
             }
             self.diseq_roots[i] = (nr1, nr2);
             self.diseq_epoch[i] = self.epoch;
+        }
+        if !self.reported_tf
+            && let (Some(t), Some(f)) = (self.true_term, self.false_term)
+            && self.eg.find_const(self.node(t)) == self.eg.find_const(self.node(f))
+        {
+            self.reported_tf = true;
+            return Some(Conflict {
+                equalities: self.explain_true_false(t, f),
+                disequality: (t, f),
+                diseq_lit: None,
+            });
         }
         None
     }
