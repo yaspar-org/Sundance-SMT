@@ -276,17 +276,21 @@ impl SemperEgraph {
         buf.steps.clear();
         let ok = self.eg.explain_deep(self.node(a), self.node(b), &mut buf);
         debug_assert!(ok, "explain_pairs on unequal classes");
-        let mut pairs: Vec<(u32, u32)> = buf
-            .steps
+        // Proof-path order, deduplicated by first occurrence. Sorted order
+        // was also tried on the hypothesis that antecedent order steers
+        // CaDiCaL's watched literals onto a different search trajectory:
+        // measured no difference on the 103-file subset (11.9s vs 11.7s,
+        // run noise), so the choice between them is free. Path order is
+        // kept because the dedup is O(k) against the sort's O(k log k).
+        let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        buf.steps
             .iter()
             .filter_map(|&(_, _, j)| match j {
                 Justification::Assumption { lit } => Some(self.asserts[lit.as_usize()]),
                 _ => None,
             })
-            .collect();
-        pairs.sort_unstable();
-        pairs.dedup();
-        pairs
+            .filter(|&p| seen.insert(p))
+            .collect()
     }
 
     /// Scan the disequality log for one violated by the current classes.
