@@ -27,11 +27,23 @@
 //!   log, and explanation maps the indices back to the asserted pairs the
 //!   driver expects (it reconstructs SAT literals itself via `make_eq`).
 //!
-//! Current limits, by design of this first cut: `match_triggers` returns no
-//! matches (quantified problems need the pattern compiler bridge), and
+//! E-matching (`match_triggers`) is implemented as a port of the basic
+//! backend's top-down matcher over the registration log, and relevancy
+//! filtering of match candidates is implemented as a traversal of the merge
+//! state (the e-graph is the relevancy skeleton). Both are opt-in:
+//! `SEMPER_EMATCH=1` enables the matcher, `SEMPER_RELEVANCY=1` adds the
+//! filter. E-matching is gated off by default because it currently emits an
+//! unsound theory lemma on 2 of 224 quantifier regression files: a true=false
+//! conflict from two congruent equality-atoms merged to opposite truth values
+//! is explained via `explain_pairs(true, false)`, which can take a forest path
+//! that omits the congruence's child-equality antecedents. The fix is to
+//! explain the two colliding atom-nodes instead, forcing the congruence
+//! expansion. With the matcher off, quantified problems are sound but
+//! incomplete (unknown).
+//!
 //! `drain_arithmetic_equalities` returns none (Nelson-Oppen equality
-//! propagation needs a merge-observation hook in the engine), so run with
-//! quantifier-free problems and `--arith-solver none`.
+//! propagation needs a merge-observation hook in the engine), so arithmetic
+//! problems still need the basic backend / `--arith-solver none`.
 
 use crate::egraphs::repr::{Op, Pattern, PatternId};
 use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
@@ -120,6 +132,32 @@ pub struct SemperEgraph {
     /// driver does not consume `EgraphResult::propagations` yet.
     eq_watches: Vec<(u32, u32, Lit)>,
     patterns: Vec<Pattern<u32>>,
+    /// (op, arity) -> driver ids of registered terms, for e-matching
+    /// candidate enumeration. Built incrementally from `reg_log` up to
+    /// `fn_index_upto`. Both live in driver-id space, which is
+    /// backtrack-stable (terms are permanent), so the index survives
+    /// restores without repair — the same reason `reg_log` replays work.
+    fn_index: FxHashMap<(Op, usize), Vec<u32>>,
+    fn_index_upto: usize,
+    /// Terms asserted at level 0: the input formula's top level, and the
+    /// seeds of the relevancy slice. Level 0 takes no token, so these are
+    /// never rolled back and the vector is append-only.
+    root_terms: Vec<u32>,
+    /// Relevancy gating for e-matching (SEMPER_RELEVANCY=1). When enabled,
+    /// match_triggers computes the relevant cone of the current assignment
+    /// (Z3's witness rules, read off the merge state: a gate's truth value
+    /// is whether its root is the true or false class) and skips candidates
+    /// outside it. Off by default so regression comparisons are unaffected.
+    relevancy_enabled: bool,
+    /// The slice for the match round in progress; None when gating is off.
+    active_slice: Option<rustc_hash::FxHashSet<u32>>,
+    /// E-matching is opt-in (SEMPER_EMATCH=1) while a soundness bug in the
+    /// conflict path with instantiation-created terms is open: it emits an
+    /// unsound theory lemma on 2 of 224 quantifier regression files
+    /// (quantifier_disequalities_level{,2}: wrong unsat, Z3 says sat). Off by
+    /// default, match_triggers returns nothing, so quantified problems are
+    /// sound-but-incomplete (unknown) exactly as before the matcher landed.
+    ematch_enabled: bool,
     /// Current SAT decision level, advanced by `notify_new_decision_level`.
     level: usize,
     /// Materialized scopes, tagged with the level that first mutated the
@@ -173,6 +211,12 @@ impl SemperEgraph {
             reported_tf: false,
             eq_watches: Vec::new(),
             patterns: Vec::new(),
+            fn_index: FxHashMap::default(),
+            fn_index_upto: 0,
+            root_terms: Vec::new(),
+            relevancy_enabled: std::env::var("SEMPER_RELEVANCY").is_ok_and(|v| v == "1"),
+            active_slice: None,
+            ematch_enabled: std::env::var("SEMPER_EMATCH").is_ok_and(|v| v == "1"),
             level: 0,
             marks: Vec::new(),
             scratch: RefCell::new(ProofBuf::new()),
@@ -220,8 +264,7 @@ impl SemperEgraph {
         match &self.reg_log[event_index] {
             RegEvent::Term { op, children } => {
                 let op = op.clone();
-                let children: Vec<ENodeId> =
-                    children.iter().map(|&c| self.node(c)).collect();
+                let children: Vec<ENodeId> = children.iter().map(|&c| self.node(c)).collect();
                 let op_id = self.op_id(&op, children.len());
                 self.eg.add(op_id, &children)
             }
@@ -244,8 +287,7 @@ impl SemperEgraph {
     fn push_registration(&mut self, event: RegEvent) -> u32 {
         self.reg_log.push(event);
         let node = self.intern(self.reg_log.len() - 1);
-        let driver_id =
-            u32::try_from(self.terms.len()).expect("driver term table exceeds u32");
+        let driver_id = u32::try_from(self.terms.len()).expect("driver term table exceeds u32");
         self.terms.push(node);
         self.node_to_driver.entry(node).or_insert(driver_id);
         driver_id
@@ -343,6 +385,280 @@ impl SemperEgraph {
             None => EgraphResult::ok(),
         }
     }
+
+    /// Extend the (op, arity) -> terms index over registrations made since
+    /// the last call. Driver ids and `reg_log` children never change, so
+    /// extension is the only maintenance the index ever needs.
+    fn ensure_fn_index(&mut self) {
+        for i in self.fn_index_upto..self.reg_log.len() {
+            if let RegEvent::Term { op, children } = &self.reg_log[i] {
+                self.fn_index
+                    .entry((op.clone(), children.len()))
+                    .or_default()
+                    .push(u32::try_from(i).expect("driver id fits u32"));
+            }
+        }
+        self.fn_index_upto = self.reg_log.len();
+    }
+
+    fn reg_children(&self, term: u32) -> &[u32] {
+        match &self.reg_log[term as usize] {
+            RegEvent::Term { children, .. } => children,
+            RegEvent::Opaque => &[],
+        }
+    }
+
+    // --- Relevancy --------------------------------------------------------
+    //
+    // The e-graph itself is the relevancy skeleton: the driver registers
+    // every term including the logical operators, and truth values arrive
+    // as merges with the true/false classes, so the relevant cone is
+    // computable by traversal alone. The slice is recomputed per match
+    // round rather than maintained incrementally — matching dominates its
+    // O(terms) cost, and a transient set has no backtracking interaction
+    // at all. The incremental version (a flag bit in the engine's node
+    // headers, which are already captured by the semi-persistent stores)
+    // becomes worth it only if slicing shows up in a profile.
+
+    /// The relevant cone of the current assignment: Z3's witness rules,
+    /// closed under equivalence classes, seeded by the level-0 assertions.
+    fn relevant_slice(&self) -> rustc_hash::FxHashSet<u32> {
+        let true_root = self.true_term.map(|t| self.find(t));
+        let false_root = self.false_term.map(|t| self.find(t));
+        // Class membership over driver ids, for the class-closure rule.
+        let mut class_members: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        for i in 0..self.terms.len() {
+            let i = i as u32;
+            class_members.entry(self.find(i)).or_default().push(i);
+        }
+        let mut relevant: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+        let mut queue: Vec<u32> = self.root_terms.clone();
+        while let Some(t) = queue.pop() {
+            if !relevant.insert(t) {
+                continue;
+            }
+            // Relevancy is a property of the whole class.
+            if let Some(members) = class_members.get(&self.find(t)) {
+                for &m in members {
+                    if !relevant.contains(&m) {
+                        queue.push(m);
+                    }
+                }
+            }
+            let RegEvent::Term { op, children } = &self.reg_log[t as usize] else {
+                continue;
+            };
+            let value = {
+                let r = self.find(t);
+                if Some(r) == true_root {
+                    Some(true)
+                } else if Some(r) == false_root {
+                    Some(false)
+                } else {
+                    None
+                }
+            };
+            let child_is = |c: u32, v: bool| {
+                let r = self.find(c);
+                if v {
+                    Some(r) == true_root
+                } else {
+                    Some(r) == false_root
+                }
+            };
+            match (op, value) {
+                // A satisfied gate needs one witness; a falsified one needs
+                // every child. An unassigned gate contributes nothing yet.
+                (Op::And, Some(true)) | (Op::Or, Some(false)) => queue.extend(children),
+                (Op::And, Some(false)) => {
+                    if let Some(&w) = children.iter().find(|&&c| child_is(c, false)) {
+                        queue.push(w);
+                    }
+                }
+                (Op::Or, Some(true)) => {
+                    if let Some(&w) = children.iter().find(|&&c| child_is(c, true)) {
+                        queue.push(w);
+                    }
+                }
+                (Op::Implies, Some(false)) => queue.extend(children),
+                (Op::Implies, Some(true)) => {
+                    if children.len() == 2 {
+                        if child_is(children[0], false) {
+                            queue.push(children[0]);
+                        } else if child_is(children[1], true) {
+                            queue.push(children[1]);
+                        }
+                    } else {
+                        queue.extend(children);
+                    }
+                }
+                (Op::And | Op::Or | Op::Implies, None) => {}
+                (Op::Ite, _) if children.len() == 3 => {
+                    queue.push(children[0]);
+                    if child_is(children[0], true) {
+                        queue.push(children[1]);
+                    } else if child_is(children[0], false) {
+                        queue.push(children[2]);
+                    }
+                }
+                // Everything else — applications, equalities, negation —
+                // makes all its arguments relevant.
+                _ => queue.extend(children),
+            }
+        }
+        relevant
+    }
+
+    fn candidate_relevant(&self, cand: u32) -> bool {
+        self.active_slice.as_ref().is_none_or(|s| s.contains(&cand))
+    }
+
+    // --- E-matching -------------------------------------------------------
+    //
+    // A faithful port of the basic backend's top-down matcher, over the
+    // registration log instead of its function_maps: same binding
+    // discipline (variables bind raw ids, consistency compared by class),
+    // same congruence dedup (candidates with canonically equal subterm
+    // vectors are matched once), same multi-trigger semantics (one
+    // substitution threaded through all trigger patterns). Bridging to the
+    // engine's compiled leapfrog matcher is the planned upgrade; this port
+    // establishes behavioral parity first so that swap is measurable.
+
+    fn match_pairs(
+        &self,
+        assignment: &mut crate::utils::DeterministicHashMap<Local, u32>,
+        pairs: &[(PatternId, Option<u32>)],
+    ) -> Vec<crate::utils::DeterministicHashMap<Local, u32>> {
+        let Some(&(pattern_id, hint)) = pairs.first() else {
+            return vec![assignment.clone()];
+        };
+        let pattern = self.patterns[pattern_id].clone();
+        self.match_top(assignment, &pattern, hint, &pairs[1..])
+    }
+
+    fn match_top(
+        &self,
+        assignment: &mut crate::utils::DeterministicHashMap<Local, u32>,
+        pattern: &Pattern<u32>,
+        hint: Option<u32>,
+        remaining: &[(PatternId, Option<u32>)],
+    ) -> Vec<crate::utils::DeterministicHashMap<Local, u32>> {
+        match pattern {
+            Pattern::Var(name) => {
+                let ground = hint.expect("Pattern::Var requires a ground term to bind");
+                match assignment.get(name) {
+                    None => {
+                        assignment.insert(name.clone(), ground);
+                        self.match_pairs(assignment, remaining)
+                    }
+                    Some(&v) if self.find(v) == self.find(ground) => {
+                        self.match_pairs(assignment, remaining)
+                    }
+                    Some(_) => vec![],
+                }
+            }
+            Pattern::Ground(id) => match hint {
+                Some(ground) if self.find(*id) == self.find(ground) => {
+                    self.match_pairs(assignment, remaining)
+                }
+                None => self.match_pairs(assignment, remaining),
+                _ => vec![],
+            },
+            Pattern::App(op, subs) => {
+                let Some(candidates) = self.fn_index.get(&(op.clone(), subs.len())) else {
+                    return vec![];
+                };
+                let ground_root = hint.map(|t| self.find(t));
+                let mut out = Vec::new();
+                let mut considered: rustc_hash::FxHashSet<Vec<u32>> =
+                    rustc_hash::FxHashSet::default();
+                for &cand in candidates {
+                    if !self.candidate_relevant(cand) {
+                        continue;
+                    }
+                    if let Some(gr) = ground_root
+                        && self.find(cand) != gr
+                    {
+                        continue;
+                    }
+                    let subterms: Vec<u32> = self.reg_children(cand).to_vec();
+                    let canonical: Vec<u32> = subterms.iter().map(|&s| self.find(s)).collect();
+                    if !considered.insert(canonical) {
+                        continue;
+                    }
+                    let mut sub_assignment = assignment.clone();
+                    out.extend(self.match_subs(&mut sub_assignment, subs, &subterms, remaining));
+                }
+                out
+            }
+        }
+    }
+
+    fn match_subs(
+        &self,
+        assignment: &mut crate::utils::DeterministicHashMap<Local, u32>,
+        sub_patterns: &[Pattern<u32>],
+        grounds: &[u32],
+        remaining: &[(PatternId, Option<u32>)],
+    ) -> Vec<crate::utils::DeterministicHashMap<Local, u32>> {
+        let Some(pattern) = sub_patterns.first() else {
+            return self.match_pairs(assignment, remaining);
+        };
+        let ground = grounds[0];
+        let rest_patterns = &sub_patterns[1..];
+        let rest_grounds = &grounds[1..];
+        match pattern {
+            Pattern::Var(name) => match assignment.get(name) {
+                None => {
+                    assignment.insert(name.clone(), ground);
+                    self.match_subs(assignment, rest_patterns, rest_grounds, remaining)
+                }
+                Some(&v) if self.find(v) == self.find(ground) => {
+                    self.match_subs(assignment, rest_patterns, rest_grounds, remaining)
+                }
+                Some(_) => vec![],
+            },
+            Pattern::Ground(id) => {
+                if self.find(*id) == self.find(ground) {
+                    self.match_subs(assignment, rest_patterns, rest_grounds, remaining)
+                } else {
+                    vec![]
+                }
+            }
+            Pattern::App(op, children) => {
+                let Some(candidates) = self.fn_index.get(&(op.clone(), children.len())) else {
+                    return vec![];
+                };
+                let ground_root = self.find(ground);
+                let mut out = Vec::new();
+                let mut considered: rustc_hash::FxHashSet<Vec<u32>> =
+                    rustc_hash::FxHashSet::default();
+                for &cand in candidates {
+                    if !self.candidate_relevant(cand) {
+                        continue;
+                    }
+                    if self.find(cand) != ground_root {
+                        continue;
+                    }
+                    let subterms: Vec<u32> = self.reg_children(cand).to_vec();
+                    let canonical: Vec<u32> = subterms.iter().map(|&s| self.find(s)).collect();
+                    if !considered.insert(canonical) {
+                        continue;
+                    }
+                    let mut sub_assignment = assignment.clone();
+                    for mut sub in self.match_subs(&mut sub_assignment, children, &subterms, &[]) {
+                        out.extend(self.match_subs(
+                            &mut sub,
+                            rest_patterns,
+                            rest_grounds,
+                            remaining,
+                        ));
+                    }
+                }
+                out
+            }
+        }
+    }
 }
 
 impl EgraphTrait for SemperEgraph {
@@ -432,6 +748,10 @@ impl EgraphTrait for SemperEgraph {
             self.node(t2),
             Justification::Assumption { lit: word },
         );
+        if self.level == 0 {
+            self.root_terms.push(t1);
+            self.root_terms.push(t2);
+        }
         if merged.is_none() {
             // Already equal: no class changed, so no rebuild is needed and
             // no disequality can have become violated.
@@ -446,6 +766,10 @@ impl EgraphTrait for SemperEgraph {
         self.ensure_scope();
         let r1 = self.eg.find_const(self.node(t1));
         let r2 = self.eg.find_const(self.node(t2));
+        if self.level == 0 {
+            self.root_terms.push(t1);
+            self.root_terms.push(t2);
+        }
         self.diseqs.push((t1, t2, lit));
         self.diseq_roots.push((r1, r2));
         self.diseq_epoch.push(self.epoch);
@@ -488,11 +812,17 @@ impl EgraphTrait for SemperEgraph {
 
     fn match_triggers(
         &mut self,
-        _trigger_term_pairs: Vec<(PatternId, Option<u32>)>,
+        trigger_term_pairs: Vec<(PatternId, Option<u32>)>,
     ) -> Vec<crate::utils::DeterministicHashMap<Local, u32>> {
-        // Pattern-compiler bridge to the engine's e-matching is the next
-        // step; until then quantified problems need the basic backend.
-        Vec::new()
+        if !self.ematch_enabled {
+            return Vec::new();
+        }
+        self.ensure_fn_index();
+        self.active_slice = self.relevancy_enabled.then(|| self.relevant_slice());
+        let mut assignment = crate::utils::DeterministicHashMap::default();
+        let matches = self.match_pairs(&mut assignment, &trigger_term_pairs);
+        self.active_slice = None;
+        matches
     }
 
     fn backtrack_to(&mut self, level: usize) {
