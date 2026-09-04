@@ -242,6 +242,10 @@ impl QiGcTracker {
         self.permanent_instantiations.iter()
     }
 
+    pub(crate) fn pending_clause_registrations(&self) -> usize {
+        self.pending_clause_groups.values().map(Vec::len).sum()
+    }
+
     pub(crate) fn pin_permanent_terms(&mut self, term_uids: impl IntoIterator<Item = u64>) {
         self.permanent_term_uids.extend(term_uids);
     }

@@ -117,6 +117,7 @@ pub fn cdcl_decision_procedure(
             total_promoted_derived_clauses: 0,
             total_retired_terms: 0,
             total_retired_sat_vars: 0,
+            collection_check_pending: false,
         }));
         proof_tracer.borrow_mut().qi_gc_state = Some(Rc::clone(&state));
         eprintln!("[qi-gc] epoch 0: new activation literal act={}", act_var);

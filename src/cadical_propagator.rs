@@ -43,7 +43,10 @@ const EAGER_UNASSIGNED_ORIGINAL_LIMIT: usize = 0;
 /// clause deletion work until an epoch is both large and cheaply compressible.
 const QI_GC_MIN_EPOCH_CLAUSES: u64 = 10_000;
 const QI_GC_MIN_RECLAIMED_CLAUSES: usize = 5_000;
-const QI_GC_MAX_RETAIN_PERCENT: usize = 60;
+/// Root collection replays retained QI and activation-free learned clauses.
+/// Bound that work directly against the clauses actually discarded instead
+/// of comparing unlike totals with a retained-percentage heuristic.
+const QI_GC_MAX_REPLAY_TO_RECLAIM_RATIO: usize = 2;
 
 pub(crate) fn init_qi_gc_trace() {
     QI_GC_TRACE.store(
@@ -97,6 +100,19 @@ pub(crate) struct QiGcState {
     pub total_promoted_derived_clauses: u64,
     pub total_retired_terms: u64,
     pub total_retired_sat_vars: u64,
+    /// A completed matching round added enough guarded clauses that the next
+    /// safe SAT decision callback should evaluate an exact collection plan.
+    pub collection_check_pending: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QiGcCollectionAnalysis {
+    observed_qi: usize,
+    retained_qi: usize,
+    promoted_derived: usize,
+    reclaimable_qi: usize,
+    candidate_terms: usize,
+    worthwhile: bool,
 }
 
 fn retire_activation_unit(activation: i32) -> Vec<i32> {
@@ -145,10 +161,30 @@ fn qi_gc_reduction_is_worthwhile(
     if epoch_clauses < QI_GC_MIN_EPOCH_CLAUSES || observed_qi == 0 {
         return false;
     }
-    let retained = retained_qi + promoted_derived;
+    let replayed = retained_qi + promoted_derived;
     let reclaimed = observed_qi.saturating_sub(retained_qi);
     reclaimed >= QI_GC_MIN_RECLAIMED_CLAUSES
-        && retained.saturating_mul(100) <= observed_qi.saturating_mul(QI_GC_MAX_RETAIN_PERCENT)
+        && replayed <= reclaimed.saturating_mul(QI_GC_MAX_REPLAY_TO_RECLAIM_RATIO)
+}
+
+fn qi_gc_collection_analysis(gc: &QiGcState) -> QiGcCollectionAnalysis {
+    let plan = gc.tracker.plan();
+    let observed_qi = plan.observed_qi_clauses;
+    let retained_qi = plan.qi_clauses.len();
+    let promoted_derived = plan.derived_clauses.len();
+    QiGcCollectionAnalysis {
+        observed_qi,
+        retained_qi,
+        promoted_derived,
+        reclaimable_qi: observed_qi.saturating_sub(retained_qi),
+        candidate_terms: plan.retired_candidate_term_uids.len(),
+        worthwhile: qi_gc_reduction_is_worthwhile(
+            gc.epoch_guarded_clauses,
+            observed_qi,
+            retained_qi,
+            promoted_derived,
+        ),
+    }
 }
 
 /// Implements CaDiCaL's `Learner` trait to capture conflict clauses containing ¬act.
@@ -848,7 +884,8 @@ impl<'a> CustomExternalPropagator<'a> {
         }
 
         self.materializing_quantifiers = false;
-        if pending.is_empty() {
+        let round_complete = pending.is_empty();
+        if round_complete {
             for i in pending.skolemized_quantifier_idxs() {
                 self.solver_state.quantifiers[*i].skolemized = true;
             }
@@ -862,6 +899,19 @@ impl<'a> CustomExternalPropagator<'a> {
         // Drain those relevance events after materialization is complete and
         // re-entrancy through quantifier materialization is disabled.
         self.process_pending_relevant_assignments();
+
+        // Collection planning is proportional to the current dependency
+        // graph. Evaluate it once after a complete matching round, when all
+        // instance groups are stable, rather than at every SAT decision.
+        if round_complete
+            && count > 0
+            && let Some(ref gc) = self.qi_gc_state
+        {
+            let mut gc = gc.borrow_mut();
+            if gc.epoch_guarded_clauses >= QI_GC_MIN_EPOCH_CLAUSES {
+                gc.collection_check_pending = true;
+            }
+        }
 
         // Single-item materialization is the common model-refutation path.
         // Reporting every such item distorts the benchmark and produces
@@ -1189,6 +1239,7 @@ impl<'a> CustomExternalPropagator<'a> {
         gc.transitions += 1;
         gc.epoch_guarded_clauses = 0;
         gc.epoch_instantiations = 0;
+        gc.collection_check_pending = false;
 
         // 6. Allocate new activation literal
         let new_act = self.solver_state.cnf_cache.next_var;
@@ -1224,13 +1275,79 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     fn qi_gc_collection_worthwhile(&self, gc: &QiGcState) -> bool {
-        let plan = gc.tracker.plan();
-        qi_gc_reduction_is_worthwhile(
-            gc.epoch_guarded_clauses,
-            plan.observed_qi_clauses,
-            plan.qi_clauses.len(),
-            plan.derived_clauses.len(),
-        )
+        qi_gc_collection_analysis(gc).worthwhile
+    }
+
+    /// Evaluate a requested collection at a callback where all external
+    /// clauses from the completed matching round have been consumed. If the
+    /// exact dependency plan is sufficiently compressible, schedule one root
+    /// restart; otherwise wait for another completed matching round.
+    fn schedule_qi_gc_transition_if_worthwhile(&mut self) {
+        let Some(gc_state) = self.qi_gc_state.clone() else {
+            return;
+        };
+        let (epoch, epoch_clauses, pending_registrations, analysis) = {
+            let mut gc = gc_state.borrow_mut();
+            if !gc.collection_check_pending {
+                return;
+            }
+            let pending_registrations = gc.tracker.pending_clause_registrations();
+            if pending_registrations != 0 {
+                if QI_GC_PROFILE.load(Ordering::Relaxed) {
+                    eprintln!(
+                        "[qi-gc-profile] collection-check-deferred epoch={} \
+                         pending_clause_registrations={}",
+                        gc.epoch, pending_registrations
+                    );
+                }
+                return;
+            }
+            gc.collection_check_pending = false;
+            (
+                gc.epoch,
+                gc.epoch_guarded_clauses,
+                pending_registrations,
+                qi_gc_collection_analysis(&gc),
+            )
+        };
+
+        if QI_GC_PROFILE.load(Ordering::Relaxed) {
+            eprintln!(
+                "[qi-gc-profile] collection-check epoch={} level={} epoch_clauses={} \
+                 observed_qi={} retained_qi={} reclaimable_qi={} promoted_derived={} \
+                 candidate_terms={} pending_clause_registrations={} worthwhile={}",
+                epoch,
+                self.decision_level,
+                epoch_clauses,
+                analysis.observed_qi,
+                analysis.retained_qi,
+                analysis.reclaimable_qi,
+                analysis.promoted_derived,
+                analysis.candidate_terms,
+                pending_registrations,
+                analysis.worthwhile
+            );
+        }
+        if !analysis.worthwhile {
+            return;
+        }
+
+        self.qi_gc_transition_pending = true;
+        self.qi_gc_force_backtrack = self.decision_level > 0;
+        qi_gc_trace!(
+            "epoch {}: collection requested at level {} (reclaimable_qi={}, candidate_terms={})",
+            epoch,
+            self.decision_level,
+            analysis.reclaimable_qi,
+            analysis.candidate_terms
+        );
+        if QI_GC_PROFILE.load(Ordering::Relaxed) {
+            eprintln!(
+                "[qi-gc-profile] collection-request epoch={} level={} reclaimable_qi={} \
+                 candidate_terms={}",
+                epoch, self.decision_level, analysis.reclaimable_qi, analysis.candidate_terms
+            );
+        }
     }
 
     /// Add instances from the current partial assignment according to the
@@ -2019,10 +2136,22 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn cb_decide(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
 
+        self.schedule_qi_gc_transition_if_worthwhile();
+
+        // A collection request can coincide with a natural root backtrack.
+        // Complete it directly instead of asking CaDiCaL to backtrack from
+        // level zero to level zero.
+        if self.qi_gc_transition_pending && self.decision_level == 0 {
+            self.qi_gc_transition_pending = false;
+            self.qi_gc_force_backtrack = false;
+            if let Some(gc_state) = self.qi_gc_state.clone() {
+                self.trigger_epoch_transition(&gc_state);
+            }
+        }
+
         // QI GC: force backtrack to level 0 if scheduled (triggers epoch transition)
         if self.qi_gc_force_backtrack {
             self.qi_gc_force_backtrack = false;
-            self.qi_gc_transition_pending = true;
             qi_gc_trace!(
                 "force_backtrack(0) from cb_decide at level {}",
                 self.decision_level
@@ -2220,8 +2349,9 @@ mod qi_gc_tests {
     #[test]
     fn collection_requires_both_scale_and_strong_reduction() {
         assert!(!qi_gc_reduction_is_worthwhile(5_219, 5_219, 3_624, 574));
+        assert!(qi_gc_reduction_is_worthwhile(20_000, 20_000, 12_000, 1_000));
         assert!(!qi_gc_reduction_is_worthwhile(
-            20_000, 20_000, 12_000, 1_000
+            20_000, 20_000, 15_000, 1_000
         ));
         assert!(qi_gc_reduction_is_worthwhile(20_000, 20_000, 5_000, 1_000));
     }
