@@ -1065,9 +1065,44 @@ impl<'a> CustomExternalPropagator<'a> {
             .retain(|lit| !self.solver_state.is_retired_sat_var(*lit));
 
         #[cfg(feature = "z3-solver")]
-        if let Some(z3) = self.z3_incremental.as_mut() {
-            z3.retire_non_arithmetic_terms(&term_gc.retired_sat_vars);
-        }
+        let z3_rebuild = if self.z3_incremental.is_some() {
+            let root_literals: Vec<i32> = self
+                .assignments
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter_map(|(idx, assignment)| {
+                    (*assignment != 0
+                        && self.theory_processed_levels[idx] == Some(0)
+                        && !self.solver_state.is_retired_sat_var(idx as i32)
+                        && (self
+                            .solver_state
+                            .cnf_cache
+                            .var_map_reverse
+                            .contains_key(&(idx as i32))
+                            || self
+                                .solver_state
+                                .cnf_cache
+                                .var_map_reverse
+                                .contains_key(&-(idx as i32))))
+                    .then_some(if *assignment > 0 {
+                        idx as i32
+                    } else {
+                        -(idx as i32)
+                    })
+                })
+                .collect();
+            let arithmetic_equalities = self.solver_state.egraph.arithmetic_root_equalities();
+            let (rebuilt, profile) = Z3IncrementalState::rebuild_from_root(
+                &root_literals,
+                &arithmetic_equalities,
+                self.solver_state,
+            );
+            self.z3_incremental = Some(rebuilt);
+            Some(profile)
+        } else {
+            None
+        };
 
         qi_gc_trace!(
             "epoch {}: term GC requested={} retired_terms={} retired_sat_vars={} \
@@ -1081,6 +1116,28 @@ impl<'a> CustomExternalPropagator<'a> {
             term_gc.blocked_pattern,
             term_gc.missing
         );
+        #[cfg(feature = "z3-solver")]
+        if (QI_GC_TRACE.load(Ordering::Relaxed) || QI_GC_PROFILE.load(Ordering::Relaxed))
+            && let Some(profile) = z3_rebuild
+        {
+            eprintln!(
+                "[qi-gc-profile] z3-rebuild root_literals={} arithmetic_equalities={}",
+                profile.replayed_root_literals, profile.replayed_arithmetic_equalities
+            );
+        }
+        if QI_GC_PROFILE.load(Ordering::Relaxed) {
+            eprintln!(
+                "[qi-gc-profile] term-gc requested={} retired_terms={} retired_sat_vars={} \
+                 blocked_non_singleton={} blocked_live_parent={} blocked_pattern={} missing={}",
+                term_gc.requested,
+                term_gc.retired_terms,
+                term_gc.retired_sat_vars.len(),
+                term_gc.blocked_non_singleton,
+                term_gc.blocked_live_parent,
+                term_gc.blocked_pattern,
+                term_gc.missing
+            );
+        }
 
         // 4. Keep dedup keys for promoted instance groups. Dropped groups must
         // become eligible for regeneration; retained groups must not be

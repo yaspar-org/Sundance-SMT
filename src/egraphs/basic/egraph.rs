@@ -549,10 +549,34 @@ impl Egraph {
                 size: 1,
                 disequalities,
                 children,
-                arithmetic: false,
                 ..
             } if disequalities.is_empty() && children.is_empty()
         )
+    }
+
+    /// Equalities between live members of arithmetic classes that survive at
+    /// level zero. A rebuilt arithmetic backend can assert these permanently
+    /// instead of depending on historical merge callbacks.
+    pub(crate) fn arithmetic_root_equalities(&self) -> Vec<(u32, u32)> {
+        let mut equalities = Vec::new();
+        for root in 0..self.next_id {
+            if matches!(self.terms[root as usize], TermSlot::Empty) {
+                continue;
+            }
+            let ProofForestEdge::Root {
+                arithmetic: true, ..
+            } = &self.proof_forest[root as usize]
+            else {
+                continue;
+            };
+            let mut member = self.member_next[root as usize];
+            while member != root {
+                debug_assert!(!matches!(self.terms[member as usize], TermSlot::Empty));
+                equalities.push((root, member));
+                member = self.member_next[member as usize];
+            }
+        }
+        equalities
     }
 
     /// Physically remove dead QI-created enodes at decision level zero.

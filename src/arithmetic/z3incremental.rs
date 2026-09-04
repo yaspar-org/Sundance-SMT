@@ -84,6 +84,12 @@ pub(crate) struct Z3GcProfile {
     pub(crate) pending_partial_assertions: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Z3RebuildProfile {
+    pub(crate) replayed_root_literals: usize,
+    pub(crate) replayed_arithmetic_equalities: usize,
+}
+
 impl Z3IncrementalState {
     pub fn new() -> Self {
         Self {
@@ -113,25 +119,34 @@ impl Z3IncrementalState {
         }
     }
 
-    /// Remove metadata for reclaimed non-arithmetic SAT variables. Arithmetic
-    /// egraph IDs are deliberately not reclaimed while this persistent Z3
-    /// context can still contain level-0 definitions using their names.
-    pub(crate) fn retire_non_arithmetic_terms(&mut self, retired_sat_vars: &[i32]) {
-        let retired: DeterministicHashSet<i32> =
-            retired_sat_vars.iter().map(|var| var.abs()).collect();
-        debug_assert!(
-            self.active_lits
-                .iter()
-                .all(|lit| !retired.contains(&lit.abs())),
-            "cannot retire a SAT variable that is still active in Z3"
-        );
-        self.tracker_by_abs_lit
-            .retain(|var, _| !retired.contains(var));
-        self.non_arithmetic_lits
-            .retain(|var| !retired.contains(var));
-        for lits in &mut self.lits_by_level {
-            lits.retain(|lit| !retired.contains(&lit.abs()));
+    /// Reconstruct a fresh level-zero arithmetic context after QI GC.
+    ///
+    /// Dropping the old `Solver` physically releases stale Z3 ASTs, trackers,
+    /// and definitions. Surviving root assignments are replayed with their
+    /// trackers, while egraph equalities are permanent because level-zero
+    /// unions cannot later be backtracked.
+    pub(crate) fn rebuild_from_root(
+        root_literals: &[i32],
+        arithmetic_equalities: &[(u32, u32)],
+        solver_state: &mut SolverState,
+    ) -> (Self, Z3RebuildProfile) {
+        let mut rebuilt = Self::new();
+        for &lit in root_literals {
+            rebuilt.on_literal_assignment(lit, solver_state);
         }
+        for &(a, b) in arithmetic_equalities {
+            let va = rebuilt.var_for(a, solver_state);
+            let vb = rebuilt.var_for(b, solver_state);
+            rebuilt.solver.assert(Int::eq(&va, vb));
+        }
+        rebuilt.pending_partial_assertions = 0;
+        (
+            rebuilt,
+            Z3RebuildProfile {
+                replayed_root_literals: root_literals.len(),
+                replayed_arithmetic_equalities: arithmetic_equalities.len(),
+            },
+        )
     }
 
     /// Ensure `push_counts` and per-level tracking vectors are indexed up to
