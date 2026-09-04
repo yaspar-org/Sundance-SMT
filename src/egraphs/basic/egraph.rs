@@ -769,6 +769,10 @@ impl Egraph {
         &mut self,
         candidates: &DeterministicHashSet<u32>,
     ) -> EgraphRetireReport {
+        let mut report = EgraphRetireReport {
+            requested: candidates.len(),
+            ..EgraphRetireReport::default()
+        };
         assert_eq!(
             self.decision_level, 0,
             "egraph terms may only be retired at decision level zero"
@@ -778,10 +782,6 @@ impl Egraph {
             "egraph retirement requires all transient proof state to be backtracked"
         );
 
-        let mut report = EgraphRetireReport {
-            requested: candidates.len(),
-            ..EgraphRetireReport::default()
-        };
         (
             report.predecessor_entries_before,
             report.predecessor_entries_after_compaction,
@@ -870,144 +870,102 @@ impl Egraph {
             }
         }
 
-        // Compute the transitive live-reference closure. Blocking a term can
-        // expose its parent/proof edge as live, which can pin another
-        // candidate on the next iteration.
-        loop {
-            let mut changed = false;
-
-            // A root can only disappear when its complete class disappears.
-            let mixed_roots: Vec<u32> = class_members_by_root
-                .iter()
-                .filter_map(|(root, members)| {
-                    (removable.contains(root)
-                        && members.iter().any(|member| !removable.contains(member)))
-                    .then_some(*root)
-                })
-                .collect();
-            for root in mixed_roots {
-                if removable.remove(&root) {
-                    report.blocked_mixed_class_roots += 1;
-                    changed = true;
+        // Compute the transitive live-reference closure with a work queue.
+        // The old fixed-point loop rescanned every predecessor and proof edge
+        // once per newly blocked layer, which made deep QI term DAGs
+        // quadratic. A term outside `removable` is live; processing it can
+        // make its syntactic children, proof references, disequality
+        // references, or candidate class root live in turn.
+        let mut live_work = Vec::new();
+        let mut live_processed = vec![false; self.terms.len()];
+        let mut predecessor_children_by_parent = vec![Vec::new(); self.terms.len()];
+        for (child, predecessors) in self.predecessors.iter().enumerate() {
+            for parent in predecessors.keys() {
+                if (*parent as usize) < predecessor_children_by_parent.len() {
+                    predecessor_children_by_parent[*parent as usize].push(child as u32);
                 }
             }
+        }
+        for (id, slot) in self.terms.iter().enumerate() {
+            if !matches!(slot, TermSlot::Empty) && !removable.contains(&(id as u32)) {
+                live_work.push(id as u32);
+            }
+        }
 
-            let parent_blocked: Vec<u32> = removable
-                .iter()
-                .copied()
-                .filter(|id| {
-                    self.predecessors[*id as usize].keys().any(|parent| {
-                        (*parent as usize) < self.terms.len()
-                            && !matches!(self.terms[*parent as usize], TermSlot::Empty)
-                            && !removable.contains(parent)
-                    })
-                })
-                .collect();
-            for id in parent_blocked {
-                if removable.remove(&id) {
+        while let Some(id) = live_work.pop() {
+            if live_processed[id as usize] {
+                continue;
+            }
+            live_processed[id as usize] = true;
+
+            let class_root = self.find(id);
+            if removable.remove(&class_root) {
+                report.blocked_mixed_class_roots += 1;
+                live_work.push(class_root);
+            }
+
+            for &child in &predecessor_children_by_parent[id as usize] {
+                if removable.remove(&child) {
                     report.blocked_live_parent_terms += 1;
-                    changed = true;
+                    live_work.push(child);
                 }
             }
 
-            let mut proof_blocked = DeterministicHashSet::default();
-            let mut disequality_blocked = DeterministicHashSet::default();
-            for (id, edge) in self.proof_forest.iter().enumerate() {
-                if matches!(self.terms[id], TermSlot::Empty) || removable.contains(&(id as u32)) {
+            let edge = &self.proof_forest[id as usize];
+            let mut proof_references = Vec::new();
+            match edge {
+                ProofForestEdge::Root { children, .. } => {
+                    proof_references.extend(children.iter().copied());
+                }
+                ProofForestEdge::Equality {
+                    term,
+                    parent,
+                    children,
+                    ..
+                } => {
+                    proof_references.push(*parent);
+                    if let Some((left, right)) = term {
+                        proof_references.push(*left);
+                        proof_references.push(*right);
+                    }
+                    proof_references.extend(children.iter().copied());
+                }
+                ProofForestEdge::Congruence {
+                    pairs,
+                    parent,
+                    children,
+                    ..
+                } => {
+                    proof_references.push(*parent);
+                    for (left, right) in pairs {
+                        proof_references.push(*left);
+                        proof_references.push(*right);
+                    }
+                    proof_references.extend(children.iter().copied());
+                }
+            }
+            for referenced in proof_references {
+                if removable.remove(&referenced) {
+                    report.blocked_proof_reference_terms += 1;
+                    live_work.push(referenced);
+                }
+            }
+
+            for (key, disequality) in edge.disequalities() {
+                if !valid_hash(disequality.hash, disequality.level, &self.predecessor_level) {
                     continue;
                 }
-
-                match edge {
-                    ProofForestEdge::Root { children, .. } => {
-                        proof_blocked.extend(
-                            children
-                                .iter()
-                                .copied()
-                                .filter(|child| removable.contains(child)),
-                        );
-                    }
-                    ProofForestEdge::Equality {
-                        term,
-                        parent,
-                        children,
-                        ..
-                    } => {
-                        if removable.contains(parent) {
-                            proof_blocked.insert(*parent);
-                        }
-                        if let Some((left, right)) = term {
-                            if removable.contains(left) {
-                                proof_blocked.insert(*left);
-                            }
-                            if removable.contains(right) {
-                                proof_blocked.insert(*right);
-                            }
-                        }
-                        proof_blocked.extend(
-                            children
-                                .iter()
-                                .copied()
-                                .filter(|child| removable.contains(child)),
-                        );
-                    }
-                    ProofForestEdge::Congruence {
-                        pairs,
-                        parent,
-                        children,
-                        ..
-                    } => {
-                        if removable.contains(parent) {
-                            proof_blocked.insert(*parent);
-                        }
-                        for (left, right) in pairs {
-                            if removable.contains(left) {
-                                proof_blocked.insert(*left);
-                            }
-                            if removable.contains(right) {
-                                proof_blocked.insert(*right);
-                            }
-                        }
-                        proof_blocked.extend(
-                            children
-                                .iter()
-                                .copied()
-                                .filter(|child| removable.contains(child)),
-                        );
+                for referenced in [
+                    *key,
+                    disequality.term,
+                    disequality.original_disequality.0,
+                    disequality.original_disequality.1,
+                ] {
+                    if removable.remove(&referenced) {
+                        report.blocked_disequality_terms += 1;
+                        live_work.push(referenced);
                     }
                 }
-
-                for (key, disequality) in edge.disequalities() {
-                    if !valid_hash(disequality.hash, disequality.level, &self.predecessor_level) {
-                        continue;
-                    }
-                    for referenced in [
-                        *key,
-                        disequality.term,
-                        disequality.original_disequality.0,
-                        disequality.original_disequality.1,
-                    ] {
-                        if removable.contains(&referenced) {
-                            disequality_blocked.insert(referenced);
-                        }
-                    }
-                }
-            }
-
-            for id in proof_blocked {
-                if removable.remove(&id) {
-                    report.blocked_proof_reference_terms += 1;
-                    changed = true;
-                }
-            }
-            for id in disequality_blocked {
-                if removable.remove(&id) {
-                    report.blocked_disequality_terms += 1;
-                    changed = true;
-                }
-            }
-
-            if !changed {
-                break;
             }
         }
 
@@ -1773,6 +1731,11 @@ impl Egraph {
 
     /// Undo all egraph operations at levels strictly greater than `level`.
     fn backtrack_to(&mut self, level: usize) {
+        let old_decision_level = self.decision_level;
+        assert!(
+            level <= old_decision_level,
+            "egraph received an upward backtrack from level {old_decision_level} to {level}"
+        );
         self.backtrack_match_relevance(level);
         self.predecessor_hash += 1;
 
@@ -1843,6 +1806,15 @@ impl Egraph {
         }
         predecessor_replays.sort_unstable();
         if level != 0 {
+            assert!(
+                level < self.quantifier_predecessor_replay_trail.len(),
+                "quantifier predecessor replay trail lost level {level}: \
+                 old_decision_level={old_decision_level} replay_levels={} \
+                 union_replay_levels={} predecessor_trail_levels={}",
+                self.quantifier_predecessor_replay_trail.len(),
+                self.union_to_eclass_replay_trail.len(),
+                self.predecessor_trail.len(),
+            );
             self.quantifier_predecessor_replay_trail[level]
                 .extend(predecessor_replays.iter().copied());
         }
