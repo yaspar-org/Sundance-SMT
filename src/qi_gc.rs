@@ -9,7 +9,6 @@
 //! only if it still depends on some guarded QI clause from the epoch.
 
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
-use std::collections::HashSet;
 use yaspar_ir::ast::{Local, Term};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -18,39 +17,41 @@ pub(crate) struct QiInstantiationKey {
     pub(crate) substitution: DeterministicHashMap<Local, Term>,
 }
 
-#[derive(Debug)]
-struct QiInstanceGroup {
-    key: QiInstantiationKey,
-    clauses: Vec<Vec<i32>>,
-    created_terms: DeterministicHashSet<u64>,
-    referenced_terms: DeterministicHashSet<u64>,
+#[derive(Debug, Clone)]
+pub(crate) struct QiRetainedInstance {
+    pub(crate) key: QiInstantiationKey,
+    pub(crate) clauses: Vec<Vec<i32>>,
+    pub(crate) clause_terms: DeterministicHashSet<u64>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct QiGcPlan {
-    /// Guarded QI clauses needed by a live derived clause, with `-activation`
-    /// removed.
-    pub(crate) qi_clauses: Vec<Vec<i32>>,
+    /// Complete instance groups needed by a live derived clause.
+    pub(crate) retained_instances: Vec<QiRetainedInstance>,
+    /// Guarded QI clauses whose source instance could not be recovered, with
+    /// `-activation` removed.
+    pub(crate) retained_orphan_clauses: Vec<Vec<i32>>,
     /// Live derived clauses, with `-activation` removed.
     pub(crate) derived_clauses: Vec<Vec<i32>>,
     /// Number of guarded QI clauses observed in this epoch.
     pub(crate) observed_qi_clauses: usize,
     /// Number of derived-clause ancestry edges retained for the epoch.
     pub(crate) antecedent_edges: usize,
-    /// Instantiations whose complete clause groups were retained.
-    pub(crate) retained_instantiations: Vec<QiInstantiationKey>,
-    /// Terms referenced by retained instances from this or earlier epochs.
+    /// Exact clause-term closure retained from this or earlier epochs.
     pub(crate) retained_term_uids: DeterministicHashSet<u64>,
-    /// Terms created only by discarded instances and not referenced by any
-    /// retained instance. These are candidates for physical reclamation.
-    pub(crate) retired_candidate_term_uids: DeterministicHashSet<u64>,
+    /// Terms pinned independently of the current epoch's guarded instances.
+    pub(crate) permanent_term_uids: DeterministicHashSet<u64>,
+    /// Every solver term owned by the current epoch. This includes terms first
+    /// registered by its instances and dead terms carried from an earlier
+    /// epoch because the egraph could not safely retire them yet.
+    pub(crate) epoch_owned_term_uids: DeterministicHashSet<u64>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct QiGcTracker {
     next_group_id: u64,
     /// Instance group ID -> substitution identity and all ungated clauses.
-    instance_groups: DeterministicHashMap<u64, QiInstanceGroup>,
+    instance_groups: DeterministicHashMap<u64, QiRetainedInstance>,
     /// Normalized guarded clause -> instance groups awaiting the original
     /// clause callback that assigns a CaDiCaL clause ID.
     pending_clause_groups: DeterministicHashMap<Vec<i32>, Vec<u64>>,
@@ -64,9 +65,9 @@ pub(crate) struct QiGcTracker {
     antecedents: DeterministicHashMap<u64, Vec<u64>>,
     /// Tainted derived clauses CaDiCaL has not deleted.
     live_derived: DeterministicHashMap<u64, Vec<i32>>,
-    /// Substitutions whose QI clauses were promoted in an earlier transition.
-    permanent_instantiations: HashSet<QiInstantiationKey>,
-    /// Terms referenced by promoted instance groups from earlier transitions.
+    /// Terms whose lifetime is owned by the current guarded epoch.
+    epoch_owned_term_uids: DeterministicHashSet<u64>,
+    /// Terms referenced by permanent clauses from earlier transitions.
     permanent_term_uids: DeterministicHashSet<u64>,
 }
 
@@ -77,7 +78,6 @@ pub(crate) struct QiGcTrackerProfile {
     pub(crate) antecedent_edges: usize,
     pub(crate) live_derived: usize,
     pub(crate) instance_groups: usize,
-    pub(crate) permanent_instantiations: usize,
     pub(crate) permanent_term_uids: usize,
 }
 
@@ -103,20 +103,28 @@ impl QiGcTracker {
         clauses: &[Vec<i32>],
         activation: i32,
         created_terms: &DeterministicHashSet<u64>,
-        referenced_terms: &DeterministicHashSet<u64>,
+        clause_terms: &DeterministicHashSet<u64>,
+    ) {
+        self.epoch_owned_term_uids
+            .extend(created_terms.iter().copied());
+        self.register_retained_instance(
+            QiRetainedInstance {
+                key,
+                clauses: clauses.to_vec(),
+                clause_terms: clause_terms.clone(),
+            },
+            activation,
+        );
+    }
+
+    pub(crate) fn register_retained_instance(
+        &mut self,
+        instance: QiRetainedInstance,
+        activation: i32,
     ) {
         let group_id = self.next_group_id;
         self.next_group_id += 1;
-        self.instance_groups.insert(
-            group_id,
-            QiInstanceGroup {
-                key,
-                clauses: clauses.to_vec(),
-                created_terms: created_terms.clone(),
-                referenced_terms: referenced_terms.clone(),
-            },
-        );
-        for clause in clauses {
+        for clause in &instance.clauses {
             let mut guarded = clause.clone();
             guarded.push(-activation);
             self.pending_clause_groups
@@ -124,6 +132,7 @@ impl QiGcTracker {
                 .or_default()
                 .push(group_id);
         }
+        self.instance_groups.insert(group_id, instance);
     }
 
     pub(crate) fn note_gated_qi_clause(
@@ -194,52 +203,28 @@ impl QiGcTracker {
             }
         }
 
-        let mut qi_clauses = Vec::new();
-        let mut retained_instantiations = Vec::new();
+        let mut retained_instances = Vec::new();
         let mut retained_term_uids = self.permanent_term_uids.clone();
-        let mut retired_candidate_term_uids = DeterministicHashSet::default();
-        for (group_id, group) in &self.instance_groups {
-            if !required_groups.contains(group_id) {
-                retired_candidate_term_uids.extend(group.created_terms.iter().copied());
-            }
+        for group_id in &required_groups {
+            let group = &self.instance_groups[group_id];
+            retained_instances.push(group.clone());
+            retained_term_uids.extend(group.clause_terms.iter().copied());
         }
-        for group_id in required_groups {
-            let group = &self.instance_groups[&group_id];
-            qi_clauses.extend(group.clauses.iter().cloned());
-            retained_instantiations.push(group.key.clone());
-            retained_term_uids.extend(group.referenced_terms.iter().copied());
-            retained_term_uids.extend(group.created_terms.iter().copied());
-        }
-        retired_candidate_term_uids.retain(|uid| !retained_term_uids.contains(uid));
-        qi_clauses.extend(
-            required_orphans
-                .into_iter()
-                .map(|id| self.orphan_qi_clauses[&id].clone()),
-        );
+        let retained_orphan_clauses = required_orphans
+            .into_iter()
+            .map(|id| self.orphan_qi_clauses[&id].clone())
+            .collect();
 
         QiGcPlan {
-            qi_clauses,
+            retained_instances,
+            retained_orphan_clauses,
             derived_clauses: self.live_derived.values().cloned().collect(),
             observed_qi_clauses: self.qi_clause_groups.len() + self.orphan_qi_clauses.len(),
             antecedent_edges: self.antecedents.values().map(Vec::len).sum(),
-            retained_instantiations,
             retained_term_uids,
-            retired_candidate_term_uids,
+            permanent_term_uids: self.permanent_term_uids.clone(),
+            epoch_owned_term_uids: self.epoch_owned_term_uids.clone(),
         }
-    }
-
-    pub(crate) fn promote_instantiations(
-        &mut self,
-        keys: &[QiInstantiationKey],
-        retained_term_uids: &DeterministicHashSet<u64>,
-    ) {
-        self.permanent_instantiations.extend(keys.iter().cloned());
-        self.permanent_term_uids
-            .extend(retained_term_uids.iter().copied());
-    }
-
-    pub(crate) fn permanent_instantiations(&self) -> impl Iterator<Item = &QiInstantiationKey> {
-        self.permanent_instantiations.iter()
     }
 
     pub(crate) fn pending_clause_registrations(&self) -> usize {
@@ -250,6 +235,11 @@ impl QiGcTracker {
         self.permanent_term_uids.extend(term_uids);
     }
 
+    pub(crate) fn set_epoch_owned_terms(&mut self, term_uids: impl IntoIterator<Item = u64>) {
+        self.epoch_owned_term_uids.clear();
+        self.epoch_owned_term_uids.extend(term_uids);
+    }
+
     pub(crate) fn clear_epoch(&mut self) {
         self.instance_groups.clear();
         self.pending_clause_groups.clear();
@@ -257,6 +247,7 @@ impl QiGcTracker {
         self.orphan_qi_clauses.clear();
         self.antecedents.clear();
         self.live_derived.clear();
+        self.epoch_owned_term_uids.clear();
     }
 
     pub(crate) fn profile(&self) -> QiGcTrackerProfile {
@@ -266,7 +257,6 @@ impl QiGcTracker {
             antecedent_edges: self.antecedents.values().map(Vec::len).sum(),
             live_derived: self.live_derived.len(),
             instance_groups: self.instance_groups.len(),
-            permanent_instantiations: self.permanent_instantiations.len(),
             permanent_term_uids: self.permanent_term_uids.len(),
         }
     }
@@ -286,7 +276,8 @@ mod tests {
         tracker.note_deleted_clause(10);
 
         let plan = tracker.plan();
-        assert_eq!(plan.qi_clauses, vec![vec![-5, 6]]);
+        assert_eq!(plan.retained_orphan_clauses, vec![vec![-5, 6]]);
+        assert!(plan.retained_instances.is_empty());
         assert_eq!(plan.derived_clauses, vec![vec![6, 9]]);
         assert_eq!(plan.observed_qi_clauses, 2);
         assert_eq!(plan.antecedent_edges, 4);
@@ -310,34 +301,75 @@ mod tests {
         tracker.note_deleted_clause(2);
 
         let plan = tracker.plan();
-        assert_eq!(plan.qi_clauses, vec![vec![3]]);
+        assert_eq!(plan.retained_orphan_clauses, vec![vec![3]]);
         assert_eq!(plan.derived_clauses, vec![vec![5]]);
     }
 
     #[test]
-    fn retained_instance_pins_terms_created_by_discarded_instance() {
+    fn retained_clause_pins_terms_created_by_another_instance() {
         let mut tracker = QiGcTracker::default();
         let key = |quantifier_id| QiInstantiationKey {
             quantifier_id,
             substitution: DeterministicHashMap::default(),
         };
         let first_created = DeterministicHashSet::from_iter([10, 11]);
-        let first_referenced = first_created.clone();
-        tracker.register_instance(key(1), &[vec![1]], 100, &first_created, &first_referenced);
+        let first_clause_terms = first_created.clone();
+        tracker.register_instance(key(1), &[vec![1]], 100, &first_created, &first_clause_terms);
 
-        let second_created = DeterministicHashSet::from_iter([20]);
-        let second_referenced = DeterministicHashSet::from_iter([10, 20]);
-        tracker.register_instance(key(2), &[vec![2]], 100, &second_created, &second_referenced);
+        let second_created = DeterministicHashSet::from_iter([20, 21]);
+        let second_clause_terms = DeterministicHashSet::from_iter([10, 20]);
+        tracker.register_instance(
+            key(2),
+            &[vec![2]],
+            100,
+            &second_created,
+            &second_clause_terms,
+        );
 
         tracker.note_gated_qi_clause(1, &[1, -100], 100);
         tracker.note_gated_qi_clause(2, &[2, -100], 100);
         tracker.note_derived_clause(3, &[3, -100], &[2], 100);
 
         let plan = tracker.plan();
-        assert_eq!(plan.retained_term_uids, second_referenced);
+        assert_eq!(plan.retained_instances.len(), 1);
+        assert_eq!(plan.retained_instances[0].key.quantifier_id, 2);
+        assert_eq!(plan.retained_term_uids, second_clause_terms);
         assert_eq!(
-            plan.retired_candidate_term_uids,
-            DeterministicHashSet::from_iter([11])
+            plan.epoch_owned_term_uids,
+            DeterministicHashSet::from_iter([10, 11, 20, 21])
+        );
+    }
+
+    #[test]
+    fn migrated_instances_remain_collectible_in_the_next_epoch() {
+        let mut tracker = QiGcTracker::default();
+        let instance = QiRetainedInstance {
+            key: QiInstantiationKey {
+                quantifier_id: 7,
+                substitution: DeterministicHashMap::default(),
+            },
+            clauses: vec![vec![1, 2]],
+            clause_terms: DeterministicHashSet::from_iter([10, 11]),
+        };
+
+        tracker.set_epoch_owned_terms([10, 11, 12]);
+        tracker.register_retained_instance(instance, 200);
+        assert!(tracker.note_gated_qi_clause(20, &[1, 2, -200], 200));
+        assert!(tracker.note_derived_clause(21, &[2, -200], &[20], 200));
+
+        let retained = tracker.plan();
+        assert_eq!(retained.retained_instances.len(), 1);
+        assert_eq!(
+            retained.epoch_owned_term_uids,
+            DeterministicHashSet::from_iter([10, 11, 12])
+        );
+
+        tracker.note_deleted_clause(21);
+        let discarded = tracker.plan();
+        assert!(discarded.retained_instances.is_empty());
+        assert_eq!(
+            discarded.epoch_owned_term_uids,
+            DeterministicHashSet::from_iter([10, 11, 12])
         );
     }
 }

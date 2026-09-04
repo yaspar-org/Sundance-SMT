@@ -34,10 +34,10 @@ pub(crate) enum QuantifierInstance {
         /// These are candidates for reclamation if the complete instance is
         /// discarded at a QI-GC epoch transition.
         created_terms: DeterministicHashSet<u64>,
-        /// Complete registered-term closure referenced by this instance's
-        /// body and clauses. A retained instance pins these terms even when
-        /// another, discarded instance originally created them.
-        referenced_terms: DeterministicHashSet<u64>,
+        /// Registered-term closure of this instance's SAT clauses. If the
+        /// clauses survive a transition, these are the solver terms that must
+        /// remain live even when another instance originally created them.
+        clause_terms: DeterministicHashSet<u64>,
     },
     Skolemization {
         clauses: Vec<Vec<i32>>,
@@ -490,11 +490,8 @@ fn process_deferred_instantiations(
         let mut clauses = raw_clauses;
         clauses.extend(additional_constraints);
         let created_terms = solver_state.finish_qi_term_capture();
-        let mut referenced_terms = DeterministicHashSet::default();
-        solver_state.collect_registered_term_closure(&pre_nnf_body, &mut referenced_terms);
-        solver_state.collect_registered_term_closure(&t, &mut referenced_terms);
-        solver_state.collect_clause_term_closure(&clauses, &mut referenced_terms);
-        referenced_terms.extend(created_terms.iter().copied());
+        let mut clause_terms = DeterministicHashSet::default();
+        solver_state.collect_clause_term_closure(&clauses, &mut clause_terms);
 
         results.push(QuantifierInstance::Instantiation {
             clauses,
@@ -504,7 +501,7 @@ fn process_deferred_instantiations(
                 substitution,
             },
             created_terms,
-            referenced_terms,
+            clause_terms,
         });
     }
     results
