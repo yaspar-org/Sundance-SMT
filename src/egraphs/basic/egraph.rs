@@ -26,6 +26,20 @@ type SigKey = (CanonicalOp, Children);
 /// (level, key, term_id, was_inserted)
 type SigTrailEntry = (usize, SigKey, u32, bool);
 
+/// Exact predecessor-map mutation made at one decision level.
+///
+/// The hash stamps make discarded entries logically stale after backtracking,
+/// but retaining every historical copy causes predecessor storage to grow
+/// monotonically. The trail lets the solver reclaim only mutations from
+/// discarded levels without rescanning every predecessor map.
+#[derive(Debug, Clone)]
+struct PredecessorTrailEntry {
+    term: u32,
+    key: u32,
+    previous: Option<Predecessor>,
+    installed: Predecessor,
+}
+
 impl fmt::Display for Egraph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "=== Egraph Summary ===")?;
@@ -220,6 +234,8 @@ pub struct Egraph {
     proof_forest_backtrack_stack: Vec<(usize, ProofForestEdge, u32, ProofForestEdge, u32, u32)>,
     /// this is a map from terms (u32) -> (term in the same egraph, predecessor of term in same egraph)
     predecessors: Vec<FastDeterministicHashMap<u32, Predecessor>>,
+    /// Exact predecessor-map mutations, grouped by decision level.
+    predecessor_trail: Vec<Vec<PredecessorTrailEntry>>,
     /// number to keep track of the current hash
     predecessor_hash: u32,
     /// mapping from levels -> corresponding hash
@@ -287,6 +303,12 @@ pub struct Egraph {
 pub(crate) struct EgraphStats {
     /// Number of successful equality merges (where roots differed).
     pub(crate) merges: u64,
+    /// Number of incremental predecessor cleanup passes after backtracking.
+    pub(crate) predecessor_gc_runs: u64,
+    /// Historical predecessor entries physically removed by those passes.
+    pub(crate) predecessor_gc_removed: u64,
+    /// Earlier predecessor entries restored after a branch-local replacement.
+    pub(crate) predecessor_gc_restored: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -297,11 +319,16 @@ pub(crate) struct EgraphGcProfile {
     pub(crate) relevant_function_entries: usize,
     pub(crate) active_relevant_terms: usize,
     pub(crate) predecessor_entries: usize,
+    pub(crate) predecessor_trail_entries: usize,
     pub(crate) qi_predecessor_entries: usize,
     pub(crate) union_to_eclass_entries: usize,
     pub(crate) signature_entries: usize,
+    pub(crate) signature_trail_entries: usize,
     pub(crate) backtrack_entries: usize,
     pub(crate) merges: u64,
+    pub(crate) predecessor_gc_runs: u64,
+    pub(crate) predecessor_gc_removed: u64,
+    pub(crate) predecessor_gc_restored: u64,
     pub(crate) e_match_calls: u64,
     pub(crate) e_match_candidates_scanned: u64,
     pub(crate) e_match_relevant_candidates_scanned: u64,
@@ -319,6 +346,13 @@ pub(crate) struct EgraphRetireReport {
     pub(crate) blocked_live_parent: usize,
     pub(crate) blocked_pattern: usize,
     pub(crate) missing: usize,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct EgraphPredecessorGcReport {
+    pub(crate) examined_mutations: usize,
+    pub(crate) removed_entries: usize,
+    pub(crate) restored_entries: usize,
 }
 
 impl Default for Egraph {
@@ -344,6 +378,7 @@ impl Egraph {
             member_next: vec![0],
             proof_forest_backtrack_stack: Vec::new(),
             predecessors: vec![FastDeterministicHashMap::default()],
+            predecessor_trail: vec![Vec::new()],
             predecessor_hash: 1,
             predecessor_level: vec![1, 1],
             function_maps: DeterministicHashMap::default(),
@@ -384,6 +419,7 @@ impl Egraph {
                 .filter(|level| level.is_some())
                 .count(),
             predecessor_entries: self.predecessors.iter().map(|entries| entries.len()).sum(),
+            predecessor_trail_entries: self.predecessor_trail.iter().map(Vec::len).sum(),
             qi_predecessor_entries: self
                 .predecessors_created_by_quantifiers
                 .values()
@@ -391,8 +427,12 @@ impl Egraph {
                 .sum(),
             union_to_eclass_entries: self.union_to_eclass.len(),
             signature_entries: self.sig_table.len(),
+            signature_trail_entries: self.sig_trail.len(),
             backtrack_entries: self.proof_forest_backtrack_stack.len(),
             merges: self.stats.merges,
+            predecessor_gc_runs: self.stats.predecessor_gc_runs,
+            predecessor_gc_removed: self.stats.predecessor_gc_removed,
+            predecessor_gc_restored: self.stats.predecessor_gc_restored,
             e_match_calls: self.e_match_calls.get(),
             e_match_candidates_scanned: self.e_match_candidates_scanned.get(),
             e_match_relevant_candidates_scanned: self.e_match_relevant_candidates_scanned.get(),
@@ -493,9 +533,7 @@ impl Egraph {
                     .or_default()
                     .insert(id, self.decision_level);
 
-                self.predecessors[root as usize]
-                    .entry(id)
-                    .or_insert(root_predecessor);
+                self.add_predecessor(root, id, root_predecessor);
             }
         }
 
@@ -582,14 +620,41 @@ impl Egraph {
         equalities
     }
 
+    /// Restore or remove exact predecessor-map mutations from levels that
+    /// have already been backtracked.
+    pub(crate) fn collect_backtracked_predecessors(&mut self) -> EgraphPredecessorGcReport {
+        let mut report = EgraphPredecessorGcReport::default();
+        for level in (self.decision_level + 1..self.predecessor_trail.len()).rev() {
+            let entries = std::mem::take(&mut self.predecessor_trail[level]);
+            for entry in entries.into_iter().rev() {
+                report.examined_mutations += 1;
+                let predecessors = &mut self.predecessors[entry.term as usize];
+                if predecessors.get(&entry.key) != Some(&entry.installed) {
+                    // A lower-level dynamic predecessor may have been
+                    // re-established after the backtrack. It supersedes the
+                    // discarded branch mutation and must remain installed.
+                    continue;
+                }
+                if let Some(previous) = entry.previous {
+                    predecessors.insert(entry.key, previous);
+                    report.restored_entries += 1;
+                } else {
+                    predecessors.remove(&entry.key);
+                    report.removed_entries += 1;
+                }
+            }
+        }
+        self.stats.predecessor_gc_runs += 1;
+        self.stats.predecessor_gc_removed += report.removed_entries as u64;
+        self.stats.predecessor_gc_restored += report.restored_entries as u64;
+        report
+    }
+
     /// Rebuild the predecessor index from live level-zero enodes.
     ///
-    /// Merges copy predecessor entries to new roots and keep the old maps for
-    /// backtracking. Hash stamps make those copies logically stale after a
-    /// backtrack, but their storage otherwise grows monotonically. QI
-    /// collection already requires a fully backtracked level-zero egraph, so
-    /// it can safely discard the history and reconstruct only the syntactic
-    /// and current-root edges needed by future congruence closure.
+    /// This remains a full-compaction fallback for root QI collection. Normal
+    /// SAT backtracks use `collect_backtracked_predecessors` and touch only
+    /// entries mutated on discarded decision levels.
     fn compact_level_zero_predecessors(&mut self) -> (usize, usize) {
         assert_eq!(self.decision_level, 0);
         assert!(
@@ -609,6 +674,9 @@ impl Egraph {
             .collect();
 
         for entries in &mut self.predecessors {
+            entries.clear();
+        }
+        for entries in &mut self.predecessor_trail {
             entries.clear();
         }
         for (parent, children) in live_parents {
@@ -1139,11 +1207,15 @@ impl Egraph {
         let new_valid = valid_hash(new_pred.hash, new_pred.level, &self.predecessor_level);
         let new_pred_level = new_pred.level;
         let new_pred_hash = new_pred.hash;
+        let installed = new_pred.clone();
+        let mut previous = None;
+        let mut changed = false;
 
         use std::collections::hash_map::Entry;
         match self.predecessors[term as usize].entry(new_pred_key) {
             Entry::Vacant(slot) => {
                 slot.insert(new_pred);
+                changed = true;
                 debug_println!(
                     11,
                     0,
@@ -1168,7 +1240,9 @@ impl Egraph {
                 let orig_predecessor = original.predecessor;
                 let should_replace = (!orig_valid || new_pred_level <= orig_level) && new_valid;
                 if should_replace {
+                    previous = Some(original.clone());
                     slot.insert(new_pred);
+                    changed = true;
                     debug_println!(
                         11,
                         0,
@@ -1184,6 +1258,17 @@ impl Egraph {
                 }
                 // Keep-old case: zero inserts, no debug output (matches original).
             }
+        }
+        if changed && new_pred_level != 0 {
+            while new_pred_level >= self.predecessor_trail.len() {
+                self.predecessor_trail.push(Vec::new());
+            }
+            self.predecessor_trail[new_pred_level].push(PredecessorTrailEntry {
+                term,
+                key: new_pred_key,
+                previous,
+                installed,
+            });
         }
     }
 
@@ -1413,7 +1498,7 @@ impl Egraph {
                     predecessor: *parent,
                     inner_term: *term,
                 };
-                self.predecessors[current_ancestor as usize].insert(*parent, predecessor);
+                self.add_predecessor(current_ancestor, *parent, predecessor);
             }
         }
 
@@ -2370,6 +2455,31 @@ mod tests {
     }
 
     #[test]
+    fn incremental_predecessor_gc_reclaims_backtracked_copies() {
+        let mut egraph = Egraph::new();
+        let x = egraph.register_term(Op::App("x".to_owned()), &[], false);
+        let y = egraph.register_term(Op::App("y".to_owned()), &[], false);
+        let fx = egraph.register_term(Op::App("f".to_owned()), &[x], false);
+        let fy = egraph.register_term(Op::App("f".to_owned()), &[y], false);
+        let baseline = egraph.gc_profile().predecessor_entries;
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(x, y).conflict.is_none());
+        assert_eq!(egraph.find(fx), egraph.find(fy));
+        egraph.backtrack_to(0);
+        assert!(egraph.gc_profile().predecessor_entries > baseline);
+
+        let report = egraph.collect_backtracked_predecessors();
+        assert!(report.examined_mutations > 0);
+        assert!(report.removed_entries + report.restored_entries > 0);
+        assert_eq!(egraph.gc_profile().predecessor_entries, baseline);
+
+        egraph.notify_new_decision_level();
+        assert!(egraph.assert_equal(x, y).conflict.is_none());
+        assert_eq!(egraph.find(fx), egraph.find(fy));
+    }
+
+    #[test]
     fn retirement_keeps_terms_referenced_by_compiled_patterns() {
         let mut egraph = Egraph::new();
         let a = egraph.register_constant(Op::Constant("a".to_owned()));
@@ -2484,6 +2594,9 @@ impl EgraphTrait for Egraph {
         while self.decision_level >= self.predecessor_level.len() {
             self.predecessor_level
                 .resize(self.predecessor_level.len() * 2, 0);
+        }
+        while self.decision_level >= self.predecessor_trail.len() {
+            self.predecessor_trail.push(Vec::new());
         }
         self.predecessor_level[self.decision_level] = self.predecessor_hash;
     }

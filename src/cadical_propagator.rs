@@ -533,8 +533,9 @@ impl<'a> CustomExternalPropagator<'a> {
         );
         eprintln!(
             "[qi-gc-profile] egraph terms={} reusable_ids={} function_entries={} relevant_entries={} \
-             active_relevant_terms={} predecessors={} qi_predecessors={} union_terms={} \
-             signatures={} backtrack_entries={} merges={} match_calls={} \
+             active_relevant_terms={} predecessors={} predecessor_trail={} qi_predecessors={} \
+             union_terms={} signatures={} signature_trail={} backtrack_entries={} merges={} \
+             predecessor_gc_runs={} predecessor_gc_removed={} predecessor_gc_restored={} match_calls={} \
              match_candidates={} relevant_match_candidates={} match_results={}",
             egraph.registered_terms,
             egraph.reusable_ids,
@@ -542,11 +543,16 @@ impl<'a> CustomExternalPropagator<'a> {
             egraph.relevant_function_entries,
             egraph.active_relevant_terms,
             egraph.predecessor_entries,
+            egraph.predecessor_trail_entries,
             egraph.qi_predecessor_entries,
             egraph.union_to_eclass_entries,
             egraph.signature_entries,
+            egraph.signature_trail_entries,
             egraph.backtrack_entries,
             egraph.merges,
+            egraph.predecessor_gc_runs,
+            egraph.predecessor_gc_removed,
+            egraph.predecessor_gc_restored,
             egraph.e_match_calls,
             egraph.e_match_candidates_scanned,
             egraph.e_match_relevant_candidates_scanned,
@@ -2240,6 +2246,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // any congruence merges from `union_to_eclass` replay, so the queue
         // on return holds exactly the merges that survive at `level`.
         self.solver_state.egraph.backtrack_to(level);
+        let _ = self.solver_state.egraph.collect_backtracked_predecessors();
         self.solver_state.propagate_class_relevancy_from_merges();
 
         #[cfg(feature = "z3-solver")]
@@ -2472,6 +2479,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         let _ = self.solver_state.egraph.drain_arithmetic_equalities();
                         if let Some(c) = result.conflict {
                             self.solver_state.egraph.backtrack_to(probe_level - 1);
+                            let _ = self.solver_state.egraph.collect_backtracked_predecessors();
                             probe_level -= 1;
                             conflicts.push(c);
                             if conflicts.len() >= self.max_arith_conflicts_per_round {
@@ -2520,6 +2528,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 // the queue via `union_to_eclass` re-firing (e.g. from the
                 // trichotomy terms just registered); drain those into Z3.
                 self.solver_state.egraph.backtrack_to(base_level);
+                let _ = self.solver_state.egraph.collect_backtracked_predecessors();
                 #[cfg(feature = "z3-solver")]
                 {
                     if let Some(z3) = self.z3_incremental.as_mut() {
