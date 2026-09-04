@@ -152,6 +152,10 @@ pub struct SemperEgraph {
     relevancy_enabled: bool,
     /// The slice for the match round in progress; None when gating is off.
     active_slice: Option<rustc_hash::FxHashSet<u32>>,
+    /// Relevancy-restricted branching (SEMPER_REL_DECIDE=1): when set,
+    /// `suggest_decision` descends the relevant Boolean structure and returns
+    /// the next atom to branch on with a justifying phase.
+    decide_enabled: bool,
     /// E-matching is on by default. It was gated while the congruent-atom
     /// true=false explanation bug was open (unsound unsat on 2 quantifier
     /// files); after that fix a Z3-cross-checked sweep of the quantifier
@@ -217,6 +221,7 @@ impl SemperEgraph {
             root_terms: Vec::new(),
             relevancy_enabled: std::env::var("SEMPER_RELEVANCY").is_ok_and(|v| v == "1"),
             active_slice: None,
+            decide_enabled: std::env::var("SEMPER_REL_DECIDE").is_ok_and(|v| v == "1"),
             ematch_enabled: std::env::var("SEMPER_EMATCH").map_or(true, |v| v != "0"),
             level: 0,
             marks: Vec::new(),
@@ -600,6 +605,87 @@ impl SemperEgraph {
         self.active_slice.as_ref().is_none_or(|s| s.contains(&cand))
     }
 
+    // --- Relevancy-restricted branching (phase-aware) ---------------------
+    //
+    // A structural relevant-first decision policy (Z3 CASE_SPLIT=3). It
+    // descends the Boolean structure from the level-0 assertions carrying a
+    // *desired polarity* `want` (the assertions want to be true), and returns
+    // the first unassigned atom to branch on together with the phase that
+    // pushes its relevant, not-yet-satisfied ancestor gate toward
+    // satisfaction. Polarity is threaded explicitly and flipped at `not`
+    // (`want` -> `!want`), which is the negation bookkeeping NNF would make
+    // implicit; because the driver already NNF-normalizes before Tseitin,
+    // negations sit at the leaves, so the flip is cheap. For `and`/`or` the
+    // children inherit the parent's `want` unchanged (the monotonicity of the
+    // NNF structure): and/or-true both want true children, and/or-false both
+    // want false children. Assigned nodes are read off the merge state and
+    // pruned, so already-justified structure is skipped and only live
+    // don't-care-free decisions are produced.
+
+    fn bool_value(&self, t: u32, tr: Option<ENodeId>, fr: Option<ENodeId>) -> Option<bool> {
+        let r = self.eg.find_const(self.node(t));
+        if Some(r) == tr {
+            Some(true)
+        } else if Some(r) == fr {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    fn suggest_rec(
+        &self,
+        t: u32,
+        want: bool,
+        tr: Option<ENodeId>,
+        fr: Option<ENodeId>,
+        visited: &mut rustc_hash::FxHashSet<(u32, bool)>,
+    ) -> Option<(u32, bool)> {
+        if !visited.insert((t, want)) {
+            return None;
+        }
+        match self.bool_value(t, tr, fr) {
+            // Already carries the wanted value: this branch is justified.
+            // Assigned the other way: nothing to decide here toward `want`.
+            Some(_) => return None,
+            None => {}
+        }
+        let (op, children) = match &self.reg_log[t as usize] {
+            RegEvent::Term { op, children } => (op.clone(), children.clone()),
+            RegEvent::Opaque => return None,
+        };
+        match op {
+            // Monotone gates: children inherit the parent's desired polarity.
+            Op::And | Op::Or => {
+                for &c in &children {
+                    if let Some(d) = self.suggest_rec(c, want, tr, fr, visited) {
+                        return Some(d);
+                    }
+                }
+                None
+            }
+            // Negation flips the desired polarity.
+            Op::Not => children
+                .first()
+                .and_then(|&c| self.suggest_rec(c, !want, tr, fr, visited)),
+            // (=> a b) = (or (not a) b): antecedent wants !want, consequent wants want.
+            Op::Implies if children.len() == 2 => self
+                .suggest_rec(children[0], !want, tr, fr, visited)
+                .or_else(|| self.suggest_rec(children[1], want, tr, fr, visited)),
+            // ite(c, th, el): decide the condition first if it is open, else
+            // descend the taken branch. The condition's phase is a free
+            // choice; true is a fine default (a decision, not a commitment).
+            Op::Ite if children.len() == 3 => match self.bool_value(children[0], tr, fr) {
+                None => self.suggest_rec(children[0], true, tr, fr, visited),
+                Some(true) => self.suggest_rec(children[1], want, tr, fr, visited),
+                Some(false) => self.suggest_rec(children[2], want, tr, fr, visited),
+            },
+            // Leaf atom (Eq / App / Distinct / Constant): unassigned by the
+            // check above, so it is the decision, with the resolved phase.
+            _ => Some((t, want)),
+        }
+    }
+
     // --- E-matching -------------------------------------------------------
     //
     // A faithful port of the basic backend's top-down matcher, over the
@@ -956,6 +1042,21 @@ impl EgraphTrait for SemperEgraph {
                 self.node_to_driver.entry(node).or_insert(i as u32);
             }
         }
+    }
+
+    fn suggest_decision(&self) -> Option<(u32, bool)> {
+        if !self.decide_enabled {
+            return None;
+        }
+        let tr = self.true_term.map(|t| self.eg.find_const(self.node(t)));
+        let fr = self.false_term.map(|t| self.eg.find_const(self.node(t)));
+        let mut visited: rustc_hash::FxHashSet<(u32, bool)> = rustc_hash::FxHashSet::default();
+        for &r in &self.root_terms {
+            if let Some(d) = self.suggest_rec(r, true, tr, fr, &mut visited) {
+                return Some(d);
+            }
+        }
+        None
     }
 
     fn make_decision(&self, _assignments: &[i32]) -> i32 {

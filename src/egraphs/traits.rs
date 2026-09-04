@@ -165,6 +165,20 @@ pub trait EgraphTrait {
 
     // --- Decisions ---
 
+    /// Relevancy-restricted branching (Z3 CASE_SPLIT=3 style): suggest an
+    /// unassigned atom to decide next, with the phase that helps justify a
+    /// relevant, not-yet-satisfied gate, plus the desired polarity resolved
+    /// through the Boolean structure. Returns the atom's `TermId` and the
+    /// phase (true = assign positive). `None` means no preference — let the
+    /// SAT solver's own heuristic decide. Default: no preference.
+    ///
+    /// The caller maps the returned term to its SAT literal and is
+    /// responsible for skipping a suggestion whose atom has no decision
+    /// variable or is already assigned.
+    fn suggest_decision(&self) -> Option<(Self::TermId, bool)> {
+        None
+    }
+
     /// SAT solver asks if the egraph wants to make a branching decision.
     /// Returns 0 if no preference, otherwise a signed literal to assign.
     fn make_decision(&self, assignments: &[i32]) -> i32;

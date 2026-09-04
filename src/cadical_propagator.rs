@@ -863,6 +863,23 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
+        // Relevancy-restricted branching: let the egraph suggest the next atom
+        // to decide, with a justifying phase. The egraph works in term-id
+        // space, so map its suggestion to a SAT literal here (term -> uid ->
+        // literal). Skip and fall back to the solver's own heuristic (return
+        // 0) if the atom has no decision variable or is already assigned;
+        // reordering decisions is always sound.
+        if let Some((term, phase)) = self.solver_state.egraph.suggest_decision()
+            && let Some(&uid) = self.solver_state.id_map.get_by_right(&term)
+            && let Some(&lit) = self.solver_state.cnf_cache.var_map.get(&uid)
+        {
+            let var = lit.abs();
+            let idx = var as usize;
+            if idx < self.assignments.len() && self.assignments[idx] == 0 {
+                return if phase { var } else { -var };
+            }
+        }
+
         0
     }
 
