@@ -345,10 +345,10 @@ impl<'a> CustomExternalPropagator<'a> {
             live_derived,
             instance_groups,
             permanent_instances,
-        ) = self
-            .qi_gc_state
-            .as_ref()
-            .map_or((0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), |gc| {
+            permanent_terms,
+        ) = self.qi_gc_state.as_ref().map_or(
+            (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            |gc| {
                 let gc = gc.borrow();
                 let tracker = gc.tracker.profile();
                 (
@@ -367,8 +367,10 @@ impl<'a> CustomExternalPropagator<'a> {
                     tracker.live_derived,
                     tracker.instance_groups,
                     tracker.permanent_instantiations,
+                    tracker.permanent_term_uids,
                 )
-            });
+            },
+        );
 
         eprintln!(
             "[qi-gc-profile] event={event} elapsed={:.3}s level={} assigned={} \
@@ -376,7 +378,7 @@ impl<'a> CustomExternalPropagator<'a> {
              epoch={} transitions={} epoch_instances={} total_instances={} \
              epoch_clauses={} total_clauses={} retained_qi={} retired_qi={} \
              promoted_derived={} tracked_qi={} ancestry_nodes={} ancestry_edges={} \
-             live_derived={} instance_groups={} permanent_instances={} \
+             live_derived={} instance_groups={} permanent_instances={} permanent_terms={} \
              qi_rounds={} pending_qi={}",
             self.stats.elapsed().as_secs_f64(),
             self.decision_level,
@@ -400,6 +402,7 @@ impl<'a> CustomExternalPropagator<'a> {
             live_derived,
             instance_groups,
             permanent_instances,
+            permanent_terms,
             self.stats.instantiation_rounds,
             self.pending.is_some(),
         );
@@ -706,24 +709,35 @@ impl<'a> CustomExternalPropagator<'a> {
                     clauses,
                     pre_nnf_body,
                     key,
+                    created_terms,
+                    referenced_terms,
                 } => {
                     self.stats.instantiations += 1;
-                    (clauses, pre_nnf_body, Some(key))
+                    (
+                        clauses,
+                        pre_nnf_body,
+                        Some((key, created_terms, referenced_terms)),
+                    )
                 }
                 Skolemization {
                     clauses,
                     pre_nnf_body,
                 } => (clauses, pre_nnf_body, None),
             };
-            if let Some(key) = instantiation_key
+            if let Some((key, created_terms, referenced_terms)) = instantiation_key
                 && let Some(ref gc) = self.qi_gc_state
             {
                 let mut gc = gc.borrow_mut();
                 gc.epoch_instantiations += 1;
                 gc.total_epoch_instantiations += 1;
                 let activation = gc.current_act;
-                gc.tracker
-                    .register_instance(key.clone(), clauses, activation);
+                gc.tracker.register_instance(
+                    key.clone(),
+                    clauses,
+                    activation,
+                    created_terms,
+                    referenced_terms,
+                );
             }
             // Register the pre-NNF instance body with relevancy so structural
             // rules see the original connectives (Iff/ITE/Implies) before
@@ -919,6 +933,8 @@ impl<'a> CustomExternalPropagator<'a> {
         let retired_qi_count = plan.observed_qi_clauses.saturating_sub(retained_qi_count);
         let ancestry_edges = plan.antecedent_edges;
         let retained_instantiations = plan.retained_instantiations;
+        let retained_term_uids = plan.retained_term_uids;
+        let retired_candidate_term_uids = plan.retired_candidate_term_uids;
         let retained_instantiation_count = retained_instantiations.len();
 
         // Keep every live activation-dependent learned clause. The proof
@@ -943,12 +959,15 @@ impl<'a> CustomExternalPropagator<'a> {
 
         qi_gc_trace!(
             "epoch {}: dependency plan observed_qi={} retained_qi={} retired_qi={} \
-             retained_instances={} promoted_derived={} ancestry_edges={}",
+             retained_instances={} retained_terms={} retire_term_candidates={} \
+             promoted_derived={} ancestry_edges={}",
             epoch,
             plan.observed_qi_clauses,
             retained_qi_count,
             retired_qi_count,
             retained_instantiation_count,
+            retained_term_uids.len(),
+            retired_candidate_term_uids.len(),
             promoted_derived_count,
             ancestry_edges
         );
@@ -996,7 +1015,8 @@ impl<'a> CustomExternalPropagator<'a> {
         // materialized and re-added on every epoch.
         let mut gc = gc_state.borrow_mut();
         gc.learned_clauses.clear();
-        gc.tracker.promote_instantiations(&retained_instantiations);
+        gc.tracker
+            .promote_instantiations(&retained_instantiations, &retained_term_uids);
         let permanent_instantiations = gc
             .tracker
             .permanent_instantiations()

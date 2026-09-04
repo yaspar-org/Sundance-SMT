@@ -22,6 +22,8 @@ pub(crate) struct QiInstantiationKey {
 struct QiInstanceGroup {
     key: QiInstantiationKey,
     clauses: Vec<Vec<i32>>,
+    created_terms: DeterministicHashSet<u64>,
+    referenced_terms: DeterministicHashSet<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -37,6 +39,11 @@ pub(crate) struct QiGcPlan {
     pub(crate) antecedent_edges: usize,
     /// Instantiations whose complete clause groups were retained.
     pub(crate) retained_instantiations: Vec<QiInstantiationKey>,
+    /// Terms referenced by retained instances from this or earlier epochs.
+    pub(crate) retained_term_uids: DeterministicHashSet<u64>,
+    /// Terms created only by discarded instances and not referenced by any
+    /// retained instance. These are candidates for physical reclamation.
+    pub(crate) retired_candidate_term_uids: DeterministicHashSet<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +66,8 @@ pub(crate) struct QiGcTracker {
     live_derived: DeterministicHashMap<u64, Vec<i32>>,
     /// Substitutions whose QI clauses were promoted in an earlier transition.
     permanent_instantiations: HashSet<QiInstantiationKey>,
+    /// Terms referenced by promoted instance groups from earlier transitions.
+    permanent_term_uids: DeterministicHashSet<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -69,6 +78,7 @@ pub(crate) struct QiGcTrackerProfile {
     pub(crate) live_derived: usize,
     pub(crate) instance_groups: usize,
     pub(crate) permanent_instantiations: usize,
+    pub(crate) permanent_term_uids: usize,
 }
 
 impl QiGcTracker {
@@ -92,6 +102,8 @@ impl QiGcTracker {
         key: QiInstantiationKey,
         clauses: &[Vec<i32>],
         activation: i32,
+        created_terms: &DeterministicHashSet<u64>,
+        referenced_terms: &DeterministicHashSet<u64>,
     ) {
         let group_id = self.next_group_id;
         self.next_group_id += 1;
@@ -100,6 +112,8 @@ impl QiGcTracker {
             QiInstanceGroup {
                 key,
                 clauses: clauses.to_vec(),
+                created_terms: created_terms.clone(),
+                referenced_terms: referenced_terms.clone(),
             },
         );
         for clause in clauses {
@@ -182,11 +196,21 @@ impl QiGcTracker {
 
         let mut qi_clauses = Vec::new();
         let mut retained_instantiations = Vec::new();
+        let mut retained_term_uids = self.permanent_term_uids.clone();
+        let mut retired_candidate_term_uids = DeterministicHashSet::default();
+        for (group_id, group) in &self.instance_groups {
+            if !required_groups.contains(group_id) {
+                retired_candidate_term_uids.extend(group.created_terms.iter().copied());
+            }
+        }
         for group_id in required_groups {
             let group = &self.instance_groups[&group_id];
             qi_clauses.extend(group.clauses.iter().cloned());
             retained_instantiations.push(group.key.clone());
+            retained_term_uids.extend(group.referenced_terms.iter().copied());
+            retained_term_uids.extend(group.created_terms.iter().copied());
         }
+        retired_candidate_term_uids.retain(|uid| !retained_term_uids.contains(uid));
         qi_clauses.extend(
             required_orphans
                 .into_iter()
@@ -199,11 +223,19 @@ impl QiGcTracker {
             observed_qi_clauses: self.qi_clause_groups.len() + self.orphan_qi_clauses.len(),
             antecedent_edges: self.antecedents.values().map(Vec::len).sum(),
             retained_instantiations,
+            retained_term_uids,
+            retired_candidate_term_uids,
         }
     }
 
-    pub(crate) fn promote_instantiations(&mut self, keys: &[QiInstantiationKey]) {
+    pub(crate) fn promote_instantiations(
+        &mut self,
+        keys: &[QiInstantiationKey],
+        retained_term_uids: &DeterministicHashSet<u64>,
+    ) {
         self.permanent_instantiations.extend(keys.iter().cloned());
+        self.permanent_term_uids
+            .extend(retained_term_uids.iter().copied());
     }
 
     pub(crate) fn permanent_instantiations(&self) -> impl Iterator<Item = &QiInstantiationKey> {
@@ -227,6 +259,7 @@ impl QiGcTracker {
             live_derived: self.live_derived.len(),
             instance_groups: self.instance_groups.len(),
             permanent_instantiations: self.permanent_instantiations.len(),
+            permanent_term_uids: self.permanent_term_uids.len(),
         }
     }
 }
@@ -271,5 +304,32 @@ mod tests {
         let plan = tracker.plan();
         assert_eq!(plan.qi_clauses, vec![vec![3]]);
         assert_eq!(plan.derived_clauses, vec![vec![5]]);
+    }
+
+    #[test]
+    fn retained_instance_pins_terms_created_by_discarded_instance() {
+        let mut tracker = QiGcTracker::default();
+        let key = |quantifier_id| QiInstantiationKey {
+            quantifier_id,
+            substitution: DeterministicHashMap::default(),
+        };
+        let first_created = DeterministicHashSet::from_iter([10, 11]);
+        let first_referenced = first_created.clone();
+        tracker.register_instance(key(1), &[vec![1]], 100, &first_created, &first_referenced);
+
+        let second_created = DeterministicHashSet::from_iter([20]);
+        let second_referenced = DeterministicHashSet::from_iter([10, 20]);
+        tracker.register_instance(key(2), &[vec![2]], 100, &second_created, &second_referenced);
+
+        tracker.note_gated_qi_clause(1, &[1, -100], 100);
+        tracker.note_gated_qi_clause(2, &[2, -100], 100);
+        tracker.note_derived_clause(3, &[3, -100], &[2], 100);
+
+        let plan = tracker.plan();
+        assert_eq!(plan.retained_term_uids, second_referenced);
+        assert_eq!(
+            plan.retired_candidate_term_uids,
+            DeterministicHashSet::from_iter([11])
+        );
     }
 }

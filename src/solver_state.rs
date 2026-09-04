@@ -31,7 +31,7 @@ use crate::solver_types::{
     Assertion, ConstructorType, ConstructorType::*, Polarity, Quantifier, TermOption,
 };
 
-use crate::utils::DeterministicHashMap;
+use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
 fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     match term.repr() {
@@ -133,6 +133,10 @@ pub struct SolverState {
     /// current quantifier instance. Zero outside instance materialization.
     pub(crate) current_instantiation_generation: u32,
 
+    /// Exact solver UIDs first registered by the quantifier instance currently
+    /// being materialized. `None` outside instantiation materialization.
+    current_qi_created_terms: Option<DeterministicHashSet<u64>>,
+
     /// Precomputed datatype constructor/selector info.
     pub datatype_info: DatatypeInfo,
 
@@ -208,6 +212,7 @@ impl SolverState {
             added_instantiations: HashMap::default(),
             generation: DeterministicHashMap::default(),
             current_instantiation_generation: 0,
+            current_qi_created_terms: None,
             datatype_info,
             term_constructors: DeterministicHashMap::new(),
             nelson_oppen_ineq_literals: HashSet::new(),
@@ -232,6 +237,53 @@ impl SolverState {
         CNFEnv {
             context: &mut self.context,
             cache: &mut self.cnf_cache,
+        }
+    }
+
+    pub(crate) fn begin_qi_term_capture(&mut self) {
+        debug_assert!(self.current_qi_created_terms.is_none());
+        self.current_qi_created_terms = Some(DeterministicHashSet::default());
+    }
+
+    pub(crate) fn finish_qi_term_capture(&mut self) -> DeterministicHashSet<u64> {
+        self.current_qi_created_terms
+            .take()
+            .expect("QI term capture must be active")
+    }
+
+    fn record_qi_created_term(&mut self, uid: u64) {
+        if let Some(created) = self.current_qi_created_terms.as_mut() {
+            created.insert(uid);
+        }
+    }
+
+    pub(crate) fn collect_registered_term_closure(
+        &self,
+        term: &Term,
+        result: &mut DeterministicHashSet<u64>,
+    ) {
+        if !result.insert(term.uid()) {
+            return;
+        }
+        let (_, subterms) = get_subterms(term);
+        for subterm in subterms {
+            self.collect_registered_term_closure(subterm, result);
+        }
+    }
+
+    pub(crate) fn collect_clause_term_closure(
+        &self,
+        clauses: &[Vec<i32>],
+        result: &mut DeterministicHashSet<u64>,
+    ) {
+        for literal in clauses.iter().flatten() {
+            let Some(uid) = self.cnf_cache.var_map_reverse.get(&literal.abs()) else {
+                continue;
+            };
+            let Some(TermOption::Some(term)) = self.terms_list.get(*uid as usize) else {
+                continue;
+            };
+            self.collect_registered_term_closure(term, result);
         }
     }
 
@@ -998,6 +1050,7 @@ impl SolverState {
         if let Exists(_, _) | Forall(_, _) = term.repr() {
             let egraph_id = self.egraph.register_opaque();
             self.id_map.insert(num, egraph_id);
+            self.record_qi_created_term(num);
             self.register_arithmetic_and_quantifier(term, guard);
             return egraph_id;
         }
@@ -1018,6 +1071,7 @@ impl SolverState {
                 .register_term(op, &egraph_children, from_quantifier)
         };
         self.id_map.insert(num, egraph_id);
+        self.record_qi_created_term(num);
         self.register_arithmetic_and_quantifier(term, guard);
         egraph_id
     }

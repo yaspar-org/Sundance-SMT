@@ -16,7 +16,7 @@ use crate::quantifiers::skolem::skolemize;
 use crate::relevancy::{RelevancyTrait, relevancy_trace_enabled};
 use crate::solver_state::SolverState;
 use crate::solver_types::Polarity;
-use crate::utils::DeterministicHashMap;
+use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
 use crate::debug_println;
 use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, TermAllocator};
@@ -30,6 +30,14 @@ pub(crate) enum QuantifierInstance {
         clauses: Vec<Vec<i32>>,
         pre_nnf_body: Term,
         key: QiInstantiationKey,
+        /// Solver terms first registered while materializing this instance.
+        /// These are candidates for reclamation if the complete instance is
+        /// discarded at a QI-GC epoch transition.
+        created_terms: DeterministicHashSet<u64>,
+        /// Complete registered-term closure referenced by this instance's
+        /// body and clauses. A retained instance pins these terms even when
+        /// another, discarded instance originally created them.
+        referenced_terms: DeterministicHashSet<u64>,
     },
     Skolemization {
         clauses: Vec<Vec<i32>>,
@@ -432,6 +440,7 @@ fn process_deferred_instantiations(
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
+        solver_state.begin_qi_term_capture();
         let previous_generation = solver_state.current_instantiation_generation;
         solver_state.current_instantiation_generation = previous_generation.max(generation);
         solver_state.set_generation(t.uid(), generation);
@@ -480,6 +489,12 @@ fn process_deferred_instantiations(
 
         let mut clauses = raw_clauses;
         clauses.extend(additional_constraints);
+        let created_terms = solver_state.finish_qi_term_capture();
+        let mut referenced_terms = DeterministicHashSet::default();
+        solver_state.collect_registered_term_closure(&pre_nnf_body, &mut referenced_terms);
+        solver_state.collect_registered_term_closure(&t, &mut referenced_terms);
+        solver_state.collect_clause_term_closure(&clauses, &mut referenced_terms);
+        referenced_terms.extend(created_terms.iter().copied());
 
         results.push(QuantifierInstance::Instantiation {
             clauses,
@@ -488,6 +503,8 @@ fn process_deferred_instantiations(
                 quantifier_id,
                 substitution,
             },
+            created_terms,
+            referenced_terms,
         });
     }
     results
