@@ -931,18 +931,29 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         if literal != 0 {
             self.add_lit_to_proof_tracer(literal);
         }
-        if let Some(term) = self.solver_state.get_term_from_lit_safe(literal) {
-            debug_println!(
-                11,
-                0,
-                "PROPAGATOR: Adding external clause literal (might be negated) {} which is term {}",
-                literal,
-                term
-            );
-        } else {
-            debug_println!(11, 0, "END OF CLAUSE");
-            assert!(literal == 0);
+        // The term lookup exists only to feed the level-11 print, but it was
+        // evaluated unconditionally: one map probe plus term materialization
+        // per literal of every external clause (a visible fraction of
+        // clause-addition time under profiling). The invariant it piggybacked
+        // on — a nonzero literal always has a term — stays as a debug_assert.
+        if is_important(11) {
+            if let Some(term) = self.solver_state.get_term_from_lit_safe(literal) {
+                debug_println!(
+                    11,
+                    0,
+                    "PROPAGATOR: Adding external clause literal (might be negated) {} which is term {}",
+                    literal,
+                    term
+                );
+            } else {
+                debug_println!(11, 0, "END OF CLAUSE");
+                assert!(literal == 0);
+            }
         }
+        debug_assert!(
+            literal == 0 || self.solver_state.get_term_from_lit_safe(literal).is_some(),
+            "nonzero external clause literal without a term"
+        );
         debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal
     }
