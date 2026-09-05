@@ -57,6 +57,9 @@ type Eg = EGraph31<MachineLit, true, true>;
 type SortId = semi_persistent_egraph::id::SortId;
 type OpId = semi_persistent_egraph::id::OpId;
 
+/// Sentinel for `node_to_driver`: this engine node has no driver id yet.
+const NO_DRIVER: u32 = u32::MAX;
+
 /// Counters surfaced to the driver (`propagator.sync_external_stats` reads
 /// `stats.merges`).
 #[derive(Default)]
@@ -94,7 +97,13 @@ pub struct SemperEgraph {
     /// canonical driver id per class (the root node's first registrant), so
     /// the driver's `find(id) == id` is-representative idiom stays
     /// meaningful. Rebuilt after a restore, since replay can re-mint nodes.
-    node_to_driver: FxHashMap<ENodeId, u32>,
+    ///
+    /// A dense `Vec` indexed by the engine node id, not a hash map: node ids
+    /// are dense and `find` is on the hot path (one lookup per `find`), so an
+    /// array index beats a hash probe. `NO_DRIVER` marks an index with no
+    /// driver id yet. Profiling showed the hashed version's probe among the
+    /// top non-CaDiCaL costs on backtrack-heavy runs.
+    node_to_driver: Vec<u32>,
     reg_log: Vec<RegEvent>,
     opaque_count: usize,
     /// Asserted equalities; index i is the `Assumption` payload of merge i.
@@ -204,7 +213,7 @@ impl SemperEgraph {
             term_sort,
             ops: FxHashMap::default(),
             terms: Vec::new(),
-            node_to_driver: FxHashMap::default(),
+            node_to_driver: Vec::new(),
             reg_log: Vec::new(),
             opaque_count: 0,
             asserts: Vec::new(),
@@ -295,8 +304,20 @@ impl SemperEgraph {
         let node = self.intern(self.reg_log.len() - 1);
         let driver_id = u32::try_from(self.terms.len()).expect("driver term table exceeds u32");
         self.terms.push(node);
-        self.node_to_driver.entry(node).or_insert(driver_id);
+        self.set_node_driver(node, driver_id);
         driver_id
+    }
+
+    /// Record the first driver id for an engine node (first-registrant wins),
+    /// growing the dense map as needed.
+    fn set_node_driver(&mut self, node: ENodeId, driver_id: u32) {
+        let idx = node.to_usize();
+        if idx >= self.node_to_driver.len() {
+            self.node_to_driver.resize(idx + 1, NO_DRIVER);
+        }
+        if self.node_to_driver[idx] == NO_DRIVER {
+            self.node_to_driver[idx] = driver_id;
+        }
     }
 
     /// Take a token for the current level if it has none yet. Every mutating
@@ -1045,10 +1066,9 @@ impl EgraphTrait for SemperEgraph {
         let root = self.eg.find_const(self.node(term));
         // Every engine node was produced by a registration, so the root
         // always has a driver id; its first registrant is the class name.
-        *self
-            .node_to_driver
-            .get(&root)
-            .expect("every node comes from a registration")
+        let d = self.node_to_driver[root.to_usize()];
+        debug_assert_ne!(d, NO_DRIVER, "every node comes from a registration");
+        d
     }
 
     fn are_equal(&self, t1: u32, t2: u32) -> bool {
@@ -1109,10 +1129,14 @@ impl EgraphTrait for SemperEgraph {
         // Replay can re-mint node ids, so the reverse map is rebuilt from
         // the repaired table (first registrant wins, as at registration).
         if mark.reg_len < self.reg_log.len() {
-            self.node_to_driver.clear();
-            for (i, &node) in self.terms.iter().enumerate() {
-                self.node_to_driver.entry(node).or_insert(i as u32);
+            for e in self.node_to_driver.iter_mut() {
+                *e = NO_DRIVER;
             }
+            let terms = std::mem::take(&mut self.terms);
+            for (i, &node) in terms.iter().enumerate() {
+                self.set_node_driver(node, i as u32);
+            }
+            self.terms = terms;
         }
     }
 
