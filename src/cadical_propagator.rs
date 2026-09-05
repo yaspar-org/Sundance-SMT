@@ -15,6 +15,7 @@ use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
 use crate::solver_state::{SolverState, process_assignment};
+use crate::solver_types::Polarity;
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
@@ -31,6 +32,24 @@ pub(crate) enum EagerQiMode {
 enum EagerQiAction {
     Bounded(usize),
     FullRound,
+}
+
+fn select_positive_existential_decision<'a>(
+    quantifier_literals: impl Iterator<Item = (&'a Polarity, i32)>,
+    assignments: &[i32],
+) -> i32 {
+    for (polarity, literal) in quantifier_literals {
+        if *polarity != Polarity::Existential {
+            continue;
+        }
+
+        let idx = literal.unsigned_abs() as usize;
+        if assignments.get(idx).copied().unwrap_or(0) == 0 {
+            return literal;
+        }
+    }
+
+    0
 }
 
 impl EagerQiMode {
@@ -850,6 +869,24 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn cb_decide(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
 
+        // Prefer the semantic-positive literal for an unassigned existential.
+        // This steers the quantifier toward skolemization instead of waiting
+        // for CaDiCaL's default phase choice.
+        let existential_decision = select_positive_existential_decision(
+            self.solver_state
+                .quantifiers
+                .iter()
+                .filter_map(|quantifier| {
+                    self.solver_state
+                        .get_lit_from_u64_safe(quantifier.id)
+                        .map(|literal| (&quantifier.polarity, literal))
+                }),
+            &self.assignments,
+        );
+        if existential_decision != 0 {
+            return existential_decision;
+        }
+
         // For recursive datatypes, prefer base-case constructors to avoid infinite expansion
         if self.solver_state.datatype_info.has_recursive_datatype() {
             for &lit in &self.solver_state.base_case_tester_lits {
@@ -945,5 +982,43 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_positive_existential_decision;
+    use crate::solver_types::Polarity;
+
+    #[test]
+    fn positive_existential_decision_skips_universal_quantifiers() {
+        let universal = Polarity::Universal;
+        let existential = Polarity::Existential;
+        let assignments = vec![0; 4];
+        let quantifiers = [(&universal, 1), (&existential, 2), (&existential, 3)];
+
+        assert_eq!(
+            select_positive_existential_decision(quantifiers.into_iter(), &assignments),
+            2
+        );
+    }
+
+    #[test]
+    fn positive_existential_decision_skips_assigned_quantifiers() {
+        let existential = Polarity::Existential;
+        let mut assignments = vec![0; 4];
+        assignments[1] = 2;
+        let quantifiers = [(&existential, 1), (&existential, 3)];
+
+        assert_eq!(
+            select_positive_existential_decision(quantifiers.into_iter(), &assignments),
+            3
+        );
+
+        assignments[3] = -2;
+        assert_eq!(
+            select_positive_existential_decision(quantifiers.into_iter(), &assignments),
+            0
+        );
     }
 }
