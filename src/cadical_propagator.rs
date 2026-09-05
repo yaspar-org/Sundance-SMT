@@ -35,11 +35,11 @@ enum EagerQiAction {
 }
 
 fn select_positive_existential_decision<'a>(
-    quantifier_literals: impl Iterator<Item = (&'a Polarity, i32)>,
+    quantifier_literals: impl Iterator<Item = (&'a Polarity, bool, i32)>,
     assignments: &[i32],
 ) -> i32 {
-    for (polarity, literal) in quantifier_literals {
-        if *polarity != Polarity::Existential {
+    for (polarity, skolemized, literal) in quantifier_literals {
+        if *polarity != Polarity::Existential || skolemized {
             continue;
         }
 
@@ -869,9 +869,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn cb_decide(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
 
-        // Prefer the semantic-positive literal for an unassigned existential.
-        // This steers the quantifier toward skolemization instead of waiting
-        // for CaDiCaL's default phase choice.
+        // Prefer the semantic-positive literal for an unassigned,
+        // unskolemized existential. Once skolemized, let CaDiCaL choose its
+        // phase normally because another positive decision adds no new axiom.
         let existential_decision = select_positive_existential_decision(
             self.solver_state
                 .quantifiers
@@ -879,7 +879,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 .filter_map(|quantifier| {
                     self.solver_state
                         .get_lit_from_u64_safe(quantifier.id)
-                        .map(|literal| (&quantifier.polarity, literal))
+                        .map(|literal| (&quantifier.polarity, quantifier.skolemized, literal))
                 }),
             &self.assignments,
         );
@@ -995,7 +995,11 @@ mod tests {
         let universal = Polarity::Universal;
         let existential = Polarity::Existential;
         let assignments = vec![0; 4];
-        let quantifiers = [(&universal, 1), (&existential, 2), (&existential, 3)];
+        let quantifiers = [
+            (&universal, false, 1),
+            (&existential, false, 2),
+            (&existential, false, 3),
+        ];
 
         assert_eq!(
             select_positive_existential_decision(quantifiers.into_iter(), &assignments),
@@ -1008,7 +1012,7 @@ mod tests {
         let existential = Polarity::Existential;
         let mut assignments = vec![0; 4];
         assignments[1] = 2;
-        let quantifiers = [(&existential, 1), (&existential, 3)];
+        let quantifiers = [(&existential, false, 1), (&existential, false, 3)];
 
         assert_eq!(
             select_positive_existential_decision(quantifiers.into_iter(), &assignments),
@@ -1019,6 +1023,18 @@ mod tests {
         assert_eq!(
             select_positive_existential_decision(quantifiers.into_iter(), &assignments),
             0
+        );
+    }
+
+    #[test]
+    fn positive_existential_decision_skips_skolemized_quantifiers() {
+        let existential = Polarity::Existential;
+        let assignments = vec![0; 4];
+        let quantifiers = [(&existential, true, 1), (&existential, false, 3)];
+
+        assert_eq!(
+            select_positive_existential_decision(quantifiers.into_iter(), &assignments),
+            3
         );
     }
 }
