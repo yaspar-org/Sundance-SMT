@@ -888,6 +888,12 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.solver_state
                 .quantifiers
                 .iter()
+                .filter(|quantifier| {
+                    self.solver_state
+                        .cnf_cache
+                        .positive_existential_decision_candidates
+                        .contains(&quantifier.id)
+                })
                 .filter_map(|quantifier| {
                     self.solver_state
                         .get_lit_from_u64_safe(quantifier.id)

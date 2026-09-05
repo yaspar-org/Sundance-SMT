@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use sat_interface::{Clause, Formula};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::{
     AConstant, ATerm, Context, FetchSort, ObjectAllocatorExt, Term, TermAllocator,
 };
@@ -25,6 +25,7 @@ pub struct CNFCache {
     pub var_map_reverse: HashMap<i32, u64>,
     pub next_var: i32,
     pub nnf_cache: HashMap<u64, [Option<Term>; 2]>,
+    pub positive_existential_decision_candidates: HashSet<u64>,
 }
 
 impl Default for CNFCache {
@@ -40,7 +41,16 @@ impl CNFCache {
             var_map_reverse: HashMap::new(),
             next_var: 1,
             nnf_cache: HashMap::new(),
+            positive_existential_decision_candidates: HashSet::new(),
         }
+    }
+}
+
+fn direct_existential_uid(term: &Term) -> Option<u64> {
+    match term.repr() {
+        ATerm::Exists(..) => Some(term.uid()),
+        ATerm::Annotated(inner, _) => direct_existential_uid(inner),
+        _ => None,
     }
 }
 
@@ -114,6 +124,13 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                     }
                 } else {
                     // If so, then we convert a = b to a <=> b
+                    for operand in [a, b] {
+                        if let Some(uid) = direct_existential_uid(operand) {
+                            env.cache
+                                .positive_existential_decision_candidates
+                                .insert(uid);
+                        }
+                    }
                     let not_a = env.context.not(a.clone());
                     let not_b = env.context.not(b.clone());
                     // let a_i_b = env.context.flat_or(vec![not_a, b.clone()]);
@@ -441,6 +458,11 @@ mod tests {
         let positive_literal = env.cache.var_map[&quantifier.uid()];
         let negative_literal = env.cache.var_map[&negated_quantifier.uid()];
         assert_eq!(negative_literal, -positive_literal);
+        assert!(
+            env.cache
+                .positive_existential_decision_candidates
+                .contains(&quantifier.uid())
+        );
     }
 
     #[test]
@@ -490,6 +512,30 @@ mod tests {
             (declare-fun q (U) Bool)
             (assert (= p (exists ((x U)) (q x))))
             ",
+        );
+    }
+
+    #[test]
+    fn standalone_existential_is_not_a_positive_decision_candidate() {
+        let (mut context, existential) = parse_assertion(
+            "
+            (declare-sort U 0)
+            (declare-fun q (U) Bool)
+            (assert (exists ((x U)) (q x)))
+            ",
+        );
+        let mut cache = CNFCache::new();
+        let mut env = CNFEnv {
+            context: &mut context,
+            cache: &mut cache,
+        };
+
+        let _ = existential.cnf_tseitin(&mut env);
+
+        assert!(
+            env.cache
+                .positive_existential_decision_candidates
+                .is_empty()
         );
     }
 }
