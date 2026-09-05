@@ -56,10 +56,19 @@ pub fn cdcl_decision_procedure(
 
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
     // todo: for right now always have hid_quantifiers to be true, need to change this
+    let proof_needed = proof_file.is_some() || partial_proof_file.is_some();
     let proof_tracer = Rc::new(RefCell::new(SMTProofTracer::new(sorts, symbol_table)));
 
-    // Connect the proof tracer (must be done in CONFIGURING state)
-    solver.connect_proof_tracer1(&mut *proof_tracer.borrow_mut(), true); // true for antecedents
+    // The proof tracer records an eDRAT step per clause and a per-literal term
+    // map. When no proof is requested, disable that recording and do not
+    // connect the tracer to CaDiCaL — the callback side and the direct
+    // recording calls then both no-op, which removes the tracer's per-step
+    // cost from the solve-only path.
+    proof_tracer.borrow_mut().disabled = !proof_needed;
+    if proof_needed {
+        // Connect the proof tracer (must be done in CONFIGURING state)
+        solver.connect_proof_tracer1(&mut *proof_tracer.borrow_mut(), true); // true for antecedents
+    }
 
     let mut terminator = if timeout > 0 {
         Some(DeadlineTerminator {
@@ -147,11 +156,19 @@ pub fn cdcl_decision_procedure(
 
     let result = solve(&mut solver);
 
-    // Disconnect the proof tracer before dropping the propagator
-    solver.disconnect_proof_tracer1();
+    // Disconnect the proof tracer before dropping the propagator (only if it
+    // was connected).
+    if proof_needed {
+        solver.disconnect_proof_tracer1();
+    }
 
-    // Generate proof after all borrows are released
-    let edrat_proof = proof_tracer.borrow_mut().generate_edrat();
+    // Generate proof after all borrows are released (only when requested; the
+    // tracer holds no steps otherwise).
+    let edrat_proof = if proof_needed {
+        proof_tracer.borrow_mut().generate_edrat()
+    } else {
+        String::new()
+    };
 
     // Write proof to file if requested
     if let Some(p) = proof_file

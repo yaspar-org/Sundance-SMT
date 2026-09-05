@@ -24,6 +24,13 @@ pub struct SMTProofTracer {
     registered_clause_callbacks: HashMap<Vec<i32>, usize>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
+    /// When true, all proof-recording methods are no-ops. Set when no proof
+    /// output is requested (no --proof / --partial-proof), so the eDRAT
+    /// bookkeeping — a growing step vector and two hash maps touched on every
+    /// clause and literal — costs nothing on the common solve-only path. The
+    /// tracer is also not connected to CaDiCaL in that case (see cdcl.rs), so
+    /// the callback side is skipped too.
+    pub disabled: bool,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -233,12 +240,16 @@ impl SMTProofTracer {
             instantiations_for_smt2: Vec::new(),
             registered_clause_callbacks: HashMap::new(),
             deleted_clauses: 0,
+            disabled: false,
         }
     }
 
     ////////////////////////////////////////////////////////////////////////////
 
     pub fn push_step(&mut self, clause: &[i32], typ: ProofStepType) {
+        if self.disabled {
+            return;
+        }
         if !is_tautology(clause) {
             self.proof_steps.push(ProofStep {
                 clause: clause.to_vec(),
@@ -270,6 +281,9 @@ impl SMTProofTracer {
     }
 
     pub fn register_clause_for_cadical_callback(&mut self, clause: &[i32]) {
+        if self.disabled {
+            return;
+        }
         let clause = normalize_clause(clause);
         *self.registered_clause_callbacks.entry(clause).or_default() += 1;
     }
@@ -308,6 +322,9 @@ impl SMTProofTracer {
     /// Basically, each term registered this way gets an `(edrat-literal ...)`
     /// line in the proof, and may be referenced in later DIMACS-style clauses.
     pub fn register_term(&mut self, literal: i32, term: &Term, polarity: bool) {
+        if self.disabled {
+            return;
+        }
         if self.get_lit_info(literal).is_none() {
             self.terms_list
                 .insert(literal, (term.uid(), term.clone(), polarity));
