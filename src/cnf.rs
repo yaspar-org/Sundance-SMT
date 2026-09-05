@@ -1,8 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::utils::FastDeterministicHashMap as HashMap;
 use sat_interface::{Clause, Formula};
-use std::collections::HashMap;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
     AConstant, ATerm, Context, FetchSort, IdentifierKind, ObjectAllocatorExt, Term, TermAllocator,
@@ -37,10 +37,10 @@ impl Default for CNFCache {
 impl CNFCache {
     pub(crate) fn new() -> Self {
         Self {
-            var_map: HashMap::new(),
-            var_map_reverse: HashMap::new(),
+            var_map: HashMap::default(),
+            var_map_reverse: HashMap::default(),
             next_var: 1,
-            nnf_cache: HashMap::new(),
+            nnf_cache: HashMap::default(),
         }
     }
 }

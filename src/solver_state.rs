@@ -110,8 +110,17 @@ pub struct SolverState {
     /// Maps decision level -> hash at which that level was entered.
     pub hash_at_level: Vec<u32>,
 
-    /// Bidirectional mapping between solver term UIDs and egraph term IDs
-    pub id_map: bimap::BiMap<u64, u32>,
+    /// Bidirectional mapping between solver term UIDs and egraph term IDs.
+    /// FxHash, not bimap's default SipHash: this is probed on every
+    /// to_egraph_id / to_solver_uid (i.e. every make_eq and find), and the
+    /// SipHash version was among the top non-CaDiCaL costs on backtrack-heavy
+    /// runs. FxHash is deterministic, so run-to-run reproducibility is kept.
+    pub id_map: bimap::BiHashMap<
+        u64,
+        u32,
+        std::hash::BuildHasherDefault<rustc_hash::FxHasher>,
+        std::hash::BuildHasherDefault<rustc_hash::FxHasher>,
+    >,
 
     /// Map from term UID to yaspar Term objects (solver-level, not in egraph)
     pub terms_list: Vec<TermOption>,
@@ -187,7 +196,7 @@ impl SolverState {
             false_uid: 0,
             current_hash: 1,
             hash_at_level: vec![1, 1],
-            id_map: bimap::BiMap::new(),
+            id_map: bimap::BiHashMap::default(),
             terms_list: vec![TermOption::None],
             assertions: vec![],
             quantifiers: vec![],
