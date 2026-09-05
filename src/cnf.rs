@@ -403,7 +403,45 @@ pub fn push_literal_if_not_tautology(clause: &mut Vec<i32>, literal: i32) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yaspar_ir::ast::Context;
+    use yaspar_ir::ast::{ACommand, Context, Typecheck};
+    use yaspar_ir::untyped::UntypedAst;
+
+    fn parse_assertion(script: &str) -> (Context, Term) {
+        let mut context = Context::new();
+        let commands = UntypedAst
+            .parse_script_str(script)
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+        let assertion = commands
+            .iter()
+            .find_map(|command| match command.repr() {
+                ACommand::Assert(term) => Some(term.clone()),
+                _ => None,
+            })
+            .unwrap();
+        (context, assertion)
+    }
+
+    fn assert_boolean_equality_reuses_existential_literal(script: &str) {
+        let (mut context, equality) = parse_assertion(script);
+        let quantifier = match equality.repr() {
+            ATerm::Eq(_, quantifier) => quantifier.clone(),
+            other => panic!("expected equality, got {other:?}"),
+        };
+        let mut cache = CNFCache::new();
+        let mut env = CNFEnv {
+            context: &mut context,
+            cache: &mut cache,
+        };
+
+        let _ = equality.cnf_tseitin(&mut env);
+
+        let negated_quantifier = env.context.not(quantifier.clone());
+        let positive_literal = env.cache.var_map[&quantifier.uid()];
+        let negative_literal = env.cache.var_map[&negated_quantifier.uid()];
+        assert_eq!(negative_literal, -positive_literal);
+    }
 
     #[test]
     fn test_sundance_nnf_false() {
@@ -441,5 +479,17 @@ mod tests {
         assert!(env.cache.var_map.contains_key(&a.uid()));
         assert!(env.cache.var_map.contains_key(&b.uid()));
         assert!(env.cache.var_map.contains_key(&and_term.uid()));
+    }
+
+    #[test]
+    fn boolean_equality_reuses_existential_literal_across_polarities() {
+        assert_boolean_equality_reuses_existential_literal(
+            "
+            (declare-sort U 0)
+            (declare-const p Bool)
+            (declare-fun q (U) Bool)
+            (assert (= p (exists ((x U)) (q x))))
+            ",
+        );
     }
 }
