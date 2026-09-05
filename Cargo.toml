@@ -33,7 +33,7 @@ cadical-sys = { git = "https://github.com/amarshah1/cadical-sys.git", rev = "2f2
 # Pinned to the semi-persistent repo (branch satcore-layer0) so this branch
 # builds from a single clone with no sibling checkout. For local
 # co-development, override with `[patch]` or a path dependency.
-semi-persistent-egraph = { git = "https://github.com/yaspar-org/semi-persistent.git", rev = "ede7c4402eb7a2a782c577febe771349ff1b4d3a", optional = true }
+semi-persistent-egraph = { git = "https://github.com/yaspar-org/semi-persistent.git", rev = "ec1eb8ae1387ce42986ecb87c3ce32f78264f9c6", optional = true }
 
 array2d = "^0.3"
 clap = { version = "4.5.40", features = ["derive"] }
