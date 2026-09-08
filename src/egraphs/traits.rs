@@ -55,6 +55,16 @@ impl<T> EgraphResult<T> {
 }
 
 pub trait EgraphTrait {
+    /// Whether any conflict this engine reported may carry an INCOMPLETE
+    /// antecedent set (the true=false-collision fallback, whose explanation is
+    /// documented as potentially omitting the argument equalities behind a
+    /// hash-cons collision). A refutation built on such a clause is not
+    /// trustworthy, so the driver downgrades `unsat` to `unknown` when this is
+    /// set. Sound by construction: it only ever widens `unsat` to `unknown`.
+    fn refutation_tainted(&self) -> bool {
+        false
+    }
+
     /// Operator key for congruence: two terms are congruent iff they have
     /// the same Op and pairwise-equal children.
     type Op: Clone + Eq + Hash;

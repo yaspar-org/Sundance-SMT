@@ -200,6 +200,16 @@ pub fn cdcl_decision_procedure(
     // Harvest stats from solver_state, egraph, and proof tracer
     propagator.sync_external_stats();
     propagator.stats.finish();
+    // Soundness taint: a refutation that leaned on the e-graph's true=false
+    // collision fallback (whose antecedent set can be incomplete) is not a
+    // trustworthy unsat; report unknown instead. Only ever widens the answer.
+    let result = if result == Status::UNSATISFIABLE
+        && propagator.solver_state.egraph.refutation_tainted()
+    {
+        Status::UNKNOWN
+    } else {
+        result
+    };
     (result, propagator.stats)
 }
 

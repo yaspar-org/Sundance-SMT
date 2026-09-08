@@ -85,6 +85,9 @@ struct LevelMark {
 
 pub struct SemperEgraph {
     eg: Eg,
+    /// Set when the true=false-collision fallback produced a conflict (see
+    /// `EgraphTrait::refutation_tainted`).
+    tf_taint: bool,
     term_sort: SortId,
     /// Op interning, keyed by (op, arity): the same symbol can only recur at
     /// one arity per key, and registry names are mangled with the arity so
@@ -210,6 +213,7 @@ impl SemperEgraph {
         let term_sort = eg.sorts_mut().intern("SunTerm");
         SemperEgraph {
             eg,
+            tf_taint: false,
             term_sort,
             ops: FxHashMap::default(),
             terms: Vec::new(),
@@ -364,69 +368,36 @@ impl SemperEgraph {
 
     /// Explain a true=false collision completely.
     ///
-    /// The base forest path names the atoms merged to true and to false, but
-    /// when those atoms are two syntactically different equality terms that
-    /// hash-consed to one node, the path has no congruence edge to expand and
-    /// so omits why they are the same node: their arguments are equal. This
-    /// recovers those argument equalities. For each true-side atom and
-    /// false-side atom that resolve to the same engine node, it explains their
-    /// arguments pairwise (matched by class, so the commutative Eq orientation
-    /// is handled), appending those antecedents. The argument equalities
-    /// themselves go through ordinary congruence with real forest edges, so
-    /// `explain_pairs` on them is complete.
-    fn explain_true_false(&self, t: u32, f: u32) -> Vec<(u32, u32)> {
+    /// The base forest path's assumption leaves are facts about specific
+    /// terms, but a term that interned onto a node created by a
+    /// syntactically different term is only equal to that node's other
+    /// residents under earlier merges the forest never recorded as edges.
+    /// `align_to_creator` recovers those implicit equalities for every term
+    /// the antecedent set cites, transitively.
+    fn explain_true_false(&mut self, t: u32, f: u32) -> Vec<(u32, u32)> {
         let mut out = self.explain_pairs(t, f);
         let tf = [t, f];
-        // The atoms merged directly to true / false, read off the base leaves.
-        let side = |constant: u32| -> Vec<u32> {
-            out.iter()
-                .filter_map(|&(a, b)| {
-                    if b == constant && a != constant {
-                        Some(a)
-                    } else if a == constant && b != constant {
-                        Some(b)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        let true_atoms = side(t);
-        let false_atoms = side(f);
-        let mut extra: Vec<(u32, u32)> = Vec::new();
-        for &x in &true_atoms {
-            for &y in &false_atoms {
-                if x == y || self.node(x) != self.node(y) {
-                    continue;
-                }
-                // x and y are congruent equality atoms sharing one node. Match
-                // their arguments by class and explain each matched pair.
-                let cx = self.reg_children(x).to_vec();
-                let cy = self.reg_children(y).to_vec();
-                if cx.len() != cy.len() {
-                    continue;
-                }
-                for (i, &a) in cx.iter().enumerate() {
-                    // Prefer the positional partner; fall back to any
-                    // class-matching one (commutative orientation).
-                    let partner = if self.eg.find_const(self.node(a))
-                        == self.eg.find_const(self.node(cy[i]))
-                    {
-                        Some(cy[i])
-                    } else {
-                        cy.iter().copied().find(|&b| {
-                            self.eg.find_const(self.node(a)) == self.eg.find_const(self.node(b))
-                        })
-                    };
-                    if let Some(b) = partner
-                        && a != b
-                    {
-                        extra.extend(self.explain_pairs(a, b));
-                    }
+        // Every assumption pair is a fact about its TERMS, but the forest path
+        // it justifies runs over NODES. A term that interned onto a node some
+        // OTHER term created (hash-cons keys on canonical children, so merely
+        // class-equal children suffice) carries an implicit equality to that
+        // creator term whose justification the forest never recorded. Align
+        // every cited term to its node's first registrant, recursively; the
+        // first registrant's syntax matches the node, so each chain grounds
+        // out in assumptions. The worklist also aligns the terms cited by the
+        // pairs the alignment itself appends.
+        let mut visited: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        let mut aligned: rustc_hash::FxHashSet<u32> = rustc_hash::FxHashSet::default();
+        let mut i = 0;
+        while i < out.len() {
+            let (a, b) = out[i];
+            i += 1;
+            for x in [a, b] {
+                if aligned.insert(x) {
+                    self.align_to_creator(x, &mut out, &mut visited);
                 }
             }
         }
-        out.extend(extra);
         // Drop any incidental references to the true/false constants and dedup.
         out.retain(|&(a, b)| !tf.contains(&a) || !tf.contains(&b));
         let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
@@ -452,6 +423,95 @@ impl SemperEgraph {
     /// stays as a fallback for collisions no specific disequality covers
     /// (e.g. non-equality Boolean terms). Per-entry cost is two parent reads
     /// via the cached roots.
+    /// The first registrant of an engine node: the term whose registration
+    /// created it, so the one whose syntax the node's stored children match.
+    fn node_driver(&self, node: ENodeId) -> Option<u32> {
+        let d = *self.node_to_driver.get(node.to_usize())?;
+        (d != NO_DRIVER).then_some(d)
+    }
+
+    /// Explain the implicit equality between term `x` and the first
+    /// registrant of `node(x)`: nothing when `x` created the node itself;
+    /// otherwise `x` interned onto it because its children were class-equal
+    /// to the creator's at intern time, an equality judgment the forest never
+    /// recorded as an edge. Matches the two terms' registered children by
+    /// class, explains each matched pair, and aligns the matched children to
+    /// THEIR creators, because the same conflation can occur at any depth.
+    /// Terminates: the creator registered first, so ids strictly decrease
+    /// along every chain, and `visited` deduplicates. A child it cannot match
+    /// taints the run (see `EgraphTrait::refutation_tainted`).
+    fn align_to_creator(
+        &mut self,
+        x: u32,
+        extra: &mut Vec<(u32, u32)>,
+        visited: &mut rustc_hash::FxHashSet<(u32, u32)>,
+    ) {
+        let r = self.node_driver(self.node(x));
+        let Some(r) = r else {
+            // A cited term's node has no recorded first registrant: cannot
+            // recover the conflation. Taint.
+            self.tf_taint = true;
+            return;
+        };
+        if r == x {
+            return;
+        }
+        self.expand_syntactic_pair(x, r, extra, visited);
+    }
+
+    /// Recover the argument equalities behind two syntactically different
+    /// terms that HASH-CONSED to one node (so the forest has no edge between
+    /// them and a plain path walk omits why they are equal). See
+    /// `align_to_creator` for the recursion and termination argument.
+    fn expand_syntactic_pair(
+        &mut self,
+        x: u32,
+        y: u32,
+        extra: &mut Vec<(u32, u32)>,
+        visited: &mut rustc_hash::FxHashSet<(u32, u32)>,
+    ) {
+        if !visited.insert((x.min(y), x.max(y))) {
+            return;
+        }
+        let cx = self.reg_children(x).to_vec();
+        let cy = self.reg_children(y).to_vec();
+        if cx.len() != cy.len() {
+            // Cannot expand: the antecedent set may be missing the equalities
+            // behind the collision. Taint the run so an unsat that leans on
+            // this clause degrades to unknown.
+            self.tf_taint = true;
+            return;
+        }
+        for (i, &a) in cx.iter().enumerate() {
+            // Prefer the positional partner; fall back to any class-matching
+            // one (commutative orientation).
+            let partner = if self.eg.find_const(self.node(a))
+                == self.eg.find_const(self.node(cy[i]))
+            {
+                Some(cy[i])
+            } else {
+                cy.iter().copied().find(|&b| {
+                    self.eg.find_const(self.node(a)) == self.eg.find_const(self.node(b))
+                })
+            };
+            match partner {
+                Some(b) => {
+                    if a != b {
+                        extra.extend(self.explain_pairs(a, b));
+                    }
+                    // The matched children are themselves cited terms now:
+                    // their own intern-time conflations need explaining too.
+                    self.align_to_creator(a, extra, visited);
+                    self.align_to_creator(b, extra, visited);
+                }
+                None => {
+                    // No class-matching partner: cannot fully recover. Taint.
+                    self.tf_taint = true;
+                }
+            }
+        }
+    }
+
     fn violated_diseq(&mut self) -> Option<Conflict<u32>> {
         for i in 0..self.diseqs.len() {
             if self.reported_diseqs.contains(&i) {
@@ -483,8 +543,9 @@ impl SemperEgraph {
             && self.eg.find_const(self.node(t)) == self.eg.find_const(self.node(f))
         {
             self.reported_tf = true;
+            let eqs = self.explain_true_false(t, f);
             return Some(Conflict {
-                equalities: self.explain_true_false(t, f),
+                equalities: eqs,
                 disequality: (t, f),
                 diseq_lit: None,
             });
@@ -921,6 +982,10 @@ impl SemperEgraph {
 }
 
 impl EgraphTrait for SemperEgraph {
+    fn refutation_tainted(&self) -> bool {
+        self.tf_taint
+    }
+
     type Op = Op;
     type TermId = u32;
 
