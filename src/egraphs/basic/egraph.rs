@@ -258,6 +258,13 @@ impl Default for Egraph {
     }
 }
 
+// Trail-boundary profile print, mirroring the semper backend's teardown print.
+impl Drop for Egraph {
+    fn drop(&mut self) {
+        crate::egraphs::trail_prof::report("basic");
+    }
+}
+
 impl Egraph {
     pub fn new() -> Self {
         Egraph {
@@ -1727,6 +1734,7 @@ impl EgraphTrait for Egraph {
     }
 
     fn notify_new_decision_level(&mut self) {
+        let prof_t = crate::egraphs::trail_prof::enabled().then(std::time::Instant::now);
         assert!(
             self.arithmetic_merge_queue.is_empty(),
             "arithmetic queue must be drained before advancing decision level"
@@ -1737,6 +1745,9 @@ impl EgraphTrait for Egraph {
                 .resize(self.predecessor_level.len() * 2, 0);
         }
         self.predecessor_level[self.decision_level] = self.predecessor_hash;
+        if let Some(t) = prof_t {
+            crate::egraphs::trail_prof::record_level(t.elapsed().as_nanos() as u64);
+        }
     }
 
     fn assert_equal(&mut self, t1: Self::TermId, t2: Self::TermId) -> EgraphResult<Self::TermId> {
@@ -1773,7 +1784,11 @@ impl EgraphTrait for Egraph {
     }
 
     fn backtrack_to(&mut self, level: usize) {
-        self.backtrack_to(level)
+        let prof_t = crate::egraphs::trail_prof::enabled().then(std::time::Instant::now);
+        self.backtrack_to(level);
+        if let Some(t) = prof_t {
+            crate::egraphs::trail_prof::record_backtrack(t.elapsed().as_nanos() as u64);
+        }
     }
 
     fn make_decision(&self, _assignments: &[i32]) -> i32 {

@@ -212,6 +212,7 @@ impl Drop for SemperEgraph {
                  restore_ns={restore_ns} restore_calls={restore_calls}"
             );
         }
+        crate::egraphs::trail_prof::report("semper");
     }
 }
 
@@ -1074,9 +1075,13 @@ impl EgraphTrait for SemperEgraph {
     }
 
     fn notify_new_decision_level(&mut self) {
+        let prof_t = crate::egraphs::trail_prof::enabled().then(std::time::Instant::now);
         // Lazy: the token is taken by the first mutation at this level, if
         // any (see `ensure_scope`).
         self.level += 1;
+        if let Some(t) = prof_t {
+            crate::egraphs::trail_prof::record_level(t.elapsed().as_nanos() as u64);
+        }
     }
 
     fn assert_equal(&mut self, t1: u32, t2: u32) -> EgraphResult<u32> {
@@ -1173,6 +1178,7 @@ impl EgraphTrait for SemperEgraph {
     }
 
     fn backtrack_to(&mut self, level: usize) {
+        let prof_t = crate::egraphs::trail_prof::enabled().then(std::time::Instant::now);
         self.level = level;
         self.reported_diseqs.clear();
         self.reported_tf = false;
@@ -1182,6 +1188,9 @@ impl EgraphTrait for SemperEgraph {
         // happened there: nothing to undo.
         let pos = self.marks.partition_point(|&(l, _)| l <= level);
         if pos == self.marks.len() {
+            if let Some(t) = prof_t {
+                crate::egraphs::trail_prof::record_backtrack(t.elapsed().as_nanos() as u64);
+            }
             return;
         }
         let (_, mark) = self
@@ -1219,6 +1228,9 @@ impl EgraphTrait for SemperEgraph {
                 self.set_node_driver(node, i as u32);
             }
             self.terms = terms;
+        }
+        if let Some(t) = prof_t {
+            crate::egraphs::trail_prof::record_backtrack(t.elapsed().as_nanos() as u64);
         }
     }
 
