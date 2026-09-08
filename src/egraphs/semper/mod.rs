@@ -198,6 +198,23 @@ pub struct SemperEgraph {
     pub stats: SemperStats,
 }
 
+// Profile surfacing for the H4a mark/restore fraction measurement: with
+// SEMPER_PROF set, the engine accumulates mark/restore wall (see
+// take_markrestore_profile) and this prints the totals when the solve tears
+// the e-graph down, so a runner can divide them by the process wall.
+impl Drop for SemperEgraph {
+    fn drop(&mut self) {
+        if std::env::var_os("SEMPER_PROF").is_some() {
+            let (mark_ns, mark_calls, restore_ns, restore_calls) =
+                semi_persistent_egraph::take_markrestore_profile();
+            eprintln!(
+                "SEMPER_PROF mark_ns={mark_ns} mark_calls={mark_calls} \
+                 restore_ns={restore_ns} restore_calls={restore_calls}"
+            );
+        }
+    }
+}
+
 impl Default for SemperEgraph {
     fn default() -> Self {
         Self::new()
