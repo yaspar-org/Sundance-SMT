@@ -74,6 +74,7 @@
     "edge_cases_quantifiers/checkmodel-wants-emptydisequalities": "unsat",
     "edge_cases_quantifiers/checkmodel-wants-emptydisequalities.smt2": "unsat",
     "edge_cases_quantifiers/relevancyfiltering.smt2": "unsat",
+    "edge_cases_quantifiers/bool_eq_existential.smt2": "unsat",
     "edge_cases_quantifiers/add_quant_instantiation_to_root_predlist.smt2": "unsat",
     "edge_cases_quantifiers/minimize_membership.smt2": "unsat",
     "edge_cases_quantifiers/membership_reduced_reducedagain.smt": "unsat",

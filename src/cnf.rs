@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use sat_interface::{Clause, Formula};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use yaspar_ir::ast::{
     AConstant, ATerm, Context, FetchSort, ObjectAllocatorExt, Term, TermAllocator,
 };
@@ -25,7 +25,10 @@ pub struct CNFCache {
     pub var_map_reverse: HashMap<i32, u64>,
     pub next_var: i32,
     pub nnf_cache: HashMap<u64, [Option<Term>; 2]>,
-    pub positive_existential_decision_candidates: HashSet<u64>,
+    /// UIDs of existential quantifiers that appear as a direct operand of a
+    /// Boolean equality (`(= a b)` where `a` / `b` : Bool). Used by the SAT
+    /// decision heuristic to bias these existentials toward `true`.
+    pub bool_equality_existential_candidates: Vec<u64>,
 }
 
 impl Default for CNFCache {
@@ -41,7 +44,7 @@ impl CNFCache {
             var_map_reverse: HashMap::new(),
             next_var: 1,
             nnf_cache: HashMap::new(),
-            positive_existential_decision_candidates: HashSet::new(),
+            bool_equality_existential_candidates: Vec::new(),
         }
     }
 }
@@ -126,9 +129,10 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                     // If so, then we convert a = b to a <=> b
                     for operand in [a, b] {
                         if let Some(uid) = direct_existential_uid(operand) {
-                            env.cache
-                                .positive_existential_decision_candidates
-                                .insert(uid);
+                            let candidates = &mut env.cache.bool_equality_existential_candidates;
+                            if !candidates.contains(&uid) {
+                                candidates.push(uid);
+                            }
                         }
                     }
                     let not_a = env.context.not(a.clone());
@@ -460,7 +464,7 @@ mod tests {
         assert_eq!(negative_literal, -positive_literal);
         assert!(
             env.cache
-                .positive_existential_decision_candidates
+                .bool_equality_existential_candidates
                 .contains(&quantifier.uid())
         );
     }
@@ -516,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_existential_is_not_a_positive_decision_candidate() {
+    fn standalone_existential_is_not_a_bool_equality_candidate() {
         let (mut context, existential) = parse_assertion(
             "
             (declare-sort U 0)
@@ -532,10 +536,6 @@ mod tests {
 
         let _ = existential.cnf_tseitin(&mut env);
 
-        assert!(
-            env.cache
-                .positive_existential_decision_candidates
-                .is_empty()
-        );
+        assert!(env.cache.bool_equality_existential_candidates.is_empty());
     }
 }
