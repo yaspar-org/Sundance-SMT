@@ -35,6 +35,12 @@ pub struct Args {
     #[cfg_attr(feature = "z3-solver", arg(long, default_value_t = ArithSolver::Z3Incremental, value_enum))]
     #[cfg_attr(not(feature = "z3-solver"), arg(long, default_value_t = ArithSolver::Internal, value_enum))]
     pub arithmetic: ArithSolver,
+    /// Diff store for the semper e-graph's node-cache columns: "inline" or
+    /// "parallel" (frame diffs, first-write-wins capture) or "trail"
+    /// (chronological capture, branch-free writes). Only meaningful with the
+    /// semper-egraph backend; exported as SEMPER_DIFF before construction.
+    #[arg(long, default_value = "inline", value_parser = ["inline", "parallel", "trail"])]
+    pub diff_mode: String,
     /// Turns on lazy datatype instantiation for certain axioms
     #[arg(long, default_value_t = true)]
     pub lazy_dt: bool,

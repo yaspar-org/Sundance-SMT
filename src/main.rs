@@ -19,6 +19,11 @@ use yaspar_ir::untyped::UntypedAst;
 fn main() -> Result<(), String> {
     let args = Args::parse();
 
+    // Store-kind lever for the semper e-graph backend: read once at first
+    // cache construction, so export before any engine is built.
+    // SAFETY (env mutation): single-threaded startup, before any reader.
+    unsafe { std::env::set_var("SEMPER_DIFF", &args.diff_mode) };
+
     // --proof and --partial-proof both write an eDRAT dump; using them together
     // is ambiguous (and with the same path the second write silently truncates
     // the first, replacing a checkable refutation with a header-prefixed
