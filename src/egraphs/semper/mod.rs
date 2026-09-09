@@ -212,6 +212,24 @@ impl Drop for SemperEgraph {
                  restore_ns={restore_ns} restore_calls={restore_calls}"
             );
         }
+        if std::env::var_os("SEMPER_RESTORE_PROF").is_some() {
+            let per = semi_persistent_egraph::take_restore_member_profile();
+            let labels = semi_persistent_egraph::RESTORE_PROF_MEMBERS;
+            let line: Vec<String> = labels
+                .iter()
+                .zip(per.iter())
+                .map(|(l, ns)| format!("{l}={ns}"))
+                .collect();
+            eprintln!("SEMPER_RESTORE_PROF {}", line.join(" "));
+            let per = semi_persistent_egraph::take_node_restore_profile();
+            let labels = semi_persistent_egraph::NODE_PROF_PARTS;
+            let line: Vec<String> = labels
+                .iter()
+                .zip(per.iter())
+                .map(|(l, ns)| format!("{l}={ns}"))
+                .collect();
+            eprintln!("SEMPER_NODE_PROF {}", line.join(" "));
+        }
         crate::egraphs::trail_prof::report("semper");
     }
 }
