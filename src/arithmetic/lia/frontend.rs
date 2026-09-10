@@ -9,6 +9,7 @@ use std::fmt::{self, Display};
 use std::ops;
 use std::time::Instant;
 
+use num::Signed;
 use yaspar_ir::ast::{self as smt_ast, FetchSort};
 use yaspar_ir::ast::{AConstant, ATerm};
 use yaspar_ir::ast::{Context, LetElim, Term, Typecheck};
@@ -258,11 +259,6 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                         // Introduce fresh integer variable q for the quotient,
                         // associated with the div term for model reporting
                         let q = ctx.allocate_term(term.clone(), None, app_sort.clone());
-                        let abs_n = if n < Rational::ZERO {
-                            -n.clone()
-                        } else {
-                            n.clone()
-                        };
                         // Constraint 1: e - n*q >= 0  (i.e., remainder >= 0)
                         let rel_ge = Rel::from_addends_lhs_rhs(
                             e1.0.iter()
@@ -284,7 +280,7 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                                 .chain(std::iter::once(Addend::term(-n.clone(), q)))
                                 .collect(),
                             Constraint::Le,
-                            vec![Addend::Constant(abs_n - Rational::ONE)],
+                            vec![Addend::Constant(n.abs() - Rational::ONE)],
                         );
                         let slack_le = ctx.allocate_var(
                             &format!("$div_slack_le_{}", ctx.num_variables()),
@@ -317,15 +313,7 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                         // The remainder variable is associated with the mod term itself, so
                         // that it is reported in models; the quotient is auxiliary.
                         let r = ctx.allocate_term(term.clone(), None, app_sort.clone());
-                        let q = ctx.allocate_var(
-                            &format!("$mod_quotient_{}", ctx.num_variables()),
-                            VarType::Int,
-                        );
-                        let abs_n = if n < Rational::ZERO {
-                            -n.clone()
-                        } else {
-                            n.clone()
-                        };
+                        let q = ctx.allocate_var(&ctx.fresh_name("$mod_quotient"), VarType::Int);
                         // Constraint 1: e - n*q - r = 0  (i.e., e = n*q + r)
                         let rel_eq = Rel::from_addends_lhs_rhs(
                             e1.0.iter()
@@ -338,10 +326,8 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                             Constraint::Eq,
                             vec![Addend::Constant(Rational::ZERO)],
                         );
-                        let slack_eq = ctx.allocate_var(
-                            &format!("$mod_slack_eq_{}", ctx.num_variables()),
-                            VarType::Real,
-                        );
+                        let slack_eq =
+                            ctx.allocate_var(&ctx.fresh_name("$mod_slack_eq"), VarType::Real);
                         ctx.push_relation(rel_eq, slack_eq);
                         // Constraint 2: r >= 0
                         let rel_ge = Rel::from_addends_lhs_rhs(
@@ -349,21 +335,17 @@ fn convert_linear_term(ctx: &mut ConvContext, term: &Term) -> FrontendResult<Lin
                             Constraint::Ge,
                             vec![Addend::Constant(Rational::ZERO)],
                         );
-                        let slack_ge = ctx.allocate_var(
-                            &format!("$mod_slack_ge_{}", ctx.num_variables()),
-                            VarType::Real,
-                        );
+                        let slack_ge =
+                            ctx.allocate_var(&ctx.fresh_name("$mod_slack_ge"), VarType::Real);
                         ctx.push_relation(rel_ge, slack_ge);
                         // Constraint 3: r <= |n| - 1  (i.e., r < |n|)
                         let rel_le = Rel::from_addends_lhs_rhs(
                             vec![Addend::term(Rational::ONE, r)],
                             Constraint::Le,
-                            vec![Addend::Constant(abs_n - Rational::ONE)],
+                            vec![Addend::Constant(n.abs() - Rational::ONE)],
                         );
-                        let slack_le = ctx.allocate_var(
-                            &format!("$mod_slack_le_{}", ctx.num_variables()),
-                            VarType::Real,
-                        );
+                        let slack_le =
+                            ctx.allocate_var(&ctx.fresh_name("$mod_slack_le"), VarType::Real);
                         ctx.push_relation(rel_le, slack_le);
                         // Return r as the result expression
                         Ok(LinExpr(vec![Addend::term(Rational::ONE, r)]))
