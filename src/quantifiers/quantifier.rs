@@ -250,6 +250,9 @@ fn process_deferred_skolemizations(
         let reduced_skolem_literal = solver_state.get_lit_from_term(&reduced_skolem);
         // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first
         let skolem_literal = if skolem.uid() != reduced_skolem.uid() {
+            // Same reason as the instantiation path: register `skolem` in the
+            // egraph so its lit has an egraph id when `notify_assignment` fires.
+            solver_state.insert_predecessor(&skolem, None, None, true);
             solver_state.get_or_allocate_lit_for_term(&skolem)
         } else {
             0
@@ -347,6 +350,12 @@ fn process_deferred_instantiations(
         let nnf_term_literal = solver_state.get_lit_from_term(&nnf_term);
         // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first
         let subst_literal = if t.uid() != nnf_term.uid() {
+            // Register `t` in the egraph before allocating a lit for it. Otherwise
+            // `sync_new_vars` observes the fresh lit (its term is already in
+            // `terms_list` from the enclosing quantifier's body registration),
+            // CaDiCaL later assigns it, and `process_assignment` panics in
+            // `to_egraph_id` because `t` has no egraph id.
+            solver_state.insert_predecessor(&t, None, None, true);
             solver_state.get_or_allocate_lit_for_term(&t)
         } else {
             0
