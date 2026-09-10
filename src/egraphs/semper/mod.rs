@@ -67,10 +67,55 @@ pub struct SemperStats {
     pub merges: u64,
 }
 
+/// Adapter-local symbol id, assigned once per distinct `Op` at the driver
+/// boundary. `Op` owns a `String` for `App` and `Constant`, and a tuple key
+/// such as `(Op, usize)` cannot be probed by reference, because `Borrow`
+/// cannot produce a tuple of borrows. Keying on `(SymId, u32)` instead is what
+/// keeps every lookup after registration on integers: probing the old tuple
+/// key allocated and freed a `String` per call.
+type SymId = u32;
+
+/// The part of an `Op` the adapter still needs once the symbol is interned:
+/// enough to drive Boolean descent and to pick the commutative registration
+/// for `Eq`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SymKind {
+    And,
+    Or,
+    Not,
+    Implies,
+    Ite,
+    Eq,
+    Other,
+}
+
+impl SymKind {
+    fn of(op: &Op) -> Self {
+        match op {
+            Op::And => SymKind::And,
+            Op::Or => SymKind::Or,
+            Op::Not => SymKind::Not,
+            Op::Implies => SymKind::Implies,
+            Op::Ite => SymKind::Ite,
+            Op::Eq => SymKind::Eq,
+            _ => SymKind::Other,
+        }
+    }
+}
+
+/// Per-symbol data, indexed by `SymId`.
+struct SymInfo {
+    /// `Op::to_function_map_key()`, computed once per symbol. The registry
+    /// name is this plus an arity suffix, built only when `ops` misses.
+    base: Box<str>,
+    kind: SymKind,
+}
+
 /// One driver-visible registration, replayable after a restore. Children are
-/// driver ids, resolved through the terms table at replay time.
+/// driver ids, resolved through the terms table at replay time. The operator
+/// is a `SymId`, not an `Op`: replay must not touch a string.
 enum RegEvent {
-    Term { op: Op, children: Vec<u32> },
+    Term { sym: SymId, children: Vec<u32> },
     Opaque,
 }
 
@@ -89,10 +134,24 @@ pub struct SemperEgraph {
     /// `EgraphTrait::refutation_tainted`).
     tf_taint: bool,
     term_sort: SortId,
-    /// Op interning, keyed by (op, arity): the same symbol can only recur at
-    /// one arity per key, and registry names are mangled with the arity so
-    /// `App("f")/1` and `Constant("f")/0` cannot collide.
-    ops: FxHashMap<(Op, usize), OpId>,
+    /// `Op` -> `SymId`. The only map still keyed on an `Op`, and it is probed
+    /// by reference, so probing never clones: the owned insert happens once
+    /// per distinct symbol for the lifetime of the adapter.
+    syms: FxHashMap<Op, SymId>,
+    /// Per-symbol data, indexed by `SymId`. Monotone, and deliberately so: a
+    /// symbol is a name, and names do not become invalid on restore. Unlike
+    /// the engine's `OpRegistry`, which marks and restores a `completion`
+    /// entry per op, this carries no per-entry restore state, so keeping it
+    /// monotone costs one string per symbol and nothing on the mark path.
+    sym_info: Vec<SymInfo>,
+    /// Engine op interning, keyed by (symbol, arity): the same symbol can only
+    /// recur at one arity per key, and registry names are mangled with the
+    /// arity so `App("f")/1` and `Constant("f")/0` cannot collide.
+    ops: FxHashMap<(SymId, u32), OpId>,
+    /// Scratch for resolving a registration's children into engine nodes.
+    /// Detached with `mem::take` around the `reg_log` borrow so `intern`
+    /// allocates no vector per replayed term.
+    child_buf: Vec<ENodeId>,
     /// Driver id -> current engine node. Append-only; entries above a
     /// restore point are repaired by replay, never removed.
     terms: Vec<ENodeId>,
@@ -142,7 +201,7 @@ pub struct SemperEgraph {
     /// `fn_index_upto`. Both live in driver-id space, which is
     /// backtrack-stable (terms are permanent), so the index survives
     /// restores without repair — the same reason `reg_log` replays work.
-    fn_index: FxHashMap<(Op, usize), Vec<u32>>,
+    fn_index: FxHashMap<(SymId, u32), Vec<u32>>,
     fn_index_upto: usize,
     /// Terms asserted at level 0: the input formula's top level, and the
     /// seeds of the relevancy slice. Level 0 takes no token, so these are
@@ -251,7 +310,10 @@ impl SemperEgraph {
             eg,
             tf_taint: false,
             term_sort,
+            syms: FxHashMap::default(),
+            sym_info: Vec::new(),
             ops: FxHashMap::default(),
+            child_buf: Vec::new(),
             terms: Vec::new(),
             node_to_driver: Vec::new(),
             reg_log: Vec::new(),
@@ -287,11 +349,37 @@ impl SemperEgraph {
         self.terms[driver_id as usize]
     }
 
-    fn op_id(&mut self, op: &Op, arity: usize) -> OpId {
-        if let Some(&id) = self.ops.get(&(op.clone(), arity)) {
+    /// Intern an `Op` to its `SymId`, assigning one on first sight. This is
+    /// the only place the adapter hashes an `Op`, and the only place it ever
+    /// clones one: the probe borrows, and the insert happens once per symbol.
+    fn sym_id(&mut self, op: &Op) -> SymId {
+        if let Some(&sym) = self.syms.get(op) {
+            return sym;
+        }
+        let sym = u32::try_from(self.sym_info.len()).expect("symbol table exceeds u32");
+        self.sym_info.push(SymInfo {
+            base: op.to_function_map_key().into_boxed_str(),
+            kind: SymKind::of(op),
+        });
+        self.syms.insert(op.clone(), sym);
+        sym
+    }
+
+    /// The `SymId` for an already-interned `Op`, without assigning one. A
+    /// symbol that was never registered indexes no terms, so callers that are
+    /// only probing an index treat `None` as "no candidates".
+    fn sym_lookup(&self, op: &Op) -> Option<SymId> {
+        self.syms.get(op).copied()
+    }
+
+    fn op_id(&mut self, sym: SymId, arity: usize) -> OpId {
+        let arity_key = u32::try_from(arity).expect("arity fits u32");
+        if let Some(&id) = self.ops.get(&(sym, arity_key)) {
             return id;
         }
-        let name = format!("{}${arity}", op.to_function_map_key());
+        let info = &self.sym_info[sym as usize];
+        let name = format!("{}${arity}", info.base);
+        let is_eq = info.kind == SymKind::Eq;
         // The registry is the authority, the map only a cache: the registry
         // is semi-persistent, so a restore can drop ops registered in the
         // popped scopes, and `backtrack_to` clears the cache to match. An op
@@ -299,7 +387,7 @@ impl SemperEgraph {
         // dropped is re-registered by the replay that needs it.
         let id = if let Some(id) = self.eg.ops().id_by_name(&name) {
             id
-        } else if matches!(op, Op::Eq) && arity == 2 {
+        } else if is_eq && arity == 2 {
             // Eq gets the commutative (sorted-pair) representation so both
             // argument orders intern to one node.
             self.eg
@@ -309,21 +397,35 @@ impl SemperEgraph {
             let sorts = vec![self.term_sort; arity];
             self.eg.ops_mut().register(&name, &sorts, self.term_sort)
         };
-        self.ops.insert((op.clone(), arity), id);
+        self.ops.insert((sym, arity_key), id);
         id
     }
 
     /// Intern one registration event into the engine, returning the node.
     /// Used both for first registration and for replay after a restore.
     fn intern(&mut self, event_index: usize) -> ENodeId {
-        match &self.reg_log[event_index] {
-            RegEvent::Term { op, children } => {
-                let op = op.clone();
-                let children: Vec<ENodeId> = children.iter().map(|&c| self.node(c)).collect();
-                let op_id = self.op_id(&op, children.len());
-                self.eg.add(op_id, &children)
+        // Detach the scratch so resolving children borrows only `reg_log` and
+        // `terms`, leaving `op_id` free to take `&mut self` afterwards. This
+        // is what lets replay run without cloning the operator or allocating
+        // a fresh child vector per term.
+        let mut buf = std::mem::take(&mut self.child_buf);
+        buf.clear();
+        // Resolve the event while `reg_log` is borrowed, then drop the borrow
+        // before anything needs `&mut self`. The symbol is a `Copy` id, so
+        // nothing has to be cloned out of the log to survive the match.
+        let sym = match &self.reg_log[event_index] {
+            RegEvent::Term { sym, children } => {
+                buf.extend(children.iter().map(|&c| self.terms[c as usize]));
+                Some(*sym)
             }
-            RegEvent::Opaque => {
+            RegEvent::Opaque => None,
+        };
+        let node = match sym {
+            Some(sym) => {
+                let op_id = self.op_id(sym, buf.len());
+                self.eg.add(op_id, &buf)
+            }
+            None => {
                 // A unique nullary op per opaque index keeps replay
                 // deterministic: the same event re-interns the same symbol.
                 // Lookup-or-register for the same reason as `op_id`: a
@@ -336,7 +438,9 @@ impl SemperEgraph {
                 };
                 self.eg.add(op_id, &[])
             }
-        }
+        };
+        self.child_buf = buf;
+        node
     }
 
     fn push_registration(&mut self, event: RegEvent) -> u32 {
@@ -601,9 +705,10 @@ impl SemperEgraph {
     /// extension is the only maintenance the index ever needs.
     fn ensure_fn_index(&mut self) {
         for i in self.fn_index_upto..self.reg_log.len() {
-            if let RegEvent::Term { op, children } = &self.reg_log[i] {
+            if let RegEvent::Term { sym, children } = &self.reg_log[i] {
+                let key = (*sym, u32::try_from(children.len()).expect("arity fits u32"));
                 self.fn_index
-                    .entry((op.clone(), children.len()))
+                    .entry(key)
                     .or_default()
                     .push(u32::try_from(i).expect("driver id fits u32"));
             }
@@ -655,9 +760,10 @@ impl SemperEgraph {
                     }
                 }
             }
-            let RegEvent::Term { op, children } = &self.reg_log[t as usize] else {
+            let RegEvent::Term { sym, children } = &self.reg_log[t as usize] else {
                 continue;
             };
+            let kind = self.sym_info[*sym as usize].kind;
             let value = {
                 let r = self.find(t);
                 if Some(r) == true_root {
@@ -676,22 +782,22 @@ impl SemperEgraph {
                     Some(r) == false_root
                 }
             };
-            match (op, value) {
+            match (kind, value) {
                 // A satisfied gate needs one witness; a falsified one needs
                 // every child. An unassigned gate contributes nothing yet.
-                (Op::And, Some(true)) | (Op::Or, Some(false)) => queue.extend(children),
-                (Op::And, Some(false)) => {
+                (SymKind::And, Some(true)) | (SymKind::Or, Some(false)) => queue.extend(children),
+                (SymKind::And, Some(false)) => {
                     if let Some(&w) = children.iter().find(|&&c| child_is(c, false)) {
                         queue.push(w);
                     }
                 }
-                (Op::Or, Some(true)) => {
+                (SymKind::Or, Some(true)) => {
                     if let Some(&w) = children.iter().find(|&&c| child_is(c, true)) {
                         queue.push(w);
                     }
                 }
-                (Op::Implies, Some(false)) => queue.extend(children),
-                (Op::Implies, Some(true)) => {
+                (SymKind::Implies, Some(false)) => queue.extend(children),
+                (SymKind::Implies, Some(true)) => {
                     if children.len() == 2 {
                         if child_is(children[0], false) {
                             queue.push(children[0]);
@@ -702,8 +808,8 @@ impl SemperEgraph {
                         queue.extend(children);
                     }
                 }
-                (Op::And | Op::Or | Op::Implies, None) => {}
-                (Op::Ite, _) if children.len() == 3 => {
+                (SymKind::And | SymKind::Or | SymKind::Implies, None) => {}
+                (SymKind::Ite, _) if children.len() == 3 => {
                     queue.push(children[0]);
                     if child_is(children[0], true) {
                         queue.push(children[1]);
@@ -787,12 +893,14 @@ impl SemperEgraph {
         }
         let is_true = |c: u32| self.bool_value(c, tr, fr) == Some(true);
         let is_false = |c: u32| self.bool_value(c, tr, fr) == Some(false);
-        let (op, children) = match &self.reg_log[t as usize] {
-            RegEvent::Term { op, children } => (op.clone(), children.clone()),
+        let (kind, children) = match &self.reg_log[t as usize] {
+            RegEvent::Term { sym, children } => {
+                (self.sym_info[*sym as usize].kind, children.clone())
+            }
             RegEvent::Opaque => return None,
         };
-        match op {
-            Op::And => {
+        match kind {
+            SymKind::And => {
                 if want {
                     // Every child must be true: descend all, deciding the
                     // unassigned ones true.
@@ -812,7 +920,7 @@ impl SemperEgraph {
                     }
                 }
             }
-            Op::Or => {
+            SymKind::Or => {
                 if want {
                     // One true child suffices: already-true child justifies the
                     // gate and masks the rest (relevancy); else decide one true.
@@ -831,11 +939,11 @@ impl SemperEgraph {
                 }
             }
             // Negation flips the desired polarity.
-            Op::Not => children
+            SymKind::Not => children
                 .first()
                 .and_then(|&c| self.suggest_rec(c, !want, tr, fr, visited)),
             // (=> a b) = (or (not a) b).
-            Op::Implies if children.len() == 2 => {
+            SymKind::Implies if children.len() == 2 => {
                 let (a, b) = (children[0], children[1]);
                 if want {
                     if is_false(a) || is_true(b) {
@@ -851,7 +959,7 @@ impl SemperEgraph {
             }
             // ite(c, th, el): decide the condition first if open, else descend
             // the taken branch. The condition's phase is a free choice.
-            Op::Ite if children.len() == 3 => match self.bool_value(children[0], tr, fr) {
+            SymKind::Ite if children.len() == 3 => match self.bool_value(children[0], tr, fr) {
                 None => self.suggest_rec(children[0], true, tr, fr, visited),
                 Some(true) => self.suggest_rec(children[1], want, tr, fr, visited),
                 Some(false) => self.suggest_rec(children[2], want, tr, fr, visited),
@@ -888,8 +996,10 @@ impl SemperEgraph {
         let Some(&(pattern_id, hint)) = pairs.first() else {
             return vec![assignment.clone()];
         };
-        let pattern = self.patterns[pattern_id].clone();
-        self.match_top(assignment, &pattern, hint, &pairs[1..])
+        // Borrowed, not cloned: `match_top` takes `&self`, so the pattern
+        // borrow coexists with it. Cloning here deep-copied the whole pattern
+        // tree, strings included, once per matched pair.
+        self.match_top(assignment, &self.patterns[pattern_id], hint, &pairs[1..])
     }
 
     fn match_top(
@@ -921,7 +1031,13 @@ impl SemperEgraph {
                 _ => vec![],
             },
             Pattern::App(op, subs) => {
-                let Some(candidates) = self.fn_index.get(&(op.clone(), subs.len())) else {
+                // A pattern symbol the adapter never interned indexes no
+                // terms, so an absent `SymId` means no candidates.
+                let Some(sym) = self.sym_lookup(op) else {
+                    return vec![];
+                };
+                let arity = u32::try_from(subs.len()).expect("arity fits u32");
+                let Some(candidates) = self.fn_index.get(&(sym, arity)) else {
                     return vec![];
                 };
                 let ground_root = hint.map(|t| self.find(t));
@@ -982,7 +1098,11 @@ impl SemperEgraph {
                 }
             }
             Pattern::App(op, children) => {
-                let Some(candidates) = self.fn_index.get(&(op.clone(), children.len())) else {
+                let Some(sym) = self.sym_lookup(op) else {
+                    return vec![];
+                };
+                let arity = u32::try_from(children.len()).expect("arity fits u32");
+                let Some(candidates) = self.fn_index.get(&(sym, arity)) else {
                     return vec![];
                 };
                 let ground_root = self.find(ground);
@@ -1030,8 +1150,9 @@ impl EgraphTrait for SemperEgraph {
         // registration "dynamic": a term congruent to an existing one under
         // the current classes interns to that node.
         self.ensure_scope();
+        let sym = self.sym_id(&op);
         self.push_registration(RegEvent::Term {
-            op,
+            sym,
             children: children.to_vec(),
         })
     }
@@ -1043,8 +1164,9 @@ impl EgraphTrait for SemperEgraph {
             _ => None,
         };
         self.ensure_scope();
+        let sym = self.sym_id(&op);
         let id = self.push_registration(RegEvent::Term {
-            op,
+            sym,
             children: Vec::new(),
         });
         match tf {
@@ -1072,8 +1194,9 @@ impl EgraphTrait for SemperEgraph {
 
     fn register_boolean_term(&mut self, op: Op, children: &[u32], _lit: Lit) -> u32 {
         self.ensure_scope();
+        let sym = self.sym_id(&op);
         self.push_registration(RegEvent::Term {
-            op,
+            sym,
             children: children.to_vec(),
         })
     }
