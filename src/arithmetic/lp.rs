@@ -449,9 +449,9 @@ pub fn extract_linear_expression(
                         } else {
                             // Two non-constant factors: non-linear.
                             //
-                            // `theory_check::reject_nonlinear_arithmetic` rejects the ground cases
-                            // before the search starts, so reaching here means the product was
-                            // produced by quantifier instantiation.
+                            // `theory_check::NonlinearityCheck` rejects the ground cases during
+                            // preprocessing, after let and `define-fun` inlining, so reaching here
+                            // means the product was produced by quantifier instantiation.
                             //
                             // TODO: This is a poor way to report it: we are inside a CaDiCaL
                             // external-propagator callback, and cxx converts a panic crossing that
