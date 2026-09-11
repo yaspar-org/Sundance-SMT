@@ -193,9 +193,16 @@ fn rejection_test() {
                     // rejected (errored on) instead.
                     answered.push(format!("{} (got {})", name, actual));
                     println!("\x1b[31m✗ (expected rejection, got {})\x1b[0m", actual);
+                } else if output.status.code().is_none() {
+                    // Killed by a signal: an abort or segfault, not a clean rejection.
+                    answered.push(format!("{} (crashed: {})", name, output.status));
+                    println!(
+                        "\x1b[31m✗ (expected rejection, crashed: {})\x1b[0m",
+                        output.status
+                    );
                 } else {
-                    // Empty/other output means the solver errored out (e.g. the
-                    // panic on non-linear multiplication) — a rejection.
+                    // A non-answer with a normal exit status means the solver
+                    // reported an error and exited — a rejection.
                     rejected += 1;
                     println!("\x1b[32m✓ (rejected)\x1b[0m");
                 }
