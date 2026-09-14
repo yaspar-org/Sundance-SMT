@@ -25,6 +25,10 @@ pub struct CNFCache {
     pub var_map_reverse: HashMap<i32, u64>,
     pub next_var: i32,
     pub nnf_cache: HashMap<u64, [Option<Term>; 2]>,
+    /// UIDs of existential quantifiers that appear as a direct operand of a
+    /// Boolean equality (`(= a b)` where `a` / `b` : Bool). Used by the SAT
+    /// decision heuristic to bias these existentials toward `true`.
+    pub bool_equality_existential_candidates: Vec<u64>,
 }
 
 impl Default for CNFCache {
@@ -40,7 +44,16 @@ impl CNFCache {
             var_map_reverse: HashMap::new(),
             next_var: 1,
             nnf_cache: HashMap::new(),
+            bool_equality_existential_candidates: Vec::new(),
         }
+    }
+}
+
+fn direct_existential_uid(term: &Term) -> Option<u64> {
+    match term.repr() {
+        ATerm::Exists(..) => Some(term.uid()),
+        ATerm::Annotated(inner, _) => direct_existential_uid(inner),
+        _ => None,
     }
 }
 
@@ -114,6 +127,14 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                     }
                 } else {
                     // If so, then we convert a = b to a <=> b
+                    for operand in [a, b] {
+                        if let Some(uid) = direct_existential_uid(operand) {
+                            let candidates = &mut env.cache.bool_equality_existential_candidates;
+                            if !candidates.contains(&uid) {
+                                candidates.push(uid);
+                            }
+                        }
+                    }
                     let not_a = env.context.not(a.clone());
                     let not_b = env.context.not(b.clone());
                     // let a_i_b = env.context.flat_or(vec![not_a, b.clone()]);
@@ -403,7 +424,50 @@ pub fn push_literal_if_not_tautology(clause: &mut Vec<i32>, literal: i32) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yaspar_ir::ast::Context;
+    use yaspar_ir::ast::{ACommand, Context, Typecheck};
+    use yaspar_ir::untyped::UntypedAst;
+
+    fn parse_assertion(script: &str) -> (Context, Term) {
+        let mut context = Context::new();
+        let commands = UntypedAst
+            .parse_script_str(script)
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+        let assertion = commands
+            .iter()
+            .find_map(|command| match command.repr() {
+                ACommand::Assert(term) => Some(term.clone()),
+                _ => None,
+            })
+            .unwrap();
+        (context, assertion)
+    }
+
+    fn assert_boolean_equality_reuses_existential_literal(script: &str) {
+        let (mut context, equality) = parse_assertion(script);
+        let quantifier = match equality.repr() {
+            ATerm::Eq(_, quantifier) => quantifier.clone(),
+            other => panic!("expected equality, got {other:?}"),
+        };
+        let mut cache = CNFCache::new();
+        let mut env = CNFEnv {
+            context: &mut context,
+            cache: &mut cache,
+        };
+
+        let _ = equality.cnf_tseitin(&mut env);
+
+        let negated_quantifier = env.context.not(quantifier.clone());
+        let positive_literal = env.cache.var_map[&quantifier.uid()];
+        let negative_literal = env.cache.var_map[&negated_quantifier.uid()];
+        assert_eq!(negative_literal, -positive_literal);
+        assert!(
+            env.cache
+                .bool_equality_existential_candidates
+                .contains(&quantifier.uid())
+        );
+    }
 
     #[test]
     fn test_sundance_nnf_false() {
@@ -441,5 +505,37 @@ mod tests {
         assert!(env.cache.var_map.contains_key(&a.uid()));
         assert!(env.cache.var_map.contains_key(&b.uid()));
         assert!(env.cache.var_map.contains_key(&and_term.uid()));
+    }
+
+    #[test]
+    fn boolean_equality_reuses_existential_literal_across_polarities() {
+        assert_boolean_equality_reuses_existential_literal(
+            "
+            (declare-sort U 0)
+            (declare-const p Bool)
+            (declare-fun q (U) Bool)
+            (assert (= p (exists ((x U)) (q x))))
+            ",
+        );
+    }
+
+    #[test]
+    fn standalone_existential_is_not_a_bool_equality_candidate() {
+        let (mut context, existential) = parse_assertion(
+            "
+            (declare-sort U 0)
+            (declare-fun q (U) Bool)
+            (assert (exists ((x U)) (q x)))
+            ",
+        );
+        let mut cache = CNFCache::new();
+        let mut env = CNFEnv {
+            context: &mut context,
+            cache: &mut cache,
+        };
+
+        let _ = existential.cnf_tseitin(&mut env);
+
+        assert!(env.cache.bool_equality_existential_candidates.is_empty());
     }
 }

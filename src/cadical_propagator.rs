@@ -863,6 +863,24 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
+        // After preserving the datatype base-case priority, bias an
+        // unassigned existential that appears under a Boolean equality
+        // toward `true`. The candidate set is populated during CNF
+        // conversion and contains only Exists uids, so no polarity check
+        // is needed here.
+        for &uid in &self
+            .solver_state
+            .cnf_cache
+            .bool_equality_existential_candidates
+        {
+            if let Some(lit) = self.solver_state.get_lit_from_u64_safe(uid) {
+                let idx = lit.unsigned_abs() as usize;
+                if self.assignments.get(idx).copied().unwrap_or(0) == 0 {
+                    return lit;
+                }
+            }
+        }
+
         0
     }
 
