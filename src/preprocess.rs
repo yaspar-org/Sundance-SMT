@@ -424,7 +424,12 @@ fn process_ite(
         let ite_axioms = solver_state.and(vec![imp1, imp2]);
         let ite_axioms_nnf = ite_axioms.nnf(solver_state);
         solver_state.insert_predecessor(&ite_axioms_nnf, None, None, from_quantifier);
-        Some(ite_axioms_nnf.cnf_tseitin(solver_state))
+        let cnf = ite_axioms_nnf.cnf_tseitin(solver_state);
+        // Register the pre-NNF axiom with relevancy so its structural
+        // sub-parts (Implies/And/Or/Eq children) become known and can
+        // propagate relevance when the axiom is asserted true.
+        solver_state.relevancy_register_term(&ite_axioms, 0);
+        Some(cnf)
     } else {
         None
     }

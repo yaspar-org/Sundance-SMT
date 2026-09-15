@@ -11,25 +11,47 @@ use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::EgraphTrait;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
+use crate::qi_gc::QiInstantiationKey;
 use crate::quantifiers::skolem::skolemize;
+use crate::relevancy::{RelevancyTrait, relevancy_trace_enabled};
 use crate::solver_state::SolverState;
 use crate::solver_types::Polarity;
-use crate::utils::DeterministicHashMap;
+use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
 use crate::debug_println;
 use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, TermAllocator};
 
 #[derive(Debug, Clone)]
 pub(crate) enum QuantifierInstance {
-    Instantiation { clauses: Vec<Vec<i32>> },
-    Skolemization { clauses: Vec<Vec<i32>> },
+    /// `pre_nnf_body` is the instance body after let-elim but before NNF/
+    /// Tseitin — used by relevancy filtering so structural rules see the
+    /// original connectives (Iff, ITE, Implies) that NNF destroys.
+    Instantiation {
+        clauses: Vec<Vec<i32>>,
+        pre_nnf_body: Term,
+        key: QiInstantiationKey,
+        /// Solver terms first registered while materializing this instance.
+        /// These are candidates for reclamation if the complete instance is
+        /// discarded at a QI-GC epoch transition.
+        created_terms: DeterministicHashSet<u64>,
+        /// Registered-term closure of this instance's SAT clauses. If the
+        /// clauses survive a transition, these are the solver terms that must
+        /// remain live even when another instance originally created them.
+        clause_terms: DeterministicHashSet<u64>,
+    },
+    Skolemization {
+        clauses: Vec<Vec<i32>>,
+        pre_nnf_body: Term,
+    },
 }
 
 struct DeferredInstantiation {
     substituted_term: Term,
+    substitution: DeterministicHashMap<Local, Term>,
     is_exists: bool,
     literal: i32,
     quantifier_id: u64,
+    generation: u32,
 }
 
 struct DeferredSkolemization {
@@ -37,6 +59,7 @@ struct DeferredSkolemization {
     skolem_vars: Vec<(Str, Sort)>,
     is_exists: bool,
     literal: i32,
+    generation: u32,
 }
 
 pub(crate) struct PendingInstantiations {
@@ -45,9 +68,19 @@ pub(crate) struct PendingInstantiations {
     skolemized_quantifier_idxs: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TriggerMatchScope {
+    RelevantClasses,
+    AllClasses,
+}
+
 impl PendingInstantiations {
     pub(crate) fn is_empty(&self) -> bool {
         self.deferred_instantiations.is_empty() && self.deferred_skolemizations.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.deferred_instantiations.len() + self.deferred_skolemizations.len()
     }
 
     pub(crate) fn skolemized_quantifier_idxs(&self) -> &[usize] {
@@ -61,6 +94,10 @@ pub(crate) fn instantiate_quantifiers(
     solver_state: &mut SolverState,
     assignments: &[i32],
     allow_skolemization: bool,
+    require_quantifier_relevance: bool,
+    trigger_match_scope: TriggerMatchScope,
+    generation_limit: Option<u32>,
+    instantiation_limit: Option<usize>,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
@@ -70,7 +107,7 @@ pub(crate) fn instantiate_quantifiers(
     let mut deferred_instantiations: VecDeque<DeferredInstantiation> = VecDeque::new();
 
     // We `enumerate()` so we can update quantifiers[i].skolemized after the loop
-    for (i, quantifier) in quantifiers.iter().enumerate() {
+    'quantifiers: for (i, quantifier) in quantifiers.iter().enumerate() {
         debug_println!(
             19,
             0,
@@ -88,6 +125,9 @@ pub(crate) fn instantiate_quantifiers(
 
         // if the quantifier is unassigned, we can skip it
         if quantifier_assignment == 0 {
+            continue;
+        }
+        if require_quantifier_relevance && !solver_state.is_lit_relevant(quantifier_literal) {
             continue;
         }
 
@@ -110,6 +150,7 @@ pub(crate) fn instantiate_quantifiers(
                 skolem_vars,
                 is_exists: quantifier_is_exists,
                 literal: quantifier_literal,
+                generation: solver_state.generation_of(quantifier.id).saturating_add(1),
             });
         }
 
@@ -132,13 +173,40 @@ pub(crate) fn instantiate_quantifiers(
             let trigger_term_pairs: Vec<(usize, Option<u32>)> =
                 multipattern.iter().map(|t| (*t, None)).collect();
 
-            let list_assignments = solver_state.egraph.match_triggers(trigger_term_pairs);
+            // Eager matching considers only ground terms whose class was marked
+            // relevant. Complete-model checks widen the search to every class
+            // so filtered progress cannot indefinitely postpone a refutation.
+            let relevant_only = solver_state.relevancy.is_enabled()
+                && trigger_match_scope == TriggerMatchScope::RelevantClasses;
+            let list_assignments = solver_state
+                .egraph
+                .match_triggers(&trigger_term_pairs, relevant_only);
 
+            if relevancy_trace_enabled() {
+                eprintln!(
+                    "[relevancy] quantifier {} produced {} trigger matches",
+                    quantifier.id,
+                    list_assignments.len()
+                );
+            }
             if list_assignments.is_empty() {
                 continue;
             }
 
             for subs_ids in list_assignments.iter() {
+                if instantiation_limit.is_some_and(|limit| deferred_instantiations.len() >= limit) {
+                    break 'quantifiers;
+                }
+                let candidate_generation = subs_ids
+                    .iter()
+                    .map(|(_, id)| solver_state.generation_of(solver_state.to_solver_uid(*id)))
+                    .max()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                if generation_limit.is_some_and(|limit| candidate_generation > limit) {
+                    continue;
+                }
+
                 // Convert the (Local -> egraph id) map into a (Local -> Term) map for substitution
                 let subs: DeterministicHashMap<Local, Term> = subs_ids
                     .iter()
@@ -153,22 +221,40 @@ pub(crate) fn instantiate_quantifiers(
                 if let Some(set) = solver_state.added_instantiations.get(&quantifier.id)
                     && set.contains(&subs)
                 {
+                    if relevancy_trace_enabled() {
+                        eprintln!(
+                            "[relevancy] quantifier {} skipping duplicate substitution {:?}",
+                            quantifier.id, subs
+                        );
+                    }
                     continue;
                 }
-                solver_state
-                    .added_instantiations
-                    .entry(quantifier.id)
-                    .or_default()
-                    .insert(subs.clone());
+                if relevancy_trace_enabled() {
+                    eprintln!(
+                        "[relevancy] quantifier {} accepting substitution {:?}",
+                        quantifier.id, subs
+                    );
+                }
+                let rediscovered_after_gc =
+                    solver_state.remember_added_instantiation(quantifier.id, &subs);
+                if rediscovered_after_gc && relevancy_trace_enabled() {
+                    eprintln!(
+                        "[relevancy] quantifier {} rediscovered collected substitution {:?}",
+                        quantifier.id, subs
+                    );
+                }
 
                 let term = solver_state.get_term(body);
+                let substitution_key = subs.clone();
                 let substitution = Substitution::new(subs);
                 let substituted_term = term.subst(&substitution, &mut solver_state.context);
                 deferred_instantiations.push_back(DeferredInstantiation {
                     substituted_term,
+                    substitution: substitution_key,
                     is_exists: quantifier_is_exists,
                     literal: quantifier_literal,
                     quantifier_id: quantifier.id,
+                    generation: candidate_generation,
                 });
             }
         }
@@ -219,6 +305,55 @@ pub(crate) fn materialize_next(
     None
 }
 
+/// Rebuild an exact previously collected instantiation from its quantifier
+/// identity and substitution. The old CNF/e-graph closure may already have
+/// been reclaimed; the retained AST terms are registered again as needed.
+pub(crate) fn rematerialize_instantiation(
+    key: &QiInstantiationKey,
+    solver_state: &mut SolverState,
+    proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+) -> Vec<QuantifierInstance> {
+    let quantifier = solver_state
+        .quantifiers
+        .iter()
+        .find(|quantifier| quantifier.id == key.quantifier_id)
+        .cloned()
+        .expect("collected quantifier instance lost its source quantifier");
+    let literal = solver_state.get_lit_from_u64(quantifier.id);
+    assert_ne!(
+        literal, 0,
+        "collected quantifier instance lost its source literal"
+    );
+
+    let body = solver_state.get_term(quantifier.body);
+    let substitution = Substitution::new(key.substitution.clone());
+    let substituted_term = body.subst(&substitution, &mut solver_state.context);
+    let generation = key
+        .substitution
+        .values()
+        .map(|term| solver_state.generation_of(term.uid()))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let ddsmt = solver_state.ddsmt;
+    let lazy_dt = solver_state.lazy_dt;
+
+    process_deferred_instantiations(
+        vec![DeferredInstantiation {
+            substituted_term,
+            substitution: key.substitution.clone(),
+            is_exists: quantifier.polarity == Polarity::Existential,
+            literal,
+            quantifier_id: quantifier.id,
+            generation,
+        }],
+        solver_state,
+        proof_tracer,
+        ddsmt,
+        lazy_dt,
+    )
+}
+
 fn process_deferred_skolemizations(
     deferred_skolemizations: Vec<DeferredSkolemization>,
     solver_state: &mut SolverState,
@@ -232,14 +367,21 @@ fn process_deferred_skolemizations(
         skolem_vars,
         is_exists,
         literal,
+        generation,
     } in deferred_skolemizations
     {
+        let previous_generation = solver_state.current_instantiation_generation;
+        solver_state.current_instantiation_generation = previous_generation.max(generation);
         let reduced_skolem: Term = skolem.let_elim(&mut solver_state.context);
+        let pre_nnf_body = reduced_skolem.clone();
         let reduced_skolem = reduced_skolem.nnf(solver_state);
+        solver_state.set_generation(skolem.uid(), generation);
+        solver_state.set_generation(reduced_skolem.uid(), generation);
         let additional_constraints =
             check_for_function_bool(&reduced_skolem, solver_state, true, ddsmt, lazy_dt);
 
         solver_state.insert_predecessor(&reduced_skolem, None, None, true);
+        solver_state.current_instantiation_generation = previous_generation;
 
         // Must do Tseitin *before* allocating the skolem literal — see comment on instantiation path
         let clauses = reduced_skolem.cnf_tseitin(solver_state);
@@ -294,6 +436,7 @@ fn process_deferred_skolemizations(
 
         results.push(QuantifierInstance::Skolemization {
             clauses: skolem_clauses,
+            pre_nnf_body,
         });
     }
     results
@@ -309,9 +452,11 @@ fn process_deferred_instantiations(
     let mut results = vec![];
     for DeferredInstantiation {
         substituted_term,
+        substitution,
         is_exists,
         literal,
         quantifier_id,
+        generation,
     } in deferred_instantiations
     {
         let t = if is_exists {
@@ -330,15 +475,38 @@ fn process_deferred_instantiations(
 
         let let_elim_term = t.let_elim(&mut solver_state.context);
 
-        let nnf_term = let_elim_term.nnf(solver_state);
+        // Wrap the body in `quantifier => body` and NNF+Tseitin the whole
+        // thing. This gives the wrapper implication its own SAT literal
+        // (needed by relevancy — a bare-body registration has no lit for
+        // the implication as a whole). NNF distributes over Implies as
+        // `Or(¬quantifier, nnf(body))`, so the body's Tseitin clauses are
+        // still emitted separately and remain ungated (preserving the
+        // propagation behavior the previous manual encoding was chosen
+        // for). Tseitinizing adds one fresh var and two extra backward
+        // clauses per instance — cheap.
+        let quantifier_term = solver_state.get_term(quantifier_id);
+        let quantifier_side = if is_exists {
+            solver_state.context.not(quantifier_term)
+        } else {
+            quantifier_term
+        };
+        let pre_nnf_body = solver_state.implies(vec![quantifier_side], let_elim_term.clone());
+
+        let nnf_term = pre_nnf_body.nnf(solver_state);
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
+        solver_state.begin_qi_term_capture();
+        let previous_generation = solver_state.current_instantiation_generation;
+        solver_state.current_instantiation_generation = previous_generation.max(generation);
+        solver_state.set_generation(t.uid(), generation);
+        solver_state.set_generation(pre_nnf_body.uid(), generation);
+        solver_state.set_generation(nnf_term.uid(), generation);
         solver_state.insert_predecessor(&nnf_term, None, None, true);
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
 
-        let mut raw_clauses: Vec<Vec<i32>> = cnf_term
+        let raw_clauses: Vec<Vec<i32>> = cnf_term
             .into_iter()
             .map(|x| x.into_iter().collect::<Vec<_>>())
             .collect();
@@ -363,27 +531,13 @@ fn process_deferred_instantiations(
                 ProofStepType::Instantiation,
             );
 
-        // Assert the body only when the quantifier holds (`quantifier => body`).
-        // `cnf_tseitin` appends, as its final clause, a unit clause asserting the
-        // top literal unconditionally; guarding just that clause (turning it into
-        // the implication `-quantifier \/ top`) is enough for soundness. The
-        // remaining clauses only define fresh Tseitin variables and are valid
-        // regardless of the quantifier, so they stay ungated. Gating every clause
-        // instead (as the skolemization path does) suppresses all propagation of
-        // the body's structure until the top literal is decided, which badly
-        // hurts search.
-        let top = raw_clauses
-            .pop()
-            .expect("cnf_tseitin always emits the top-level clause");
-        debug_assert_eq!(top, vec![nnf_term_literal]);
-        raw_clauses.push(vec![-quantifier_dimacs_literal, nnf_term_literal]);
-
         proof_tracer
             .borrow_mut()
             .push_steps(&raw_clauses, ProofStepType::TheoryClause(Theory::Boolean));
 
         let additional_constraints =
             check_for_function_bool(&nnf_term, solver_state, true, ddsmt, lazy_dt);
+        solver_state.current_instantiation_generation = previous_generation;
         proof_tracer.borrow_mut().push_steps(
             &additional_constraints,
             ProofStepType::TheoryClause(Theory::Background),
@@ -391,8 +545,23 @@ fn process_deferred_instantiations(
 
         let mut clauses = raw_clauses;
         clauses.extend(additional_constraints);
+        let created_terms = solver_state.finish_qi_term_capture();
+        let mut clause_terms = DeterministicHashSet::default();
+        solver_state.collect_clause_term_closure(&clauses, &mut clause_terms);
+        for term in substitution.values() {
+            solver_state.collect_registered_term_closure(term, &mut clause_terms);
+        }
 
-        results.push(QuantifierInstance::Instantiation { clauses });
+        results.push(QuantifierInstance::Instantiation {
+            clauses,
+            pre_nnf_body,
+            key: QiInstantiationKey {
+                quantifier_id,
+                substitution,
+            },
+            created_terms,
+            clause_terms,
+        });
     }
     results
 }
