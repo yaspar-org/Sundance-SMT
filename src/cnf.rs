@@ -3,8 +3,9 @@
 
 use sat_interface::{Clause, Formula};
 use std::collections::HashMap;
+use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
-    AConstant, ATerm, Context, FetchSort, ObjectAllocatorExt, Term, TermAllocator,
+    AConstant, ATerm, Context, FetchSort, IdentifierKind, ObjectAllocatorExt, Term, TermAllocator,
 };
 use yaspar_ir::traits::Repr;
 
@@ -230,6 +231,28 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                     acc = env.context.eq(not_acc, t.clone());
                 }
                 acc.nnf_impl(env, polarity)
+            }
+            ATerm::App(f, args, _)
+                if args.len() > 2
+                    && matches!(
+                        f.get_kind(),
+                        Some(
+                            IdentifierKind::Lt
+                                | IdentifierKind::Le
+                                | IdentifierKind::Gt
+                                | IdentifierKind::Ge
+                        )
+                    ) =>
+            {
+                let bool_sort = env.context.bool_sort();
+                let conjuncts = args
+                    .windows(2)
+                    .map(|c| {
+                        env.context
+                            .app(f.clone(), c.to_vec(), Some(bool_sort.clone()))
+                    })
+                    .collect();
+                env.context.and(conjuncts).nnf_impl(env, polarity)
             }
             _ => {
                 // all other cases are regarded as atoms
