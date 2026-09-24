@@ -112,7 +112,10 @@ pub struct LIRASolver {
     lra_solver: LRASolver,
     /// Solver configuration.
     config: SolverConfig,
-    /// Runtime statistics accumulated across all LRA solves.
+    /// Runtime statistics for the current [`Self::solve`] call. Reset at the start of every
+    /// `solve` and accumulated across the LRA solves that call performs, so a reused
+    /// `LIRASolver` never carries stats — or the [`SolverConfig::max_lra_solve_calls`] budget
+    /// derived from them — over from an earlier `solve`.
     stats: Stats,
 }
 
@@ -131,8 +134,23 @@ impl LIRASolver {
     /// First tries cheap heuristics (unit cube test, rounding) against the rational
     /// relaxation, then falls back to branch-and-bound. Returns `FEASIBLE` with a model,
     /// `INFEASIBLE` with a conflict core, or `UNKNOWN` if a resource limit was hit.
+    ///
+    /// A `LIRASolver` is safe to reuse across `solve` calls: each call resets its own per-call
+    /// state up front, so the caller need not track anything between calls. Both the returned
+    /// [`SolverReturn`] and the [`SolverConfig::max_lra_solve_calls`] budget describe this one
+    /// call.
     pub fn solve(&mut self) -> SolverResult<SolverReturn> {
         debug_println!(21, 0, "lia::lira_solver: starting LIRASolver");
+
+        // Clear any terminal `Unsat` state left by a previous `solve` (or by branch-and-bound
+        // within one). While the underlying solver is `Unsat`, `set_backtrack` is a no-op and so is
+        // its matching `backtrack`. Clearing it here makes reuse transparent to the caller.
+        self.lra_solver.clear_unsat_state();
+
+        // Stats are per-call: they are reset here so the returned [`SolverReturn`] describes
+        // *this* solve, and so the [`SolverConfig::max_lra_solve_calls`] budget checked by
+        // [`Self::over_budget`] is a per-solve budget.
+        self.stats = Stats::new();
 
         // The unit cube test can find an integer point with a single LRA solve, so try it
         // before further testing the relaxation and integer bounded branches.
@@ -447,6 +465,10 @@ impl LIRASolver {
             return Ok(ExploreStep::Done(NodeOutcome::Unknown));
         }
 
+        // A previously-pruned sibling branch leaves the LRA solver `Unsat`, and `set_backtrack` is
+        // a no-op in that state. Clear it first so the assert/solve/backtrack triple around this
+        // branch is properly scoped.
+        self.lra_solver.clear_unsat_state();
         let level = self.lra_solver.set_backtrack();
         let qbound = QDelta::from(Rational::from(bound));
         let assert_res = match side {
@@ -632,6 +654,103 @@ mod tests {
             lira_solver.solve().unwrap().decision,
             SolverDecision::INFEASIBLE(_)
         ));
+    }
+
+    /// Stats and hence the `max_lra_solve_calls` budget derived from them are per-call.
+    ///
+    /// A `LIRASolver` kept alive across several `solve` calls (as an incremental frontend does)
+    /// must not accumulate `num_lra_solve`, or it would eventually exceed any finite budget and
+    /// report `UNKNOWN` on every subsequent call regardless of the problem's difficulty.
+    #[test]
+    fn stats_are_reset_per_solve() {
+        let smt_input = r#"
+        (set-logic QF_LIA)
+        (declare-fun x () Int)
+        (declare-fun y () Int)
+        (assert (>= y x))
+        (assert (>= (* 3 x) 1))
+        (assert (<= (* 3 y) 2))
+            "#;
+        // A budget just large enough for one solve, but which repeated solves would exhaust if
+        // stats accumulated across calls.
+        let config = SolverConfig {
+            max_lra_solve_calls: Some(8),
+            ..SolverConfig::default()
+        };
+        let lra_solver =
+            smt_to_lra_solver(smt_input, &config).expect("Failed to create LRA solver");
+        let mut lira_solver = LIRASolver::new(lra_solver, config);
+
+        let first = lira_solver.solve().unwrap();
+        assert!(
+            matches!(first.decision, SolverDecision::INFEASIBLE(_)),
+            "expected INFEASIBLE on the first solve"
+        );
+        let first_solves = first.stats.num_lra_solve;
+        assert!(
+            first_solves > 0,
+            "the solve should have run at least one LRA solve"
+        );
+
+        // Re-solving the same system must reach the same verdict with the same accounting,
+        // without the caller having to reset any state between calls.
+        for round in 0..3 {
+            let ret = lira_solver.solve().unwrap();
+            assert!(
+                matches!(ret.decision, SolverDecision::INFEASIBLE(_)),
+                "round {round}: expected INFEASIBLE — the per-solve budget was exhausted by \
+                 stats accumulating across calls"
+            );
+            assert_eq!(
+                ret.stats.num_lra_solve, first_solves,
+                "round {round}: stats must describe this solve alone, not all solves so far"
+            );
+        }
+    }
+
+    /// Branch-and-bound must not leak its speculative branch bounds into the solver it was
+    /// handed.
+    ///
+    /// Each branch is scoped by `set_backtrack` / ... / `backtrack(level)`. But
+    /// `LRASolver::set_backtrack` is a no-op while the solver is `Unsat` — and pruning the floor
+    /// branch leaves exactly that state — so without clearing it first the ceil branch's
+    /// `set_backtrack` returns the *current* level, making the matching `backtrack` a no-op too.
+    /// The ceil bound then survives `solve` and corrupts every later use of that solver.
+    ///
+    /// `3x >= 1 && 3x <= 2` pins `x` to `[1/3, 2/3]`: integer-infeasible, and B&B prunes the
+    /// floor branch (`x <= 0`) before exploring the ceil branch (`x >= 1`). That `x >= 1` is the
+    /// bound that used to leak.
+    #[test]
+    fn branch_and_bound_does_not_leak_branch_bounds() {
+        let smt_input = r#"
+        (set-logic QF_LIA)
+        (declare-fun x () Int)
+        (assert (>= (* 3 x) 1))
+        (assert (<= (* 3 x) 2))
+            "#;
+        let lra_solver = smt_to_lra_solver(smt_input, &SolverConfig::default())
+            .expect("Failed to create LRA solver");
+        let mut lira_solver = LIRASolver::new(lra_solver, SolverConfig::default());
+
+        assert!(
+            matches!(
+                lira_solver.solve().unwrap().decision,
+                SolverDecision::INFEASIBLE(_)
+            ),
+            "x must lie in [1/3, 2/3], so there is no integer solution"
+        );
+
+        // `x` itself was never directly bounded by the input (only `3x` was, via slacks), so any
+        // bound left on it after the search must have come from a branch.
+        let x = lira_solver.lra_solver().get_var("x").expect("x exists");
+        let bounds = lira_solver
+            .lra_solver()
+            .get_bounds(&x)
+            .expect("x has a bounds record");
+        assert!(
+            bounds.lower.is_none() && bounds.upper.is_none(),
+            "branch-and-bound leaked a speculative bound on x: {bounds:?}"
+        );
     }
 
     // Repeat the `branch_and_bound_triangle` test as purely LIA

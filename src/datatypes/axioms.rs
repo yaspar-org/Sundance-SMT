@@ -330,8 +330,16 @@ pub fn learn_ctor_selector_clauses(
             .collect();
     }
 
-    // have the simple_sorted id for the global case and the simple id for the app case
-    let ctor_id = QualifiedIdentifier::simple(ctor_name.clone());
+    // A constructor of a parametric datatype must carry its ground sort on the identifier,
+    // else it prints bare and fails to re-typecheck: a nullary constructor (e.g. `None`) has
+    // no arguments to pin down the type parameters, and even an applied constructor can't when
+    // a parameter is phantom (appears in no field). Constructors of a non-parametric datatype
+    // (a result sort with no sort parameters) stay bare.
+    let ctor_id = if sort.1.is_empty() {
+        QualifiedIdentifier::simple(ctor_name.clone())
+    } else {
+        QualifiedIdentifier::simple_sorted(ctor_name.clone(), sort.clone())
+    };
     let ctor_app = if selector_apps.is_empty() {
         solver_state.global(ctor_id, Some(sort.clone()))
     } else {

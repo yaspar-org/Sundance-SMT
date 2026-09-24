@@ -60,6 +60,7 @@ impl PendingInstantiations {
 pub(crate) fn instantiate_quantifiers(
     solver_state: &mut SolverState,
     assignments: &[i32],
+    allow_skolemization: bool,
 ) -> PendingInstantiations {
     let eager_skolem = solver_state.eager_skolem;
     debug_println!(24, 0, "Starting a matching round");
@@ -80,7 +81,10 @@ pub(crate) fn instantiate_quantifiers(
         // check if the quantifier is assigned
         let quantifier_literal = solver_state.get_lit_from_u64(quantifier.id);
         assert!(quantifier_literal != 0); // todo: note I think this should actually always be positive but not sure
-        let quantifier_assignment = assignments[quantifier_literal.unsigned_abs() as usize];
+        let quantifier_assignment = assignments
+            .get(quantifier_literal.unsigned_abs() as usize)
+            .copied()
+            .unwrap_or(0);
 
         // if the quantifier is unassigned, we can skip it
         if quantifier_assignment == 0 {
@@ -94,7 +98,7 @@ pub(crate) fn instantiate_quantifiers(
             (quantifier_assignment > 0) ^ (quantifier_literal > 0) ^ quantifier_is_exists;
 
         // if the quantifier has positive polarity or we are doing ddsmt optimizations, and we haven't skolemized it yet, then we skolemize it
-        if (quantifier_polarity || eager_skolem) && !quantifier.skolemized {
+        if allow_skolemization && (quantifier_polarity || eager_skolem) && !quantifier.skolemized {
             skolemized_quantifier_idxs.push(i);
 
             let term = solver_state.get_term(quantifier.id);

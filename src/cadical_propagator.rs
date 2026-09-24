@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::arithmetic::incremental_solver::PartialCheckResult;
 use crate::arithmetic::incremental_solver::translation::ArithTranslator;
 use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
@@ -20,6 +21,60 @@ use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+#[derive(Clone, Copy)]
+pub(crate) enum EagerQiMode {
+    Disabled,
+    Bounded { limit: usize, remaining: usize },
+    FullRound { started: bool },
+}
+
+enum EagerQiAction {
+    Bounded(usize),
+    FullRound,
+}
+
+impl EagerQiMode {
+    pub(crate) fn new(value: i32) -> Self {
+        if value < 0 {
+            Self::FullRound { started: false }
+        } else if value == 0 {
+            Self::Disabled
+        } else {
+            let limit = usize::try_from(value).expect("positive i32 must fit in usize");
+            Self::Bounded {
+                limit,
+                remaining: limit,
+            }
+        }
+    }
+
+    fn next_action(&mut self) -> Option<EagerQiAction> {
+        match self {
+            Self::Disabled | Self::Bounded { remaining: 0, .. } => None,
+            Self::Bounded { remaining, .. } => Some(EagerQiAction::Bounded(*remaining)),
+            Self::FullRound { started: true } => None,
+            Self::FullRound { started } => {
+                *started = true;
+                Some(EagerQiAction::FullRound)
+            }
+        }
+    }
+
+    fn consume(&mut self, count: usize) {
+        if let Self::Bounded { remaining, .. } = self {
+            *remaining -= count;
+        }
+    }
+
+    fn reset(&mut self) {
+        match self {
+            Self::Disabled => {}
+            Self::Bounded { limit, remaining } => *remaining = *limit,
+            Self::FullRound { started } => *started = false,
+        }
+    }
+}
+
 /// Our implementation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
@@ -32,6 +87,9 @@ pub struct CustomExternalPropagator<'a> {
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
+    pub(crate) eager_qi: EagerQiMode,
+    /// Prevent nested QI while observing variables created by materialization.
+    pub materializing_quantifiers: bool,
     /// Max number of arithmetic-model conflicts to collect per cb_check_found_model call.
     pub max_arith_conflicts_per_round: usize,
     pub last_observed_var: i32,
@@ -47,6 +105,30 @@ pub struct CustomExternalPropagator<'a> {
 }
 
 impl<'a> CustomExternalPropagator<'a> {
+    #[cfg(feature = "z3-solver")]
+    fn check_partial_arithmetic_trail(&mut self) {
+        let Some(arith) = self.arith.as_mut() else {
+            return;
+        };
+        match arith.check_partial_trail() {
+            PartialCheckResult::Unchanged => {}
+            PartialCheckResult::Sat => {
+                self.stats.arith_checks += 1;
+            }
+            PartialCheckResult::Unsat(clause) => {
+                self.stats.arith_checks += 1;
+                debug_println!(
+                    21,
+                    0,
+                    "PROPAGATOR: Partial arithmetic inconsistency detected: {:?}",
+                    clause
+                );
+                self.queue_theory_clause(clause, Theory::QfLia);
+                self.stats.conflicts += 1;
+            }
+        }
+    }
+
     /// Stream one refuted model as a `t <signed lits>` line. A write error is
     /// reported once then the writer is dropped; it must never abort the solve.
     fn write_trail_line(&mut self, model: &[i32]) {
@@ -224,10 +306,89 @@ impl<'a> CustomExternalPropagator<'a> {
         // empty before control returns to CaDiCaL, as `notify_new_decision_level`
         // requires.
         #[cfg(feature = "z3-solver")]
-        if let Some(z3) = self.z3_incremental.as_mut() {
-            z3.drain_merge_queue(self.solver_state);
+        if let Some(arith) = self.arith.as_mut() {
+            arith.drain_merges(self.solver_state);
         }
         self.sync_new_vars();
+    }
+
+    /// Materialize up to `cap` items from the current matching round.
+    /// A zero cap is unbounded.
+    fn materialize_pending(&mut self, cap: usize) -> usize {
+        let Some(mut pending) = self.pending.take() else {
+            return 0;
+        };
+        debug_assert!(!self.materializing_quantifiers);
+        self.materializing_quantifiers = true;
+
+        let mut count = 0;
+        while (cap == 0 || count < cap)
+            && let Some(instances) =
+                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+        {
+            self.apply_instances(&instances);
+            count += 1;
+        }
+
+        self.materializing_quantifiers = false;
+        if pending.is_empty() {
+            for i in pending.skolemized_quantifier_idxs() {
+                self.solver_state.quantifiers[*i].skolemized = true;
+            }
+        } else {
+            self.pending = Some(pending);
+        }
+
+        count
+    }
+
+    /// Refresh trigger matches only after every item from the previous matching
+    /// round has been materialized.
+    fn start_quantifier_instantiation_round(&mut self, allow_skolemization: bool) -> bool {
+        debug_assert!(self.pending.is_none());
+        let pending =
+            instantiate_quantifiers(self.solver_state, &self.assignments, allow_skolemization);
+        if pending.is_empty() {
+            return false;
+        }
+
+        self.sync_external_stats();
+        self.stats.begin_round();
+        self.stats.instantiation_rounds += 1;
+        self.pending = Some(pending);
+        true
+    }
+
+    fn reset_eager_qi_for_level(&mut self) {
+        self.eager_qi.reset();
+    }
+
+    /// Add instances from the current partial assignment according to the
+    /// configured per-level eager mode. Skolemization remains a complete-model
+    /// operation.
+    fn eagerly_instantiate_quantifiers(&mut self) {
+        if self.materializing_quantifiers || !self.disequalities.borrow().is_empty() {
+            return;
+        }
+
+        match self.eager_qi.next_action() {
+            None => {}
+            Some(EagerQiAction::FullRound) => {
+                // Work from an earlier matching round must not be discarded or
+                // mixed with the one fresh round for this level.
+                self.materialize_pending(0);
+                if self.start_quantifier_instantiation_round(false) {
+                    self.materialize_pending(0);
+                }
+            }
+            Some(EagerQiAction::Bounded(budget)) => {
+                if self.pending.is_none() && !self.start_quantifier_instantiation_round(false) {
+                    return;
+                }
+                let materialized = self.materialize_pending(budget);
+                self.eager_qi.consume(materialized);
+            }
+        }
     }
 }
 
@@ -285,7 +446,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             if let Some(negated_model_or_datatype_constraints) =
                 negated_model_or_datatype_constraints_opt
             {
-                for constraint in negated_model_or_datatype_constraints {
+                for (constraint, theory) in negated_model_or_datatype_constraints {
                     // todo: deleting this ordering thing -> just for debugging
                     let mut constraint_ordered = constraint.clone();
                     constraint_ordered.sort();
@@ -343,7 +504,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                     );
 
                     // let theory_reason = format!("congruence_closure_level_{}", self.decision_level);
-                    self.queue_theory_clause(shrunk_constraint, Theory::Background);
+                    self.queue_theory_clause(shrunk_constraint, theory);
                     debug_println!(
                         14 - 3,
                         0,
@@ -353,6 +514,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
             }
         }
+
+        // Trigger matching, like incremental arithmetic above, can use a
+        // partial assignment. Existing pending work is always consumed before
+        // another matching round is created.
+        self.eagerly_instantiate_quantifiers();
+        #[cfg(feature = "z3-solver")]
+        self.check_partial_arithmetic_trail();
     }
 
     fn notify_new_decision_level(&mut self) {
@@ -365,6 +533,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.decision_level + 1
         );
         self.decision_level += 1;
+        self.reset_eager_qi_for_level();
         // Record solver hash at new level
         while self.decision_level >= self.solver_state.hash_at_level.len() {
             self.solver_state
@@ -406,6 +575,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         self.decision_level = level;
+        self.reset_eager_qi_for_level();
 
         // `backtrack_to` clears the arithmetic queue at entry then re-fires
         // any congruence merges from `union_to_eclass` replay, so the queue
@@ -463,18 +633,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // If we have pending instantiations from a previous round, materialize one
         // immediately without redoing arithmetic or datatype checks.
-        if let Some(mut pending) = self.pending.take()
-            && let Some(instances) =
-                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
-        {
-            self.apply_instances(&instances);
-            if pending.is_empty() {
-                for i in pending.skolemized_quantifier_idxs() {
-                    self.solver_state.quantifiers[*i].skolemized = true;
-                }
-            } else {
-                self.pending = Some(pending);
-            }
+        if self.pending.is_some() && self.materialize_pending(1) > 0 {
             self.stats.conflicts += 1;
             return false;
         }
@@ -672,12 +831,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
 
         debug_println!(11, 0, "Starting quantifier instantiations");
-        self.sync_external_stats();
-        self.stats.begin_round();
-        self.stats.instantiation_rounds += 1;
-        let mut pending = instantiate_quantifiers(self.solver_state, &self.assignments);
-
-        if pending.is_empty() {
+        if !self.start_quantifier_instantiation_round(true) {
             debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.disequalities.borrow().is_empty());
             return true;
@@ -685,24 +839,8 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         // Materialize up to `batch_cap` pending instances in this single check.
         // batch_cap == 0 means unbounded (materialize all).
-        let cap = self.batch_cap;
-        let mut count = 0usize;
-        while (cap == 0 || count < cap)
-            && let Some(instances) =
-                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
-        {
-            self.apply_instances(&instances);
-            count += 1;
-        }
-
-        // If nothing remains, mark skolemized quantifiers; else keep pending.
-        if pending.is_empty() {
-            for i in pending.skolemized_quantifier_idxs() {
-                self.solver_state.quantifiers[*i].skolemized = true;
-            }
-        } else {
-            self.pending = Some(pending);
-        }
+        let materialized = self.materialize_pending(self.batch_cap);
+        debug_assert!(materialized > 0);
 
         debug_println!(4, 0, "Returning false in cb_check_found_model");
         self.stats.conflicts += 1;

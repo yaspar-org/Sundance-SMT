@@ -4,7 +4,7 @@
 //! Z3-based implementation of `IncrementalArithSolver`.
 
 use crate::arithmetic::incremental_solver::{
-    ArithCheckResult, ArithConstraint, ArithExpr, IncrementalArithSolver, VarId,
+    ArithCheckResult, ArithConstraint, ArithExpr, IncrementalArithSolver, PartialCheckResult, VarId,
 };
 use crate::debug_println;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
@@ -13,6 +13,9 @@ use z3::{
     SatResult, Solver,
     ast::{Bool, Int},
 };
+
+/// Min new assertions before `check_partial_trail` actually calls Z3.
+const PARTIAL_CHECK_ASSERTION_BATCH: usize = 32;
 
 fn ibig_to_bigint(n: &IBig) -> num::BigInt {
     num::BigInt::parse_bytes(n.to_string().as_bytes(), 10).unwrap()
@@ -50,6 +53,8 @@ pub struct Z3IncrementalState {
     /// persist for the whole solve.
     defs_by_level: Vec<Vec<Bool>>,
     current_level: usize,
+    /// Tracked assertions added since the last (partial or full) check.
+    pending_partial_assertions: usize,
 }
 
 impl Z3IncrementalState {
@@ -65,7 +70,37 @@ impl Z3IncrementalState {
             vars_by_level: vec![Vec::new()],
             defs_by_level: vec![Vec::new()],
             current_level: 0,
+            pending_partial_assertions: 0,
         }
+    }
+
+    fn active_assumptions(&self) -> Vec<Bool> {
+        self.active_lits
+            .iter()
+            .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()).cloned())
+            .collect()
+    }
+
+    fn unsat_core_clause(&self) -> Vec<i32> {
+        let core = self.solver.get_unsat_core();
+        let lits: Vec<i32> = core
+            .iter()
+            .filter_map(|ast| {
+                let raw = ast.to_string();
+                let abs_lit: i32 = raw.trim_matches('|').strip_prefix("lit_")?.parse().ok()?;
+                let signed = if self.active_lits.contains(&abs_lit) {
+                    abs_lit
+                } else {
+                    -abs_lit
+                };
+                Some(-signed)
+            })
+            .collect();
+        assert!(
+            !lits.is_empty(),
+            "z3incremental: empty unsat core (definitions alone are contradictory)"
+        );
+        lits
     }
 
     fn ensure_level_slot(&mut self) {
@@ -211,6 +246,7 @@ impl IncrementalArithSolver for Z3IncrementalState {
         self.active_lits.insert(lit);
         self.lits_by_level[self.current_level].push(lit);
         self.solver.assert_and_track(ast, &tracker);
+        self.pending_partial_assertions += 1;
         debug_println!(
             21,
             0,
@@ -234,6 +270,7 @@ impl IncrementalArithSolver for Z3IncrementalState {
         self.active_lits.insert(lit);
         self.lits_by_level[self.current_level].push(lit);
         self.solver.assert_and_track(ast, &tracker);
+        self.pending_partial_assertions += 1;
         debug_println!(
             21,
             0,
@@ -247,12 +284,8 @@ impl IncrementalArithSolver for Z3IncrementalState {
 
     fn check(&mut self) -> ArithCheckResult {
         debug_println!(21, 0, "[z3inc] check() at level {}", self.current_level);
-        let assumptions: Vec<Bool> = self
-            .active_lits
-            .iter()
-            .filter_map(|lit| self.tracker_by_abs_lit.get(&lit.abs()).cloned())
-            .collect();
-        match self.solver.check_assumptions(&assumptions) {
+        self.pending_partial_assertions = 0;
+        match self.solver.check_assumptions(&self.active_assumptions()) {
             SatResult::Sat => {
                 let model = self.solver.get_model().unwrap();
                 let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<VarId>> =
@@ -268,28 +301,25 @@ impl IncrementalArithSolver for Z3IncrementalState {
                 debug_println!(21, 0, "[z3inc] SAT");
                 ArithCheckResult::Sat(buckets)
             }
-            SatResult::Unsat => {
-                let core = self.solver.get_unsat_core();
-                let lits: Vec<i32> = core
-                    .iter()
-                    .filter_map(|ast| {
-                        let raw = ast.to_string();
-                        let abs_lit: i32 =
-                            raw.trim_matches('|').strip_prefix("lit_")?.parse().ok()?;
-                        let signed = if self.active_lits.contains(&abs_lit) {
-                            abs_lit
-                        } else {
-                            -abs_lit
-                        };
-                        Some(-signed)
-                    })
-                    .collect();
-                assert!(
-                    !lits.is_empty(),
-                    "z3incremental: empty unsat core (definitions alone are contradictory)"
-                );
-                ArithCheckResult::Unsat(lits)
-            }
+            SatResult::Unsat => ArithCheckResult::Unsat(self.unsat_core_clause()),
+            SatResult::Unknown => panic!("z3incremental: Z3 returned unknown"),
+        }
+    }
+
+    fn check_partial_trail(&mut self) -> PartialCheckResult {
+        if self.pending_partial_assertions < PARTIAL_CHECK_ASSERTION_BATCH {
+            return PartialCheckResult::Unchanged;
+        }
+        self.pending_partial_assertions = 0;
+        debug_println!(
+            21,
+            0,
+            "[z3inc] partial check at level {}",
+            self.current_level
+        );
+        match self.solver.check_assumptions(&self.active_assumptions()) {
+            SatResult::Sat => PartialCheckResult::Sat,
+            SatResult::Unsat => PartialCheckResult::Unsat(self.unsat_core_clause()),
             SatResult::Unknown => panic!("z3incremental: Z3 returned unknown"),
         }
     }

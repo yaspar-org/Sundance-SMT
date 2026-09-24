@@ -114,6 +114,10 @@
     "edge_cases_quantifiers/eclass_merge_after_backtrack11.smt2": "unsat",
     "edge_cases_quantifiers/eclass_merge_after_backtrack12.smt2": "unsat",
     "edge_cases_quantifiers/quantifier_ite_true_union_false.smt2": "unsat",
+    "edge_cases_quantifiers/no_pattern_excludes_trigger.smt2": "unsat",
+    "edge_cases_quantifiers/inferred_trigger_untriggered_forall.smt2": "unsat",
+    "edge_cases_quantifiers/inferred_trigger_uninterpreted_rem.smt2": "unsat",
+    "edge_cases_quantifiers/minimal_inferred_multipattern.smt2": "unsat",
     "edge_cases_quantifiers/multipattern.smt2": "unsat",
     "edge_cases_quantifiers/multipattern2.smt2": "unsat",
     "edge_cases_quantifiers/multipattern3.smt2": "unsat",
@@ -263,6 +267,7 @@
     "datatypes/poly_nested_adt_sat.smt2": "sat",
     "datatypes/poly_option_sat.smt2": "sat",
     "datatypes/poly_option_unsat.smt2": "unsat",
+    "datatypes/phantom_param_unsat.smt2": "unsat",
     "datatypes/backtracking_new_terms.smt2": "unsat",
     "datatypes/insert_pred_sel_apps.smt2": "unsat",
     "datatypes/insert_pred_sel_apps2.smt2": "unsat",
@@ -1108,5 +1113,6 @@
   "arithmetic/mod_constant_divisor_unsat.smt2": "unsat",
   "arithmetic/mod_negative_divisor_sat.smt2": "sat",
   "arithmetic/mod_negative_divisor_unsat.smt2": "unsat",
-  "arithmetic/mod_negative_numerator_unsat.smt2": "unsat"
+  "arithmetic/mod_negative_numerator_unsat.smt2": "unsat",
+  "arithmetic/bool_arg_in_function.smt2": "unsat"
 }

@@ -3,3 +3,4 @@
 
 pub mod quantifier;
 pub mod skolem;
+pub mod trigger_inference;

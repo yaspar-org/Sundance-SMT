@@ -211,18 +211,24 @@ impl ConvContext {
         new_var
     }
 
+    /// Produce a fresh variable name of the form `{prefix}_{i}` that is not yet
+    /// present in the name <-> variable association
+    pub fn fresh_name(&self, prefix: &str) -> String {
+        let mut id = self.next_id;
+        let mut name = format!("{prefix}_{id}");
+        while self.name_to_var.contains_key(&name) {
+            // only reachable if the input problem contains variables named `{prefix}_i`
+            id += 1;
+            name = format!("{prefix}_{id}");
+        }
+        name
+    }
+
     /// Add a relation to the context and allocate a (slack) variable associated to it;
     /// return the variable
     pub fn allocate_relation(&mut self, rel: Rel<Rational>) -> Var {
-        let mut id = self.next_id;
-        let mut name = format!("!slack_{id}");
-        while self.name_to_var.contains_key(&name) {
-            // only reachable if the input problem contains variables named `!slack_i`
-            id += 1;
-            name = format!("!slack_{id}");
-        }
-        // we now have a fresh name, but note the name id is not guaranteed to equal
-        // the internal Var id
+        // note the name id is not guaranteed to equal the internal Var id
+        let name = self.fresh_name("!slack");
         let s = self.allocate_var(&name, VarType::Real);
         self.push_relation(rel, s);
         s

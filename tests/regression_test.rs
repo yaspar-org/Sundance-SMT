@@ -100,6 +100,10 @@ fn regression_test() {
             if let Some(ref a) = arithmetic {
                 cmd.arg("--arithmetic").arg(a);
             }
+            // Trigger inference is off by default on the CLI; enable it for the
+            // regression corpus so untriggered `forall`s are handled rather than
+            // panicking.
+            cmd.arg("--infer-triggers");
             let child = cmd
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -138,6 +142,89 @@ fn regression_test() {
     // Fail the test if there were any incorrect results
     if incorrect > 0 {
         panic!("{} tests failed", incorrect);
+    }
+}
+
+/// Rejection tests (issue #52): every file under `tests/regression/rejection`
+/// must make the solver error out rather than answer, so it must NOT print
+/// `sat`, `unsat`, or `unknown` (`unknown` is a sound answer, not a rejection).
+/// Forced onto the internal backend, since rejecting e.g. non-linear
+/// multiplication is a property of the internal solver.
+#[test]
+fn rejection_test() {
+    let rejection_dir = Path::new("tests/regression/rejection");
+
+    let smt_files = fs::read_dir(rejection_dir)
+        .expect("Failed to read rejection directory")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if entry.file_type().ok()?.is_file() && path.extension()?.to_str()? == "smt2" {
+                Some(path)
+            } else {
+                None
+            }
+        });
+
+    let mut rejected = 0;
+    let mut answered = Vec::new();
+
+    for path in smt_files {
+        let name = path.file_name().unwrap().to_str().unwrap().to_string();
+        print!("Rejection test: {} ... ", name);
+        io::stdout().flush().unwrap();
+
+        let mut cmd = Command::new("target/release/sundance-smt");
+        cmd.arg(path.to_str().unwrap());
+        // Force the internal backend: rejection of unsupported arithmetic (e.g.
+        // non-linear multiplication) is a property of the internal solver.
+        cmd.arg("--arithmetic").arg("internal");
+        let child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to execute solver");
+
+        match wait_with_timeout(child, Duration::from_secs(10)) {
+            Ok(output) => {
+                let actual = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if actual == "sat" || actual == "unsat" || actual == "unknown" {
+                    // The solver produced an answer for an input it should have
+                    // rejected (errored on) instead.
+                    answered.push(format!("{} (got {})", name, actual));
+                    println!("\x1b[31m✗ (expected rejection, got {})\x1b[0m", actual);
+                } else if output.status.code().is_none() {
+                    // Killed by a signal: an abort or segfault, not a clean rejection.
+                    answered.push(format!("{} (crashed: {})", name, output.status));
+                    println!(
+                        "\x1b[31m✗ (expected rejection, crashed: {})\x1b[0m",
+                        output.status
+                    );
+                } else {
+                    // A non-answer with a normal exit status means the solver
+                    // reported an error and exited — a rejection.
+                    rejected += 1;
+                    println!("\x1b[32m✓ (rejected)\x1b[0m");
+                }
+            }
+            Err(mut child) => {
+                let _ = child.kill();
+                answered.push(format!("{} (timeout)", name));
+                println!("\x1b[31m✗ (expected rejection, timed out)\x1b[0m");
+            }
+        }
+    }
+
+    println!("\nRejection Test Summary:");
+    println!("Rejected:            {}", rejected);
+    println!("Answered (unexpected): {}", answered.len());
+
+    if !answered.is_empty() {
+        panic!(
+            "{} input(s) were answered instead of rejected: {:?}",
+            answered.len(),
+            answered
+        );
     }
 }
 

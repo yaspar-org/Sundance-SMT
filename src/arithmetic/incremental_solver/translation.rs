@@ -6,7 +6,7 @@
 //! egraph ids and solver VarIds.
 
 use crate::arithmetic::incremental_solver::{
-    ArithCheckResult, ArithConstraint, ArithExpr, IncrementalArithSolver, VarId,
+    ArithCheckResult, ArithConstraint, ArithExpr, IncrementalArithSolver, PartialCheckResult, VarId,
 };
 use crate::arithmetic::lia::stats::Stats as LiaStats;
 use crate::arithmetic::lp::{ArithResult, Coefficient};
@@ -238,6 +238,11 @@ impl ArithTranslator {
             self.solver.push_equality(va, vb, lit);
         }
         new_lits
+    }
+
+    /// Cheap feasibility check on the current trail (no model, no NO probe).
+    pub fn check_partial_trail(&mut self) -> PartialCheckResult {
+        self.solver.check_partial_trail()
     }
 
     /// Register all arithmetic terms (with report_in_model=true), call check,

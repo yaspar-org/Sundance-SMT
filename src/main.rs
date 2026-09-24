@@ -9,6 +9,7 @@ use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
+use sundance_smt::theory_check::{NonlinearityCheck, reject_unsupported_theories};
 use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
@@ -72,6 +73,11 @@ fn main() -> Result<(), String> {
         })
         .collect::<Vec<_>>();
 
+    // Bail out before the assertions reach the egraph when operators from theories we do not
+    // implement would silently become uninterpreted functions and could yield `sat` on an `unsat`
+    // problem.
+    reject_unsupported_theories(&assertions, &mut context)?;
+
     let mut prop_skeleton: Vec<Vec<i32>> = vec![];
 
     // adding true and false to the egraph
@@ -84,11 +90,23 @@ fn main() -> Result<(), String> {
     assertions.push(true_term.clone());
     assertions.push(not_false_term);
 
-    let mut solver_state = SolverState::new(context, args.lazy_dt, args.ddsmt, args.eager_skolem);
+    let mut solver_state = SolverState::new(
+        context,
+        args.lazy_dt,
+        args.ddsmt,
+        args.eager_skolem,
+        args.infer_triggers,
+    );
 
     solver_state.register_bool_constants(&true_term, &false_term);
 
     let mut nnf_terms = vec![];
+    // Non-linear multiplication is the other input the solver cannot handle, and the arithmetic
+    // frontend reports it by panicking from inside a CaDiCaL callback, where cxx turns the panic
+    // into `abort()`. Catching it here instead keeps it a clean error. The check has to see the
+    // let-eliminated, globally substituted term, so it runs inside the loop below rather than
+    // alongside `reject_unsupported_theories`.
+    let mut nonlinearity = NonlinearityCheck::default();
     for assert in assertions {
         debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
 
@@ -97,6 +115,8 @@ fn main() -> Result<(), String> {
             .let_elim(&mut solver_state.context)
             .gsubst_all(&mut solver_state.context);
         debug_println!(10, 0, "Expanded form: {}", expanded_term);
+
+        nonlinearity.check(&expanded_term)?;
 
         let skolemized_term = expanded_term;
 
@@ -184,6 +204,7 @@ fn main() -> Result<(), String> {
         args.elevate,
         args.max_arith_conflicts_per_round,
         args.batch_cap,
+        args.eager_qi,
     );
 
     match return_value {

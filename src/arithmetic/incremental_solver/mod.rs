@@ -39,6 +39,13 @@ pub enum ArithCheckResult {
     Sat(DeterministicHashMap<IBig, DeterministicHashSet<VarId>>),
 }
 
+/// Result of `check_partial_trail()`. `Unchanged` = impl skipped the check.
+pub enum PartialCheckResult {
+    Unchanged,
+    Sat,
+    Unsat(Vec<i32>),
+}
+
 /// An incremental arithmetic solver that the propagator drives via
 /// push/pop of constraints and equalities, keyed by solver-assigned VarIds.
 pub trait IncrementalArithSolver {
@@ -67,4 +74,8 @@ pub trait IncrementalArithSolver {
     /// Check satisfiability of all currently-pushed constraints + definitions.
     /// On SAT, only vars registered with `report_in_model=true` appear in buckets.
     fn check(&mut self) -> ArithCheckResult;
+
+    /// Cheap feasibility check on the current trail — no model, no theory
+    /// combination. Impls may return `Unchanged` to skip on their own policy.
+    fn check_partial_trail(&mut self) -> PartialCheckResult;
 }
