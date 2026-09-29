@@ -9,7 +9,7 @@ use cadical_sys::ProofTracer;
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
-    fn add_original_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32], restored: bool) {
+    fn add_original_clause(&mut self, _id: i64, _redundant: bool, clause: &[i32], restored: bool) {
         let registered = self.consume_clause_callback_registration(clause);
         if restored || registered {
             return;
@@ -22,38 +22,40 @@ impl ProofTracer for SMTProofTracer {
 
     fn add_derived_clause(
         &mut self,
-        id: u64,
+        id: i64,
         _redundant: bool,
+        witness: i32,
         clause: &[i32],
-        antecedents: &[u64],
+        antecedents: &[i64],
     ) {
         debug_println!(6, 0, "*** SAT SOLVER CONFLICT CLAUSE LEARNED ***");
         debug_println!(6, 0, "Clause ID: {}", id);
         debug_println!(6, 0, "Conflict clause: {:?}", clause);
         debug_println!(6, 0, "Antecedent clause IDs: {:?}", antecedents);
+        debug_println!(6, 0, "RAT witness literal: {}", witness);
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
         self.add_sat_clause(clause);
     }
 
-    fn delete_clause(&mut self, _id: u64, _redundant: bool, clause: &[i32]) {
+    fn delete_clause(&mut self, _id: i64, _redundant: bool, clause: &[i32]) {
         self.deleted_clauses += 1;
         self.record_deletion(clause);
     }
 
-    fn weaken_minus(&mut self, _id: u64, _clause: &[i32]) {
+    fn weaken_minus(&mut self, _id: i64, _clause: &[i32]) {
         // Optional: track weakened clauses
         panic!("Do not currently support weaken minus")
     }
 
-    fn strengthen(&mut self, _id: u64) {
+    fn strengthen(&mut self, _id: i64) {
         // Optional: track strengthened clauses
         // panic!("Do not currently support strengthen")
         // we are allowing this for right now: just clause vivification: https://www.cril.univ-artois.fr/~piette/revival/revival.pdf
         // needed for example by tests/regression/smt_files/skolemization/skolem-negatedforall8.smt2
     }
 
-    fn finalize_clause(&mut self, _id: u64, _clause: &[i32]) {
+    fn finalize_clause(&mut self, _id: i64, _clause: &[i32]) {
         // Optional: track finalized clauses
         panic!("Do not currently support finalize clause")
     }
@@ -77,13 +79,13 @@ impl ProofTracer for SMTProofTracer {
         // Specifically this happens when we get unknown, for example when we run with a timeout.
     }
 
-    fn add_assumption_clause(&mut self, _id: u64, _clause: &[i32], _antecedents: &[u64]) {
+    fn add_assumption_clause(&mut self, _id: i64, _clause: &[i32], _antecedents: &[i64]) {
         panic!("Do not currently support assumptions")
     }
 
     fn conclude_sat(&mut self, _conclusion_type: i32, _model: &[i32]) {}
 
-    fn conclude_unsat(&mut self, _conclusion_type: i32, _clause_ids: &[u64]) {}
+    fn conclude_unsat(&mut self, _conclusion_type: i32, _clause_ids: &[i64]) {}
 
     fn conclude_unknown(&mut self, _trail: &[i32]) {}
 }
