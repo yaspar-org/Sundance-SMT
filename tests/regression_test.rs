@@ -93,7 +93,7 @@ fn regression_test() {
             // Optional arithmetic override (CI matrix passes SUNDANCE_ARITHMETIC to
             // exercise every backend against the same test corpus).
             let arithmetic = env::var("SUNDANCE_ARITHMETIC").ok();
-            // Optional SAT backend override (`cadical` or `minisat`)
+            // Optional SAT backend override (`cadical`, `minisat` or `tableau`)
             let sat_backend = env::var("SUNDANCE_SAT_BACKEND").ok();
 
             // Run solver with timeout — env! resolves to the debug or release

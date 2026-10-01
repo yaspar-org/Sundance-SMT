@@ -78,11 +78,14 @@ impl EagerQiMode {
 }
 
 /// Where the propagator registers newly observed variables, from inside a
-/// callback while the solver itself is borrowed by the search loop.
+/// callback while the solver itself is borrowed by the search loop. CaDiCaL and
+/// MiniSat are called directly; the Rust tableau receives a queue it drains
+/// after each callback.
 pub enum ObservedSink {
     Cadical(*mut CaDiCal),
     #[cfg(feature = "minisat")]
     Minisat(*mut sat_interface::minisat::MiniSat),
+    Queue(Rc<RefCell<Vec<i32>>>),
 }
 
 /// Our implementation of an IPASIR-UP external propagator
@@ -252,12 +255,15 @@ impl<'a> CustomExternalPropagator<'a> {
             "Adding literal {} as observed variable to solver",
             abs_lit
         );
-        unsafe {
-            match &self.observed_sink {
-                ObservedSink::Cadical(solver) => (**solver).add_observed_var(abs_lit),
-                #[cfg(feature = "minisat")]
-                ObservedSink::Minisat(solver) => (**solver).add_observed_var(abs_lit),
-            }
+        match &self.observed_sink {
+            ObservedSink::Cadical(solver) => unsafe {
+                (**solver).add_observed_var(abs_lit);
+            },
+            #[cfg(feature = "minisat")]
+            ObservedSink::Minisat(solver) => unsafe {
+                (**solver).add_observed_var(abs_lit);
+            },
+            ObservedSink::Queue(queue) => queue.borrow_mut().push(abs_lit),
         }
     }
 

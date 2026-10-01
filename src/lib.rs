@@ -14,6 +14,7 @@ pub mod log;
 pub mod preprocess;
 mod proof;
 mod quantifiers;
+mod sat_tableau;
 pub mod solver_state;
 pub mod solver_types;
 pub mod stats;

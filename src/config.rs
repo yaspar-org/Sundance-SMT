@@ -54,7 +54,7 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub infer_triggers: bool,
     /// Propositional search engine driving the theory propagator
-    #[arg(long, default_value_t = SatBackend::Cadical, value_enum)]
+    #[arg(long, default_value_t = SatBackend::Tableau, value_enum)]
     pub sat_backend: SatBackend,
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
@@ -81,6 +81,8 @@ pub enum SatBackend {
     Cadical,
     /// Minisat-UP
     Minisat,
+    /// Native Rust clause tableau (no learning)
+    Tableau,
 }
 
 impl std::fmt::Display for SatBackend {
@@ -88,6 +90,7 @@ impl std::fmt::Display for SatBackend {
         match self {
             SatBackend::Cadical => write!(f, "cadical"),
             SatBackend::Minisat => write!(f, "minisat"),
+            SatBackend::Tableau => write!(f, "tableau"),
         }
     }
 }
