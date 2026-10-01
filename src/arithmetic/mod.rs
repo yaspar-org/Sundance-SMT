@@ -5,6 +5,7 @@ pub mod lia;
 pub mod lialp;
 pub mod lp;
 pub mod nelsonoppen;
+pub mod simplify;
 #[cfg(feature = "z3-solver")]
 pub mod z3incremental;
 #[cfg(feature = "z3-solver")]

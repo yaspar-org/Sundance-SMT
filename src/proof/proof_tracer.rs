@@ -387,6 +387,7 @@ impl SMTProofTracer {
         reduced_literal: i32,
         reduced: &Term,
         typ: ProofStepType,
+        reduction_theory: Theory,
     ) {
         assert!(parent_literal != 0 && reduced_literal != 0);
         if child.uid() != reduced.uid() {
@@ -407,9 +408,10 @@ impl SMTProofTracer {
             // The child term won't be registered anywhere else
             self.register_term(child_literal, child, true);
 
-            // Derive `imp` through modus ponens via Boolean reasoning
+            // Derive `imp` through modus ponens; `child <=> reduced` holds in
+            // `reduction_theory` (Boolean for NNF, arithmetic if it also folded)
             self.push_step(&child_imp, typ);
-            self.add_theory_clause(&equiv_imp, Theory::Boolean);
+            self.add_theory_clause(&equiv_imp, reduction_theory);
             self.add_sat_clause(&imp);
 
             // Delete any clauses mentioning the un-reduced child
