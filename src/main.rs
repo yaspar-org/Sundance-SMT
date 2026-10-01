@@ -201,6 +201,7 @@ fn main() -> Result<(), String> {
         symbol_table,
         args.arithmetic,
         args.timeout,
+        args.sat_backend,
         args.elevate,
         args.max_arith_conflicts_per_round,
         args.batch_cap,

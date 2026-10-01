@@ -3,10 +3,12 @@
 
 //! Main CDCL decision loop
 use crate::arithmetic::lp::ArithSolver;
-use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode};
+use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode, ObservedSink};
+use crate::config::SatBackend;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::proof::{SMTProofTracer, Theory};
+use crate::sat_tableau::SatTableau;
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
@@ -43,23 +45,30 @@ pub fn cdcl_decision_procedure(
     symbol_table: HashMap<Str, Vec<(Sig, FunctionMeta)>>,
     arithmetic: ArithSolver,
     timeout: u64,
+    sat_backend: SatBackend,
     elevate: i32,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
     eager_qi: i32,
 ) -> (Status, SolverStats) {
-    let mut solver = CaDiCal::new();
-    assert!(
-        solver.set("elevate".to_string(), elevate),
-        "CaDiCaL option 'elevate' is unavailable; Sundance requires CaDiCaL >= 3.0.1 for lazy quantifier instantiation"
-    );
-
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
     // todo: for right now always have hid_quantifiers to be true, need to change this
     let proof_tracer = Rc::new(RefCell::new(SMTProofTracer::new(sorts, symbol_table)));
 
-    // Connect the proof tracer (must be done in CONFIGURING state)
-    solver.connect_proof_tracer1(&mut *proof_tracer.borrow_mut(), true); // true for antecedents
+    let mut solver = match sat_backend {
+        SatBackend::Cadical => {
+            // Boxed so the propagator's pointer stays valid when `solver` moves.
+            let mut cadical = Box::new(CaDiCal::new());
+            assert!(
+                cadical.set("elevate".to_string(), elevate),
+                "CaDiCaL option 'elevate' is unavailable; Sundance requires CaDiCaL >= 3.0.1 for lazy quantifier instantiation"
+            );
+            // Connect the proof tracer (must be done in CONFIGURING state)
+            cadical.connect_proof_tracer1(&mut *proof_tracer.borrow_mut(), true); // true for antecedents
+            Backend::Cadical(cadical)
+        }
+        SatBackend::Tableau => Backend::Tableau(Box::default()),
+    };
 
     let mut terminator = if timeout > 0 {
         Some(DeadlineTerminator {
@@ -68,9 +77,13 @@ pub fn cdcl_decision_procedure(
     } else {
         None
     };
-    if let Some(ref mut t) = terminator {
-        solver.connect_terminator(t);
+    if let (Some(t), Backend::Cadical(cadical)) = (terminator.as_mut(), &mut solver) {
+        cadical.connect_terminator(t);
     }
+    let observed_sink = match &mut solver {
+        Backend::Cadical(cadical) => ObservedSink::Cadical(&mut **cadical as *mut CaDiCal),
+        Backend::Tableau(tableau) => ObservedSink::Queue(tableau.observed_queue()),
+    };
 
     #[cfg(feature = "z3-solver")]
     let using_z3_incremental = matches!(arithmetic, ArithSolver::Z3Incremental);
@@ -91,7 +104,7 @@ pub fn cdcl_decision_procedure(
         fixed_literals: DeterministicHashSet::default(),
         proof_tracer: Rc::clone(&proof_tracer), // Clone the Rc reference
         assignments: vec![0, 0],
-        solver: &mut solver as *mut CaDiCal,
+        observed_sink,
         arithmetic,
         stats: SolverStats::new(),
         pending: None,
@@ -114,7 +127,9 @@ pub fn cdcl_decision_procedure(
         trail_atoms: std::collections::HashMap::new(),
     };
 
-    solver.connect_external_propagator(&mut propagator);
+    if let Backend::Cadical(cadical) = &mut solver {
+        cadical.connect_external_propagator(&mut propagator);
+    }
     // note: not using a fixed listener anymore
     // solver.connect_fixed_listener(&mut propagator);
 
@@ -145,10 +160,19 @@ pub fn cdcl_decision_procedure(
         }
     }
 
-    let result = solve(&mut solver);
-
-    // Disconnect the proof tracer before dropping the propagator
-    solver.disconnect_proof_tracer1();
+    let result = match &mut solver {
+        Backend::Cadical(cadical) => {
+            let result = cadical.solve();
+            // Disconnect the proof tracer before dropping the propagator
+            cadical.disconnect_proof_tracer1();
+            result
+        }
+        Backend::Tableau(tableau) => tableau.solve(
+            &mut propagator,
+            Some(&*proof_tracer),
+            terminator.as_mut().map(|t| t as &mut dyn Terminator),
+        ),
+    };
 
     // Generate proof after all borrows are released
     let edrat_proof = proof_tracer.borrow_mut().generate_edrat();
@@ -228,7 +252,7 @@ fn write_partial_proof(path: &std::path::Path, result: Status, edrat_proof: &str
 /// A missing `theory` denotes an original CNF clause.
 fn add_clause_to_proof_and_solver(
     clause: &[i32],
-    solver: &mut CaDiCal,
+    solver: &mut Backend,
     proof_tracer: &RefCell<SMTProofTracer>,
     theory: Option<Theory>,
 ) {
@@ -242,9 +266,14 @@ fn add_clause_to_proof_and_solver(
         proof_tracer.register_clause_for_cadical_callback(clause);
     }
 
-    solver.clause6(clause); // TODO `clause1()`, `clause2()`, etc. might be more efficient
+    match solver {
+        Backend::Cadical(cadical) => cadical.clause6(clause), // TODO `clause1()`, `clause2()`, etc. might be more efficient
+        Backend::Tableau(tableau) => tableau.add_clause(clause),
+    }
 }
 
-fn solve(solver: &mut CaDiCal) -> Status {
-    solver.solve()
+/// The propositional search engine selected by `--sat-backend`
+enum Backend {
+    Cadical(Box<CaDiCal>),
+    Tableau(Box<SatTableau>),
 }
