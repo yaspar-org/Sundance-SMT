@@ -62,6 +62,7 @@
     "edge_cases/booleanbug.smt2": "unsat",
     "edge_cases/booleanbug2.smt2": "unsat",
     "edge_cases_quantifiers/pattern-test.smt2": "unknown",
+    "edge_cases_quantifiers/ground-body-instantiation.smt2": "unknown",
     "edge_cases_quantifiers/pattern-test-2.smt2": "unsat",
     "edge_cases_quantifiers/wrongpattern.smt2": "unknown",
     "edge_cases_quantifiers/checkbool-quantifier.smt2": "unsat",
