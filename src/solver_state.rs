@@ -627,6 +627,7 @@ impl SolverState {
                 triggers: trigger_ids,
                 variables,
                 body: inner_term.uid(),
+                body_locals: crate::quantifiers::quantifier::collect_locals(&inner_term),
                 id: term.uid(),
                 guard,
                 polarity,

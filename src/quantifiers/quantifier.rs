@@ -14,10 +14,12 @@ use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
 use crate::solver_state::SolverState;
 use crate::solver_types::Polarity;
-use crate::utils::DeterministicHashMap;
+use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 
 use crate::debug_println;
-use yaspar_ir::ast::{LetElim, Local, Sort, Str, Substitute, Substitution, Term, TermAllocator};
+use yaspar_ir::ast::{
+    ATerm, LetElim, Local, Repr, Sort, Str, Substitute, Substitution, Term, TermAllocator,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) enum QuantifierInstance {
@@ -53,6 +55,25 @@ impl PendingInstantiations {
     pub(crate) fn skolemized_quantifier_idxs(&self) -> &[usize] {
         &self.skolemized_quantifier_idxs
     }
+}
+
+/// All locals occurring anywhere in `term`. Over-approximates the free
+/// variables (locals bound by nested binders are included), which only makes
+/// instantiation de-duplication more conservative.
+pub(crate) fn collect_locals(term: &Term) -> DeterministicHashSet<Local> {
+    let mut locals = DeterministicHashSet::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![term.clone()];
+    while let Some(t) = stack.pop() {
+        if !visited.insert(t.uid()) {
+            continue;
+        }
+        if let ATerm::Local(local) = t.repr() {
+            locals.insert(local.clone());
+        }
+        stack.extend(t.repr().sub_terms().cloned());
+    }
+    locals
 }
 
 /// Computes trigger matches and substitutions, returning deferred items
@@ -139,9 +160,12 @@ pub(crate) fn instantiate_quantifiers(
             }
 
             for subs_ids in list_assignments.iter() {
-                // Convert the (Local -> egraph id) map into a (Local -> Term) map for substitution
+                // Convert the (Local -> egraph id) map into a (Local -> Term) map for substitution.
+                // Bound variables that do not occur in the body are dropped, so matches that
+                // differ only in them (e.g. every match of a ground body) share one instance.
                 let subs: DeterministicHashMap<Local, Term> = subs_ids
                     .iter()
+                    .filter(|(k, _)| quantifier.body_locals.contains(*k))
                     .map(|(k, v)| {
                         (
                             k.clone(),
