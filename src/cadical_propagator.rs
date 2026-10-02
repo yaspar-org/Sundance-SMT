@@ -75,6 +75,14 @@ impl EagerQiMode {
     }
 }
 
+/// Where the propagator registers newly observed variables. CaDiCaL is called
+/// directly; the Rust tableau receives a queue it drains after each callback,
+/// because it is borrowed while the callback runs.
+pub enum ObservedSink {
+    Cadical(*mut CaDiCal),
+    Queue(Rc<RefCell<Vec<i32>>>),
+}
+
 /// Our implementation of a Cadical Propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
@@ -83,7 +91,7 @@ pub struct CustomExternalPropagator<'a> {
     pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
-    pub solver: *mut CaDiCal,
+    pub observed_sink: ObservedSink,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
@@ -239,8 +247,11 @@ impl<'a> CustomExternalPropagator<'a> {
             "Adding literal {} as observed variable to solver",
             abs_lit
         );
-        unsafe {
-            (*self.solver).add_observed_var(abs_lit);
+        match &self.observed_sink {
+            ObservedSink::Cadical(solver) => unsafe {
+                (**solver).add_observed_var(abs_lit);
+            },
+            ObservedSink::Queue(queue) => queue.borrow_mut().push(abs_lit),
         }
     }
 

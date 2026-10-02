@@ -93,12 +93,17 @@ fn regression_test() {
             // Optional arithmetic override (CI matrix passes SUNDANCE_ARITHMETIC to
             // exercise every backend against the same test corpus).
             let arithmetic = env::var("SUNDANCE_ARITHMETIC").ok();
+            // Optional SAT backend override (`cadical` or `tableau`).
+            let sat_backend = env::var("SUNDANCE_SAT_BACKEND").ok();
 
             // Run solver with timeout
             let mut cmd = Command::new("target/release/sundance-smt");
             cmd.arg(path.to_str().unwrap());
             if let Some(ref a) = arithmetic {
                 cmd.arg("--arithmetic").arg(a);
+            }
+            if let Some(ref b) = sat_backend {
+                cmd.arg("--sat-backend").arg(b);
             }
             // Trigger inference is off by default on the CLI; enable it for the
             // regression corpus so untriggered `forall`s are handled rather than

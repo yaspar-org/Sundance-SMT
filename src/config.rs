@@ -4,7 +4,7 @@
 //! Solver configuration and command line parsing
 
 use crate::arithmetic::lp::ArithSolver;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
 /// Sundance is an SMT solver for program verification
@@ -53,6 +53,9 @@ pub struct Args {
     /// untriggered `forall` panics instead.
     #[arg(long, default_value_t = false)]
     pub infer_triggers: bool,
+    /// Propositional search engine driving the theory propagator
+    #[arg(long, default_value_t = SatBackend::Tableau, value_enum)]
+    pub sat_backend: SatBackend,
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,
@@ -69,4 +72,22 @@ pub struct Args {
     /// 0 = unbounded (materialize all pending).
     #[arg(long, default_value_t = 85)]
     pub batch_cap: usize,
+}
+
+/// Propositional search engine behind the IPASIR-UP propagator
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SatBackend {
+    /// CaDiCaL (CDCL)
+    Cadical,
+    /// Native Rust clause tableau (no learning)
+    Tableau,
+}
+
+impl std::fmt::Display for SatBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SatBackend::Cadical => write!(f, "cadical"),
+            SatBackend::Tableau => write!(f, "tableau"),
+        }
+    }
 }
