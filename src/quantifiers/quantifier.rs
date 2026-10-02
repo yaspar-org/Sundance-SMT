@@ -265,7 +265,7 @@ fn process_deferred_skolemizations(
 
         solver_state.insert_predecessor(&reduced_skolem, None, None, true);
 
-        // Must do Tseitin *before* allocating the skolem literal — see comment on instantiation path
+        // Must do Tseitin *before* looking up the skolem literal — see comment on instantiation path
         let clauses = reduced_skolem.cnf_tseitin(solver_state);
 
         debug_println!(26, 0, "(assert {})", reduced_skolem);
@@ -274,7 +274,9 @@ fn process_deferred_skolemizations(
         let reduced_skolem_literal = solver_state.get_lit_from_term(&reduced_skolem);
         // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first
         let skolem_literal = if skolem.uid() != reduced_skolem.uid() {
-            solver_state.get_or_allocate_lit_for_term(&skolem)
+            solver_state
+                .get_lit_from_term_safe(&skolem)
+                .unwrap_or_else(|| proof_tracer.borrow_mut().new_proof_only_literal())
         } else {
             0
         };
@@ -369,9 +371,13 @@ fn process_deferred_instantiations(
 
         let quantifier_dimacs_literal = if is_exists { -literal } else { literal };
         let nnf_term_literal = solver_state.get_lit_from_term(&nnf_term);
-        // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first
+        // Must happen *after* `cnf_tseitin` so Tseitin literals are registered first.
+        // The un-reduced instance only appears in the proof, so unless it already
+        // has a SAT literal it gets a proof-only one that CaDiCaL never sees.
         let subst_literal = if t.uid() != nnf_term.uid() {
-            solver_state.get_or_allocate_lit_for_term(&t)
+            solver_state
+                .get_lit_from_term_safe(&t)
+                .unwrap_or_else(|| proof_tracer.borrow_mut().new_proof_only_literal())
         } else {
             0
         };
