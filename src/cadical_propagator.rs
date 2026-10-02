@@ -180,7 +180,11 @@ impl<'a> CustomExternalPropagator<'a> {
         self.last_observed_var = next;
         for var in start..next {
             if let Some(&uid) = self.solver_state.cnf_cache.var_map_reverse.get(&var) {
-                if self.solver_state.get_term_safe(uid).is_none() {
+                // Only observe vars whose term has an egraph node: `process_assignment`
+                // maps every observed assignment into the egraph. A term can sit in
+                // `terms_list` without one, e.g. a ground quantifier body stored as
+                // `Uninitialized` that an instantiation returns unchanged.
+                if self.solver_state.id_map.get_by_left(&uid).is_none() {
                     continue;
                 }
                 self.add_observed_variable(var);
