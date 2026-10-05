@@ -4,21 +4,29 @@
 //! A clause tableau that drives an IPASIR-UP `ExternalPropagator`.
 //!
 //! The search is depth-first over one open branch. Each decision level is a
-//! branch point. Branching picks a literal of an open (unsatisfied) clause.
-//! There is no clause learning and there are no restarts; the only clauses
-//! are the input clauses and the lemmas supplied by the propagator.
+//! branch point. Branching expands the oldest *triggered* open clause: an
+//! unsatisfied clause with a false literal, such as a Tseitin definition
+//! whose gate holds. Untriggered clauses are not expanded, so the search
+//! follows the formula top-down rather than branching on atoms of inactive
+//! definitions. Remaining variables are then decided true so the model handed
+//! to `cb_check_found_model` is total. There is no clause learning and there
+//! are no restarts; the only clauses are the input clauses and the lemmas
+//! supplied by the propagator (duplicates are merged).
 //!
 //! A falsified clause `C` whose highest level `k` holds exactly one literal
-//! asserts that literal at the second-highest level of `C`. Otherwise the
-//! branch below decision `k` is closed and the decision is flipped at level
-//! `k - 1`. Each step lexicographically increases the vector of per-level
-//! assignment counts, so the search terminates for a fixed clause set.
+//! asserts that literal at the second-highest level of `C`, backtracking
+//! chronologically to `k - 1`. Otherwise the branch is closed by
+//! dependency-directed backjumping: the latest decision the conflict depends
+//! on is flipped where its other dependencies hold. Each step lexicographically
+//! increases the vector of per-level assignment counts, so the search
+//! terminates for a fixed clause set.
 //!
 //! Like CaDiCaL with chronological backtracking, a lemma that is unit under
 //! lower levels is assigned at that lower level without backtracking. Such
 //! literals survive backtracks above their level and are notified again.
 
 use crate::debug_println;
+use crate::formula::{FormulaStore, Node, NodeId};
 use cadical_sys::{ExternalPropagator, ProofTracer, Status, Terminator};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -55,6 +63,8 @@ pub struct TableauStats {
     pub asserts: u64,
     pub model_checks: u64,
     pub external_clauses: u64,
+    pub duplicate_clauses: u64,
+    pub expansions: u64,
 }
 
 pub struct SatTableau {
@@ -62,6 +72,8 @@ pub struct SatTableau {
     input: Vec<Vec<i32>>,
     /// Clause literals; positions 0 and 1 are watched when the length is >= 2
     clauses: Vec<Vec<i32>>,
+    /// Sorted literals of each clause, to skip resent lemmas
+    clause_index: std::collections::HashMap<Vec<i32>, usize>,
     /// Indexed by `lit_index(l)`: clauses watching `l`
     watches: Vec<Vec<usize>>,
     /// Per variable: 1 true, -1 false, 0 unassigned
@@ -83,11 +95,48 @@ pub struct SatTableau {
     qhead: usize,
     /// Trail entries before this index have been notified if observed
     notify_head: usize,
-    /// Clauses before this index were satisfied when last scanned
+    /// Candidate open triggered clauses, expanded oldest first (input order
+    /// is top-down for Tseitin clauses)
+    agenda: std::collections::BinaryHeap<std::cmp::Reverse<(u64, usize)>>,
+    /// Per clause: expansion order on the agenda (input, then formula
+    /// expansions bottom-up, then lemmas)
+    priority: Vec<u64>,
+    /// The node whose definition is being added, if any
+    expanding: Option<NodeId>,
+    /// Whether the search has started (later clauses are lemmas)
+    searching: bool,
+    on_agenda: Vec<bool>,
+    /// Indexed by `lit_index(l)`: clauses containing `l`
+    occurrences: Vec<Vec<usize>>,
+    /// Variables below this index are assigned
     open_cursor: usize,
     observed_queue: Rc<RefCell<Vec<i32>>>,
+    /// Formula input, shared with the propagator, which adds instance bodies
+    formulas: Option<Rc<RefCell<FormulaStore>>>,
+    /// Per variable: the connective node it stands for, or `NO_NODE`.
+    /// The propagator never sees these variables.
+    var_node: Vec<NodeId>,
+    /// Nodes of `formulas` indexed so far
+    synced_nodes: usize,
+    /// Per node: whether the definitions for [false, true] have been added
+    expanded: Vec<[bool; 2]>,
+    /// Signed nodes reached by the branch whose definitions are not yet added
+    pending_expansions: Vec<(NodeId, bool)>,
+    /// Leave atoms the branch does not need unassigned
+    partial_models: bool,
+    /// Per variable: last polarity on the branch (0 if never assigned)
+    saved_phase: Vec<i8>,
+    /// Partial models: the level at which the accepted partial model is
+    /// being completed, until the branch backtracks below it
+    completing_from: Option<usize>,
+    /// Partial models: clauses before this index were satisfied when scanned
+    clause_cursor: usize,
+    /// Root literals of the formula input
+    formula_roots: Vec<i32>,
     pub stats: TableauStats,
 }
+
+const NO_NODE: NodeId = NodeId::MAX;
 
 fn lit_index(lit: i32) -> usize {
     2 * lit.unsigned_abs() as usize + usize::from(lit < 0)
@@ -109,6 +158,7 @@ impl SatTableau {
         SatTableau {
             input: vec![],
             clauses: vec![],
+            clause_index: Default::default(),
             watches: vec![vec![], vec![]],
             vals: vec![0],
             levels: vec![0],
@@ -121,8 +171,24 @@ impl SatTableau {
             decisions: vec![],
             qhead: 0,
             notify_head: 0,
-            open_cursor: 0,
+            open_cursor: 1,
+            agenda: Default::default(),
+            priority: vec![],
+            expanding: None,
+            searching: false,
+            on_agenda: vec![],
+            occurrences: vec![vec![], vec![]],
             observed_queue: Rc::new(RefCell::new(vec![])),
+            formulas: None,
+            var_node: vec![NO_NODE],
+            synced_nodes: 0,
+            expanded: vec![],
+            pending_expansions: vec![],
+            formula_roots: vec![],
+            partial_models: false,
+            saved_phase: vec![0],
+            clause_cursor: 0,
+            completing_from: None,
             stats: TableauStats::default(),
         }
     }
@@ -130,6 +196,87 @@ impl SatTableau {
     /// The queue through which the propagator registers observed variables
     pub fn observed_queue(&self) -> Rc<RefCell<Vec<i32>>> {
         Rc::clone(&self.observed_queue)
+    }
+
+    /// Search the given formulas, expanding each connective only when the
+    /// branch reaches it. The propagator may add instance bodies to `store`.
+    pub fn add_formulas(&mut self, store: Rc<RefCell<FormulaStore>>) {
+        self.formula_roots = {
+            let f = store.borrow();
+            f.roots.iter().map(|&r| f.lit(r)).collect()
+        };
+        self.formulas = Some(store);
+        self.sync_nodes();
+    }
+
+    /// Index connective nodes added to the store since the last call
+    fn sync_nodes(&mut self) {
+        let Some(store) = self.formulas.clone() else {
+            return;
+        };
+        let f = store.borrow();
+        for i in self.synced_nodes..f.nodes.len() {
+            if !matches!(f.nodes[i], Node::Lit(_) | Node::Not(_)) {
+                let var = f.lits[i] as usize;
+                self.ensure_var(var);
+                self.var_node[var] = i as NodeId;
+            }
+            self.expanded.push([false; 2]);
+        }
+        self.synced_nodes = f.nodes.len();
+    }
+
+    /// Hand the propagator models that only assign what the branch needs
+    pub fn set_partial_models(&mut self, partial: bool) {
+        self.partial_models = partial;
+    }
+
+    fn is_node_var(&self, var: usize) -> bool {
+        self.var_node.get(var).is_some_and(|&n| n != NO_NODE)
+    }
+
+    /// Clauses for one polarity of a node's definition, the node literal first
+    fn definitions(&self, node: NodeId, positive: bool) -> Vec<Vec<i32>> {
+        let f = self
+            .formulas
+            .as_ref()
+            .expect("nodes come from formulas")
+            .borrow();
+        let n = f.lit(node);
+        let l = |c: &NodeId| f.lit(*c);
+        match (&f.nodes[node as usize], positive) {
+            (Node::And(cs), true) => cs.iter().map(|c| vec![-n, l(c)]).collect(),
+            (Node::And(cs), false) => {
+                vec![std::iter::once(n).chain(cs.iter().map(|c| -l(c))).collect()]
+            }
+            (Node::Or(cs), true) => vec![std::iter::once(-n).chain(cs.iter().map(l)).collect()],
+            (Node::Or(cs), false) => cs.iter().map(|c| vec![n, -l(c)]).collect(),
+            (Node::Ite(c, t, e), true) => vec![vec![-n, -l(c), l(t)], vec![-n, l(c), l(e)]],
+            (Node::Ite(c, t, e), false) => vec![vec![n, -l(c), -l(t)], vec![n, l(c), -l(e)]],
+            (Node::Iff(a, b), true) => vec![vec![-n, -l(a), l(b)], vec![-n, l(a), -l(b)]],
+            (Node::Iff(a, b), false) => vec![vec![n, l(a), l(b)], vec![n, -l(a), -l(b)]],
+            (Node::Lit(_) | Node::Not(_), _) => vec![],
+        }
+    }
+
+    /// Add the definitions of signed nodes the branch has reached. They are
+    /// global: an expansion stays valid after the branch backtracks.
+    fn expand_pending(&mut self, prop: &mut dyn ExternalPropagator) -> Added {
+        let mut result = Added::Unchanged;
+        while let Some((node, positive)) = self.pending_expansions.pop() {
+            self.stats.expansions += 1;
+            for clause in self.definitions(node, positive) {
+                self.expanding = Some(node);
+                let added = self.add_to_search(&clause, prop);
+                self.expanding = None;
+                match added {
+                    Added::Unsat => return Added::Unsat,
+                    Added::Changed => result = Added::Changed,
+                    Added::Unchanged => {}
+                }
+            }
+        }
+        result
     }
 
     pub fn add_clause(&mut self, clause: &[i32]) {
@@ -151,6 +298,9 @@ impl SatTableau {
             self.notified.resize(n, None);
             self.observed.resize(n, false);
             self.watches.resize(2 * n, vec![]);
+            self.var_node.resize(n, NO_NODE);
+            self.saved_phase.resize(n, 0);
+            self.occurrences.resize(2 * n, vec![]);
         }
     }
 
@@ -174,6 +324,26 @@ impl SatTableau {
         self.levels[var] = level;
         self.reasons[var] = reason;
         self.trail.push(lit);
+        if self.is_node_var(var) {
+            let node = self.var_node[var];
+            let done = &mut self.expanded[node as usize][usize::from(lit > 0)];
+            if !*done {
+                *done = true;
+                self.pending_expansions.push((node, lit > 0));
+            }
+        }
+        // Clauses containing the negation gain a false literal.
+        self.push_agenda(-lit);
+    }
+
+    /// Put the clauses containing `lit` on the agenda
+    fn push_agenda(&mut self, lit: i32) {
+        for &c in &self.occurrences[lit_index(lit)] {
+            if !self.on_agenda[c] {
+                self.on_agenda[c] = true;
+                self.agenda.push(std::cmp::Reverse((self.priority[c], c)));
+            }
+        }
     }
 
     fn drain_observed(&mut self) {
@@ -189,6 +359,7 @@ impl SatTableau {
                 }
             }
         }
+        self.sync_nodes();
     }
 
     /// Notify the propagator of observed assignments not yet notified
@@ -219,6 +390,9 @@ impl SatTableau {
         if target >= self.level() {
             return;
         }
+        if self.completing_from.is_some_and(|l| target < l) {
+            self.completing_from = None;
+        }
         prop.notify_backtrack(target);
         self.drain_observed();
         let old_qhead = self.qhead;
@@ -243,15 +417,19 @@ impl SatTableau {
                     new_qhead = kept;
                 }
             } else {
+                self.saved_phase[var] = self.vals[var];
                 self.vals[var] = 0;
                 self.notified[var] = None;
+                // Clauses this literal satisfied may reopen.
+                self.push_agenda(lit);
             }
         }
         self.trail.truncate(kept);
         self.qhead = new_qhead;
         self.notify_head = renotify_from.min(kept);
         self.decisions.truncate(target);
-        self.open_cursor = 0;
+        self.open_cursor = 1;
+        self.clause_cursor = 0;
     }
 
     /// Move the watches of clause `c` to positions `i` and `j`
@@ -364,8 +542,9 @@ impl SatTableau {
             } else {
                 0
             };
+            // Chronological: keep levels j+1..k-1 and assign out of order.
             let lit = self.clauses[c][0];
-            self.backtrack(j, prop);
+            self.backtrack(k - 1, prop);
             self.assign(lit, j, Reason::Clause(c));
             self.stats.asserts += 1;
         } else {
@@ -378,10 +557,10 @@ impl SatTableau {
             };
             let j = deps.last().copied().unwrap_or(0);
             let decision = self.decisions[k - 1];
+            self.stats.flips += 1;
             self.backtrack(k - 1, prop);
             self.assign(-decision, j, Reason::Flip);
             self.flip_deps[decision.unsigned_abs() as usize] = deps;
-            self.stats.flips += 1;
         }
         Closure::Continue
     }
@@ -434,18 +613,50 @@ impl SatTableau {
         if lits.is_empty() {
             return Added::Unsat;
         }
-        // Order: true, then unassigned, then false by decreasing level
-        lits.sort_by_key(|&l| {
-            let v = self.value(l);
-            (-v, std::cmp::Reverse(self.lit_level(l)))
-        });
-        let c = self.clauses.len();
-        self.clauses.push(lits);
-        let cl = &self.clauses[c];
-        if cl.len() >= 2 {
-            self.watches[lit_index(cl[0])].push(c);
-            self.watches[lit_index(cl[1])].push(c);
+        let mut key = lits.clone();
+        key.sort_unstable();
+        if let Some(&c) = self.clause_index.get(&key) {
+            // Propagators resend lemmas; the copy may expose a missed implication.
+            self.stats.duplicate_clauses += 1;
+            return self.settle(c, prop);
         }
+        let c = self.clauses.len();
+        self.clause_index.insert(key, c);
+        if lits.len() >= 2 {
+            self.watches[lit_index(lits[0])].push(c);
+            self.watches[lit_index(lits[1])].push(c);
+        }
+        for &l in &lits {
+            self.occurrences[lit_index(l)].push(c);
+        }
+        let priority = match self.expanding {
+            Some(node) => (1 << 40) + node as u64,
+            None if self.searching => (1 << 41) + c as u64,
+            None => c as u64,
+        };
+        self.priority.push(priority);
+        self.on_agenda.push(true);
+        self.agenda.push(std::cmp::Reverse((priority, c)));
+        self.clauses.push(lits);
+        self.settle(c, prop)
+    }
+
+    /// Watch the best two literals of clause `c` and act on its state under
+    /// the branch: true, then unassigned, then false by decreasing level.
+    fn settle(&mut self, c: usize, prop: &mut dyn ExternalPropagator) -> Added {
+        let len = self.clauses[c].len();
+        if len >= 2 {
+            let cl = &self.clauses[c];
+            let mut order: Vec<usize> = (0..len).collect();
+            order.sort_by_key(|&p| {
+                let l = cl[p];
+                (-self.value(l), std::cmp::Reverse(self.lit_level(l)))
+            });
+            if (order[0], order[1]) != (0, 1) {
+                self.rewatch(c, order[0], order[1]);
+            }
+        }
+        let cl = &self.clauses[c];
         let first = cl[0];
         match self.value(first) {
             // An unwatched unit must hold at the root to survive backtracks.
@@ -509,20 +720,107 @@ impl SatTableau {
         Added::Unchanged
     }
 
-    /// First unassigned literal of an open clause, else any unassigned variable
+    /// An unassigned literal of the oldest triggered open clause, else the
+    /// first unassigned variable
     fn pick_branch(&mut self) -> Option<i32> {
-        while self.open_cursor < self.clauses.len() {
-            let cl = &self.clauses[self.open_cursor];
-            if !cl.iter().any(|&l| lit_value(&self.vals, l) == 1)
-                && let Some(&l) = cl.iter().find(|&&l| lit_value(&self.vals, l) == 0)
-            {
+        // Every open triggered clause is on the agenda: assignments push the
+        // clauses they falsify a literal of, unassignments the ones they
+        // satisfied.
+        while let Some(&std::cmp::Reverse((_, c))) = self.agenda.peek() {
+            if let Some(l) = self.triggered_branch(c) {
                 return Some(l);
             }
+            self.agenda.pop();
+            self.on_agenda[c] = false;
+        }
+        if self.partial_models && self.completing_from.is_none() {
+            return self.open_clause_branch();
+        }
+        // Remaining variables, true first, so the model is total.
+        // Unreached connectives stay unassigned: each can take the value of its
+        // subformula, which satisfies every definition clause added for it.
+        while self.open_cursor <= self.num_vars()
+            && (self.vals[self.open_cursor] != 0 || self.is_node_var(self.open_cursor))
+        {
             self.open_cursor += 1;
         }
-        (1..=self.num_vars())
-            .find(|&v| self.vals[v] == 0)
-            .map(|v| v as i32)
+        (self.open_cursor <= self.num_vars()).then_some(self.open_cursor as i32)
+    }
+
+    /// Partial models: an unassigned literal of an open clause without an
+    /// unassigned connective literal. Definitions of unassigned connectives
+    /// hold once unassigned atoms take their theory values and connectives
+    /// their subformula values, so they need no branching.
+    fn open_clause_branch(&mut self) -> Option<i32> {
+        while self.clause_cursor < self.clauses.len() {
+            let cl = &self.clauses[self.clause_cursor];
+            if !cl.iter().any(|&l| lit_value(&self.vals, l) == 1) {
+                let mut first = None;
+                let mut definition = false;
+                for &l in cl {
+                    if lit_value(&self.vals, l) == 0 {
+                        if self.is_node_var(l.unsigned_abs() as usize) {
+                            definition = true;
+                            break;
+                        }
+                        first = first.or(Some(l));
+                    }
+                }
+                if !definition && first.is_some() {
+                    return first;
+                }
+            }
+            self.clause_cursor += 1;
+        }
+        None
+    }
+
+    /// An unassigned literal of clause `c` if it is open and triggered
+    /// (unsatisfied with a false literal)
+    fn triggered_branch(&self, c: usize) -> Option<i32> {
+        let mut has_false = false;
+        let mut unassigned = None;
+        for &l in &self.clauses[c] {
+            match lit_value(&self.vals, l) {
+                1 => return None,
+                -1 => has_false = true,
+                _ => {
+                    // Formula input: prefer the literal agreeing with its
+                    // variable's saved phase (true if never assigned), so
+                    // e.g. typing guards are not refuted over and over.
+                    let better = unassigned.is_none()
+                        || (self.formulas.is_some()
+                            && self.wants(l)
+                            && !unassigned.is_some_and(|u| self.wants(u)));
+                    if better {
+                        unassigned = Some(l);
+                    }
+                }
+            }
+        }
+        if has_false { unassigned } else { None }
+    }
+
+    /// A partial model was accepted. Quantifier instantiation can depend on
+    /// atoms the model left open (unmerged equalities match fewer triggers),
+    /// so complete it once on this branch and check again before answering.
+    fn start_completion(&mut self) -> bool {
+        if !self.partial_models || self.completing_from.is_some() {
+            return false;
+        }
+        let open = (1..=self.num_vars()).any(|v| self.vals[v] == 0 && !self.is_node_var(v));
+        if open {
+            self.completing_from = Some(self.level());
+        }
+        open
+    }
+
+    /// Whether `lit` agrees with its variable's saved phase (positive if none)
+    fn wants(&self, lit: i32) -> bool {
+        match self.saved_phase[lit.unsigned_abs() as usize] {
+            0 => lit > 0,
+            p => (p > 0) == (lit > 0),
+        }
     }
 
     fn decide(&mut self, lit: i32, prop: &mut dyn ExternalPropagator) {
@@ -539,7 +837,7 @@ impl SatTableau {
         &mut self,
         prop: &mut dyn ExternalPropagator,
         tracer: Option<&RefCell<dyn ProofTracer + '_>>,
-        mut terminator: Option<&mut dyn Terminator>,
+        terminator: Option<&mut dyn Terminator>,
     ) -> Status {
         self.drain_observed();
         let input = std::mem::take(&mut self.input);
@@ -549,6 +847,21 @@ impl SatTableau {
                 return Status::UNSATISFIABLE;
             }
         }
+        for root in std::mem::take(&mut self.formula_roots) {
+            if self.add_to_search(&[root], prop) == Added::Unsat {
+                return Status::UNSATISFIABLE;
+            }
+        }
+        self.searching = true;
+        self.search(prop, tracer, terminator)
+    }
+
+    fn search(
+        &mut self,
+        prop: &mut dyn ExternalPropagator,
+        tracer: Option<&RefCell<dyn ProofTracer + '_>>,
+        mut terminator: Option<&mut dyn Terminator>,
+    ) -> Status {
         let mut steps: u64 = 0;
         loop {
             steps += 1;
@@ -575,6 +888,11 @@ impl SatTableau {
                     Closure::Unsat => return Status::UNSATISFIABLE,
                     Closure::Continue => continue,
                 }
+            }
+            match self.expand_pending(prop) {
+                Added::Unsat => return Status::UNSATISFIABLE,
+                Added::Changed => continue,
+                Added::Unchanged => {}
             }
             self.notify_pending(prop);
             let lit = prop.cb_propagate();
@@ -617,7 +935,7 @@ impl SatTableau {
             // Every variable is assigned and every clause is satisfied.
             self.stats.model_checks += 1;
             let model: Vec<i32> = (1..=self.num_vars())
-                .filter(|&v| self.observed[v])
+                .filter(|&v| self.observed[v] && self.vals[v] != 0)
                 .map(|v| {
                     if self.vals[v] > 0 {
                         v as i32
@@ -627,6 +945,9 @@ impl SatTableau {
                 })
                 .collect();
             if prop.cb_check_found_model(&model) {
+                if self.start_completion() {
+                    continue;
+                }
                 return Status::SATISFIABLE;
             }
             self.drain_observed();
@@ -636,9 +957,23 @@ impl SatTableau {
                 Added::Changed => continue,
                 Added::Unchanged => {}
             }
-            let fresh_vars = (1..=self.num_vars()).any(|v| self.vals[v] == 0);
+            let fresh_vars = (!self.partial_models || self.completing_from.is_some())
+                && (1..=self.num_vars()).any(|v| self.vals[v] == 0 && !self.is_node_var(v));
             if self.stats.external_clauses == had_clause && !fresh_vars {
-                // A rejection without a lemma accepts the model, as in CaDiCaL.
+                // A rejection without a lemma may request decisions on atoms a
+                // partial model left open; otherwise it accepts, as in CaDiCaL.
+                let requested = prop.cb_decide();
+                self.drain_observed();
+                if requested != 0 {
+                    self.ensure_var(requested.unsigned_abs() as usize);
+                    if self.value(requested) == 0 {
+                        self.decide(requested, prop);
+                        continue;
+                    }
+                }
+                if self.start_completion() {
+                    continue;
+                }
                 return Status::SATISFIABLE;
             }
         }
@@ -659,6 +994,9 @@ mod tests {
         hidden: Vec<Vec<i32>>,
         revealed: Vec<bool>,
         eager: bool,
+        /// Reveal hidden clauses not satisfied by the assigned literals, as a
+        /// theory must when models are partial
+        partial: bool,
         queue: Vec<Vec<i32>>,
     }
 
@@ -671,6 +1009,7 @@ mod tests {
                 hidden,
                 revealed: vec![false; n],
                 eager,
+                partial: false,
                 queue: vec![],
             }
         }
@@ -728,6 +1067,18 @@ mod tests {
                 );
             }
             self.reveal_falsified();
+            if self.partial {
+                for i in 0..self.hidden.len() {
+                    let satisfied = self.hidden[i].iter().any(|&l| {
+                        let a = self.assignment[l.unsigned_abs() as usize];
+                        a != 0 && (a > 0) == (l > 0)
+                    });
+                    if !self.revealed[i] && !satisfied {
+                        self.revealed[i] = true;
+                        self.queue.push(self.hidden[i].clone());
+                    }
+                }
+            }
             self.queue.is_empty()
         }
 
@@ -809,6 +1160,115 @@ mod tests {
             }
         }
         status
+    }
+
+    fn eval(nodes: &[Node], n: NodeId, m: &dyn Fn(i32) -> bool) -> bool {
+        match &nodes[n as usize] {
+            Node::Lit(l) => m(*l),
+            Node::Not(c) => !eval(nodes, *c, m),
+            Node::And(cs) => cs.iter().all(|c| eval(nodes, *c, m)),
+            Node::Or(cs) => cs.iter().any(|c| eval(nodes, *c, m)),
+            Node::Ite(c, t, e) => {
+                if eval(nodes, *c, m) {
+                    eval(nodes, *t, m)
+                } else {
+                    eval(nodes, *e, m)
+                }
+            }
+            Node::Iff(a, b) => eval(nodes, *a, m) == eval(nodes, *b, m),
+        }
+    }
+
+    /// Random DAG over atoms 1..=num_vars; children precede parents
+    fn random_formula(rng: &mut Rng, num_vars: usize, size: usize) -> FormulaStore {
+        let mut store = FormulaStore::default();
+        let mut next_var = num_vars as i32 + 1;
+        for v in 1..=num_vars {
+            store.add_node(Node::Lit(v as i32), &mut next_var);
+        }
+        for _ in 0..size {
+            let n = store.nodes.len() as u64;
+            let p: Vec<NodeId> = (0..3).map(|_| rng.below(n) as NodeId).collect();
+            let node = match rng.below(5) {
+                0 => Node::Not(p[0]),
+                1 => Node::And(p.clone()),
+                2 => Node::Or(vec![p[0], p[1]]),
+                3 => Node::Ite(p[0], p[1], p[2]),
+                _ => Node::Iff(p[0], p[1]),
+            };
+            store.add_node(node, &mut next_var);
+        }
+        let n = store.nodes.len() as u64;
+        store.roots = (0..1 + rng.below(3))
+            .map(|_| (n - 1 - rng.below(n.min(4))) as NodeId)
+            .collect();
+        store
+    }
+
+    #[test]
+    fn formulas_agree_with_brute_force() {
+        let mut rng = Rng(0x2545f4914f6cdd1d);
+        for round in 0..20000 {
+            let num_vars = 1 + rng.below(6) as usize;
+            let size = 1 + rng.below(10) as usize;
+            let store = random_formula(&mut rng, num_vars, size);
+            let num_hidden = rng.below(4) as usize;
+            let hidden = random_cnf(&mut rng, num_vars, num_hidden);
+            let nodes = store.nodes.clone();
+            let roots = store.roots.clone();
+            let expected = (0..1u32 << num_vars).any(|m| {
+                let val = |l: i32| ((m >> (l.unsigned_abs() - 1)) & 1 == 1) == (l > 0);
+                roots.iter().all(|&r| eval(&nodes, r, &val))
+                    && hidden.iter().all(|c| c.iter().any(|&l| val(l)))
+            });
+            for (eager, partial) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut tableau = SatTableau::new();
+                tableau.set_partial_models(partial);
+                for v in 1..=num_vars {
+                    tableau.observed_queue().borrow_mut().push(v as i32);
+                }
+                tableau.ensure_var(num_vars);
+                tableau.add_formulas(Rc::new(RefCell::new(store_clone(&nodes, &roots, num_vars))));
+                let mut prop = LazyProp::new(num_vars, hidden.clone(), eager);
+                prop.partial = partial;
+                let status = tableau.solve(&mut prop, None, None);
+                assert!(
+                    status != Status::UNKNOWN && (status == Status::SATISFIABLE) == expected,
+                    "round {round} eager {eager} partial {partial}: expected sat={expected}, nodes {nodes:?} roots {roots:?} hidden {hidden:?}"
+                );
+                if status == Status::SATISFIABLE {
+                    // Every completion of the unassigned atoms is a model.
+                    let free: Vec<usize> =
+                        (1..=num_vars).filter(|&v| tableau.vals[v] == 0).collect();
+                    assert!(partial || free.is_empty());
+                    for m in 0..1u32 << free.len() {
+                        let val = |l: i32| {
+                            let v = l.unsigned_abs() as usize;
+                            let b = match free.iter().position(|&f| f == v) {
+                                Some(i) => (m >> i) & 1 == 1,
+                                None => tableau.vals[v] > 0,
+                            };
+                            b == (l > 0)
+                        };
+                        assert!(
+                            roots.iter().all(|&r| eval(&nodes, r, &val))
+                                && hidden.iter().all(|c| c.iter().any(|&l| val(l))),
+                            "round {round} partial {partial}: completion violates formula"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn store_clone(nodes: &[Node], roots: &[NodeId], num_vars: usize) -> FormulaStore {
+        let mut store = FormulaStore::default();
+        let mut next_var = num_vars as i32 + 1;
+        for node in nodes {
+            store.add_node(node.clone(), &mut next_var);
+        }
+        store.roots = roots.to_vec();
+        store
     }
 
     #[test]

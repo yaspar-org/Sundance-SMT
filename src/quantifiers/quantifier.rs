@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::EgraphTrait;
+use crate::formula::FormulaStore;
 use crate::preprocess::check_for_function_bool;
 use crate::proof::{ProofStepType, SMTProofTracer, Theory};
 use crate::quantifiers::skolem::skolemize;
@@ -188,6 +189,7 @@ pub(crate) fn materialize_next(
     pending: &mut PendingInstantiations,
     solver_state: &mut SolverState,
     proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+    formulas: Option<&RefCell<FormulaStore>>,
 ) -> Option<Vec<QuantifierInstance>> {
     let ddsmt = solver_state.ddsmt;
     let lazy_dt = solver_state.lazy_dt;
@@ -198,6 +200,7 @@ pub(crate) fn materialize_next(
             vec![deferred],
             solver_state,
             proof_tracer,
+            formulas,
             ddsmt,
             lazy_dt,
         );
@@ -210,6 +213,7 @@ pub(crate) fn materialize_next(
             vec![deferred],
             solver_state,
             proof_tracer,
+            formulas,
             ddsmt,
             lazy_dt,
         );
@@ -219,10 +223,43 @@ pub(crate) fn materialize_next(
     None
 }
 
+/// Formula input: add `body` to the tableau's formula store, sharing nodes
+/// with the input and earlier instances. Returns the body's literal and the
+/// theory preprocessing clauses of the atoms it introduced. Proof steps are
+/// not recorded; the formula input runs without proofs.
+fn build_formula_body(
+    body: &Term,
+    formulas: &RefCell<FormulaStore>,
+    solver_state: &mut SolverState,
+    ddsmt: bool,
+    lazy_dt: bool,
+) -> (i32, Vec<Vec<i32>>) {
+    let first_atom = formulas.borrow().atoms.len();
+    let root = formulas
+        .borrow_mut()
+        .build_formula(body, solver_state, true);
+    let (lit, atoms) = {
+        let f = formulas.borrow();
+        (f.lit(root), f.atoms[first_atom..].to_vec())
+    };
+    let mut constraints = vec![];
+    for atom in &atoms {
+        constraints.extend(check_for_function_bool(
+            atom,
+            solver_state,
+            true,
+            ddsmt,
+            lazy_dt,
+        ));
+    }
+    (lit, constraints)
+}
+
 fn process_deferred_skolemizations(
     deferred_skolemizations: Vec<DeferredSkolemization>,
     solver_state: &mut SolverState,
     proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+    formulas: Option<&RefCell<FormulaStore>>,
     ddsmt: bool,
     lazy_dt: bool,
 ) -> Vec<QuantifierInstance> {
@@ -235,6 +272,19 @@ fn process_deferred_skolemizations(
     } in deferred_skolemizations
     {
         let reduced_skolem: Term = skolem.let_elim(&mut solver_state.context);
+        if let Some(formulas) = formulas {
+            let (body_lit, constraints) =
+                build_formula_body(&reduced_skolem, formulas, solver_state, ddsmt, lazy_dt);
+            let quantifier_dimacs_literal = if is_exists { literal } else { -literal };
+            let mut clauses = vec![vec![-quantifier_dimacs_literal, body_lit]];
+            for mut c in constraints {
+                if push_literal_if_not_tautology(&mut c, -body_lit) {
+                    clauses.push(c);
+                }
+            }
+            results.push(QuantifierInstance::Skolemization { clauses });
+            continue;
+        }
         let reduced_skolem = reduced_skolem.nnf(solver_state);
         let additional_constraints =
             check_for_function_bool(&reduced_skolem, solver_state, true, ddsmt, lazy_dt);
@@ -303,6 +353,7 @@ fn process_deferred_instantiations(
     deferred_instantiations: Vec<DeferredInstantiation>,
     solver_state: &mut SolverState,
     proof_tracer: &Rc<RefCell<SMTProofTracer>>,
+    formulas: Option<&RefCell<FormulaStore>>,
     ddsmt: bool,
     lazy_dt: bool,
 ) -> Vec<QuantifierInstance> {
@@ -329,6 +380,15 @@ fn process_deferred_instantiations(
         );
 
         let let_elim_term = t.let_elim(&mut solver_state.context);
+        if let Some(formulas) = formulas {
+            let (body_lit, constraints) =
+                build_formula_body(&let_elim_term, formulas, solver_state, ddsmt, lazy_dt);
+            let quantifier_dimacs_literal = if is_exists { -literal } else { literal };
+            let mut clauses = vec![vec![-quantifier_dimacs_literal, body_lit]];
+            clauses.extend(constraints);
+            results.push(QuantifierInstance::Instantiation { clauses });
+            continue;
+        }
 
         let nnf_term = let_elim_term.nnf(solver_state);
 

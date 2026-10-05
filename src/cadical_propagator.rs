@@ -8,6 +8,7 @@ use crate::arithmetic::z3incremental::{PartialCheckResult, Z3IncrementalState};
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
 use crate::egraphs::traits::Conflict;
+use crate::formula::FormulaStore;
 use crate::log::is_important;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
@@ -102,6 +103,13 @@ pub struct CustomExternalPropagator<'a> {
     /// Once reached, stop probing further pairs even if unprobed pairs remain.
     pub max_arith_conflicts_per_round: usize,
     pub last_observed_var: i32,
+    /// Every variable registered as observed, in registration order
+    pub observed_vars: Vec<i32>,
+    /// Formula input of the tableau: instance bodies are added as formulas
+    /// rather than clauses
+    pub formulas: Option<Rc<RefCell<FormulaStore>>>,
+    /// Literals the theory needs decided before a partial model is accepted
+    pub decision_requests: Vec<i32>,
     /// Max instantiations to materialize per complete-model check. 0 = unbounded.
     pub batch_cap: usize,
     /// Incremental Z3 arithmetic state — Some iff `arithmetic == ArithSolver::Z3Incremental`.
@@ -178,6 +186,45 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
+    /// Collect unassigned observed atoms whose value the theory relies on:
+    /// atoms the egraph already equates with `true` or `false` (their
+    /// assignment triggers theory checks, such as tester exclusivity), and
+    /// Bool terms that are arguments of applications (Bool has two values,
+    /// which the egraph only learns through their assignment).
+    fn request_missing_decisions(&mut self) -> bool {
+        use crate::egraphs::EgraphTrait;
+        self.decision_requests.clear();
+        let true_root = self
+            .solver_state
+            .egraph
+            .find(self.solver_state.to_egraph_id(self.solver_state.true_uid));
+        let false_root = self
+            .solver_state
+            .egraph
+            .find(self.solver_state.to_egraph_id(self.solver_state.false_uid));
+        for &var in &self.observed_vars {
+            let idx = var as usize;
+            if idx < self.assignments.len() && self.assignments[idx] != 0 {
+                continue;
+            }
+            let Some(&uid) = self.solver_state.cnf_cache.var_map_reverse.get(&var) else {
+                continue;
+            };
+            let Some(&eid) = self.solver_state.id_map.get_by_left(&uid) else {
+                continue;
+            };
+            let root = self.solver_state.egraph.find(eid);
+            if root == true_root {
+                self.decision_requests.push(var);
+            } else if root == false_root {
+                self.decision_requests.push(-var);
+            } else if self.solver_state.egraph.is_congruence_argument(eid) {
+                self.decision_requests.push(var);
+            }
+        }
+        !self.decision_requests.is_empty()
+    }
+
     /// Register any new CNF variables created since the last sync.
     pub fn sync_new_vars(&mut self) {
         let next = self.solver_state.cnf_cache.next_var;
@@ -237,6 +284,7 @@ impl<'a> CustomExternalPropagator<'a> {
     /// Add a literal as an observed variable to the solver
     fn add_observed_variable(&mut self, lit: i32) {
         let abs_lit = lit.abs();
+        self.observed_vars.push(abs_lit);
         debug_println!(
             7,
             0,
@@ -336,8 +384,12 @@ impl<'a> CustomExternalPropagator<'a> {
 
         let mut count = 0;
         while (cap == 0 || count < cap)
-            && let Some(instances) =
-                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+            && let Some(instances) = materialize_next(
+                &mut pending,
+                self.solver_state,
+                &self.proof_tracer,
+                self.formulas.as_deref(),
+            )
         {
             self.apply_instances(&instances);
             count += 1;
@@ -643,6 +695,18 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             return false;
         }
 
+        // A partial model leaves some atoms unassigned; that is sound unless the
+        // theory depends on their values, so ask the search to decide those.
+        if self.request_missing_decisions() {
+            debug_println!(
+                24,
+                0,
+                "Requesting decisions before accepting the model: {:?}",
+                self.decision_requests
+            );
+            return false;
+        }
+
         // If we have pending instantiations from a previous round, materialize one
         // immediately without redoing arithmetic or datatype checks.
         if self.pending.is_some() && self.materialize_pending(1) > 0 {
@@ -861,6 +925,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
     fn cb_decide(&mut self) -> i32 {
         debug_println!(7, 0, "PROPAGATOR: Decision callback invoked");
 
+        while let Some(lit) = self.decision_requests.pop() {
+            let idx = lit.unsigned_abs() as usize;
+            if idx >= self.assignments.len() || self.assignments[idx] == 0 {
+                return lit;
+            }
+        }
+
         // For recursive datatypes, prefer base-case constructors to avoid infinite expansion
         if self.solver_state.datatype_info.has_recursive_datatype() {
             for &lit in &self.solver_state.base_case_tester_lits {
@@ -950,9 +1021,14 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 literal,
                 term
             );
+        } else if literal != 0 {
+            // A formula-tableau connective; it has no term of its own.
+            assert!(
+                self.formulas.is_some(),
+                "external literal {literal} has no term"
+            );
         } else {
             debug_println!(11, 0, "END OF CLAUSE");
-            assert!(literal == 0);
         }
         debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal

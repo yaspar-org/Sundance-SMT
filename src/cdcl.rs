@@ -7,6 +7,7 @@ use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode, ObservedS
 use crate::config::SatBackend;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
+use crate::formula::FormulaStore;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::sat_tableau::SatTableau;
 use crate::solver_state::SolverState;
@@ -46,6 +47,8 @@ pub fn cdcl_decision_procedure(
     arithmetic: ArithSolver,
     timeout: u64,
     sat_backend: SatBackend,
+    formulas: Option<FormulaStore>,
+    partial_models: bool,
     elevate: i32,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
@@ -80,6 +83,18 @@ pub fn cdcl_decision_procedure(
     if let (Some(t), Backend::Cadical(cadical)) = (terminator.as_mut(), &mut solver) {
         cadical.connect_terminator(t);
     }
+    if let Backend::Tableau(tableau) = &mut solver {
+        tableau.set_partial_models(partial_models);
+    }
+    // Shared with the propagator, which adds quantifier instance bodies.
+    let formulas = match &mut solver {
+        Backend::Tableau(tableau) => formulas.map(|f| {
+            let f = Rc::new(RefCell::new(f));
+            tableau.add_formulas(Rc::clone(&f));
+            f
+        }),
+        Backend::Cadical(_) => None,
+    };
     let observed_sink = match &mut solver {
         Backend::Cadical(cadical) => ObservedSink::Cadical(&mut **cadical as *mut CaDiCal),
         Backend::Tableau(tableau) => ObservedSink::Queue(tableau.observed_queue()),
@@ -112,6 +127,9 @@ pub fn cdcl_decision_procedure(
         materializing_quantifiers: false,
         max_arith_conflicts_per_round,
         last_observed_var: 1,
+        observed_vars: vec![],
+        formulas,
+        decision_requests: vec![],
         batch_cap,
         #[cfg(feature = "z3-solver")]
         z3_incremental,

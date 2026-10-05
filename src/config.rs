@@ -56,6 +56,12 @@ pub struct Args {
     /// Propositional search engine driving the theory propagator
     #[arg(long, default_value_t = SatBackend::Tableau, value_enum)]
     pub sat_backend: SatBackend,
+    /// What the tableau backend searches: the original formula or its CNF
+    #[arg(long, default_value_t = TableauInput::Clauses, value_enum)]
+    pub tableau_input: TableauInput,
+    /// Tableau only: accept models that leave atoms the branch never reached unassigned
+    #[arg(long, default_value_t = false)]
+    pub partial_models: bool,
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,
@@ -81,6 +87,24 @@ pub enum SatBackend {
     Cadical,
     /// Native Rust clause tableau (no learning)
     Tableau,
+}
+
+/// Input representation for the tableau backend
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TableauInput {
+    /// Expand the original (let-eliminated) assertions lazily
+    Formula,
+    /// Branch over the Tseitin CNF of the NNF
+    Clauses,
+}
+
+impl std::fmt::Display for TableauInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TableauInput::Formula => write!(f, "formula"),
+            TableauInput::Clauses => write!(f, "clauses"),
+        }
+    }
 }
 
 impl std::fmt::Display for SatBackend {
