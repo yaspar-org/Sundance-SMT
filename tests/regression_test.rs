@@ -92,9 +92,13 @@ fn regression_test() {
 
             // Optional arithmetic override (CI matrix passes SUNDANCE_ARITHMETIC to
             // exercise every backend against the same test corpus).
-            let arithmetic = env::var("SUNDANCE_ARITHMETIC").ok().filter(|v| !v.is_empty());
+            let arithmetic = env::var("SUNDANCE_ARITHMETIC")
+                .ok()
+                .filter(|v| !v.is_empty());
             // Optional SAT backend override (`cadical` or `tableau`).
-            let sat_backend = env::var("SUNDANCE_SAT_BACKEND").ok().filter(|v| !v.is_empty());
+            let sat_backend = env::var("SUNDANCE_SAT_BACKEND")
+                .ok()
+                .filter(|v| !v.is_empty());
 
             // Run solver with timeout
             let mut cmd = Command::new("target/release/sundance-smt");
@@ -105,7 +109,10 @@ fn regression_test() {
             if let Some(ref b) = sat_backend {
                 cmd.arg("--sat-backend").arg(b);
             }
-            if let Some(input) = env::var("SUNDANCE_TABLEAU_INPUT").ok().filter(|v| !v.is_empty()) {
+            if let Some(input) = env::var("SUNDANCE_TABLEAU_INPUT")
+                .ok()
+                .filter(|v| !v.is_empty())
+            {
                 cmd.arg("--tableau-input").arg(input);
             }
             if env::var("SUNDANCE_PARTIAL_MODELS").is_ok_and(|v| !v.is_empty()) {
