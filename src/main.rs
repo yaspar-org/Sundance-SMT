@@ -6,7 +6,8 @@ use clap::Parser;
 use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
-use sundance_smt::config::Args;
+use sundance_smt::config::{Args, SatBackend, TableauInput};
+use sundance_smt::formula::FormulaStore;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
 use sundance_smt::theory_check::{NonlinearityCheck, reject_unsupported_theories};
@@ -42,6 +43,13 @@ fn main() -> Result<(), String> {
         );
     }
     // else the default is set in `crate::log`
+
+    // The formula tableau does not produce proofs yet; proofs use its CNF input.
+    let formula_input = args.sat_backend == SatBackend::Tableau
+        && args.tableau_input == TableauInput::Formula
+        && args.proof.is_none()
+        && args.partial_proof.is_none();
+    let mut formulas = formula_input.then(FormulaStore::default);
 
     // Enable debug output for proof tracking if proof file is specified
     if args.proof.is_some() {
@@ -118,6 +126,11 @@ fn main() -> Result<(), String> {
 
         nonlinearity.check(&expanded_term)?;
 
+        if let Some(formulas) = formulas.as_mut() {
+            formulas.add_assertion(&expanded_term, &mut solver_state);
+            continue;
+        }
+
         let skolemized_term = expanded_term;
 
         let nnf_term = skolemized_term.nnf(&mut solver_state);
@@ -162,6 +175,11 @@ fn main() -> Result<(), String> {
     // have to do this as a separate loop because `check_for_function_bool` uses solver_state.context
     // somewhat inefficient especially since we have to clone nnf_term, but I couldn't come up with a
     // better way to do this
+    // The formula path preprocesses atoms; connectives carry no theory content.
+    if let Some(formulas) = formulas.as_ref() {
+        nnf_terms.extend(formulas.atoms.iter().cloned());
+        prop_skeleton.extend(formulas.units.iter().map(|&l| vec![l]));
+    }
     for nnf_term in nnf_terms {
         let additional_constraints = check_for_function_bool(
             &nnf_term,
@@ -201,6 +219,9 @@ fn main() -> Result<(), String> {
         symbol_table,
         args.arithmetic,
         args.timeout,
+        args.sat_backend,
+        formulas,
+        args.partial_models,
         args.elevate,
         args.max_arith_conflicts_per_round,
         args.batch_cap,
