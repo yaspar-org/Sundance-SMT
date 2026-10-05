@@ -16,6 +16,7 @@ use crate::quantifiers::quantifier::{
     PendingInstantiations, instantiate_quantifiers, materialize_next,
 };
 use crate::solver_state::{SolverState, process_assignment};
+use crate::solver_types::Polarity;
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
@@ -221,6 +222,26 @@ impl<'a> CustomExternalPropagator<'a> {
             } else if self.solver_state.egraph.is_congruence_argument(eid) {
                 self.decision_requests.push(var);
             }
+        }
+        !self.decision_requests.is_empty()
+    }
+
+    /// Request decisions on unassigned quantifier atoms, with the value that
+    /// skolemizes them
+    fn request_open_quantifiers(&mut self) -> bool {
+        self.decision_requests.clear();
+        for q in &self.solver_state.quantifiers {
+            let lit = self.solver_state.get_lit_from_u64(q.id);
+            let var = lit.unsigned_abs() as usize;
+            if lit == 0 || (var < self.assignments.len() && self.assignments[var] != 0) {
+                continue;
+            }
+            // `instantiate_quantifiers` skolemizes when
+            // (assignment > 0) ^ (lit > 0) ^ is_exists holds.
+            let is_exists = q.polarity == Polarity::Existential;
+            let var_true = !((lit > 0) ^ is_exists);
+            self.decision_requests
+                .push(if var_true { var as i32 } else { -(var as i32) });
         }
         !self.decision_requests.is_empty()
     }
@@ -907,6 +928,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         debug_println!(11, 0, "Starting quantifier instantiations");
         if !self.start_quantifier_instantiation_round(true) {
+            // Instantiation is saturated. Before accepting a partial model,
+            // decide its open quantifier atoms, skolemizing side first: both
+            // values can be refutable, and skolem constants give E-matching
+            // ground terms no instance produced.
+            if self.request_open_quantifiers() {
+                return false;
+            }
             debug_println!(10, 0, "{}", self.solver_state.egraph);
             assert!(self.disequalities.borrow().is_empty());
             return true;
