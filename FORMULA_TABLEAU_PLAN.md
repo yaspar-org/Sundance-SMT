@@ -152,6 +152,44 @@ Measure against the clause tableau as well as CaDiCaL.
   On the full-file comparison: clause input with partial models had 15
   timeouts and 1 `unknown`; clause input with total models had 26 timeouts.
 
+## Full UFDTLIA benchmark (commit 86dfb5b; 3,763 files, 60s, 96 parallel, same binary)
+
+| Mode | unsat | timeout | unknown | Time on 3,089 all-unsat | Median ratio vs CaDiCaL |
+|---|---|---|---|---|---|
+| CaDiCaL | 3153 | 596 | 14 | 4,100s | 1.00 |
+| Tableau, clause input (default) | 3165 | 589 | 9 | 4,751s | 1.07 |
+| **Tableau, formula input + partial models** | **3184** | **565** | 14 | **3,490s** | **0.85** |
+
+- Formula input with partial models against CaDiCaL: it solves 53 files
+  CaDiCaL times out on and times out on 26 CaDiCaL solves. It gives
+  `unknown` on 8 files CaDiCaL proves `unsat`, and proves `unsat` on 12
+  files CaDiCaL leaves `unknown`.
+
+## Investigation: `noflatand2` (fixed in 876a11e)
+
+- An instance body `(=> F H)` was satisfied by `H`, so the nested quantifier
+  atom `F` stayed unassigned.
+- Both values of `F` are refutable. The `F`-false side (skolemization)
+  produces ground terms that E-matching needs to refute the rest. Total
+  models explored it because completion assigned `F`.
+- Approaches that did not work:
+  - per-branch completion of the accepted model
+  - a global fallback to total models
+  - a fallback with a restart
+  - a fallback with a restart and reset phases
+
+  Instances generated during the partial phase steer the later search away
+  from the `F`-false branch.
+- Fix: once instantiation saturates, the propagator requests the open
+  quantifier atoms through `cb_decide`, skolemizing value first.
+  - The regression suite gives 433/0/7 in all modes.
+  - Cost: genuinely `unknown` problems take longer to answer
+    (`datatypes/tester_duplication_unknown6` with clause input + partial
+    models: about 7s to about 12s).
+- The 8 Verus `unsat`→`unknown` cases are **not** fixed by this. Two classes:
+  - `atmosphere/array*`: fail only with formula input + partial models
+  - `noderep rwlock`: fail with formula input even with total models
+
 ## Later phases
 - **F2: instance bodies as formulas** **[M3]**.
   - The body root becomes a node variable. The propagator sends the external
