@@ -62,6 +62,7 @@
     "edge_cases/booleanbug.smt2": "unsat",
     "edge_cases/booleanbug2.smt2": "unsat",
     "edge_cases_quantifiers/pattern-test.smt2": "unknown",
+    "edge_cases_quantifiers/ground-body-instantiation.smt2": "unknown",
     "edge_cases_quantifiers/pattern-test-2.smt2": "unsat",
     "edge_cases_quantifiers/wrongpattern.smt2": "unknown",
     "edge_cases_quantifiers/checkbool-quantifier.smt2": "unsat",
@@ -1114,5 +1115,7 @@
   "arithmetic/mod_negative_divisor_sat.smt2": "sat",
   "arithmetic/mod_negative_divisor_unsat.smt2": "unsat",
   "arithmetic/mod_negative_numerator_unsat.smt2": "unsat",
-  "arithmetic/bool_arg_in_function.smt2": "unsat"
+  "arithmetic/bool_arg_in_function.smt2": "unsat",
+  "arithmetic/lt_chained.smt2": "unsat",
+  "arithmetic/lt_chained_negated.smt2": "unsat"
 }

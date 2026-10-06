@@ -53,6 +53,9 @@ pub struct Quantifier {
     pub triggers: Vec<Vec<crate::egraphs::repr::PatternId>>,
     pub variables: Vec<String>,
     pub body: u64,
+    /// Locals occurring in the body. Bound variables outside this set do not
+    /// affect the instance, so they are dropped from the instantiation key.
+    pub body_locals: crate::utils::DeterministicHashSet<yaspar_ir::ast::Local>,
     pub id: u64,
     pub guard: Option<u64>,
     pub polarity: Polarity,

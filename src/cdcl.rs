@@ -51,7 +51,7 @@ pub fn cdcl_decision_procedure(
     let mut solver = CaDiCal::new();
     assert!(
         solver.set("elevate".to_string(), elevate),
-        "CaDiCaL option 'elevate' is unavailable; Sundance requires the cadical-sys elevate fork for lazy quantifier instantiation"
+        "CaDiCaL option 'elevate' is unavailable; Sundance requires CaDiCaL >= 3.0.1 for lazy quantifier instantiation"
     );
 
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
