@@ -932,7 +932,10 @@ pub fn process_assignment(
     };
 
     debug_assert!(
-        solver_state.egraph.find(true_egraph_id) != solver_state.egraph.find(false_egraph_id),
+        additional_constraints.is_some()
+            || solver_state.egraph.true_false_conflict_pending()
+            || solver_state.egraph.find(true_egraph_id)
+                != solver_state.egraph.find(false_egraph_id),
         "true and false merged without conflict being detected"
     );
 
