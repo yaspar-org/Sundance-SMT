@@ -28,10 +28,10 @@ sat-interface = "0.1.1"
 cadical-sys = { git = "https://github.com/leeabarnett/cadical-sys.git", branch = "cadical-3.0.1" }
 
 # Pinned to the semi-persistent repo (branch satcore-layer0, which now carries
-# the consolidated compression history) so this branch builds from a single
-# clone with no sibling checkout. For local co-development, override with
-# `[patch]` or a path dependency.
-semi-persistent-egraph = { git = "https://github.com/yaspar-org/semi-persistent.git", rev = "5c46fd7735153be9509ae5aa9a564060e3c65c25", optional = true }
+# the consolidated compression history plus the drainable merge log the semper
+# backend needs). For local co-development, override with `[patch]` or a path
+# dependency.
+semi-persistent-egraph = { git = "https://github.com/yaspar-org/semi-persistent.git", rev = "5b699d5167ab79c997e6a40b94e71120ddf90155", optional = true }
 
 array2d = "^0.3"
 clap = { version = "4.5.40", features = ["derive"] }
