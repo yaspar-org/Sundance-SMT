@@ -34,9 +34,11 @@
 //! (`SEMPER_EMATCH=0` disables it); a Z3-cross-checked sweep of the quantifier
 //! regression suite found no unsound answers.
 //!
-//! `drain_arithmetic_equalities` returns none (Nelson-Oppen equality
-//! propagation needs a merge-observation hook in the engine), so arithmetic
-//! problems still need the basic backend / `--arith-solver none`.
+//! `drain_arithmetic_equalities` exports the EUF-derived equalities the
+//! Nelson-Oppen combination needs: the engine records every merge through its
+//! `merged_log` (enabled by `incremental_arithmetic`), and the adapter folds
+//! that log into equalities between arithmetic classes, so arithmetic runs on
+//! this backend without `--arith-solver none`. See `doc/semper-adapter.md`.
 
 use crate::egraphs::repr::{Op, Pattern, PatternId};
 use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
@@ -247,6 +249,14 @@ pub struct SemperEgraph {
     scratch: RefCell<ProofBuf<ENodeId>>,
     arithmetic_terms: Vec<u32>,
     incremental_arith: bool,
+    /// Engine class roots currently tagged arithmetic, for Nelson-Oppen
+    /// equality export. Seeded by `mark_arithmetic` and propagated through the
+    /// engine's `merged_log` in `drain_arithmetic_equalities`: a class is
+    /// arithmetic if any member is. Maintained incrementally because the
+    /// pre-merge pairing cannot be recovered from `find` after rebuild; rebuilt
+    /// from `arithmetic_terms` on `backtrack_to`, since the roots it names are
+    /// undone (and possibly re-minted) by restore.
+    arith_roots: rustc_hash::FxHashSet<ENodeId>,
     /// The driver's true/false constants, captured at registration. Their
     /// disequality is built in: the driver debug-asserts that a true/false
     /// merge never goes undetected, so the backend must report it as a
@@ -339,6 +349,7 @@ impl SemperEgraph {
             scratch: RefCell::new(ProofBuf::new()),
             arithmetic_terms: Vec::new(),
             incremental_arith: false,
+            arith_roots: rustc_hash::FxHashSet::default(),
             true_term: None,
             false_term: None,
             stats: SemperStats::default(),
@@ -1142,6 +1153,14 @@ impl EgraphTrait for SemperEgraph {
         self.tf_taint
     }
 
+    fn true_false_conflict_pending(&self) -> bool {
+        // Set when `violated_diseq` reports a true=false collision, cleared on
+        // backtrack. While set, a later merge at the same level that keeps true
+        // and false merged is not re-reported, so the driver must not treat the
+        // persisting collision as an undetected merge.
+        self.reported_tf
+    }
+
     type Op = Op;
     type TermId = u32;
 
@@ -1203,16 +1222,47 @@ impl EgraphTrait for SemperEgraph {
 
     fn mark_arithmetic(&mut self, term: u32) {
         self.arithmetic_terms.push(term);
+        // Seed the arithmetic flag on the term's current class root. Merges are
+        // propagated later, in the drain fold.
+        let root = self.eg.find_const(self.node(term));
+        self.arith_roots.insert(root);
     }
 
     fn incremental_arithmetic(&mut self, enabled: bool) {
         self.incremental_arith = enabled;
+        // Turn the engine's merge capture on/off in lockstep: EUF-only runs
+        // leave it off and the engine records nothing.
+        self.eg.set_record_merges(enabled);
     }
 
     fn drain_arithmetic_equalities(&mut self) -> Vec<(u32, u32)> {
-        // Nelson-Oppen equality propagation needs merge observation in the
-        // engine; until that hook exists this backend supports EUF only.
-        Vec::new()
+        // Fold the engine's merge log (captured at merge time, in order) into
+        // arithmetic-class equalities. A merge whose survivor or absorbed class
+        // is arithmetic yields an equality between the two class names and makes
+        // the merged class arithmetic (OR semantics, mirroring the basic
+        // backend's per-root flag). The pairing is read from the pre-merge
+        // roots, which is why capture happens in the engine, not here.
+        let merges = self.eg.take_merged_log();
+        let mut out: Vec<(u32, u32)> = Vec::with_capacity(merges.len());
+        for (survivor, absorbed) in merges {
+            let s_arith = self.arith_roots.contains(&survivor);
+            let a_arith = self.arith_roots.contains(&absorbed);
+            if s_arith || a_arith {
+                let ds = self.node_to_driver[survivor.to_usize()];
+                let da = self.node_to_driver[absorbed.to_usize()];
+                debug_assert!(
+                    ds != NO_DRIVER && da != NO_DRIVER,
+                    "merged class roots come from registrations and carry a driver id"
+                );
+                out.push((ds, da));
+                // The post-merge root is the survivor; the absorbed root is no
+                // longer a root. Carry the arithmetic flag onto the survivor.
+                self.arith_roots.insert(survivor);
+            }
+            // Keep the set over current roots only.
+            self.arith_roots.remove(&absorbed);
+        }
+        out
     }
 
     fn notify_new_decision_level(&mut self) {
@@ -1370,6 +1420,20 @@ impl EgraphTrait for SemperEgraph {
             }
             self.terms = terms;
         }
+        // The restore undid (and may have re-minted) the engine roots that
+        // `arith_roots` named, so rebuild it from the surviving arithmetic terms
+        // against the restored union-find. Drain-before-advance keeps the merge
+        // log empty here, and the engine cleared it on restore, so the next
+        // drain reports no stale equality.
+        if self.incremental_arith {
+            self.arith_roots.clear();
+            let terms = std::mem::take(&mut self.arithmetic_terms);
+            for &t in &terms {
+                let root = self.eg.find_const(self.node(t));
+                self.arith_roots.insert(root);
+            }
+            self.arithmetic_terms = terms;
+        }
         if let Some(t) = prof_t {
             crate::egraphs::trail_prof::record_backtrack(t.elapsed().as_nanos() as u64);
         }
@@ -1457,6 +1521,73 @@ mod tests {
         assert_eq!(conflict.disequality, (fa, fb));
         assert_eq!(conflict.diseq_lit, Some(3));
         assert_eq!(conflict.equalities, vec![(a, b)]);
+    }
+
+    // Acceptance #2: a congruence-derived merge of two arithmetic classes is
+    // drained as the equality between the two tagged terms; a non-arithmetic
+    // merge produces nothing.
+    #[test]
+    fn drain_exports_congruence_equality_of_tagged_terms() {
+        let mut e = SemperEgraph::new();
+        e.incremental_arithmetic(true);
+        let a = constant(&mut e, "a");
+        let b = constant(&mut e, "b");
+        let fa = e.register_term(Op::App("f".to_string()), &[a], false);
+        let fb = e.register_term(Op::App("f".to_string()), &[b], false);
+        e.mark_arithmetic(fa);
+        e.mark_arithmetic(fb);
+        // Direct merge a=b (neither tagged) rebuilds into the congruence
+        // f(a)=f(b) (both tagged).
+        assert!(e.assert_equal(a, b).conflict.is_none());
+        let eqs = e.drain_arithmetic_equalities();
+        assert_eq!(
+            eqs.len(),
+            1,
+            "only the arithmetic congruence f(a)=f(b) is exported, not a=b: {eqs:?}"
+        );
+        let got: std::collections::BTreeSet<u32> = [eqs[0].0, eqs[0].1].into_iter().collect();
+        let want: std::collections::BTreeSet<u32> = [fa, fb].into_iter().collect();
+        assert_eq!(got, want, "drained pair must be the two tagged terms");
+        // Draining is a take.
+        assert!(e.drain_arithmetic_equalities().is_empty());
+    }
+
+    // Acceptance #3: after a restore across a decision level the next drain
+    // reports no stale equality, and arith_roots is rebuilt so a re-merge still
+    // exports correctly.
+    #[test]
+    fn drain_is_restore_safe() {
+        let mut e = SemperEgraph::new();
+        e.incremental_arithmetic(true);
+        let a = constant(&mut e, "a");
+        let b = constant(&mut e, "b");
+        let fa = e.register_term(Op::App("f".to_string()), &[a], false);
+        let fb = e.register_term(Op::App("f".to_string()), &[b], false);
+        e.mark_arithmetic(fa);
+        e.mark_arithmetic(fb);
+
+        e.notify_new_decision_level();
+        assert!(e.assert_equal(a, b).conflict.is_none());
+        assert!(e.are_equal(fa, fb));
+        assert_eq!(e.drain_arithmetic_equalities().len(), 1);
+
+        // Restore: the congruence is undone, and the next drain is empty.
+        e.backtrack_to(0);
+        assert!(!e.are_equal(fa, fb), "restore undoes the congruence");
+        assert!(
+            e.drain_arithmetic_equalities().is_empty(),
+            "no stale equality after restore"
+        );
+
+        // arith_roots was rebuilt from the surviving tagged terms, so a fresh
+        // re-merge still exports f(a)=f(b).
+        e.notify_new_decision_level();
+        assert!(e.assert_equal(a, b).conflict.is_none());
+        let eqs = e.drain_arithmetic_equalities();
+        assert_eq!(eqs.len(), 1, "post-restore re-merge still exports: {eqs:?}");
+        let got: std::collections::BTreeSet<u32> = [eqs[0].0, eqs[0].1].into_iter().collect();
+        let want: std::collections::BTreeSet<u32> = [fa, fb].into_iter().collect();
+        assert_eq!(got, want);
     }
 
     #[test]
