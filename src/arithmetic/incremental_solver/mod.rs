@@ -4,6 +4,7 @@
 //! Trait for incremental arithmetic solvers. The propagator translates between
 //! egraph ids / solver terms and the abstract VarId namespace defined here.
 
+pub mod lira;
 pub mod translation;
 #[cfg(feature = "z3-solver")]
 pub(crate) mod z3;
@@ -23,6 +24,28 @@ pub struct ArithExpr {
     pub mods: Vec<(VarId, VarId, IBig)>,
 }
 
+impl ArithExpr {
+    /// A pure-linear expression from terms and a constant (no div/mod).
+    pub fn linear(terms: Vec<(VarId, IBig)>, constant: IBig) -> Self {
+        Self {
+            terms,
+            constant,
+            divs: Vec::new(),
+            mods: Vec::new(),
+        }
+    }
+
+    /// A constant expression.
+    pub fn constant(c: impl Into<IBig>) -> Self {
+        Self::linear(Vec::new(), c.into())
+    }
+
+    /// The single-variable expression `1 * var`.
+    pub fn var(var: VarId) -> Self {
+        Self::linear(vec![(var, IBig::from(1))], IBig::from(0))
+    }
+}
+
 /// A constraint between two linear expressions.
 #[derive(Debug, Clone)]
 pub enum ArithConstraint {
@@ -32,14 +55,18 @@ pub enum ArithConstraint {
 }
 
 /// Result of `check()`.
+#[derive(Debug)]
 pub enum ArithCheckResult {
     /// Conflict: negated SAT lits forming a clause.
     Unsat(Vec<i32>),
     /// Model-value → set of VarIds assigned that value.
     Sat(DeterministicHashMap<IBig, DeterministicHashSet<VarId>>),
+    /// The solver gave up (e.g. a resource limit); no conflict and no model.
+    Unknown,
 }
 
 /// Result of `check_partial_trail()`. `Unchanged` = impl skipped the check.
+#[derive(Debug)]
 pub enum PartialCheckResult {
     Unchanged,
     Sat,

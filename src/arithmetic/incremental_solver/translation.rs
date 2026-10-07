@@ -289,6 +289,7 @@ impl ArithTranslator {
                 }
                 ArithResult::Sat(translated, LiaStats::new())
             }
+            ArithCheckResult::Unknown => ArithResult::None,
         }
     }
 

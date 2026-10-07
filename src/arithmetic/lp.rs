@@ -25,6 +25,10 @@ use yaspar_ir::ast::{
 #[derive(Debug, Clone, ValueEnum)]
 pub enum ArithSolver {
     Internal,
+    /// Persistent internal LIRA solver kept in sync with CaDiCaL's trail and the
+    /// egraph's merge stream.
+    #[value(name = "internalincremental", alias = "internal-incremental")]
+    InternalIncremental,
     #[cfg(feature = "z3-solver")]
     Z3,
     /// Persistent `z3::Solver` kept in sync with CaDiCaL's trail and the
@@ -39,6 +43,7 @@ impl Display for ArithSolver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             ArithSolver::Internal => "internal".fmt(f),
+            ArithSolver::InternalIncremental => "internalincremental".fmt(f),
             #[cfg(feature = "z3-solver")]
             ArithSolver::Z3 => "z3".fmt(f),
             #[cfg(feature = "z3-solver")]
@@ -57,7 +62,7 @@ impl fmt::Display for ArithSolverParseError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'z3', 'z3incremental', 'none'",
+            "Invalid ArithSolver: '{}'. Valid options are: 'internal', 'internalincremental', 'z3', 'z3incremental', 'none'",
             self.invalid_input
         )
     }
@@ -80,6 +85,7 @@ impl FromStr for ArithSolver {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "internal" => Ok(ArithSolver::Internal),
+            "internalincremental" => Ok(ArithSolver::InternalIncremental),
             #[cfg(feature = "z3-solver")]
             "z3" => Ok(ArithSolver::Z3),
             #[cfg(feature = "z3-solver")]
@@ -102,8 +108,11 @@ pub fn check_integer_constraints_satisfiable(
         ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, solver_state),
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, solver_state),
-        // Z3Incremental is driven from the propagator's Z3IncrementalState;
-        // reaching this arm means the wiring was bypassed.
+        // The incremental backends are driven from the propagator's ArithTranslator;
+        // reaching these arms means the wiring was bypassed.
+        ArithSolver::InternalIncremental => {
+            panic!("InternalIncremental must be driven via the propagator, not this entry point")
+        }
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3Incremental => {
             panic!("Z3Incremental must be driven via the propagator, not this entry point")

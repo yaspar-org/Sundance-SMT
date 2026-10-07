@@ -113,7 +113,6 @@ pub struct CustomExternalPropagator<'a> {
 }
 
 impl<'a> CustomExternalPropagator<'a> {
-    #[cfg(feature = "z3-solver")]
     fn check_partial_arithmetic_trail(&mut self) {
         let Some(arith) = self.arith.as_mut() else {
             return;
@@ -321,7 +320,6 @@ impl<'a> CustomExternalPropagator<'a> {
         // `insert_predecessor`'s congruence closure). Drain them so the queue is
         // empty before control returns to CaDiCaL, as `notify_new_decision_level`
         // requires.
-        #[cfg(feature = "z3-solver")]
         if let Some(arith) = self.arith.as_mut() {
             arith.drain_merges(self.solver_state);
         }
@@ -535,7 +533,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // partial assignment. Existing pending work is always consumed before
         // another matching round is created.
         self.eagerly_instantiate_quantifiers();
-        #[cfg(feature = "z3-solver")]
         self.check_partial_arithmetic_trail();
     }
 
@@ -751,7 +748,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         probe_level += 1;
                         let result = self.solver_state.egraph.assert_equal(x_root, y_root);
                         // Probe merges are speculative — discard queue entries
-                        // so they don't leak into Z3IncrementalState.
+                        // so they don't leak into the incremental arithmetic backend.
                         let _ = self.solver_state.egraph.drain_arithmetic_equalities();
                         if let Some(c) = result.conflict {
                             self.solver_state.egraph.backtrack_to(probe_level - 1);

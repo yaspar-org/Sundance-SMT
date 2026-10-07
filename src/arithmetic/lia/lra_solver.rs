@@ -1145,8 +1145,16 @@ impl LRASolver {
         match ret.decision {
             SolverDecision::FEASIBLE(_) => {
                 let d0 = self.calculate_d0();
+                // Round the integer variables that were non-basic *before* this solve and
+                // recompute every other variable from the saved rows, so the assignment satisfies
+                // the tableau equations by construction. On a fresh tableau those non-basics are
+                // the structural variables, which is exactly what the unit cube argument rounds.
+                // Rounding basic variables independently is unsound once earlier pivots have
+                // moved structural variables into the basis (e.g. a solver reused incrementally):
+                // an independently rounded value can silently break its row.
                 let mut rounded_assignments = BTreeMap::new();
-                for v in self.variables.iter() {
+                for &idx in saved_non_basic.iter() {
+                    let v = &self.variables[idx];
                     let val = v.val.instantiate(&d0);
                     let rounded = if v.var.typ == VarType::Int {
                         let floor = Rational::from(val.floor());
@@ -1161,12 +1169,24 @@ impl LRASolver {
                     };
                     rounded_assignments.insert(v.var, rounded);
                 }
+                for (row, &idx) in saved_basic.iter().enumerate() {
+                    let mut val = Rational::ZERO;
+                    for (col, &nb_idx) in saved_non_basic.iter().enumerate() {
+                        let coeff = saved_tableau.get(row, col)?;
+                        if !coeff.is_zero() {
+                            val += coeff * &rounded_assignments[&self.variables[nb_idx].var];
+                        }
+                    }
+                    rounded_assignments.insert(self.variables[idx].var, val);
+                }
 
-                // Verify the rounded assignment satisfies all original bounds
+                // Verify the rounded assignment satisfies all original bounds and integrality
                 for v in self.variables.iter() {
                     let rounded_val = &rounded_assignments[&v.var];
                     let rounded_qdelta = QDelta::from(rounded_val.clone());
-                    if !v.bounds.in_bounds(&rounded_qdelta) {
+                    if !v.bounds.in_bounds(&rounded_qdelta)
+                        || (v.var.typ == VarType::Int && !rounded_val.is_int())
+                    {
                         self.state = LRASolverState::Unknown;
                         self.restore_tableau(
                             &saved_tableau,

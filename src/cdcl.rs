@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Main CDCL decision loop
+use crate::arithmetic::incremental_solver::IncrementalArithSolver;
+use crate::arithmetic::incremental_solver::lira::LiraIncrementalState;
+use crate::arithmetic::incremental_solver::translation::ArithTranslator;
 use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode, ObservedSink};
 use crate::config::SatBackend;
@@ -130,34 +133,18 @@ pub fn cdcl_decision_procedure(
         }
     };
 
-    #[cfg(feature = "z3-solver")]
-    let using_z3_incremental = matches!(arithmetic, ArithSolver::Z3Incremental);
-    #[cfg(not(feature = "z3-solver"))]
-    let using_z3_incremental = false;
+    let incremental_backend: Option<Box<dyn IncrementalArithSolver>> = match arithmetic {
+        ArithSolver::InternalIncremental => Some(Box::new(LiraIncrementalState::new())),
+        #[cfg(feature = "z3-solver")]
+        ArithSolver::Z3Incremental => Some(Box::new(
+            crate::arithmetic::incremental_solver::z3::Z3IncrementalState::new(),
+        )),
+        _ => None,
+    };
     solver_state
         .egraph
-        .incremental_arithmetic(using_z3_incremental);
-
-    let arith_translator = {
-        #[cfg(feature = "z3-solver")]
-        {
-            if using_z3_incremental {
-                Some(
-                    crate::arithmetic::incremental_solver::translation::ArithTranslator::new(
-                        Box::new(
-                            crate::arithmetic::incremental_solver::z3::Z3IncrementalState::new(),
-                        ),
-                    ),
-                )
-            } else {
-                None
-            }
-        }
-        #[cfg(not(feature = "z3-solver"))]
-        {
-            None::<crate::arithmetic::incremental_solver::translation::ArithTranslator>
-        }
-    };
+        .incremental_arithmetic(incremental_backend.is_some());
+    let arith_translator = incremental_backend.map(ArithTranslator::new);
 
     let mut propagator = CustomExternalPropagator {
         decision_level: 0,
