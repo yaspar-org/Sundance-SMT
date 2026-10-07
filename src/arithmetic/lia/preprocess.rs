@@ -36,6 +36,10 @@ pub fn preprocess(ctx: &mut ConvContext) -> PreprocessResult {
     for (r, v) in ctx.get_relations_mut() {
         // Preprocess relation
         r.normalize();
+        if r.tighten_integral() {
+            debug_println!(21, 0, "lia::preprocess: relation has no integer solution");
+            return PreprocessResult::TriviallyUnsat(*v);
+        }
         num_monomials += r.terms_ref().len();
         // remove trivially sat relations, e.g. 0 <= 5
         if r.is_trivial_sat() {

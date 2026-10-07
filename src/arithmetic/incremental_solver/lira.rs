@@ -360,10 +360,20 @@ impl LiraIncrementalState {
             }
         }
 
-        // Derive the QDelta bound(s) (handles strict-inequality δ adjustment).
-        let rel = mk(diff.monomials(), c);
-        let bounds = rel.to_qdelta_bounds();
-        self.add_row(rel.terms_ref().to_vec(), bounds, Some(lit))?;
+        // Tighten to the integer grid (all internal vars are integers), then derive the QDelta
+        // bound(s) (handles strict-inequality δ adjustment for anything left strict).
+        let mut rel = mk(diff.monomials(), c);
+        rel.normalize();
+        if rel.tighten_integral() {
+            // No integer solution (e.g. `2x + 2y = 1`): the rational relaxation is feasible and
+            // branch-and-bound could diverge, so record the constraint as a conflict on its own,
+            // as an all-zero row bounded below by 1.
+            let bounds = Bounds::new(Some(QDelta::from(Rational::ONE)), None);
+            self.add_row(Vec::new(), bounds, Some(lit))?;
+        } else {
+            let bounds = rel.to_qdelta_bounds();
+            self.add_row(rel.terms_ref().to_vec(), bounds, Some(lit))?;
+        }
         self.pending_partial += 1;
         debug_println!(
             21,
@@ -1321,13 +1331,17 @@ mod tests {
 
     #[test]
     fn partial_check_ignores_integrality() {
-        // 3x in [1, 2] is feasible over the reals: the partial check reports Sat, while the full
-        // check (branch-and-bound) reports Unsat.
+        // x + y = 1 and x - y = 0 pin x = y = 1/2: feasible over the reals (each constraint is
+        // integer-tight on its own), but not over the integers. The partial check reports Sat;
+        // the full check (branch-and-bound) reports Unsat.
         let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
-        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(x, 3)), 1)
+        let y = s.try_register_var(None, true).unwrap();
+        let sum = ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(1))], IBig::ZERO);
+        let diff = ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(-1))], IBig::ZERO);
+        s.try_push_constraint(ArithConstraint::Eq(sum, ArithExpr::constant(1)), 1)
             .unwrap();
-        s.try_push_constraint(ArithConstraint::Leq(term(x, 3), ArithExpr::constant(2)), 2)
+        s.try_push_constraint(ArithConstraint::Eq(diff, ArithExpr::constant(0)), 2)
             .unwrap();
         for lit in 3..=(PARTIAL_CHECK_ASSERTION_BATCH as i32) {
             s.try_push_constraint(
@@ -1359,16 +1373,12 @@ mod tests {
     }
 
     #[test]
-    fn branch_and_bound_budget_exhaustion_is_unknown() {
-        let config = SolverConfig {
-            max_lra_solve_calls: Some(1),
-            ..SolverConfig::default()
-        };
-        let mut s = LiraIncrementalState::with_config(config);
+    fn gcd_infeasible_equality_is_unsat() {
+        // 2x + 2y = 1 has no integer solution (gcd 2 does not divide 1) but is feasible over the
+        // reals and unbounded, where branch-and-bound would diverge. It is refuted on its own.
+        let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
         let y = s.try_register_var(None, true).unwrap();
-        // 2x + 2y = 1 is feasible over the reals but has no integer solution; showing that needs
-        // branching, which the one-solve budget does not allow.
         s.try_push_constraint(
             ArithConstraint::Eq(
                 ArithExpr::linear(vec![(x, IBig::from(2)), (y, IBig::from(2))], IBig::from(0)),
@@ -1377,6 +1387,63 @@ mod tests {
             10,
         )
         .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Unsat(core) => assert_eq!(core, vec![-10]),
+            r => panic!("expected UNSAT, got {r:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_and_bound_budget_exhaustion_is_unknown() {
+        let config = SolverConfig {
+            max_lra_solve_calls: Some(1),
+            ..SolverConfig::default()
+        };
+        let mut s = LiraIncrementalState::with_config(config);
+        let x = s.try_register_var(None, true).unwrap();
+        let y = s.try_register_var(None, true).unwrap();
+        // x + y = 1 and x - y = 0 pin x = y = 1/2: no integer solution, but each constraint is
+        // tight on its own, so showing it needs branching, which the one-solve budget forbids.
+        s.try_push_constraint(
+            ArithConstraint::Eq(
+                ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(1))], IBig::from(0)),
+                ArithExpr::constant(1),
+            ),
+            10,
+        )
+        .unwrap();
+        s.try_push_constraint(
+            ArithConstraint::Eq(
+                ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(-1))], IBig::from(0)),
+                ArithExpr::constant(0),
+            ),
+            20,
+        )
+        .unwrap();
         assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unknown));
+    }
+
+    #[test]
+    fn unbounded_integer_strip_is_unsat() {
+        // −1 < x − y < 0: rationally feasible, unbounded, no integer point. Integer tightening
+        // makes the relaxation infeasible, so branch-and-bound (which diverges here) never runs.
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(None, true).unwrap();
+        let y = s.try_register_var(None, true).unwrap();
+        let x_minus_y =
+            ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(-1))], IBig::ZERO);
+        s.try_push_constraint(
+            ArithConstraint::Lt(x_minus_y.clone(), ArithExpr::constant(0)),
+            1,
+        )
+        .unwrap();
+        s.try_push_constraint(ArithConstraint::Lt(ArithExpr::constant(-1), x_minus_y), 2)
+            .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Unsat(core) => {
+                assert!(core.contains(&-1) && core.contains(&-2), "core {core:?}")
+            }
+            r => panic!("expected UNSAT, got {r:?}"),
+        }
     }
 }

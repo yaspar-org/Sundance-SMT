@@ -725,6 +725,31 @@ pub fn solve_ctx_raw(ctx: &mut ConvContext, config: &SolverConfig) -> FrontendRe
         EqualityElimResult::Unknown => {}
     }
 
+    // Substitution can produce relations that are no longer tight on the integer grid (e.g.
+    // `x − y > −1` with no strict counterpart over the integers); tighten them again. Each
+    // relation keeps its slack, so conflict explanation and provenance are unaffected. A
+    // relation with no integer solution is a conflict on its own (plus the equalities folded
+    // into it).
+    let mut integer_infeasible = None;
+    for (rel, var) in ctx.get_relations_mut() {
+        rel.normalize();
+        if rel.tighten_integral() {
+            integer_infeasible = Some(*var);
+            break;
+        }
+    }
+    if let Some(var) = integer_infeasible {
+        let mut conflict = collections::BTreeSet::new();
+        conflict.insert(var);
+        if let Some(prov) = ctx.get_provenance(&var) {
+            conflict.extend(prov.iter().copied());
+        }
+        return Ok(SolverReturn::new(
+            SolverDecision::INFEASIBLE(Conflict::from_set(conflict)),
+            Stats::new(),
+        ));
+    }
+
     // Phase 3: build system and solve
     let sys = LinearSystem::new(ctx.clone());
     let lra_solver = sys
@@ -1502,5 +1527,42 @@ mod tests {
             }
             _ => panic!("expected INFEASIBLE"),
         }
+    }
+
+    /// `−1 < x − y < 0` has no integer solution but is feasible over the rationals, and
+    /// nothing bounds `x` or `y`. Without integer tightening, branch-and-bound on `x`/`y` never
+    /// terminates (the relaxation slides off to infinity); tightened to `x − y ≤ −1 ∧ x − y ≥ 0`
+    /// the relaxation is infeasible outright.
+    #[test]
+    fn test_unbounded_integer_strip_unsat() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const x Int)
+(declare-const y Int)
+(assert (< (- x y) 0))
+(assert (> (- x y) (- 1)))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)));
+    }
+
+    /// Same strip, but only visible after equality elimination substitutes `a = y + 1`:
+    /// `0 <= 2x − a − y <= 0` is tight as written, but becomes `1 <= 2(x − y) <= 1`, i.e.
+    /// `x − y = 1/2`. The post-elimination tightening reduces it to `x − y >= 1 ∧ x − y <= 0`.
+    #[test]
+    fn test_unbounded_integer_strip_after_elimination_unsat() {
+        let smt_input = r#"
+(set-logic QF_LIA)
+(declare-const x Int)
+(declare-const y Int)
+(declare-const a Int)
+(assert (= a (+ y 1)))
+(assert (<= (- (* 2 x) a y) 0))
+(assert (>= (- (* 2 x) a y) 0))
+(check-sat)
+    "#;
+        let result = solve_smtlib(smt_input, &SolverConfig::default()).expect("solver failed");
+        assert!(matches!(result, SolverDecisionApi::INFEASIBLE(_)));
     }
 }
