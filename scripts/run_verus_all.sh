@@ -28,6 +28,7 @@ Z3_COMMAND="z3 auto_config=false smt.mbqi=false smt.case_split=3 smt.qi.eager_th
 CVC5_COMMAND="cvc5"
 SUNDANCE_ARITH_Z3_COMMAND="sundance-smt"
 SUNDANCE_ARITH_INTERNAL_COMMAND="sundance-smt --arithmetic internal"
+SUNDANCE_ARITH_INCREMENTAL_INTERNAL_COMMAND="sundance-smt --arithmetic internalincremental"
 
 # With proof files add to Sundance:
 #
@@ -44,4 +45,7 @@ python scripts/run_verus.py --solver-command "$SUNDANCE_ARITH_Z3_COMMAND" --time
 
 echo "*** Running Sundance with internal arithmetic"
 python scripts/run_verus.py --solver-command "$SUNDANCE_ARITH_INTERNAL_COMMAND" --timeout $TIMEOUT -o sundance-arith-internal.out -j $NUM_WORKERS "$SMT_FOLDER" 2>&1 | tee sundance-arith-internal.log
+
+echo "*** Running Sundance with internal-incremental arithmetic"
+python scripts/run_verus.py --solver-command "$SUNDANCE_ARITH_INCREMENTAL_INTERNAL_COMMAND" --timeout $TIMEOUT -o sundance-arith-internal-incremental.out -j $NUM_WORKERS "$SMT_FOLDER" 2>&1 | tee sundance-arith-internal-incremental.log
 

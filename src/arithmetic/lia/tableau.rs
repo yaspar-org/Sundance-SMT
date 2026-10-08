@@ -212,6 +212,32 @@ impl Tableau for TableauImpl {
 }
 
 impl TableauImpl {
+    /// Iterate the non-zero entries `(col, value)` of `row`, in unspecified order. On the sparse
+    /// backend this costs O(nnz(row)) instead of O(ncols).
+    pub fn row_entries(&self, row: usize) -> Box<dyn Iterator<Item = (usize, &Rational)> + '_> {
+        match self {
+            TableauImpl::Dense(t) => Box::new(
+                (0..t.ncols())
+                    .map(move |c| (c, t.get(row, c).unwrap()))
+                    .filter(|(_, v)| !v.is_zero()),
+            ),
+            TableauImpl::Sparse(t) => Box::new(t.row_iter(row)),
+        }
+    }
+
+    /// Iterate the non-zero entries `(row, value)` of `col`, in unspecified order. On the sparse
+    /// backend this costs O(nnz(col)) instead of O(nrows).
+    pub fn col_entries(&self, col: usize) -> Box<dyn Iterator<Item = (usize, &Rational)> + '_> {
+        match self {
+            TableauImpl::Dense(t) => Box::new(
+                (0..t.nrows())
+                    .map(move |r| (r, t.get(r, col).unwrap()))
+                    .filter(|(_, v)| !v.is_zero()),
+            ),
+            TableauImpl::Sparse(t) => Box::new(t.col_iter(col)),
+        }
+    }
+
     /// Construct a TableauImpl of the given kind from tuples.
     pub fn new(
         kind: TableauKind,
@@ -226,6 +252,47 @@ impl TableauImpl {
             TableauKind::Sparse => Ok(TableauImpl::Sparse(TableauSparse::from_tuples(
                 nrows, ncols, t,
             )?)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arithmetic::lia::types::rbig;
+
+    #[test]
+    fn row_and_col_entries_agree_across_backends() {
+        let tuples = || {
+            vec![
+                (0, 0, rbig!(1)),
+                (0, 2, rbig!(-3)),
+                (1, 1, rbig!(2)),
+                (2, 0, rbig!(5)),
+                (2, 2, rbig!(1 / 2)),
+            ]
+        };
+        for kind in [TableauKind::Dense, TableauKind::Sparse] {
+            let mut t = TableauImpl::new(kind, 3, 3, tuples()).unwrap();
+            t.pivot(0, 0).unwrap();
+            for r in 0..3 {
+                let mut got: Vec<_> = t.row_entries(r).map(|(c, v)| (c, v.clone())).collect();
+                got.sort();
+                let want: Vec<_> = (0..3)
+                    .map(|c| (c, t.get(r, c).unwrap().clone()))
+                    .filter(|(_, v)| !v.is_zero())
+                    .collect();
+                assert_eq!(got, want, "{kind:?} row {r}");
+            }
+            for c in 0..3 {
+                let mut got: Vec<_> = t.col_entries(c).map(|(r, v)| (r, v.clone())).collect();
+                got.sort();
+                let want: Vec<_> = (0..3)
+                    .map(|r| (r, t.get(r, c).unwrap().clone()))
+                    .filter(|(_, v)| !v.is_zero())
+                    .collect();
+                assert_eq!(got, want, "{kind:?} col {c}");
+            }
         }
     }
 }

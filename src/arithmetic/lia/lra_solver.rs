@@ -176,10 +176,10 @@ impl LRASolver {
     /// Note that no loop over the tableau columns is required.
     pub fn update(&mut self, col: usize, val: &QDelta) {
         let adjustment = val - &self.variables[self.non_basic[col]].val;
-        for (row, basic_idx) in self.basic.iter().enumerate() {
-            let a_j_i = self.tableau.get(row, col).unwrap();
-            let new_val = self.variables[*basic_idx].val.clone() + &adjustment * a_j_i;
-            self.variables[*basic_idx].update_assignment(new_val);
+        for (row, a_j_i) in self.tableau.col_entries(col) {
+            let basic_idx = self.basic[row];
+            let new_val = &self.variables[basic_idx].val + &(&adjustment * a_j_i);
+            self.variables[basic_idx].update_assignment(new_val);
         }
         self.variables[self.non_basic[col]].update_assignment(val.clone());
     }
@@ -224,12 +224,11 @@ impl LRASolver {
 
         self.variables[self.non_basic[pivot_col]].update_assignment(new_non_basic_val);
 
-        for (row, basic_idx) in self.basic.iter().enumerate() {
+        for (row, a_i_col) in self.tableau.col_entries(pivot_col) {
             if row != pivot_row {
-                let a_i_col = self.tableau.get(row, pivot_col)?;
-                // TODO: a lot of this variable reference arithmetic is awkward
-                let new_val = &self.variables[*basic_idx].val + &(&non_basic_adjustment * a_i_col);
-                self.variables[*basic_idx].update_assignment(new_val);
+                let basic_idx = self.basic[row];
+                let new_val = &self.variables[basic_idx].val + &(&non_basic_adjustment * a_i_col);
+                self.variables[basic_idx].update_assignment(new_val);
             }
         }
 
@@ -301,11 +300,8 @@ impl LRASolver {
                     row[c] += a;
                 }
                 Owner::Basic(r) => {
-                    for (c, entry) in row.iter_mut().enumerate() {
-                        let t = self.tableau.get(r, c)?;
-                        if !t.is_zero() {
-                            *entry += a * t;
-                        }
+                    for (c, t) in self.tableau.row_entries(r) {
+                        row[c] += a * t;
                     }
                 }
             }
@@ -1002,12 +998,8 @@ impl LRASolver {
         };
         if var_info.below_lower() || var_info.above_upper() {
             let mut conflicts = vec![var_info.var];
-            for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
-                let a_i_j = self.tableau.get(row, col).unwrap();
-                if a_i_j != &Rational::ZERO {
-                    let non_basic_var = &self.variables[*non_basic_idx];
-                    conflicts.push(non_basic_var.var);
-                }
+            for (col, _) in self.tableau.row_entries(row) {
+                conflicts.push(self.variables[self.non_basic[col]].var);
             }
             Ok(conflicts.into_iter().collect())
         } else {
@@ -1117,8 +1109,7 @@ impl LRASolver {
             }
 
             let mut norm_1 = Rational::ZERO;
-            for col in 0..self.non_basic.len() {
-                let coeff = self.tableau.get(row, col).unwrap();
+            for (_, coeff) in self.tableau.row_entries(row) {
                 norm_1 += coeff.clone().abs();
             }
 
@@ -1185,11 +1176,9 @@ impl LRASolver {
                 }
                 for (row, &idx) in saved_basic.iter().enumerate() {
                     let mut val = Rational::ZERO;
-                    for (col, &nb_idx) in saved_non_basic.iter().enumerate() {
-                        let coeff = saved_tableau.get(row, col)?;
-                        if !coeff.is_zero() {
-                            val += coeff * &rounded_assignments[&self.variables[nb_idx].var];
-                        }
+                    for (col, coeff) in saved_tableau.row_entries(row) {
+                        let nb_idx = saved_non_basic[col];
+                        val += coeff * &rounded_assignments[&self.variables[nb_idx].var];
                     }
                     rounded_assignments.insert(self.variables[idx].var, val);
                 }
@@ -1267,9 +1256,8 @@ impl LRASolver {
     /// corresponding row equation true.
     fn calculate_assignment(&self, row: usize) -> QDelta {
         let mut rhs = QDelta::ZERO;
-        for (col, non_basic_idx) in self.non_basic.iter().enumerate() {
-            // TODO: getting the whole row at once may be faster here
-            rhs += &self.variables[*non_basic_idx].val * self.tableau.get(row, col).unwrap();
+        for (col, coeff) in self.tableau.row_entries(row) {
+            rhs += &self.variables[self.non_basic[col]].val * coeff;
         }
         rhs
     }
