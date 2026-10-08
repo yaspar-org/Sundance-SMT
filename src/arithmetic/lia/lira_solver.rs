@@ -58,6 +58,10 @@ struct BranchFrame {
     floor_bound: Integer,
     /// Lower bound for the ceil branch (`x >= ceil_bound`).
     ceil_bound: Integer,
+    /// Whether `x` already had a bound at this node (from an ancestor branch, or asserted
+    /// directly by the caller). If so, a conflict mentioning `x` may depend on that bound rather
+    /// than on this node's branch, and resolving on `x` must keep it.
+    x_bounded: bool,
     /// Distance from the root; drives the depth guard in [`LIRASolver::over_budget`].
     depth: usize,
     /// Which child this frame is about to explore or is currently waiting on.
@@ -364,16 +368,21 @@ impl LIRASolver {
                         .floor_conflict
                         .take()
                         .expect("ceil branch completed without a saved floor conflict");
-                    let resolved = floor_conflict.resolve(x, &ceil_conflict);
+                    let mut resolved = floor_conflict.resolve(x, &ceil_conflict);
+                    // A conflict mentions `x` when it uses *some* bound of `x`, which need not be
+                    // this node's branch bound. Dropping `x` is only sound if `x` was unbounded at
+                    // this node; otherwise its node bounds stay part of the explanation.
+                    if stack[top].x_bounded {
+                        resolved.insert(x);
+                    }
                     // An empty resolved would surface as `Infeasible({})`, which the propagator
                     // reads as an empty learned clause and hence unconditional (global) UNSAT.
                     // That is only ever the case if the two branches were mutually infeasible on
-                    // `x`'s bounds *alone* with no other assertion involved. In this solver `x` is
-                    // always an original (non-slack) variable whose only direct bounds are the
-                    // integer floor/ceil asserted by branching; at a fractional node
-                    // `L(x) <= floor(v) < v < ceil(v) <= U(x)`, so neither branch can be trivially
-                    // infeasible on `x` alone, and a real relaxation conflict always drags in the
-                    // slacks that constrained `x`. The `resolved` is therefore never empty.
+                    // `x`'s branch bounds *alone* with no other assertion involved. At a
+                    // fractional node `L(x) <= floor(v) < v < ceil(v) <= U(x)`, so neither branch
+                    // can be trivially infeasible on `x` alone, and a real relaxation conflict
+                    // always drags in the bounds that constrained `x`. The `resolved` is therefore
+                    // never empty.
                     assert!(
                         !resolved.is_empty(),
                         "branch-and-bound resolved an empty conflict on {x:?}; \
@@ -417,10 +426,15 @@ impl LIRASolver {
             Some(pair) => pair,
         };
         debug_println!(15, 0, "lia::lira_solver: branching on {x} = {val}");
+        let x_bounded = self
+            .lra_solver
+            .get_bounds(&x)
+            .is_some_and(|b| b.lower.is_some() || b.upper.is_some());
         Ok(Descent::Branch(BranchFrame {
             x,
             floor_bound: val.floor(),
             ceil_bound: val.ceil(),
+            x_bounded,
             depth,
             stage: Stage::ExploreFloor,
             floor_conflict: None,
