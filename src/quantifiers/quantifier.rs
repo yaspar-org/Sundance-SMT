@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use crate::arithmetic::simplify::ArithSimplify;
 use crate::cnf::{CNFConversion, push_literal_if_not_tautology};
 use crate::egraphs::EgraphTrait;
 use crate::preprocess::check_for_function_bool;
@@ -167,10 +168,10 @@ pub(crate) fn instantiate_quantifiers(
                     .iter()
                     .filter(|(k, _)| quantifier.body_locals.contains(*k))
                     .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            solver_state.get_term(solver_state.to_solver_uid(*v)),
-                        )
+                        // Fold the class representative (e.g. `(+ 2 1)` -> `3`) so that
+                        // arithmetically equal bindings dedup and instantiate alike
+                        let rep = solver_state.get_term(solver_state.to_solver_uid(*v));
+                        (k.clone(), rep.simplify(&mut solver_state.context))
                     })
                     .collect();
 
@@ -291,6 +292,7 @@ fn process_deferred_skolemizations(
                     parent_term: literal,
                     skolem_vars,
                 },
+                Theory::Boolean,
             );
 
         let skolem_imp = vec![-quantifier_dimacs_literal, reduced_skolem_literal];
@@ -354,7 +356,15 @@ fn process_deferred_instantiations(
 
         let let_elim_term = t.let_elim(&mut solver_state.context);
 
-        let nnf_term = let_elim_term.nnf(solver_state);
+        // Fold ground arithmetic that substitution creates, e.g. `(+ 3 1)` -> `4`
+        let simplified_term = let_elim_term.simplify(&mut solver_state.context);
+        let reduction_theory = if simplified_term.uid() == let_elim_term.uid() {
+            Theory::Boolean
+        } else {
+            Theory::QfLia
+        };
+
+        let nnf_term = simplified_term.nnf(solver_state);
 
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
@@ -385,6 +395,7 @@ fn process_deferred_instantiations(
                 nnf_term_literal,
                 &nnf_term,
                 ProofStepType::Instantiation,
+                reduction_theory,
             );
 
         // Assert the body only when the quantifier holds (`quantifier => body`).
