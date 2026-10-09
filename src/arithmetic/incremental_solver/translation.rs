@@ -107,9 +107,8 @@ impl ArithTranslator {
                     constant = c.clone();
                 }
                 Coefficient::Term(eid) => {
-                    // Note: this may recursively register vars via get_or_register_var.
-                    // We pass decision_level=0 for definition-time registrations since
-                    // definitions are structural facts.
+                    // Note: this may recursively register vars via get_or_register_var_internal.
+                    // Definitions are structural facts; the solver keeps them across backtracks.
                     let var_id = self.get_or_register_var_internal(*eid, solver_state);
                     terms.push((var_id, c.clone()));
                 }
