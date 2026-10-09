@@ -6,7 +6,7 @@
 
 pub mod translation;
 #[cfg(feature = "z3-solver")]
-pub mod z3;
+pub(crate) mod z3;
 
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use dashu::integer::IBig;
