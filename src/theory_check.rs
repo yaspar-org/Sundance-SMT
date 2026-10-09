@@ -213,12 +213,15 @@ mod tests {
     /// does. Only this order catches products that inlining creates.
     fn check_linear_expanded(input: &str) -> Result<(), String> {
         let (assertions, mut context) = assertions_of(input);
+        let let_free: Vec<Term> = assertions
+            .iter()
+            .map(|a| a.let_elim(&mut context))
+            .collect();
         let mut check = NonlinearityCheck::default();
-        for assertion in &assertions {
-            let expanded = assertion.let_elim(&mut context).gsubst_all(&mut context);
-            check.check(&expanded)?;
-        }
-        Ok(())
+        let_free
+            .gsubst_all(&mut context)
+            .iter()
+            .try_for_each(|t| check.check(t))
     }
 
     /// Wrap `term` in a minimal script declaring `x`, `y`, `z` so the cases below stay readable.
