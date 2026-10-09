@@ -147,8 +147,16 @@ fn main() -> Result<(), String> {
     }
 
     // save the sorts and symbol table for the proof file
-    let sorts = solver_state.context.expose_sorts().clone();
-    let symbol_table = solver_state.context.expose_symbol_table().clone();
+    let sorts = solver_state
+        .context
+        .expose_sorts()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let symbol_table = solver_state
+        .context
+        .expose_symbol_table()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
     debug_println!(
         6,
