@@ -32,6 +32,9 @@ pub struct ArithTranslator {
     vars_by_level: Vec<Vec<u32>>,
     /// Abs-lits known to be non-arithmetic.
     non_arithmetic_lits: DeterministicHashSet<i32>,
+    /// Abs-lits already returned by `drain_merges`. Never cleared: SAT lits
+    /// persist across backtracks, so each only needs registering once.
+    seen_merge_lits: DeterministicHashSet<i32>,
 }
 
 impl ArithTranslator {
@@ -42,6 +45,7 @@ impl ArithTranslator {
             var_to_solver_uid: Vec::new(),
             vars_by_level: vec![Vec::new()],
             non_arithmetic_lits: DeterministicHashSet::default(),
+            seen_merge_lits: DeterministicHashSet::default(),
         }
     }
 
@@ -234,7 +238,9 @@ impl ArithTranslator {
             let lit = solver_state.make_eq(a, b);
             let va = self.get_or_register_var_internal(a, solver_state);
             let vb = self.get_or_register_var_internal(b, solver_state);
-            new_lits.push(lit);
+            if self.seen_merge_lits.insert(lit.abs()) {
+                new_lits.push(lit);
+            }
             self.solver.push_equality(va, vb, lit);
         }
         new_lits
