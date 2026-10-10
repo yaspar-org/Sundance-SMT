@@ -107,13 +107,15 @@ fn main() -> Result<(), String> {
     // let-eliminated, globally substituted term, so it runs inside the loop below rather than
     // alongside `reject_unsupported_theories`.
     let mut nonlinearity = NonlinearityCheck::default();
-    for assert in assertions {
+    // Inline the let bindings, then the global definitions. `gsubst_all` runs once over the whole
+    // batch so the defined symbols are collected once rather than per assertion.
+    let let_free: Vec<Term> = assertions
+        .iter()
+        .map(|a| a.let_elim(&mut solver_state.context))
+        .collect();
+    let expanded_terms = let_free.gsubst_all(&mut solver_state.context);
+    for (assert, expanded_term) in assertions.iter().zip(expanded_terms) {
         debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
-
-        // inline the let bindings
-        let expanded_term = assert
-            .let_elim(&mut solver_state.context)
-            .gsubst_all(&mut solver_state.context);
         debug_println!(10, 0, "Expanded form: {}", expanded_term);
 
         nonlinearity.check(&expanded_term)?;
@@ -147,8 +149,16 @@ fn main() -> Result<(), String> {
     }
 
     // save the sorts and symbol table for the proof file
-    let sorts = solver_state.context.expose_sorts().clone();
-    let symbol_table = solver_state.context.expose_symbol_table().clone();
+    let sorts = solver_state
+        .context
+        .expose_sorts()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let symbol_table = solver_state
+        .context
+        .expose_symbol_table()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
     debug_println!(
         6,

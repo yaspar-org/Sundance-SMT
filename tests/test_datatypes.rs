@@ -29,13 +29,13 @@ fn test_datatype_parsing_and_typechecking() {
     let tree_name = context.allocate_symbol("Tree");
 
     // Verify that the context now knows about the datatypes
-    let sorts = context.expose_sorts();
+    let sorts: Vec<_> = context.expose_sorts().map(|(k, _)| k.clone()).collect();
 
     // Should have at least our two datatypes
     assert!(sorts.len() >= 2);
 
-    assert!(sorts.contains_key(&list_name));
-    assert!(sorts.contains_key(&tree_name));
+    assert!(sorts.contains(&list_name));
+    assert!(sorts.contains(&tree_name));
 
     println!("Datatype parsing and type checking test passed!");
 }

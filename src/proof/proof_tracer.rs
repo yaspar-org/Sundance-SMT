@@ -523,8 +523,14 @@ mod tests {
             .unwrap();
 
         let mut tracer = SMTProofTracer::new(
-            context.expose_sorts().clone(),
-            context.expose_symbol_table().clone(),
+            context
+                .expose_sorts()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            context
+                .expose_symbol_table()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         );
 
         let proof = tracer.generate_edrat();
@@ -543,8 +549,14 @@ mod tests {
         let skolem_name = skolem_vars[0].0.to_string();
 
         let mut tracer = SMTProofTracer::new(
-            context.expose_sorts().clone(),
-            context.expose_symbol_table().clone(),
+            context
+                .expose_sorts()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            context
+                .expose_symbol_table()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         );
         tracer.register_term(1, &parent, true);
         tracer.register_term(2, &child, true);
