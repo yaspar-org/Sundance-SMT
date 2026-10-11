@@ -166,8 +166,16 @@ pub fn cdcl_decision_procedure(
     // Disconnect the proof tracer before dropping the propagator
     solver.disconnect_proof_tracer1();
 
-    // Generate proof after all borrows are released
-    let edrat_proof = proof_tracer.borrow_mut().generate_edrat();
+    // Generate proof after all borrows are released. Only render it when it is written below:
+    // `--proof` writes it on unsat only, `--partial-proof` for any result. Rendering prints every
+    // literal's term, which can take minutes and tens of GB on large inputs.
+    let edrat_proof = if (proof_file.is_some() && result == Status::UNSATISFIABLE)
+        || partial_proof_file.is_some()
+    {
+        proof_tracer.borrow_mut().generate_edrat()
+    } else {
+        String::new()
+    };
 
     // Write proof to file if requested
     if let Some(p) = proof_file
