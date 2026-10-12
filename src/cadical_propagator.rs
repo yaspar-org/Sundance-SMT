@@ -12,7 +12,8 @@ use crate::log::is_important;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::{
-    PendingInstantiations, instantiate_quantifiers, materialize_next,
+    INST_GEN_SKIPPED, PendingInstantiations, instantiate_quantifiers, materialize_next,
+    qi_max_generation,
 };
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
@@ -20,6 +21,20 @@ use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
 use std::cell::RefCell;
 use std::rc::Rc;
+
+/// `SUNDANCE_LEMMA_LOG`: the file every theory lemma is appended to.
+fn lemma_log_path() -> Option<&'static str> {
+    static P: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    P.get_or_init(|| std::env::var("SUNDANCE_LEMMA_LOG").ok())
+        .as_deref()
+}
+
+/// `SUNDANCE_REL_FINAL=fallback`: filter the complete-model matching round
+/// by relevancy, with an unfiltered retry when it yields nothing.
+fn rel_final_fallback() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SUNDANCE_REL_FINAL").is_ok_and(|v| v == "fallback"))
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum EagerQiMode {
@@ -274,10 +289,82 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
+        // SUNDANCE_LEMMA_LOG=<file>: append every theory lemma as one line,
+        // `L <theory> <polarity><atom> ...` with `+`/`-` before each atom's
+        // text, so a lemma can be evaluated in another run's model and its
+        // validity checked independently.
+        if let Some(path) = lemma_log_path() {
+            use std::io::Write;
+            let mut line = format!("L {theory:?}");
+            for &l in &clause {
+                let rev = &self.solver_state.cnf_cache.var_map_reverse;
+                let atom = rev
+                    .get(&l)
+                    .or_else(|| rev.get(&-l))
+                    .and_then(|&u| self.solver_state.terms_list.get(u as usize))
+                    .filter(|t| !t.is_none())
+                    .map_or_else(
+                        || format!("?lit{}", l.abs()),
+                        |_| {
+                            let u = *rev.get(&l).or_else(|| rev.get(&-l)).expect("checked");
+                            self.solver_state.get_term_ref(u).to_string()
+                        },
+                    );
+                line.push_str(&format!(" {}{}", if l > 0 { '+' } else { '-' }, atom));
+                line.push('\u{1f}');
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+        self.report_termless_lits(&clause, &format!("theory {:?}", theory));
         self.proof_tracer
             .borrow_mut()
             .add_theory_clause(&clause, theory);
         self.queue_external_clause(clause);
+    }
+
+    /// SUNDANCE_AC_DEBUG=1: name the producer of an external clause that
+    /// carries a literal with no registered term. Such a literal trips the
+    /// `cb_add_external_clause_lit` invariant (debug) or CaDiCaL's
+    /// "only observed variables" check (release) only after it is dequeued,
+    /// by which point the producer is unknown. `get_term_from_lit_safe`
+    /// itself panics on a missing `terms_list` entry, so it is probed under
+    /// `catch_unwind`, as the native matcher is inside this same callback.
+    fn report_termless_lits(&self, clause: &[i32], producer: &str) {
+        if std::env::var_os("SUNDANCE_AC_DEBUG").is_none() {
+            return;
+        }
+        for &l in clause {
+            if l == 0 {
+                continue;
+            }
+            // Same lookup as `get_term_from_lit_safe`, minus the term
+            // materialization it needs `&mut self` for.
+            let rev = &self.solver_state.cnf_cache.var_map_reverse;
+            let uid = rev.get(&l).or_else(|| rev.get(&-l)).copied();
+            match uid {
+                None => eprintln!(
+                    "AC_DEBUG: {producer} clause {clause:?}: literal {l} has NO var_map_reverse entry"
+                ),
+                Some(u) => {
+                    let registered = self
+                        .solver_state
+                        .terms_list
+                        .get(u as usize)
+                        .is_some_and(|t| !t.is_none());
+                    if !registered {
+                        eprintln!(
+                            "AC_DEBUG: {producer} clause {clause:?}: literal {l} maps to uid {u} with NO terms_list entry"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     pub fn sync_external_stats(&mut self) {
@@ -287,6 +374,7 @@ impl<'a> CustomExternalPropagator<'a> {
         self.stats.dt_accessor_ax = self.solver_state.stat_dt_accessor_ax;
         self.stats.dt_constructor_ax = self.solver_state.stat_dt_constructor_ax;
         self.stats.dt_splits = self.solver_state.stat_dt_splits;
+        self.stats.generation_skipped = INST_GEN_SKIPPED.load(std::sync::atomic::Ordering::Relaxed);
     }
 
     fn apply_instances(
@@ -302,6 +390,7 @@ impl<'a> CustomExternalPropagator<'a> {
                 Skolemization { clauses } => clauses,
             };
             for clause in clauses {
+                self.report_termless_lits(clause, "instance");
                 self.queue_external_clause(clause.clone());
             }
         }
@@ -350,8 +439,71 @@ impl<'a> CustomExternalPropagator<'a> {
     /// round has been materialized.
     fn start_quantifier_instantiation_round(&mut self, allow_skolemization: bool) -> bool {
         debug_assert!(self.pending.is_none());
-        let pending =
-            instantiate_quantifiers(self.solver_state, &self.assignments, allow_skolemization);
+        // Relevancy filters eager (partial-assignment) rounds but must not filter
+        // the complete-model round (allow_skolemization): a match it would prune
+        // as Boolean-irrelevant can still carry the theory content that refutes
+        // the model, so every match must be produced once the assignment is
+        // complete. The complete-model round is the one that reaches here with
+        // allow_skolemization set.
+        // SUNDANCE_REL_FINAL=fallback: the complete-model round is first
+        // matched with relevancy (as Z3 does in every round) and matched again
+        // without it only when the filtered round yields nothing. Losing an
+        // instance can only cost a proof: with quantifiers present a
+        // satisfiable outcome is reported as unknown, never sat.
+        let final_fallback = allow_skolemization && rel_final_fallback();
+        self.solver_state
+            .egraph
+            .set_relevancy_active(!allow_skolemization || final_fallback);
+        // After the relevancy refresh, so its marks are in the round's seeds.
+        self.solver_state.egraph.begin_matching_round();
+        // The generation bound applies to every round; the complete-model
+        // round retries unbounded when the bounded round (with its relevancy
+        // retry) yields nothing, so the bound never loses a proof.
+        let bound = qi_max_generation();
+        let mut pending = instantiate_quantifiers(
+            self.solver_state,
+            &self.assignments,
+            allow_skolemization,
+            bound,
+        );
+        if pending.is_empty() && final_fallback {
+            self.solver_state.egraph.set_relevancy_active(false);
+            pending = instantiate_quantifiers(
+                self.solver_state,
+                &self.assignments,
+                allow_skolemization,
+                bound,
+            );
+        }
+        if pending.is_empty() && allow_skolemization && bound.is_some() {
+            self.stats.generation_fallbacks += 1;
+            // Iterative deepening (on unless `SUNDANCE_QI_DEEPEN=0`): the next bound is
+            // the smallest generation held back, so the chain is explored one
+            // depth at a time; otherwise the retry is unbounded.
+            let next = if crate::quantifiers::quantifier::qi_deepen() {
+                self.solver_state
+                    .gen_deferred
+                    .iter()
+                    .map(|d| d.generation)
+                    .min()
+            } else {
+                None
+            };
+            pending = instantiate_quantifiers(
+                self.solver_state,
+                &self.assignments,
+                allow_skolemization,
+                next,
+            );
+            if pending.is_empty() && next.is_some() {
+                pending = instantiate_quantifiers(
+                    self.solver_state,
+                    &self.assignments,
+                    allow_skolemization,
+                    None,
+                );
+            }
+        }
         if pending.is_empty() {
             return false;
         }
@@ -362,7 +514,21 @@ impl<'a> CustomExternalPropagator<'a> {
         self.pending = Some(pending);
         true
     }
+}
 
+/// `SUNDANCE_EAGER_EVERY=N` (default 1): eager rounds at every N-th decision level.
+fn eager_every() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("SUNDANCE_EAGER_EVERY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(1)
+    })
+}
+
+impl<'a> CustomExternalPropagator<'a> {
     fn reset_eager_qi_for_level(&mut self) {
         self.eager_qi.reset();
     }
@@ -372,6 +538,13 @@ impl<'a> CustomExternalPropagator<'a> {
     /// operation.
     fn eagerly_instantiate_quantifiers(&mut self) {
         if self.materializing_quantifiers || !self.disequalities.borrow().is_empty() {
+            return;
+        }
+        // SUNDANCE_EAGER_EVERY=N: an eager round only at decision levels that
+        // are multiples of N (default 1, every level). The complete-model
+        // round is unaffected, so nothing is lost; the per-level cost of a
+        // round is paid N times less often.
+        if !self.decision_level.is_multiple_of(eager_every()) {
             return;
         }
 
@@ -740,7 +913,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         let result = self.solver_state.egraph.assert_equal(x_root, y_root);
                         // Probe merges are speculative — discard queue entries
                         // so they don't leak into Z3IncrementalState.
-                        let _ = self.solver_state.egraph.drain_arithmetic_equalities();
+                        self.solver_state
+                            .egraph
+                            .discard_speculative_arithmetic_equalities();
                         if let Some(c) = result.conflict {
                             self.solver_state.egraph.backtrack_to(probe_level - 1);
                             probe_level -= 1;
@@ -867,6 +1042,23 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
         }
 
+        // Relevancy-restricted branching: let the egraph suggest the next atom
+        // to decide, with a justifying phase. The egraph works in term-id
+        // space, so map its suggestion to a SAT literal here (term -> uid ->
+        // literal). Skip and fall back to the solver's own heuristic (return
+        // 0) if the atom has no decision variable or is already assigned;
+        // reordering decisions is always sound.
+        if let Some((term, phase)) = self.solver_state.egraph.suggest_decision()
+            && let Some(&uid) = self.solver_state.id_map.get_by_right(&term)
+            && let Some(&lit) = self.solver_state.cnf_cache.var_map.get(&uid)
+        {
+            let var = lit.abs();
+            let idx = var as usize;
+            if idx < self.assignments.len() && self.assignments[idx] == 0 {
+                return if phase { var } else { -var };
+            }
+        }
+
         0
     }
 
@@ -935,18 +1127,29 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         if literal != 0 {
             self.add_lit_to_proof_tracer(literal);
         }
-        if let Some(term) = self.solver_state.get_term_from_lit_safe(literal) {
-            debug_println!(
-                11,
-                0,
-                "PROPAGATOR: Adding external clause literal (might be negated) {} which is term {}",
-                literal,
-                term
-            );
-        } else {
-            debug_println!(11, 0, "END OF CLAUSE");
-            assert!(literal == 0);
+        // The term lookup exists only to feed the level-11 print, but it was
+        // evaluated unconditionally: one map probe plus term materialization
+        // per literal of every external clause (a visible fraction of
+        // clause-addition time under profiling). The invariant it piggybacked
+        // on — a nonzero literal always has a term — stays as a debug_assert.
+        if is_important(11) {
+            if let Some(term) = self.solver_state.get_term_from_lit_safe(literal) {
+                debug_println!(
+                    11,
+                    0,
+                    "PROPAGATOR: Adding external clause literal (might be negated) {} which is term {}",
+                    literal,
+                    term
+                );
+            } else {
+                debug_println!(11, 0, "END OF CLAUSE");
+                assert!(literal == 0);
+            }
         }
+        debug_assert!(
+            literal == 0 || self.solver_state.get_term_from_lit_safe(literal).is_some(),
+            "nonzero external clause literal without a term"
+        );
         debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal
     }

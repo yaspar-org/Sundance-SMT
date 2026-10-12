@@ -18,6 +18,34 @@ use yaspar_ir::untyped::UntypedAst;
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
+    // The flag sets the environment switch the quantifier module reads (a
+    // cached reader, so it must be exported before any solver state is built).
+    // SAFETY (env mutation): single-threaded startup, before any reader.
+    if std::env::var_os("SUNDANCE_QI_MAX_GEN").is_none() {
+        unsafe { std::env::set_var("SUNDANCE_QI_MAX_GEN", args.max_generation.to_string()) };
+    }
+
+    // Feature switches: the flags set the environment switches the code
+    // reads (each through a cached reader at first use), so they must be
+    // exported here, before any solver state is built. The environment
+    // variables keep working on their own.
+    // SAFETY (env mutation): single-threaded startup, before any reader.
+    unsafe {
+        if args.incremental_matching {
+            std::env::set_var("SUNDANCE_INCR_MATCH", "1");
+        }
+        match args.relevancy.as_str() {
+            "final" => {
+                std::env::set_var("SEMPER_RELEVANCY", "1");
+                std::env::set_var("SUNDANCE_REL_FINAL", "fallback");
+            }
+            "eager" => {
+                std::env::set_var("SEMPER_RELEVANCY", "1");
+                std::env::set_var("SUNDANCE_EAGER_QI", "-1");
+            }
+            _ => {}
+        }
+    }
 
     // --proof and --partial-proof both write an eDRAT dump; using them together
     // is ambiguous (and with the same path the second write silently truncates
@@ -214,7 +242,17 @@ fn main() -> Result<(), String> {
         args.elevate,
         args.max_arith_conflicts_per_round,
         args.batch_cap,
-        args.eager_qi,
+        // SUNDANCE_EAGER_QI overrides --eager-qi when the flag is left at its
+        // default, so harnesses that do not pass solver flags (the regression
+        // suite) can run with eager instantiation, where relevancy filters.
+        if args.eager_qi == 0 {
+            std::env::var("SUNDANCE_EAGER_QI")
+                .ok()
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(0)
+        } else {
+            args.eager_qi
+        },
     );
 
     match return_value {

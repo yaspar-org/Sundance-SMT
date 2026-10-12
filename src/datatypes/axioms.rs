@@ -244,8 +244,14 @@ pub fn learn_exactly_one_tester_clause(
     };
     debug_println!(12, 0, "TESTER OR CASE");
     debug_println!(25, 10, "(assert {})", tester_or);
-    solver_state.insert_predecessor(&tester_or, None, None, from_quantifier);
-    let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
+    // Register the NNF, not the raw `or`: `cnf_tseitin` assigns the gate
+    // literal to the normalized term (see `learn_or_not_term_tester_term`).
+    let tester_or_nnf = tester_or.nnf(solver_state);
+    solver_state.insert_predecessor(&tester_or_nnf, None, None, from_quantifier);
+    let tester_cnf = tester_or_nnf
+        .cnf_tseitin(solver_state)
+        .into_iter()
+        .map(|x| x.0);
     vector.extend(tester_cnf);
 
     for uid in base_case_uids {
@@ -449,8 +455,15 @@ pub fn learn_or_not_term_tester_term(
     let not_tester_term = solver_state.not(tester_term.clone());
     let not_term = solver_state.not(term);
     let or_not_tester_not_term = solver_state.or(vec![not_tester_term, not_term]);
-    solver_state.insert_predecessor(&or_not_tester_not_term, None, None, from_quantifier);
-    let tester_cnf = or_not_tester_not_term
+    // Register the NNF of the axiom, not the raw term: `cnf_tseitin` normalizes
+    // internally and assigns the gate literal to the normalized term, so the
+    // registered term must be that one or the literal has no term. Every other
+    // axiom path does nnf -> insert_predecessor -> cnf_tseitin; this one only
+    // worked while the raw `or` happened to hash-cons onto its own NNF, which
+    // term-layer AC canonicalization (child sorting) no longer guarantees.
+    let or_nnf = or_not_tester_not_term.nnf(solver_state);
+    solver_state.insert_predecessor(&or_nnf, None, None, from_quantifier);
+    let tester_cnf = or_nnf
         .cnf_tseitin(solver_state)
         .into_iter()
         .map(|x| x.0)
