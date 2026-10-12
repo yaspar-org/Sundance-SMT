@@ -38,6 +38,7 @@ pub fn cdcl_decision_procedure(
     clauses: Vec<Vec<i32>>,
     boolean_dt_constraints: Vec<Vec<i32>>,
     proof_file: Option<PathBuf>,
+    share_proof_terms: bool,
     partial_proof_file: Option<PathBuf>,
     trail_file: Option<PathBuf>,
     sorts: HashMap<Str, SortDef>,
@@ -174,11 +175,17 @@ pub fn cdcl_decision_procedure(
     solver.disconnect_proof_tracer1();
 
     // Write the proof after all borrows are released. `--proof` writes it on unsat only, trimmed
-    // to the refutation; `--partial-proof` writes everything recorded, for any result.
+    // to the refutation, and with `--proof-share-terms` prints repeated subterms once through
+    // `let`; `--partial-proof` writes everything recorded, for any result.
     if let Some(p) = proof_file
         && result == Status::UNSATISFIABLE
     {
-        let written = write_proof_file(&p, |w| proof_tracer.borrow_mut().write_edrat(w, true));
+        let context = &mut propagator.solver_state.context;
+        let written = write_proof_file(&p, |w| {
+            proof_tracer
+                .borrow_mut()
+                .write_edrat(w, true, share_proof_terms.then_some(context))
+        });
         match written {
             Err(e) => debug_println!(
                 2,
@@ -238,7 +245,7 @@ fn write_partial_proof(path: &std::path::Path, result: Status, proof_tracer: &mu
     };
     let written = write_proof_file(path, |w| {
         w.write_all(header.as_bytes())?;
-        proof_tracer.write_edrat(w, false)
+        proof_tracer.write_edrat(w, false, None)
     });
     if let Err(e) = written {
         debug_println!(

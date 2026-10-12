@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod edrat_defs;
+mod let_sharing;
 mod proof_callbacks;
 mod proof_tracer;
 

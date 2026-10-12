@@ -205,6 +205,7 @@ fn main() -> Result<(), String> {
         prop_skeleton,
         boolean_dt_constraints,
         args.proof,
+        args.proof_share_terms,
         args.partial_proof,
         args.trail_out,
         sorts,
