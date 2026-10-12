@@ -37,7 +37,7 @@ jobs:
         uses: ./.github/actions/setup-z3
 
       - name: Run cargo check
-        run: cargo check --no-default-features --features local-z3
+        run: cargo check --no-default-features --features local-z3,minisat
 
       - name: Run copyright check
         run: |
@@ -46,11 +46,19 @@ jobs:
           ./.github/copyright-check.sh benches
 
   test:
-    name: Test Suite (${{ matrix.arithmetic }}, ${{ matrix.os }})
+    name: Test Suite (${{ matrix.arithmetic }}, ${{ matrix.sat_backend }}, ${{ matrix.os }})
     strategy:
       matrix:
         os: [ ubuntu-latest, macos-latest ]
         arithmetic: [ internal, z3, z3incremental ]
+        sat_backend: [ cadical ]
+        include:
+          - os: ubuntu-latest
+            arithmetic: internal
+            sat_backend: minisat
+          - os: macos-latest
+            arithmetic: internal
+            sat_backend: minisat
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -79,7 +87,8 @@ jobs:
       - name: Run tests
         env:
           SUNDANCE_ARITHMETIC: ${{ matrix.arithmetic }}
-        run: cargo test --release --no-default-features --features local-z3 -- --nocapture
+          SUNDANCE_SAT_BACKEND: ${{ matrix.sat_backend }}
+        run: cargo test --release --no-default-features --features local-z3,minisat -- --nocapture
 
   lints:
     name: Lints
@@ -109,10 +118,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run cargo clippy
-        run: cargo clippy --no-default-features --features local-z3 --tests -- -D warnings
+        run: cargo clippy --no-default-features --features local-z3,minisat --tests -- -D warnings
 
       - name: Run rustdoc lints
-        run: cargo doc --workspace --no-default-features --features local-z3 --no-deps --document-private-items
+        run: cargo doc --workspace --no-default-features --features local-z3,minisat --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -138,6 +147,6 @@ jobs:
         uses: ./.github/actions/setup-z3
 
       - name: Build documentation
-        run: cargo doc --no-default-features --features local-z3 --no-deps
+        run: cargo doc --no-default-features --features local-z3,minisat --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
