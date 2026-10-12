@@ -259,6 +259,17 @@ impl Default for Egraph {
 }
 
 impl Egraph {
+    /// Whether `term` is an argument of an application, equality or `ite`,
+    /// so that congruence depends on its value
+    pub fn is_congruence_argument(&self, term: u32) -> bool {
+        self.predecessors.get(term as usize).is_some_and(|ps| {
+            ps.keys().any(|&p| {
+                matches!(&self.terms[p as usize],
+                    TermSlot::Term(e) if matches!(e.op, Op::App(_) | Op::Eq | Op::Ite))
+            })
+        })
+    }
+
     pub fn new() -> Self {
         Egraph {
             next_id: 0,
