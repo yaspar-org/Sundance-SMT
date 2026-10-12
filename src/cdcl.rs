@@ -13,6 +13,7 @@ use crate::utils::DeterministicHashSet;
 use cadical_sys::{CaDiCal, Status, Terminator};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
@@ -57,6 +58,12 @@ pub fn cdcl_decision_procedure(
     // Create proof tracker for real-time proof tracking wrapped in Rc<RefCell<>>
     // todo: for right now always have hid_quantifiers to be true, need to change this
     let proof_tracer = Rc::new(RefCell::new(SMTProofTracer::new(sorts, symbol_table)));
+
+    // A requested proof is trimmed to the clauses the refutation uses, which needs CaDiCaL's
+    // clause ids and antecedents
+    if proof_file.is_some() {
+        proof_tracer.borrow_mut().track_core();
+    }
 
     // Connect the proof tracer (must be done in CONFIGURING state)
     solver.connect_proof_tracer1(&mut *proof_tracer.borrow_mut(), true); // true for antecedents
@@ -166,36 +173,26 @@ pub fn cdcl_decision_procedure(
     // Disconnect the proof tracer before dropping the propagator
     solver.disconnect_proof_tracer1();
 
-    // Generate proof after all borrows are released. Only render it when it is written below:
-    // `--proof` writes it on unsat only, `--partial-proof` for any result. Rendering prints every
-    // literal's term, which can take minutes and tens of GB on large inputs.
-    let edrat_proof = if (proof_file.is_some() && result == Status::UNSATISFIABLE)
-        || partial_proof_file.is_some()
-    {
-        proof_tracer.borrow_mut().generate_edrat()
-    } else {
-        String::new()
-    };
-
-    // Write proof to file if requested
+    // Write the proof after all borrows are released. `--proof` writes it on unsat only, trimmed
+    // to the refutation; `--partial-proof` writes everything recorded, for any result.
     if let Some(p) = proof_file
         && result == Status::UNSATISFIABLE
     {
-        if let Err(e) = std::fs::write(&p, &edrat_proof) {
-            debug_println!(
+        let written = write_proof_file(&p, |w| proof_tracer.borrow_mut().write_edrat(w, true));
+        match written {
+            Err(e) => debug_println!(
                 2,
                 0,
                 "Failed to write eDRAT proof to {}: {}",
                 p.display(),
                 e
-            );
-        } else {
-            debug_println!(2, 0, "eDRAT proof written to: {}", p.display());
+            ),
+            Ok(()) => debug_println!(2, 0, "eDRAT proof written to: {}", p.display()),
         }
     }
 
     if let Some(p) = partial_proof_file {
-        write_partial_proof(&p, result, &edrat_proof);
+        write_partial_proof(&p, result, &mut proof_tracer.borrow_mut());
     }
 
     // Trails were streamed during the solve; append the now-complete atom map.
@@ -210,11 +207,21 @@ pub fn cdcl_decision_procedure(
     (result, propagator.stats)
 }
 
+/// Creates `path` and streams the proof into it through `write`.
+fn write_proof_file(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    write(&mut out)?;
+    out.flush()
+}
+
 /// Dump the eDRAT proof forest for any result: complete on unsat, else a prefix
 /// with no final empty clause. A leading `;` comment records which case it is.
 /// Header status: unsat -> unsat, sat -> unknown, unknown (cadical) ->
 /// timeout/interrupt.
-fn write_partial_proof(path: &std::path::Path, result: Status, edrat_proof: &str) {
+fn write_partial_proof(path: &std::path::Path, result: Status, proof_tracer: &mut SMTProofTracer) {
     let complete = result == Status::UNSATISFIABLE;
     let status = match result {
         Status::UNSATISFIABLE => "unsat",
@@ -229,7 +236,11 @@ fn write_partial_proof(path: &std::path::Path, result: Status, edrat_proof: &str
              ; but NO final empty clause -- a prefix, not a checkable refutation.\n"
         )
     };
-    if let Err(e) = std::fs::write(path, format!("{header}{edrat_proof}")) {
+    let written = write_proof_file(path, |w| {
+        w.write_all(header.as_bytes())?;
+        proof_tracer.write_edrat(w, false)
+    });
+    if let Err(e) = written {
         debug_println!(
             2,
             0,

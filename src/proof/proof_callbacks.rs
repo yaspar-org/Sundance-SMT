@@ -9,7 +9,8 @@ use cadical_sys::ProofTracer;
 /// which uses callback functions to notify the owner of a CaDiCaL
 /// instance of important events that occur during SAT solving.
 impl ProofTracer for SMTProofTracer {
-    fn add_original_clause(&mut self, _id: i64, _redundant: bool, clause: &[i32], restored: bool) {
+    fn add_original_clause(&mut self, id: i64, _redundant: bool, clause: &[i32], restored: bool) {
+        self.record_clause(id, clause, None);
         let registered = self.consume_clause_callback_registration(clause);
         if restored || registered {
             return;
@@ -28,6 +29,7 @@ impl ProofTracer for SMTProofTracer {
         clause: &[i32],
         antecedents: &[i64],
     ) {
+        self.record_clause(id, clause, Some(antecedents));
         debug_println!(6, 0, "*** SAT SOLVER CONFLICT CLAUSE LEARNED ***");
         debug_println!(6, 0, "Clause ID: {}", id);
         debug_println!(6, 0, "Conflict clause: {:?}", clause);
@@ -85,7 +87,9 @@ impl ProofTracer for SMTProofTracer {
 
     fn conclude_sat(&mut self, _conclusion_type: i32, _model: &[i32]) {}
 
-    fn conclude_unsat(&mut self, _conclusion_type: i32, _clause_ids: &[i64]) {}
+    fn conclude_unsat(&mut self, _conclusion_type: i32, clause_ids: &[i64]) {
+        self.record_conclusion(clause_ids);
+    }
 
     fn conclude_unknown(&mut self, _trail: &[i32]) {}
 }

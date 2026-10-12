@@ -92,11 +92,11 @@ impl ProofStepType {
 }
 
 impl ProofStep {
-    pub fn push_line_to(&self, output: &mut String) {
-        output.push_str(&self.typ.get_prefix_str());
+    pub fn write_line_to(&self, out: &mut impl std::io::Write) -> std::io::Result<()> {
+        out.write_all(self.typ.get_prefix_str().as_bytes())?;
         for lit in &self.clause {
-            output.push_str(&format!("{} ", lit));
+            write!(out, "{} ", lit)?;
         }
-        output.push_str("0\n");
+        out.write_all(b"0\n")
     }
 }
