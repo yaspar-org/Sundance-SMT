@@ -16,6 +16,7 @@ default = ["bundled-z3"]
 z3-solver = ["dep:z3"]
 bundled-z3 = ["z3-solver", "z3/bundled"]
 local-z3 = ["z3-solver"]
+minisat = ["sat-interface/minisat"]
 
 [dependencies]
 yaspar-ir = { version = "=2.7.7", features = ["cache", "no-pattern"] }

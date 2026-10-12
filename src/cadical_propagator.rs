@@ -75,7 +75,15 @@ impl EagerQiMode {
     }
 }
 
-/// Our implementation of a Cadical Propagator
+/// Where the propagator registers newly observed variables, from inside a
+/// callback while the solver itself is borrowed by the search loop.
+pub enum ObservedSink {
+    Cadical(*mut CaDiCal),
+    #[cfg(feature = "minisat")]
+    Minisat(*mut sat_interface::minisat::MiniSat),
+}
+
+/// Our implementation of an IPASIR-UP external propagator
 pub struct CustomExternalPropagator<'a> {
     pub decision_level: usize,
     pub solver_state: &'a mut SolverState,
@@ -83,7 +91,7 @@ pub struct CustomExternalPropagator<'a> {
     pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
     pub assignments: Vec<i32>, // maps abs(literal) -> (decision level assigned + 1) * sgn(literal)
-    pub solver: *mut CaDiCal,
+    pub observed_sink: ObservedSink,
     pub arithmetic: ArithSolver, // whether we are doing arithmetic solving or not
     pub stats: SolverStats,
     pub pending: Option<PendingInstantiations>,
@@ -238,7 +246,11 @@ impl<'a> CustomExternalPropagator<'a> {
             abs_lit
         );
         unsafe {
-            (*self.solver).add_observed_var(abs_lit);
+            match &self.observed_sink {
+                ObservedSink::Cadical(solver) => (**solver).add_observed_var(abs_lit),
+                #[cfg(feature = "minisat")]
+                ObservedSink::Minisat(solver) => (**solver).add_observed_var(abs_lit),
+            }
         }
     }
 
@@ -949,5 +961,53 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         }
         debug_println!(4, 0, "{}", self.solver_state.egraph);
         literal
+    }
+}
+
+/// The MiniSat feature uses the IPASIR-UP trait defined in `sat_interface`
+#[cfg(feature = "minisat")]
+impl<'a> sat_interface::ExternalPropagator for CustomExternalPropagator<'a> {
+    fn is_lazy(&mut self) -> bool {
+        ExternalPropagator::is_lazy(self)
+    }
+
+    fn are_reasons_forgettable(&mut self) -> bool {
+        ExternalPropagator::are_reasons_forgettable(self)
+    }
+
+    fn notify_assignment(&mut self, lits: &[i32]) {
+        ExternalPropagator::notify_assignment(self, lits)
+    }
+
+    fn notify_new_decision_level(&mut self) {
+        ExternalPropagator::notify_new_decision_level(self)
+    }
+
+    fn notify_backtrack(&mut self, new_level: usize) {
+        ExternalPropagator::notify_backtrack(self, new_level)
+    }
+
+    fn cb_check_found_model(&mut self, model: &[i32]) -> bool {
+        ExternalPropagator::cb_check_found_model(self, model)
+    }
+
+    fn cb_decide(&mut self) -> i32 {
+        ExternalPropagator::cb_decide(self)
+    }
+
+    fn cb_propagate(&mut self) -> i32 {
+        ExternalPropagator::cb_propagate(self)
+    }
+
+    fn cb_add_reason_clause_lit(&mut self, propagated_lit: i32) -> i32 {
+        ExternalPropagator::cb_add_reason_clause_lit(self, propagated_lit)
+    }
+
+    fn cb_has_external_clause(&mut self, is_forgettable: &mut bool) -> bool {
+        ExternalPropagator::cb_has_external_clause(self, is_forgettable)
+    }
+
+    fn cb_add_external_clause_lit(&mut self) -> i32 {
+        ExternalPropagator::cb_add_external_clause_lit(self)
     }
 }
