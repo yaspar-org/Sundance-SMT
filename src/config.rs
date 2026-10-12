@@ -48,6 +48,31 @@ pub struct Args {
     /// A negative value exhausts one fresh matching round per level; 0 disables eager QI.
     #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
     pub eager_qi: i32,
+    /// Relevancy filtering of e-matching and instantiation : `off` (default), `final` (the complete-model matching round is
+    /// filtered, with an unfiltered retry when it yields nothing), or `eager`
+    /// (eager matching rounds at every decision level, filtered).
+    #[arg(long, default_value = "off", value_parser = ["off", "final", "eager"])]
+    pub relevancy: String,
+    /// Bound on the generation of quantifier instances (Z3's
+    /// `qi.eager_threshold` with the default cost): an input term has
+    /// generation 0, an instance one more than the largest generation among
+    /// its bindings. A match above the bound is left for a later round; the
+    /// complete-model round retries when nothing is below it, raising the
+    /// bound one generation at a time. Default 5 (Z3's default threshold);
+    /// 0 is unbounded. Same as ```SUNDANCE_QI_MAX_GEN=<n>```, which takes precedence
+    /// when set.
+    #[arg(long, default_value_t = 5)]
+    pub max_generation: u32,
+    /// Term-layer AC: flatten, sort and deduplicate `and`/`or` children in
+    /// preprocessing (same as SUNDANCE_AC=1). Off by default.
+    #[arg(long, default_value_t = false)]
+    pub ac: bool,
+    /// Incremental e-matching (top-down matcher): a round
+    /// matches only at root candidates whose class, or a class below it
+    /// within the pattern's depth, changed since the previous round. Same as
+    /// SUNDANCE_INCR_MATCH=1. Off by default.
+    #[arg(long, default_value_t = false)]
+    pub incremental_matching: bool,
     /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
     /// (Simplify/Z3-style auto-trigger inference). When off (default), an
     /// untriggered `forall` panics instead.
