@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod basic;
+#[cfg(test)]
+mod conformance;
 pub mod traits;
 
 // Public re-exports (stable interface)
