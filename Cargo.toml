@@ -13,12 +13,18 @@ repository = "https://github.com/yaspar-org/Sundance-SMT"
 
 [features]
 default = ["bundled-z3"]
+# Swap the e-graph backend for the semi-persistent engine (semper): the
+# adapter in src/egraphs/semper implements EgraphTrait over it. Until the
+# engine fixes this adapter needs are merged into semi-persistent main, the
+# dependency points at the PR branch head on the fork.
+semper-egraph = ["dep:semi-persistent-egraph"]
 z3-solver = ["dep:z3"]
 bundled-z3 = ["z3-solver", "z3/bundled"]
 local-z3 = ["z3-solver"]
 
 [dependencies]
 yaspar-ir = { version = "=2.7.7", features = ["cache", "no-pattern"] }
+semi-persistent-egraph = { git = "https://github.com/remi-delmas-3000/semi-persistent.git", rev = "5db2d96e8549531ae0d98a6987bbf0c58fce9e84", optional = true }
 sat-interface = "0.1.1"
 # Pin the fork until upstream cadical-sys moves to CaDiCaL 3.0.1
 cadical-sys = { git = "https://github.com/leeabarnett/cadical-sys.git", branch = "cadical-3.0.1" }
@@ -62,3 +68,4 @@ harness = false
 [[bench]]
 name = "lia_benchmarks"
 harness = false
+

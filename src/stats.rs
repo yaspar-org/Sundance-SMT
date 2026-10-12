@@ -57,6 +57,12 @@ pub struct SolverStats {
     /// Number of times the quantifier instantiation queue was refreshed
     /// (i.e., number of calls to `instantiate_quantifiers` that produced work)
     pub instantiation_rounds: u64,
+    /// Complete-model rounds that found nothing under the generation bound
+    /// and were retried unbounded
+    pub generation_fallbacks: u64,
+    /// Matches left uninstantiated by the generation bound (summed over
+    /// rounds; a match skipped in several rounds counts each time)
+    pub generation_skipped: u64,
     /// Accumulated arithmetic sub-solver statistics
     pub arith: ArithStats,
     /// Number of theory conflicts (cb_check_found_model returning false)
@@ -107,6 +113,8 @@ impl SolverStats {
             arith_checks: 0,
             instantiations: 0,
             instantiation_rounds: 0,
+            generation_fallbacks: 0,
+            generation_skipped: 0,
             arith: ArithStats::default(),
             conflicts: 0,
             clauses: 0,
@@ -217,6 +225,12 @@ impl fmt::Display for SolverStats {
             "  \"instantiation_rounds\": {},",
             self.instantiation_rounds
         )?;
+        writeln!(
+            f,
+            "  \"generation_fallbacks\": {},",
+            self.generation_fallbacks
+        )?;
+        writeln!(f, "  \"generation_skipped\": {},", self.generation_skipped)?;
         writeln!(f, "  \"egraph_merges\": {},", self.egraph_merges)?;
         writeln!(f, "  \"bool_vars\": {},", self.bool_vars)?;
         writeln!(f, "  \"clauses\": {},", self.clauses)?;

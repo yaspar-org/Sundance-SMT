@@ -1,8 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::utils::FastDeterministicHashMap as HashMap;
 use sat_interface::{Clause, Formula};
-use std::collections::HashMap;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
     AConstant, ATerm, Context, FetchSort, IdentifierKind, ObjectAllocatorExt, Term, TermAllocator,
@@ -37,10 +37,10 @@ impl Default for CNFCache {
 impl CNFCache {
     pub(crate) fn new() -> Self {
         Self {
-            var_map: HashMap::new(),
-            var_map_reverse: HashMap::new(),
+            var_map: HashMap::default(),
+            var_map_reverse: HashMap::default(),
             next_var: 1,
-            nnf_cache: HashMap::new(),
+            nnf_cache: HashMap::default(),
         }
     }
 }
@@ -77,6 +77,74 @@ impl CNFEnv<'_> {
             v
         }
     }
+}
+
+/// Term-layer AC-completion for `and`/`or` (`SUNDANCE_AC=1`, off by default).
+///
+/// Canonicalizes a connective at the layer where terms, CNF literals and
+/// trigger patterns are all born, so one AC-equivalence class is one `Term`,
+/// one Tseitin literal and one e-graph node. This is what makes AC sound here:
+/// the engine-level alternative (`register_set` on and/or) conflates distinct
+/// driver terms that still carry distinct SAT literals, and the adapter's
+/// conflict explainer then taints the run (99 regression files unsat -> unknown).
+///
+/// The canonical form is flatten + sort + dedup: nested same-op children are
+/// spliced in (NNF builds bottom-up, so one layer here yields a fully flat
+/// term), children are ordered by hash-cons id, and duplicates dropped
+/// (idempotence). No constant is absorbed and a singleton is kept as is: the
+/// transformation is exactly associativity + commutativity + idempotence.
+///
+/// Sorting by hash-cons id is safe only because trigger patterns never contain
+/// a connective (measured: 0 of the regression files and 0 of 419 Verus files
+/// have `and`/`or` inside a `:pattern`), so no pattern's child order has to
+/// survive substitution. If that ever changes, `build_pattern_tree` must apply
+/// the same canonicalization or the positional matcher misses.
+fn ac_enabled() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var("SUNDANCE_AC").is_ok_and(|v| v == "1"))
+}
+
+/// Diagnostic sub-switches, each on unless set to "0": SUNDANCE_AC_FLATTEN,
+/// SUNDANCE_AC_SORT, SUNDANCE_AC_DEDUP. They exist to isolate which of the
+/// three operations a regression or crash depends on; the shipped form is all
+/// three.
+fn ac_sub(name: &'static str) -> bool {
+    std::env::var(name).map_or(true, |v| v != "0")
+}
+
+fn ac_canon(ts: Vec<Term>, is_and: bool) -> Vec<Term> {
+    let mut acc: Vec<Term> = Vec::with_capacity(ts.len());
+    let flatten = ac_sub("SUNDANCE_AC_FLATTEN");
+    for t in ts {
+        match t.repr() {
+            ATerm::And(inner) if flatten && is_and => acc.extend(inner.iter().cloned()),
+            ATerm::Or(inner) if flatten && !is_and => acc.extend(inner.iter().cloned()),
+            _ => acc.push(t),
+        }
+    }
+    if ac_sub("SUNDANCE_AC_SORT") {
+        acc.sort_by_key(|t| t.uid());
+    }
+    if ac_sub("SUNDANCE_AC_DEDUP") {
+        acc.dedup_by_key(|t| t.uid());
+    }
+    acc
+}
+
+fn ac_and(env: &mut CNFEnv, ts: Vec<Term>) -> Term {
+    if !ac_enabled() {
+        return env.context.and(ts);
+    }
+    let acc = ac_canon(ts, true);
+    env.context.and(acc)
+}
+
+fn ac_or(env: &mut CNFEnv, ts: Vec<Term>) -> Term {
+    if !ac_enabled() {
+        return env.context.or(ts);
+    }
+    let acc = ac_canon(ts, false);
+    env.context.or(acc)
 }
 
 /// Helper trait for internal CNF conversion implementations
@@ -169,10 +237,10 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                             .collect::<Vec<_>>();
                         if polarity {
                             // env.context.flat_and(nts)
-                            env.context.and(nts)
+                            ac_and(env, nts)
                         } else {
                             // notice that `(not (and a b))` is `(or (not a) (not b))`
-                            env.context.or(nts)
+                            ac_or(env, nts)
                         }
                     }
                 }
@@ -188,11 +256,11 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                             .collect::<Vec<_>>();
                         if polarity {
                             // env.context.flat_or(nts)
-                            env.context.or(nts)
+                            ac_or(env, nts)
                         } else {
                             // notice that `(not (or a b))` is `(and (not a) (not b))`
                             // env.context.flat_and(nts)
-                            env.context.and(nts)
+                            ac_and(env, nts)
                         }
                     }
                 }
@@ -204,10 +272,10 @@ impl CNFConversionHelper<CNFEnv<'_>> for Term {
                 nts.push(nb);
                 if polarity {
                     // env.context.flat_or(nts)
-                    env.context.or(nts)
+                    ac_or(env, nts)
                 } else {
                     // env.context.flat_and(nts)
-                    env.context.and(nts)
+                    ac_and(env, nts)
                 }
             }
             ATerm::Not(t) => t.nnf_impl(env, !polarity),

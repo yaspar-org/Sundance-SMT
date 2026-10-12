@@ -414,6 +414,18 @@ fn process_ite(
     from_quantifier: bool,
 ) -> Option<Formula> {
     if let Ite(b, t1, t2) = term.repr() {
+        // ite(c, a, a) = a: when both branches are the same term, the condition
+        // is irrelevant — assert the ite equals that branch and drop the two
+        // conditional axioms, so `c` never forces a case split for this ite.
+        // (Z3 does the same in `bool_rewriter::mk_ite_core`: `if (t == e) result
+        // = t`.) The branches are hash-consed, so `==` is a cheap identity test.
+        if t1 == t2 {
+            let eq = solver_state.eq(term.clone(), t1.clone());
+            let eq_nnf = eq.nnf(solver_state);
+            solver_state.insert_predecessor(&eq_nnf, None, None, from_quantifier);
+            return Some(eq_nnf.cnf_tseitin(solver_state));
+        }
+
         let eq1 = solver_state.eq(term.clone(), t1.clone());
         let imp1 = solver_state.implies(vec![b.clone()], eq1);
 

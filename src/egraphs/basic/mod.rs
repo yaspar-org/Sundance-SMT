@@ -4,4 +4,5 @@
 mod datastructures;
 pub mod egraph;
 mod proofforest;
+mod relevancy;
 pub mod repr;
