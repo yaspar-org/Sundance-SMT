@@ -178,21 +178,21 @@ pub fn cdcl_decision_procedure(
     if let Some(p) = proof_file
         && result == Status::UNSATISFIABLE
     {
-        let written = write_proof_file(&p, |w| proof_tracer.borrow_mut().write_edrat(w, true));
-        match written {
-            Err(e) => debug_println!(
+        if let Err(e) = write_proof_file(&p, |w| proof_tracer.borrow().write_edrat(w, true)) {
+            debug_println!(
                 2,
                 0,
                 "Failed to write eDRAT proof to {}: {}",
                 p.display(),
                 e
-            ),
-            Ok(()) => debug_println!(2, 0, "eDRAT proof written to: {}", p.display()),
+            );
+        } else {
+            debug_println!(2, 0, "eDRAT proof written to: {}", p.display());
         }
     }
 
     if let Some(p) = partial_proof_file {
-        write_partial_proof(&p, result, &mut proof_tracer.borrow_mut());
+        write_partial_proof(&p, result, &proof_tracer.borrow());
     }
 
     // Trails were streamed during the solve; append the now-complete atom map.
@@ -221,7 +221,7 @@ fn write_proof_file(
 /// with no final empty clause. A leading `;` comment records which case it is.
 /// Header status: unsat -> unsat, sat -> unknown, unknown (cadical) ->
 /// timeout/interrupt.
-fn write_partial_proof(path: &std::path::Path, result: Status, proof_tracer: &mut SMTProofTracer) {
+fn write_partial_proof(path: &std::path::Path, result: Status, proof_tracer: &SMTProofTracer) {
     let complete = result == Status::UNSATISFIABLE;
     let status = match result {
         Status::UNSATISFIABLE => "unsat",
@@ -236,11 +236,10 @@ fn write_partial_proof(path: &std::path::Path, result: Status, proof_tracer: &mu
              ; but NO final empty clause -- a prefix, not a checkable refutation.\n"
         )
     };
-    let written = write_proof_file(path, |w| {
+    if let Err(e) = write_proof_file(path, |w| {
         w.write_all(header.as_bytes())?;
         proof_tracer.write_edrat(w, false)
-    });
-    if let Err(e) = written {
+    }) {
         debug_println!(
             2,
             0,
