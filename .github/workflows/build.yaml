@@ -50,7 +50,7 @@ jobs:
     strategy:
       matrix:
         os: [ ubuntu-latest, macos-latest ]
-        arithmetic: [ internal, z3, z3incremental ]
+        arithmetic: [ internal, internalincremental, z3, z3incremental ]
         sat_backend: [ cadical ]
         include:
           - os: ubuntu-latest
