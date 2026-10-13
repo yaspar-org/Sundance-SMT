@@ -62,3 +62,8 @@ harness = false
 [[bench]]
 name = "lia_benchmarks"
 harness = false
+
+# Sundance's fork of the z3 crate, with `Solver::internalize` for the
+# `Z3_solver_internalize` function added in the `z3` submodule.
+[patch.crates-io]
+z3 = { git = "https://github.com/CanCebeci/z3.rs", branch = "sundance-internalize" }

@@ -129,6 +129,19 @@ impl<'a> CustomExternalPropagator<'a> {
         }
     }
 
+    /// Theory work run before CaDiCaL takes queued clauses: check the
+    /// arithmetic trail, then instantiate quantifiers if that queued nothing.
+    fn propagate(&mut self) {
+        #[cfg(feature = "z3-solver")]
+        self.check_partial_arithmetic_trail();
+
+        // CaDiCaL asks until the queue is empty before deciding, so this is the
+        // last point to add instances for the current assignment.
+        if self.disequalities.borrow().is_empty() {
+            self.eagerly_instantiate_quantifiers();
+        }
+    }
+
     /// Stream one refuted model as a `t <signed lits>` line. A write error is
     /// reported once then the writer is dropped; it must never abort the solve.
     fn write_trail_line(&mut self, model: &[i32]) {
@@ -518,13 +531,6 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
             }
         }
-
-        // Trigger matching, like incremental arithmetic above, can use a
-        // partial assignment. Existing pending work is always consumed before
-        // another matching round is created.
-        self.eagerly_instantiate_quantifiers();
-        #[cfg(feature = "z3-solver")]
-        self.check_partial_arithmetic_trail();
     }
 
     fn notify_new_decision_level(&mut self) {
@@ -896,7 +902,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             "PROPAGATOR: Checking for external clauses (forgettable: {})",
             is_forgettable
         );
-        // For now, no external clauses
+        self.propagate();
         if (*self.disequalities.borrow_mut()).is_empty() {
             false
         } else {

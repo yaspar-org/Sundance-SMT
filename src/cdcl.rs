@@ -91,13 +91,14 @@ pub fn cdcl_decision_procedure(
         #[cfg(feature = "z3-solver")]
         {
             if using_z3_incremental {
-                Some(
+                let mut arith =
                     crate::arithmetic::incremental_solver::translation::ArithTranslator::new(
                         Box::new(
                             crate::arithmetic::incremental_solver::z3::Z3IncrementalState::new(),
                         ),
-                    ),
-                )
+                    );
+                arith.internalize_terms(solver_state);
+                Some(arith)
             } else {
                 None
             }

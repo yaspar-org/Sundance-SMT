@@ -213,6 +213,38 @@ impl ArithTranslator {
         Some(constraint)
     }
 
+    /// Internalize the arithmetic known before the search at level 0, so that
+    /// no backtrack removes it: every arithmetic term gets its var, whose
+    /// definition is asserted, and every arithmetic literal's constraint is
+    /// internalized without being pushed. The solver thus sets up all of them
+    /// here, including opaque terms (e.g. `(f 1)`) and the terms of atoms.
+    /// Terms and literals that appear later, e.g. in quantifier instances, are
+    /// registered when first used, at the current level.
+    pub fn internalize_terms(&mut self, solver_state: &mut SolverState) {
+        debug_assert_eq!(self.vars_by_level.len(), 1);
+        let arith_terms = solver_state.arithmetic_terms.clone();
+        for term_id in &arith_terms {
+            let egraph_id = solver_state.to_egraph_id(*term_id);
+            let var = self.get_or_register_var_internal(egraph_id, solver_state);
+            self.solver.internalize_var(var);
+        }
+        for var in 1..solver_state.cnf_cache.next_var {
+            let Some(&uid) = solver_state.cnf_cache.var_map_reverse.get(&var) else {
+                continue;
+            };
+            if solver_state.get_term_safe(uid).is_none() {
+                continue;
+            }
+            for lit in [var, -var] {
+                let Some(constraint) = self.extract_constraint(lit, solver_state) else {
+                    self.non_arithmetic_lits.insert(var);
+                    break;
+                };
+                self.solver.internalize_constraint(&constraint);
+            }
+        }
+    }
+
     /// Push a SAT literal into the solver if it's arithmetic.
     pub fn on_literal(&mut self, lit: i32, solver_state: &mut SolverState) {
         let abs_lit = lit.abs();

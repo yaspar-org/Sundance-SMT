@@ -57,6 +57,14 @@ pub trait IncrementalArithSolver {
     /// Mark an already-registered var for model reporting. Idempotent.
     fn mark_model_var(&mut self, var: VarId);
 
+    /// Prepare `var` for later use without asserting anything, e.g. create
+    /// its solver-internal structures up front. Impls may ignore it.
+    fn internalize_var(&mut self, _var: VarId) {}
+
+    /// Prepare `constraint` to be pushed later without asserting it, e.g.
+    /// create its solver-internal structures up front. Impls may ignore it.
+    fn internalize_constraint(&mut self, _constraint: &ArithConstraint) {}
+
     /// SAT solver advanced a decision level.
     fn notify_new_decision_level(&mut self);
 
