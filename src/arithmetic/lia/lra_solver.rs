@@ -1054,8 +1054,12 @@ impl LRASolver {
             self.update(*col, rounded);
         }
 
-        // Check if all variables are still in bounds
-        let feasible = self.variables.iter().all(|v| v.in_bounds());
+        // Check if all variables are still in bounds, and that every integer variable (including
+        // basic ones recomputed from rational tableau coefficients) came out integral
+        let d0 = self.calculate_d0();
+        let feasible = self.variables.iter().all(|v| {
+            v.in_bounds() && (v.var.typ != VarType::Int || v.val.instantiate(&d0).is_int())
+        });
 
         if feasible {
             let assg = self.compute_assignment();
