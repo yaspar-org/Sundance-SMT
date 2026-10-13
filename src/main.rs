@@ -18,6 +18,12 @@ use yaspar_ir::untyped::UntypedAst;
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
+    // The flag sets the environment switch the quantifier module reads (a
+    // cached reader, so it must be exported before any solver state is built).
+    // SAFETY (env mutation): single-threaded startup, before any reader.
+    if std::env::var_os("SUNDANCE_QI_MAX_GEN").is_none() {
+        unsafe { std::env::set_var("SUNDANCE_QI_MAX_GEN", args.max_generation.to_string()) };
+    }
 
     // --proof and --partial-proof both write an eDRAT dump; using them together
     // is ambiguous (and with the same path the second write silently truncates

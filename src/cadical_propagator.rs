@@ -12,7 +12,8 @@ use crate::log::is_important;
 use crate::proof::{SMTProofTracer, Theory};
 use crate::quantifiers::quantifier::QuantifierInstance::{Instantiation, Skolemization};
 use crate::quantifiers::quantifier::{
-    PendingInstantiations, instantiate_quantifiers, materialize_next,
+    INST_GEN_SKIPPED, PendingInstantiations, instantiate_quantifiers, materialize_next,
+    qi_max_generation,
 };
 use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
@@ -299,6 +300,7 @@ impl<'a> CustomExternalPropagator<'a> {
         self.stats.dt_accessor_ax = self.solver_state.stat_dt_accessor_ax;
         self.stats.dt_constructor_ax = self.solver_state.stat_dt_constructor_ax;
         self.stats.dt_splits = self.solver_state.stat_dt_splits;
+        self.stats.generation_skipped = INST_GEN_SKIPPED.load(std::sync::atomic::Ordering::Relaxed);
     }
 
     fn apply_instances(
@@ -362,8 +364,45 @@ impl<'a> CustomExternalPropagator<'a> {
     /// round has been materialized.
     fn start_quantifier_instantiation_round(&mut self, allow_skolemization: bool) -> bool {
         debug_assert!(self.pending.is_none());
-        let pending =
-            instantiate_quantifiers(self.solver_state, &self.assignments, allow_skolemization);
+        // The generation bound applies to every round; the complete-model
+        // round retries when the bounded round yields nothing, so the bound
+        // never loses a proof.
+        let bound = qi_max_generation();
+        let mut pending = instantiate_quantifiers(
+            self.solver_state,
+            &self.assignments,
+            allow_skolemization,
+            bound,
+        );
+        if pending.is_empty() && allow_skolemization && bound.is_some() {
+            self.stats.generation_fallbacks += 1;
+            // Iterative deepening (on unless `SUNDANCE_QI_DEEPEN=0`): the next bound is
+            // the smallest generation held back, so the chain is explored one
+            // depth at a time; otherwise the retry is unbounded.
+            let next = if crate::quantifiers::quantifier::qi_deepen() {
+                self.solver_state
+                    .gen_deferred
+                    .iter()
+                    .map(|d| d.generation)
+                    .min()
+            } else {
+                None
+            };
+            pending = instantiate_quantifiers(
+                self.solver_state,
+                &self.assignments,
+                allow_skolemization,
+                next,
+            );
+            if pending.is_empty() && next.is_some() {
+                pending = instantiate_quantifiers(
+                    self.solver_state,
+                    &self.assignments,
+                    allow_skolemization,
+                    None,
+                );
+            }
+        }
         if pending.is_empty() {
             return false;
         }
@@ -765,8 +804,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 }
 
                 for conflict in &conflicts {
-                    // Walk the proof path backward, pick the last probe-merged
-                    // pair whose trichotomy hasn't been emitted yet. Emit at
+                    // Scan the explanation in reverse enumeration order for a
+                    // probe pair whose trichotomy has not been emitted yet.
+                    // Enumeration order does not encode probe chronology. Emit at
                     // most one trichotomy per conflict; other probed pairs
                     // fall back on `make_eq` allocating a bare eq lit.
                     let fresh_probe_pair = conflict.equalities.iter().rev().find_map(|&(a, b)| {

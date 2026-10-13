@@ -244,8 +244,14 @@ pub fn learn_exactly_one_tester_clause(
     };
     debug_println!(12, 0, "TESTER OR CASE");
     debug_println!(25, 10, "(assert {})", tester_or);
-    solver_state.insert_predecessor(&tester_or, None, None, from_quantifier);
-    let tester_cnf = tester_or.cnf_tseitin(solver_state).into_iter().map(|x| x.0);
+    // Register the NNF, not the raw `or`: `cnf_tseitin` assigns the gate
+    // literal to the normalized term (see `learn_or_not_term_tester_term`).
+    let tester_or_nnf = tester_or.nnf(solver_state);
+    solver_state.insert_predecessor(&tester_or_nnf, None, None, from_quantifier);
+    let tester_cnf = tester_or_nnf
+        .cnf_tseitin(solver_state)
+        .into_iter()
+        .map(|x| x.0);
     vector.extend(tester_cnf);
 
     for uid in base_case_uids {
@@ -449,8 +455,15 @@ pub fn learn_or_not_term_tester_term(
     let not_tester_term = solver_state.not(tester_term.clone());
     let not_term = solver_state.not(term);
     let or_not_tester_not_term = solver_state.or(vec![not_tester_term, not_term]);
-    solver_state.insert_predecessor(&or_not_tester_not_term, None, None, from_quantifier);
-    let tester_cnf = or_not_tester_not_term
+    // Register the NNF of the axiom, not the raw term: `cnf_tseitin` normalizes
+    // internally and assigns the gate literal to the normalized term, so the
+    // registered term must be that one or the literal has no term. Every other
+    // axiom path does nnf -> insert_predecessor -> cnf_tseitin; this one only
+    // worked while the raw `or` happened to hash-cons onto its own NNF, which
+    // term-layer AC canonicalization (child sorting) no longer guarantees.
+    let or_nnf = or_not_tester_not_term.nnf(solver_state);
+    solver_state.insert_predecessor(&or_nnf, None, None, from_quantifier);
+    let tester_cnf = or_nnf
         .cnf_tseitin(solver_state)
         .into_iter()
         .map(|x| x.0)
@@ -458,4 +471,61 @@ pub fn learn_or_not_term_tester_term(
     debug_println!(25, 10, "(assert {})", or_not_tester_not_term,);
     debug_println!(12, 2, "This gives us {:?}", tester_cnf);
     tester_cnf
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use yaspar_ir::ast::{Context, Typecheck, alg};
+    use yaspar_ir::untyped::UntypedAst;
+
+    #[test]
+    fn tester_axiom_registers_normalized_gate() {
+        let mut context = Context::default();
+        let commands = UntypedAst
+            .parse_script_str(
+                "(set-logic ALL) (declare-datatype Color ((red) (blue)))
+             (declare-const x Color) (assert ((_ is red) x)) (assert ((_ is blue) x))",
+            )
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+        let testers: Vec<Term> = commands
+            .iter()
+            .filter_map(|c| match c.repr() {
+                alg::Command::Assert(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut state = SolverState::new(context, true, false, false, false);
+        let t = state.get_true();
+        let f = state.get_false();
+        state.register_bool_constants(&t, &f);
+        // A negative tester makes the raw axiom contain a double negation.
+        // Its NNF has a different UID even without AC canonicalization.
+        let negative_tester = state.not(testers[0].clone());
+        let not_negative = state.not(negative_tester.clone());
+        let not_blue = state.not(testers[1].clone());
+        let raw = state.or(vec![not_blue, not_negative]);
+        let normalized = raw.nnf(&mut state);
+        assert_ne!(
+            raw.uid(),
+            normalized.uid(),
+            "regression must exercise different gates"
+        );
+        let clauses =
+            learn_or_not_term_tester_term(&mut state, negative_tester, testers[1].clone(), true);
+        let gate = state.get_lit_from_term(&normalized);
+        assert_eq!(clauses.last(), Some(&vec![gate]));
+        assert!(state.id_map.contains_left(&normalized.uid()));
+        // Every emitted literal must map to a registered term, including the
+        // normalized top gate that the old raw-registration path omitted.
+        for lit in clauses.iter().flatten() {
+            let uid = state.cnf_cache.var_map_reverse[&lit.abs()];
+            assert!(
+                state.id_map.contains_left(&uid),
+                "unregistered literal {lit}"
+            );
+        }
+    }
 }

@@ -55,6 +55,27 @@ impl<T> EgraphResult<T> {
 }
 
 pub trait EgraphTrait {
+    /// Whether any conflict this engine reported may carry an INCOMPLETE
+    /// antecedent set (the true=false-collision fallback, whose explanation is
+    /// documented as potentially omitting the argument equalities behind a
+    /// hash-cons collision). A refutation built on such a clause is not
+    /// trustworthy, so the driver downgrades `unsat` to `unknown` when this is
+    /// set. Sound by construction: it only ever widens `unsat` to `unknown`.
+    fn refutation_tainted(&self) -> bool {
+        false
+    }
+
+    /// Whether a true=false collision has already been reported as a conflict
+    /// at the current decision level and not yet cleared by a backtrack. While
+    /// one is outstanding the engine does not re-report the same unresolved
+    /// collision on every subsequent merge, so the driver's end-of-assignment
+    /// `true != false` invariant holds "unless a conflict is already pending".
+    /// Default false: an engine that keeps true and false apart except when it
+    /// returns the conflict in the same call never needs to override this.
+    fn true_false_conflict_pending(&self) -> bool {
+        false
+    }
+
     /// Operator key for congruence: two terms are congruent iff they have
     /// the same Op and pairwise-equal children.
     type Op: Clone + Eq + Hash;
@@ -111,6 +132,15 @@ pub trait EgraphTrait {
     /// Callers must drain before advancing the decision level.
     fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
 
+    /// Drop the arithmetic equalities produced by a speculative merge (an
+    /// arithmetic probe that is undone right after), without losing
+    /// equalities that do not depend on that merge. Default: drain and
+    /// discard everything, which is right for a backend whose queue holds
+    /// merge-derived equalities only.
+    fn discard_speculative_arithmetic_equalities(&mut self) {
+        let _ = self.drain_arithmetic_equalities();
+    }
+
     // --- Decision level ---
 
     /// Advance the internal decision level by one.
@@ -158,12 +188,92 @@ pub trait EgraphTrait {
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
     ) -> Vec<crate::utils::DeterministicHashMap<Local, Self::TermId>>;
 
+    /// The triggering-term hints for `pattern`: one term per distinct
+    /// e-class whose members carry the pattern's root operator. The caller
+    /// runs one `match_triggers` call per hint with `Some(term)` on this
+    /// pattern; the union over the hints is the unrooted result, so rooting
+    /// changes the enumeration order and bound, never the match set.
+    /// `None`: no hint is available, call once with `None`. `Some(empty)`:
+    /// the operator indexes no term, so no call is needed. Default: no hint.
+    fn trigger_root_candidates(&mut self, _pattern: PatternId) -> Option<Vec<Self::TermId>> {
+        None
+    }
+
+    /// Whether the most recent `match_triggers` call was answered by the
+    /// backend's native (engine) matcher rather than the top-down matcher.
+    /// Instrumentation only (`SUNDANCE_INST_TRACE`): labels each instance
+    /// with the matcher that produced its bindings. Default: top-down.
+    fn last_match_native(&self) -> bool {
+        false
+    }
+
+    /// Record `term` as the body of a quantifier instance. Z3 asserts each
+    /// instance as the root clause `(or (not q) body)` with relevancy
+    /// watches, so a true instance body is relevant; a backend whose
+    /// relevancy seeds only level-0 assertions can use this to seed true
+    /// instance bodies as well. Default: ignored.
+    fn note_instance_root(&mut self, _term: Self::TermId) {}
+
+    /// `term` has just been given a truth value by the propagator (merged
+    /// with true or false, without conflict). A backend with relevancy
+    /// re-applies the rules of `term` and of the gates it is a child of, so
+    /// the relevant set follows the assignment as Z3's does
+    /// (`relevancy_propagator::assign_eh`) instead of waiting for the next
+    /// matching round. Default: ignored.
+    fn note_assignment(&mut self, _term: Self::TermId) {}
+
+    /// A matching round starts: called once by the propagator before the
+    /// round's `match_triggers` calls (retries within the round do not call
+    /// it again). A backend with incremental matching takes its snapshot
+    /// here. Default: ignored.
+    fn begin_matching_round(&mut self) {}
+
+    /// Whether `match_triggers` filters the first pattern's root candidates
+    /// to those changed since the previous round. The caller then roots each
+    /// pattern of a multi-pattern in turn, so a change under any of them is
+    /// seen. Default: false.
+    fn incremental_matching(&self) -> bool {
+        false
+    }
+
+    /// Whether `term` is relevant for the current matching round. A backend
+    /// with relevancy gates quantifier instantiation on it in eager rounds,
+    /// as Z3 instantiates a quantifier only once its atom is relevant; the
+    /// complete-model round is never gated. Default: everything is relevant.
+    fn is_term_relevant(&self, _term: Self::TermId) -> bool {
+        true
+    }
+
+    /// Turn relevancy-restricted matching on or off for the next
+    /// `match_triggers` calls. Relevancy filtering is sound only while it
+    /// defers instantiation: an instance it prunes on the current partial
+    /// assignment must still be produced once that assignment is a complete
+    /// model, because a Boolean-irrelevant atom's theory content can still
+    /// refute the model. The caller activates it for eager (partial-assignment)
+    /// rounds and deactivates it for the complete-model round. Default: no-op
+    /// (backends without relevancy ignore it).
+    fn set_relevancy_active(&mut self, _active: bool) {}
+
     // --- Backtracking ---
 
     /// Undo all operations performed at levels strictly greater than `level`.
     fn backtrack_to(&mut self, level: usize);
 
     // --- Decisions ---
+
+    /// Relevancy-restricted branching (Z3 CASE_SPLIT=3 style): suggest an
+    /// unassigned atom to decide next, with the phase that helps justify a
+    /// relevant, not-yet-satisfied gate, plus the desired polarity resolved
+    /// through the Boolean structure. Returns the atom's `TermId` and the
+    /// phase (true = assign positive). `None` means no preference — let the
+    /// SAT solver's own heuristic decide. Default: no preference.
+    ///
+    /// The caller maps the returned term to its SAT literal and is
+    /// responsible for skipping a suggestion whose atom has no decision
+    /// variable or is already assigned.
+    fn suggest_decision(&self) -> Option<(Self::TermId, bool)> {
+        None
+    }
 
     /// SAT solver asks if the egraph wants to make a branching decision.
     /// Returns 0 if no preference, otherwise a signed literal to assign.
