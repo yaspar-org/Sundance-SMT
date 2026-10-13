@@ -13,6 +13,13 @@ use std::hash::Hash;
 use std::ops::Neg;
 use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, SortDef, Str, SymbolQuote, Term};
 
+/// Proof-only literals name terms that appear only in proof steps and never in
+/// the SAT solver (e.g. an un-reduced instantiation). They are numbered from here
+/// rather than from `cnf_cache.next_var`, because CaDiCaL creates every variable
+/// up to the largest one it sees, so a proof-only number in the SAT range becomes
+/// an unconstrained decision variable.
+const PROOF_ONLY_LITERAL_BASE: i32 = 1 << 30;
+
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
 /// to generate an eDRAT proof.
 pub struct SMTProofTracer {
@@ -24,6 +31,8 @@ pub struct SMTProofTracer {
     registered_clause_callbacks: HashMap<Vec<i32>, usize>,
     /// Number of clauses deleted by CaDiCaL (for stats)
     pub(crate) deleted_clauses: u64,
+    /// Next literal handed out by [`Self::new_proof_only_literal`]
+    next_proof_only_literal: i32,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -233,7 +242,18 @@ impl SMTProofTracer {
             instantiations_for_smt2: Vec::new(),
             registered_clause_callbacks: HashMap::new(),
             deleted_clauses: 0,
+            next_proof_only_literal: PROOF_ONLY_LITERAL_BASE,
         }
+    }
+
+    /// A fresh literal for a term that only the proof mentions; see
+    /// [`PROOF_ONLY_LITERAL_BASE`]. Never pass it to the SAT solver.
+    pub fn new_proof_only_literal(&mut self) -> i32 {
+        let lit = self.next_proof_only_literal;
+        self.next_proof_only_literal = lit
+            .checked_add(1)
+            .expect("Too many proof-only literals; reached i32::MAX!");
+        lit
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -375,8 +395,8 @@ impl SMTProofTracer {
     /// be handled on different proof lines.
     ///
     /// As a result, we carefully register the un-reduced child with only
-    /// the eDRAT proof (although the caller must reserve a DIMACS literal
-    /// for it beforehand), and then if the reduction differs from the
+    /// the eDRAT proof (the caller passes its SAT literal if it has one, and
+    /// otherwise a [`Self::new_proof_only_literal`]), and then if the reduction differs from the
     /// un-reduced child, we derive the "e-graph implication" using modus ponens
     /// via "parent => child", "child => reduced child".
     pub fn push_skolem_or_instantiation_derivation(
