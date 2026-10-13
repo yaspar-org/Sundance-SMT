@@ -623,7 +623,7 @@ impl SMTProofTracer {
         &self,
         out: &mut impl Write,
         trim: bool,
-        mut share_terms: Option<&mut Context>,
+        share_terms: Option<&mut Context>,
     ) -> io::Result<()> {
         let keep = if trim { self.core_steps() } else { None };
 
@@ -649,18 +649,14 @@ impl SMTProofTracer {
             format_function_declarations(&self.symbol_table, used_symbols.as_ref()).as_bytes(),
         )?;
 
-        let mut sharer = LetSharer::default();
+        let mut sharer = share_terms.map(LetSharer::new);
         self.visit_proof(keep.as_deref(), |item| match item {
-            ProofItem::Literal(lit, term) => match share_terms.as_deref_mut() {
-                Some(context) => {
-                    writeln!(
-                        out,
-                        "(edrat-literal {lit} {})",
-                        sharer.share(&term, context)
-                    )
+            ProofItem::Literal(lit, mut term) => {
+                if let Some(sharer) = &mut sharer {
+                    term = sharer.share(&term);
                 }
-                None => writeln!(out, "(edrat-literal {lit} {term})"),
-            },
+                writeln!(out, "(edrat-literal {lit} {term})")
+            }
             ProofItem::Skolem(parent, i, var) => {
                 writeln!(out, "(declare-skolem {} {} {} {})", parent, i, var.0, var.1)
             }

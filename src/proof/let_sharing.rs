@@ -29,8 +29,8 @@ const MIN_SHARED_SIZE: u64 = 3;
 
 /// Introduces `let` bindings for repeated subterms. Results are cached by term, so the same
 /// subterm is rewritten once across all the literals of a proof.
-#[derive(Default)]
-pub(crate) struct LetSharer {
+pub(crate) struct LetSharer<'a> {
+    context: &'a mut Context,
     regions: HashMap<u64, Term>,
 }
 
@@ -38,39 +38,22 @@ pub(crate) struct LetSharer {
 /// their own, and attributes are printed unchanged.
 fn region_children(t: &Term) -> Vec<&Term> {
     match t.repr() {
-        ATerm::Constant(..)
-        | ATerm::Global(..)
-        | ATerm::Local(..)
-        | ATerm::Let(..)
-        | ATerm::Exists(..)
-        | ATerm::Forall(..) => vec![],
-        ATerm::App(_, ts, _)
-        | ATerm::Distinct(ts)
-        | ATerm::And(ts)
-        | ATerm::Or(ts)
-        | ATerm::Xor(ts) => ts.iter().collect(),
-        ATerm::Eq(a, b) => vec![a, b],
-        ATerm::Not(a) | ATerm::Annotated(a, _) | ATerm::Matching(a, _) => vec![a],
-        ATerm::Implies(ts, t) => ts.iter().chain(std::iter::once(t)).collect(),
-        ATerm::Ite(b, t, e) => vec![b, t, e],
+        ATerm::Let(..) | ATerm::Exists(..) | ATerm::Forall(..) => vec![],
+        ATerm::Annotated(a, _) | ATerm::Matching(a, _) => vec![a],
+        r => r.sub_terms().collect(),
     }
 }
 
-fn is_compound(t: &Term) -> bool {
-    !matches!(
-        t.repr(),
-        ATerm::Constant(..) | ATerm::Global(..) | ATerm::Local(..)
-    )
-}
-
-impl LetSharer {
-    /// Returns `term` with `let` bindings for its repeated compound subterms.
-    pub fn share(&mut self, term: &Term, context: &mut Context) -> Term {
-        self.region(term, context)
+impl<'a> LetSharer<'a> {
+    pub fn new(context: &'a mut Context) -> Self {
+        Self {
+            context,
+            regions: HashMap::new(),
+        }
     }
 
-    /// Rewrites the region rooted at `root`.
-    fn region(&mut self, root: &Term, context: &mut Context) -> Term {
+    /// Returns `root` with `let` bindings for the repeated compound subterms of its region.
+    pub fn share(&mut self, root: &Term) -> Term {
         if let Some(done) = self.regions.get(&root.uid()) {
             return done.clone();
         }
@@ -97,111 +80,94 @@ impl LetSharer {
             }
         }
 
-        // Tree size (capped), whether a subterm is shared, and the binding level it needs:
-        // one more than the deepest shared subterm it mentions
+        // Rebuild bottom-up. A shared subterm (referenced more than once, and not smaller than
+        // MIN_SHARED_SIZE nodes, which leaves out atoms) is bound one level above the deepest
+        // binding it mentions, and replaced by its variable where it is used.
         let mut size: HashMap<u64, u64> = HashMap::new();
-        let mut level: HashMap<u64, usize> = HashMap::new();
-        let mut shared: HashSet<u64> = HashSet::new();
+        let mut depth: HashMap<u64, usize> = HashMap::new();
+        let mut uses: HashMap<u64, Term> = HashMap::new();
+        let mut levels: Vec<Vec<VarBinding<_, Term>>> = vec![];
         for t in &order {
             let children = region_children(t);
             let s = children
                 .iter()
                 .fold(1u64, |acc, c| acc.saturating_add(size[&c.uid()]));
+            let level = children.iter().map(|c| depth[&c.uid()]).max().unwrap_or(0);
+            let shared = t.uid() != root.uid() && refs[&t.uid()] > 1 && s >= MIN_SHARED_SIZE;
             size.insert(t.uid(), s);
-            let need = children
-                .iter()
-                .map(|c| level[&c.uid()] + usize::from(shared.contains(&c.uid())))
-                .max()
-                .unwrap_or(0);
-            level.insert(t.uid(), need);
-            if t.uid() != root.uid()
-                && refs.get(&t.uid()).copied().unwrap_or(0) > 1
-                && is_compound(t)
-                && s >= MIN_SHARED_SIZE
-            {
-                shared.insert(t.uid());
-            }
-        }
-
-        // Rebuild bottom-up; a shared subterm is replaced by its variable where it is used
-        let mut uses: HashMap<u64, Term> = HashMap::new();
-        let mut levels: Vec<Vec<VarBinding<_, Term>>> = vec![];
-        let mut body = None;
-        for t in &order {
-            let rebuilt = self.rebuild(t, &uses, context);
-            if t.uid() == root.uid() {
-                body = Some(rebuilt);
-            } else if shared.contains(&t.uid()) {
-                let sort = t.get_sort(context);
-                let id = context.arena().new_local();
-                let symbol = context.arena().fresh_x();
-                let lvl = level[&t.uid()];
-                if levels.len() <= lvl {
-                    levels.resize_with(lvl + 1, Vec::new);
+            depth.insert(t.uid(), level + usize::from(shared));
+            let mut rebuilt = self.rebuild(t, &uses);
+            if shared {
+                let sort = t.get_sort(self.context);
+                let id = self.context.arena().new_local();
+                let symbol = self.context.arena().fresh_x();
+                if levels.len() <= level {
+                    levels.resize_with(level + 1, Vec::new);
                 }
-                levels[lvl].push(VarBinding(symbol.clone(), id, rebuilt));
-                let var = context.arena().local(Local { id, symbol, sort });
-                uses.insert(t.uid(), var);
-            } else {
-                uses.insert(t.uid(), rebuilt);
+                levels[level].push(VarBinding(symbol.clone(), id, rebuilt));
+                rebuilt = self.context.arena().local(Local { id, symbol, sort });
             }
+            uses.insert(t.uid(), rebuilt);
         }
-        let mut result = body.expect("the root is part of its region");
-        for bindings in levels.into_iter().rev() {
-            if !bindings.is_empty() {
-                result = context.arena().let_term(bindings, result);
-            }
-        }
+        // The root comes last in post-order, and every level below the top one is non-empty
+        let body = uses
+            .remove(&root.uid())
+            .expect("the root is part of its region");
+        let result = levels.into_iter().rev().fold(body, |body, bindings| {
+            self.context.arena().let_term(bindings, body)
+        });
         self.regions.insert(root.uid(), result.clone());
         result
     }
 
     /// The body of a binder: its own region, inside the annotation if it has one.
-    fn binder_body(&mut self, body: &Term, context: &mut Context) -> Term {
+    fn binder_body(&mut self, body: &Term) -> Term {
         if let ATerm::Annotated(inner, attributes) = body.repr() {
-            let inner = self.region(inner, context);
-            context.arena().annotated(inner, attributes.clone())
+            let inner = self.share(inner);
+            self.context.arena().annotated(inner, attributes.clone())
         } else {
-            self.region(body, context)
+            self.share(body)
         }
     }
 
     /// Rebuilds `t` from the rewritten versions of its region children in `uses`.
-    fn rebuild(&mut self, t: &Term, uses: &HashMap<u64, Term>, context: &mut Context) -> Term {
+    fn rebuild(&mut self, t: &Term, uses: &HashMap<u64, Term>) -> Term {
         let u = |c: &Term| uses[&c.uid()].clone();
         let us = |cs: &[Term]| cs.iter().map(u).collect::<Vec<_>>();
         match t.repr() {
             ATerm::Constant(..) | ATerm::Global(..) | ATerm::Local(..) | ATerm::Let(..) => {
                 t.clone()
             }
-            ATerm::App(id, ts, sort) => context.arena().app(id.clone(), us(ts), sort.clone()),
-            ATerm::Distinct(ts) => context.arena().distinct(us(ts)),
-            ATerm::And(ts) => context.arena().and(us(ts)),
-            ATerm::Or(ts) => context.arena().or(us(ts)),
-            ATerm::Xor(ts) => context.arena().xor(us(ts)),
-            ATerm::Eq(a, b) => context.arena().eq(u(a), u(b)),
-            ATerm::Not(a) => context.arena().not(u(a)),
-            ATerm::Implies(ts, b) => context.arena().implies(us(ts), u(b)),
-            ATerm::Ite(b, x, y) => context.arena().ite(u(b), u(x), u(y)),
-            ATerm::Annotated(a, attributes) => context.arena().annotated(u(a), attributes.clone()),
+            ATerm::App(id, ts, sort) => self.context.arena().app(id.clone(), us(ts), sort.clone()),
+            ATerm::Distinct(ts) => self.context.arena().distinct(us(ts)),
+            ATerm::And(ts) => self.context.arena().and(us(ts)),
+            ATerm::Or(ts) => self.context.arena().or(us(ts)),
+            ATerm::Xor(ts) => self.context.arena().xor(us(ts)),
+            ATerm::Eq(a, b) => self.context.arena().eq(u(a), u(b)),
+            ATerm::Not(a) => self.context.arena().not(u(a)),
+            ATerm::Implies(ts, b) => self.context.arena().implies(us(ts), u(b)),
+            ATerm::Ite(b, x, y) => self.context.arena().ite(u(b), u(x), u(y)),
+            ATerm::Annotated(a, attributes) => {
+                self.context.arena().annotated(u(a), attributes.clone())
+            }
             ATerm::Matching(scrutinee, arms) => {
                 let scrutinee = u(scrutinee);
                 let arms = arms
                     .iter()
                     .map(|arm| PatternArm {
                         pattern: arm.pattern.clone(),
-                        body: self.region(&arm.body, context),
+                        body: self.share(&arm.body),
                     })
                     .collect();
-                context.arena().matching(scrutinee, arms)
+                self.context.arena().matching(scrutinee, arms)
             }
             ATerm::Exists(vs, body) => {
-                let body = self.binder_body(body, context);
-                context.arena().exists(vs.clone(), body)
+                let body = self.binder_body(body);
+                self.context.arena().exists(vs.clone(), body)
             }
             ATerm::Forall(vs, body) => {
-                let body = self.binder_body(body, context);
-                context.arena().forall(vs.clone(), body)
+                let body = self.binder_body(body);
+                self.context.arena().forall(vs.clone(), body)
             }
         }
     }
@@ -213,66 +179,58 @@ mod tests {
     use yaspar_ir::ast::{ACommand, LetElim, Typecheck};
     use yaspar_ir::untyped::UntypedAst;
 
-    /// Parses `script` and returns its context and its last assertion, let-eliminated as the
-    /// solver sees it.
-    fn last_assertion(script: &str) -> (Context, Term) {
-        let mut context = Context::new();
-        let commands = UntypedAst
-            .parse_script_str(script)
-            .unwrap()
-            .type_check(&mut context)
-            .unwrap();
-        let term = commands
-            .iter()
-            .filter_map(|c| match c.repr() {
-                ACommand::Assert(t) => Some(t.clone()),
-                _ => None,
-            })
-            .next_back()
-            .unwrap();
-        let term = term.let_elim(&mut context);
-        (context, term)
-    }
-
-    fn shared(script: &str) -> (String, Term, Term, Context) {
-        let (mut context, term) = last_assertion(script);
-        let out = LetSharer::default().share(&term, &mut context);
-        (out.to_string(), term, out, context)
-    }
-
     const DECLS: &str = "(declare-sort S 0) (declare-fun f (S S) S) (declare-fun p (S) Bool) \
                          (declare-const a S) (declare-const b S)";
 
+    /// Asserts `body` after `DECLS` and returns the context, the assertion let-eliminated as the
+    /// solver sees it, and that term with its repeated subterms shared.
+    fn share(body: &str) -> (Context, Term, Term) {
+        let mut context = Context::new();
+        let commands = UntypedAst
+            .parse_script_str(&format!("{DECLS} (assert {body})"))
+            .unwrap()
+            .type_check(&mut context)
+            .unwrap();
+        let ACommand::Assert(term) = commands.last().unwrap().repr() else {
+            panic!("the script ends with its assertion");
+        };
+        let term = term.let_elim(&mut context);
+        let shared = LetSharer::new(&mut context).share(&term);
+        (context, term, shared)
+    }
+
+    fn printed(body: &str) -> String {
+        share(body).2.to_string()
+    }
+
     #[test]
     fn binds_repeated_subterms_once() {
-        let (printed, ..) = shared(&format!("{DECLS} (assert (p (f (f a b) (f a b))))"));
-        assert_eq!(printed, "(let ((x-0 (f a b))) (p (f x-0 x-0)))");
+        assert_eq!(
+            printed("(p (f (f a b) (f a b)))"),
+            "(let ((x-0 (f a b))) (p (f x-0 x-0)))"
+        );
     }
 
     #[test]
     fn leaves_small_and_single_subterms_in_place() {
-        let (printed, ..) = shared(&format!("{DECLS} (assert (and (p a) (p a) (p (f a b))))"));
-        assert_eq!(printed, "(and (p a) (p a) (p (f a b)))");
+        assert_eq!(
+            printed("(and (p a) (p a) (p (f a b)))"),
+            "(and (p a) (p a) (p (f a b)))"
+        );
     }
 
     #[test]
     fn levels_bindings_by_dependency() {
-        let (printed, ..) = shared(&format!(
-            "{DECLS} (assert (let ((u (f a b))) (let ((v (f u u))) (= (f v v) (f v a)))))"
-        ));
         assert_eq!(
-            printed,
+            printed("(let ((u (f a b))) (let ((v (f u u))) (= (f v v) (f v a))))"),
             "(let ((x-0 (f a b))) (let ((x-1 (f x-0 x-0))) (= (f x-1 x-1) (f x-1 a))))"
         );
     }
 
     #[test]
     fn binds_inside_quantifiers_and_keeps_patterns_on_top() {
-        let (printed, ..) = shared(&format!(
-            "{DECLS} (assert (forall ((x S)) (! (p (f (f x a) (f x a))) :pattern ((p x)))))"
-        ));
         assert_eq!(
-            printed,
+            printed("(forall ((x S)) (! (p (f (f x a) (f x a))) :pattern ((p x))))"),
             "(forall ((x S)) (! (let ((x-0 (f x a))) (p (f x-0 x-0))) :pattern ((p x))))"
         );
     }
@@ -286,8 +244,8 @@ mod tests {
              :pattern ((p x))))",
             "(exists ((x S)) (or (p (f x x)) (forall ((y S)) (= (f (f x y) (f x y)) (f x y)))))",
         ] {
-            let (_, term, out, mut context) = shared(&format!("{DECLS} (assert {body})"));
-            assert_eq!(out.let_elim(&mut context), term, "{body}");
+            let (mut context, term, shared) = share(body);
+            assert_eq!(shared.let_elim(&mut context), term, "{body}");
         }
     }
 }
