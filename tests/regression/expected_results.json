@@ -1117,5 +1117,6 @@
   "arithmetic/mod_negative_numerator_unsat.smt2": "unsat",
   "arithmetic/bool_arg_in_function.smt2": "unsat",
   "arithmetic/lt_chained.smt2": "unsat",
-  "arithmetic/lt_chained_negated.smt2": "unsat"
+  "arithmetic/lt_chained_negated.smt2": "unsat",
+  "arithmetic/persistent_assumption_core_sat.smt2": "sat"
 }
