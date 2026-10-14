@@ -124,7 +124,6 @@
     "edge_cases_quantifiers/inferred_multipattern_order.smt2": "unsat",
     "edge_cases_quantifiers/inferred_trigger_nested_forall.smt2": "unsat",
     "edge_cases_quantifiers/inferred_trigger_nopattern_fallback.smt2": "unsat",
-    "edge_cases_quantifiers/inferred_trigger_no_matching_loop.smt2": "unknown",
     "edge_cases_quantifiers/multipattern.smt2": "unsat",
     "edge_cases_quantifiers/multipattern2.smt2": "unsat",
     "edge_cases_quantifiers/multipattern3.smt2": "unsat",

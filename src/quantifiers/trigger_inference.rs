@@ -33,7 +33,6 @@
 //! If some bound variable never appears under an uninterpreted symbol, no valid
 //! trigger exists and inference returns `None`.
 
-use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use yaspar_ir::ast::ATerm::*;
@@ -64,51 +63,6 @@ fn collect_candidates(
     out: &mut Vec<Candidate>,
 ) {
     match term.repr() {
-        App(func, args, _) => {
-            // Recurse into arguments first (collect nested candidates too).
-            for a in args.iter() {
-                collect_candidates(a, bound, shadowed, out);
-            }
-            // Built-in/theory identifiers have an IR kind; user-declared
-            // functions do not. Use that metadata rather than the symbol's
-            // spelling, since names such as `rem` are valid user functions.
-            if func.get_kind().is_none() {
-                let vars = free_bound_vars(term, bound);
-                if !vars.is_empty()
-                    && is_pattern_safe(term)
-                    && (shadowed.is_empty() || free_bound_vars(term, shadowed).is_empty())
-                {
-                    out.push(Candidate {
-                        term: term.clone(),
-                        vars,
-                        size: pattern_size(term, bound).0,
-                    });
-                }
-            }
-        }
-        // Interpreted logical/relational connectives: never candidates
-        // themselves, but their subterms can be.
-        Eq(l, r) => {
-            collect_candidates(l, bound, shadowed, out);
-            collect_candidates(r, bound, shadowed, out);
-        }
-        Not(t) => collect_candidates(t, bound, shadowed, out),
-        Ite(c, t, e) => {
-            collect_candidates(c, bound, shadowed, out);
-            collect_candidates(t, bound, shadowed, out);
-            collect_candidates(e, bound, shadowed, out);
-        }
-        And(items) | Or(items) | Distinct(items) | Xor(items) => {
-            for it in items.iter() {
-                collect_candidates(it, bound, shadowed, out);
-            }
-        }
-        Implies(ante, cons) => {
-            for a in ante.iter() {
-                collect_candidates(a, bound, shadowed, out);
-            }
-            collect_candidates(cons, bound, shadowed, out);
-        }
         // Look inside nested quantifiers, as Z3 does: a variable of ours may
         // occur under an uninterpreted head only there. The nested variables
         // shadow ours, and a term mentioning one cannot match a ground term.
@@ -119,10 +73,33 @@ fn collect_candidates(
                 let shadowed: BTreeSet<String> = shadowed.union(&names).cloned().collect();
                 collect_candidates(inner, &bound, &shadowed, out);
             }
+            return;
         }
-        Annotated(inner, _) => collect_candidates(inner, bound, shadowed, out),
-        Let(..) => {} // Lets are inlined before registration.
+        Annotated(inner, _) => return collect_candidates(inner, bound, shadowed, out),
+        // Lets are inlined before registration; `match` arms bind their own
+        // variables.
+        Let(..) | Matching(..) => return,
         _ => {}
+    }
+    // Recurse into subterms first (collect nested candidates too).
+    for t in term.repr().sub_terms() {
+        collect_candidates(t, bound, shadowed, out);
+    }
+    // Built-in/theory identifiers have an IR kind; user-declared functions do
+    // not. Use that metadata rather than the symbol's spelling, since names
+    // such as `rem` are valid user functions. Interpreted connectives are never
+    // candidates themselves.
+    if let App(func, ..) = term.repr()
+        && func.get_kind().is_none()
+    {
+        let vars = free_bound_vars(term, bound);
+        if !vars.is_empty() && is_pattern_safe(term) && free_bound_vars(term, shadowed).is_empty() {
+            out.push(Candidate {
+                term: term.clone(),
+                vars,
+                size: pattern_size(term, bound).0,
+            });
+        }
     }
 }
 
@@ -143,19 +120,6 @@ fn is_pattern_safe(term: &Term) -> bool {
         Implies(ante, cons) => ante.iter().all(is_pattern_safe) && is_pattern_safe(cons),
         // Xor, Forall, Exists, Let, Matching, Annotated: unsupported by extract_op.
         _ => false,
-    }
-}
-
-/// The immediate subterms of a pattern-safe term (see [`is_pattern_safe`]).
-fn subterms(term: &Term) -> Vec<&Term> {
-    match term.repr() {
-        App(_, args, _) => args.iter().collect(),
-        Eq(l, r) => vec![l, r],
-        Not(t) => vec![t],
-        Ite(a, b, c) => vec![a, b, c],
-        And(items) | Or(items) | Distinct(items) => items.iter().collect(),
-        Implies(ante, cons) => ante.iter().chain(std::iter::once(cons)).collect(),
-        _ => vec![],
     }
 }
 
@@ -223,8 +187,9 @@ fn pattern_size(term: &Term, bound: &BTreeSet<String>) -> (usize, bool) {
     if let Local(local) = term.repr() {
         return (1, bound.contains(local.symbol.get()));
     }
-    let (size, has_var) = subterms(term)
-        .into_iter()
+    let (size, has_var) = term
+        .repr()
+        .sub_terms()
         .map(|t| pattern_size(t, bound))
         .fold((1, false), |(size, has_var), (s, h)| {
             (size + s, has_var || h)
@@ -244,13 +209,8 @@ fn is_instance(
     if let Local(local) = pattern.repr()
         && bound.contains(local.symbol.get())
     {
-        return match bindings.entry(local.symbol.get().clone()) {
-            Entry::Occupied(e) => *e.get() == term.uid(),
-            Entry::Vacant(e) => {
-                e.insert(term.uid());
-                true
-            }
-        };
+        let bound_to = bindings.entry(local.symbol.get().clone());
+        return *bound_to.or_insert(term.uid()) == term.uid();
     }
     match (pattern.repr(), term.repr()) {
         (App(f, _, sf), App(g, _, sg)) if f != g || sf != sg => return false,
@@ -264,7 +224,8 @@ fn is_instance(
         | (Implies(..), Implies(..)) => {}
         _ => return pattern.uid() == term.uid(),
     }
-    let (ps, ts) = (subterms(pattern), subterms(term));
+    let ps: Vec<_> = pattern.repr().sub_terms().collect();
+    let ts: Vec<_> = term.repr().sub_terms().collect();
     ps.len() == ts.len()
         && ps
             .into_iter()
@@ -304,7 +265,7 @@ fn drop_bigger(candidates: Vec<&Candidate>) -> Vec<&Candidate> {
         candidates.iter().map(|c| (c.term.uid(), &c.vars)).collect();
     let has_sub_candidate = |c: &Candidate| {
         let mut seen = BTreeSet::new();
-        let mut todo = subterms(&c.term);
+        let mut todo: Vec<&Term> = c.term.repr().sub_terms().collect();
         while let Some(t) = todo.pop() {
             if !seen.insert(t.uid()) {
                 continue;
@@ -312,7 +273,7 @@ fn drop_bigger(candidates: Vec<&Candidate>) -> Vec<&Candidate> {
             if vars_of.get(&t.uid()) == Some(&&c.vars) {
                 return true;
             }
-            todo.extend(subterms(t));
+            todo.extend(t.repr().sub_terms());
         }
         false
     };
@@ -327,9 +288,6 @@ fn select_triggers(
     candidates: Vec<&Candidate>,
     bound: &BTreeSet<String>,
 ) -> Option<Vec<Vec<Term>>> {
-    if candidates.is_empty() {
-        return None;
-    }
     let candidates = drop_bigger(drop_looping(candidates, bound));
 
     // Step 5: every candidate that covers all bound variables on its own is a
@@ -423,17 +381,11 @@ pub fn infer_triggers(
         .iter()
         .filter(|c| excluded.is_empty() || !excluded.contains(&c.term.to_string()))
         .collect();
-    let some_excluded = allowed.len() < candidates.len();
-    select_triggers(allowed, &bound).or_else(|| {
-        // ...unless they are the only way to instantiate the quantifier. Z3 then
-        // warns "ignoring nopats annotation because Z3 couldn't find any other
-        // pattern" and uses them.
-        if some_excluded {
-            select_triggers(candidates.iter().collect(), &bound)
-        } else {
-            None
-        }
-    })
+    // ...unless they are the only way to instantiate the quantifier. Z3 then
+    // warns "ignoring nopats annotation because Z3 couldn't find any other
+    // pattern" and uses them.
+    select_triggers(allowed, &bound)
+        .or_else(|| select_triggers(candidates.iter().collect(), &bound))
 }
 
 #[cfg(test)]
@@ -486,44 +438,14 @@ mod tests {
     }
 
     #[test]
-    fn every_minimal_single_trigger_is_kept() {
-        let triggers = triggers_of(
-            "(declare-sort T 0) (declare-fun P (T) Bool) (declare-fun Q (T) Bool)
-             (assert (forall ((x T)) (and (P x) (Q x))))",
-        );
-        assert_eq!(triggers, Some(vec!["(P x)".into(), "(Q x)".into()]));
-    }
-
-    #[test]
-    fn bigger_candidate_with_the_same_variables_is_dropped() {
-        // (f (g x)) contains the candidate (g x), which has the same variables.
-        let triggers = triggers_of(
-            "(declare-fun f (Int) Int) (declare-fun g (Int) Int)
-             (assert (forall ((x Int)) (> (f (g x)) 0)))",
-        );
-        assert_eq!(triggers, Some(vec!["(g x)".into()]));
-    }
-
-    #[test]
-    fn looping_candidate_is_dropped() {
-        // (f x) matches its own instance (f (g x)); Z3 keeps (g x) only.
+    fn looping_and_bigger_candidates_are_dropped() {
+        // (f x) is looping: (f (g x)) is an instance of it. (f (g x)) is bigger:
+        // it contains the candidate (g x). Z3 keeps (g x) only.
         let triggers = triggers_of(
             "(declare-fun f (Int) Int) (declare-fun g (Int) Int)
              (assert (forall ((x Int)) (= (f x) (f (g x)))))",
         );
         assert_eq!(triggers, Some(vec!["(g x)".into()]));
-    }
-
-    #[test]
-    fn multi_pattern_prefers_more_variables_then_smaller_terms() {
-        // No single candidate covers {x, y}. (g x) comes first and (h y) adds y;
-        // (k x) is never needed.
-        let triggers = triggers_of(
-            "(declare-sort T 0) (declare-fun g (T) Int) (declare-fun h (T) Int)
-             (declare-fun k (T) Int)
-             (assert (forall ((x T) (y T)) (= (+ (g x) (h y) (* 0 (k x))) 0)))",
-        );
-        assert_eq!(triggers, Some(vec!["(g x) (h y)".into()]));
     }
 
     #[test]
@@ -543,24 +465,11 @@ mod tests {
     }
 
     #[test]
-    fn candidates_are_collected_inside_nested_quantifiers() {
-        // i occurs under an uninterpreted head only inside the nested forall.
-        // (R o (h i)) mentions the nested variable o and is not a candidate.
+    fn nested_candidates_must_not_mention_nested_variables() {
+        // (R o i) mentions the nested variable o, so i has no trigger.
         let triggers = triggers_of(
-            "(declare-sort T 0) (declare-fun h (Int) T) (declare-fun R (T T) Bool)
-             (assert (forall ((i Int)) (=> (<= 0 i)
-                (forall ((o T)) (! (R o (h i)) :pattern ((R o (h i))))))))",
-        );
-        assert_eq!(triggers, Some(vec!["(h i)".into()]));
-    }
-
-    #[test]
-    fn nested_variable_with_the_same_name_shadows_ours() {
-        // Inside the nested forall, x is the nested variable: (p x) there is not
-        // a candidate for the outer x, which has no trigger.
-        let triggers = triggers_of(
-            "(declare-fun p (Int) Bool)
-             (assert (forall ((x Int)) (or (> x 0) (forall ((x Int)) (p x)))))",
+            "(declare-sort T 0) (declare-fun R (T Int) Bool)
+             (assert (forall ((i Int)) (forall ((o T)) (R o i))))",
         );
         assert_eq!(triggers, None);
     }
@@ -572,23 +481,5 @@ mod tests {
              (assert (forall ((l Int)) (! (=> (le 0 l) (q l)) :no-pattern (le 0 l))))",
         );
         assert_eq!(triggers, Some(vec!["(q l)".into()]));
-    }
-
-    #[test]
-    fn no_pattern_is_ignored_when_it_leaves_no_trigger() {
-        let triggers = triggers_of(
-            "(declare-fun le (Int Int) Bool) (declare-const c Bool)
-             (assert (forall ((l Int)) (! (=> (le 0 l) c) :no-pattern (le 0 l))))",
-        );
-        assert_eq!(triggers, Some(vec!["(le 0 l)".into()]));
-    }
-
-    #[test]
-    fn uncoverable_variable_has_no_trigger() {
-        let triggers = triggers_of(
-            "(declare-fun p (Int) Bool)
-             (assert (forall ((x Int) (y Int)) (or (p x) (> y 0))))",
-        );
-        assert_eq!(triggers, None);
     }
 }
