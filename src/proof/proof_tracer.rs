@@ -548,7 +548,40 @@ impl SMTProofTracer {
                 keep[premises.clone()].fill(true);
             }
         }
+        self.keep_used_skolemizations(&mut keep);
         Some(keep)
+    }
+
+    /// Marks the Skolemization steps whose Skolem constants a kept literal mentions.
+    ///
+    /// The refutation can use a term with a Skolem constant (e.g. in an instance) without using
+    /// the Skolemization that introduced it. That step's `declare-skolem` line is the only
+    /// declaration of the constant, so the step must be kept anyway. Repeats until nothing
+    /// changes, since a newly kept step's literals may mention earlier Skolem constants.
+    fn keep_used_skolemizations(&self, keep: &mut [bool]) {
+        loop {
+            let mut used = HashSet::new();
+            let mut seen = HashSet::new();
+            let _ = self.visit_proof(Some(&*keep), |item| {
+                if let ProofItem::Literal(_, term) = item {
+                    collect_global_symbols(&term, &mut seen, &mut used);
+                }
+                Ok(())
+            });
+            let mut changed = false;
+            for (step, kept) in self.proof_steps.iter().zip(keep.iter_mut()) {
+                if let ProofStepType::Skolemization { skolem_vars, .. } = &step.typ
+                    && !*kept
+                    && skolem_vars.iter().any(|(name, _)| used.contains(name))
+                {
+                    *kept = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
     }
 
     /// Walks the proof in order and reports, for every step that is written, the literal
@@ -845,5 +878,41 @@ mod tests {
         assert!(declaration < child_definition);
         assert!(child_definition < skolem_step);
         assert_eq!(proof.matches("(edrat-literal 1 ").count(), 1);
+    }
+
+    #[test]
+    fn trimming_keeps_skolemizations_of_used_skolem_constants() {
+        let script = "(assert (exists ((x Int)) (> x 0)))";
+        let (mut context, assertions) = parse_assertions(script);
+        let parent = &assertions[0];
+        let (child, skolem_vars) = skolemize(parent, &mut context, true);
+        let skolem_name = skolem_vars[0].0.to_string();
+
+        let mut tracer = tracer_for(&context);
+        tracer.register_term(1, parent, true);
+        tracer.register_term(2, &child, true);
+        tracer.track_core();
+        tracer.push_step(
+            &[-1, 2],
+            ProofStepType::Skolemization {
+                parent_term: 1,
+                skolem_vars,
+            },
+        );
+        tracer.register_clause_for_cadical_callback(&[-1, 2]);
+        ProofTracer::add_original_clause(&mut tracer, 1, false, &[-1, 2], false);
+        // The refutation uses the Skolem constant in literal 2, but not the Skolemization
+        add_input_clause(&mut tracer, 2, &[2]);
+        add_input_clause(&mut tracer, 3, &[-2]);
+        ProofTracer::add_derived_clause(&mut tracer, 4, false, 0, &[], &[2, 3]);
+        ProofTracer::conclude_unsat(&mut tracer, 0, &[4]);
+
+        let proof = trimmed(&tracer);
+        let skolem_declaration = format!("(declare-skolem 1 0 {} Int)", skolem_name);
+        assert!(proof.contains(&skolem_declaration), "{proof}");
+        let declaration = proof.find(&skolem_declaration).unwrap();
+        let use_site = proof.find("(edrat-literal 2 ").unwrap();
+        assert!(declaration < use_site, "{proof}");
+        assert!(proof.contains("s -1 2 0\n"), "{proof}");
     }
 }
