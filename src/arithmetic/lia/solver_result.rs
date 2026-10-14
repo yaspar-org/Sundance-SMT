@@ -181,6 +181,63 @@ impl<T: Ord + Clone> Conflict<T> {
     // TODO: Conflict: add better reduction, e.g. quickXplain?
 }
 
+impl Conflict<BoundRef> {
+    /// Forget which side of each variable's bounds the conflict depends on.
+    pub fn vars(&self) -> Conflict<Var> {
+        self.iter().map(|b| b.var).collect()
+    }
+}
+
+/// One side of a variable's bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BoundSide {
+    /// The variable's lower bound.
+    Lower,
+    /// The variable's upper bound.
+    Upper,
+}
+
+/// A reference to the bound currently asserted on one side of a variable.
+///
+/// A [`Conflict<Var>`] only records that some bound on a variable is involved. That is enough
+/// when every variable's bounds come from a single source, but not when bounds on the same
+/// variable are asserted at several backtrack levels (as branch-and-bound does), since a caller
+/// can then no longer tell which of those bounds a conflict depends on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BoundRef {
+    /// The bounded variable.
+    pub var: Var,
+    /// Which of its bounds is meant.
+    pub side: BoundSide,
+}
+
+impl BoundRef {
+    /// The lower bound of `var`.
+    pub fn lower(var: Var) -> Self {
+        Self {
+            var,
+            side: BoundSide::Lower,
+        }
+    }
+
+    /// The upper bound of `var`.
+    pub fn upper(var: Var) -> Self {
+        Self {
+            var,
+            side: BoundSide::Upper,
+        }
+    }
+}
+
+impl fmt::Display for BoundRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.side {
+            BoundSide::Lower => write!(f, "L({})", self.var),
+            BoundSide::Upper => write!(f, "U({})", self.var),
+        }
+    }
+}
+
 impl<T: Copy + Ord> Default for Conflict<T> {
     fn default() -> Self {
         Conflict::new()

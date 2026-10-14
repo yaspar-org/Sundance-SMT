@@ -12,7 +12,7 @@ use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::solver_result::{
-    Assignment, Conflict, SolverDecision, SolverResult, SolverReturn,
+    Assignment, BoundRef, Conflict, SolverDecision, SolverResult, SolverReturn,
 };
 use crate::arithmetic::lia::stats::Stats;
 use crate::arithmetic::lia::variables::{Var, VarType};
@@ -29,8 +29,14 @@ enum NodeOutcome {
     /// short-circuits on the first one found.
     Feasible(Assignment<Var>),
     /// The subtree rooted at this node is infeasible; the [`Conflict`] is a subset of the
-    /// asserted bounds (identified by their slack variables) that explains why.
-    Pruned(Conflict<Var>),
+    /// asserted bounds that explains why.
+    ///
+    /// Each [`BoundRef`] refers to the bound on that side of the variable asserted closest to
+    /// this node: on the path from the root, every branch bound on `x` is strictly tighter than
+    /// the earlier bounds on the same side, so it is the one the LRA solver used. A node therefore
+    /// owns exactly the bound it asserts, and once it is done with its children, the bounds left
+    /// in their conflicts that name the same variable refer to bounds asserted further up.
+    Pruned(Conflict<BoundRef>),
     /// The search hit a resource limit (LRA-solve budget or maximum depth) before proving
     /// feasibility or infeasibility.
     Unknown,
@@ -45,6 +51,16 @@ enum BranchSide {
     Floor,
     /// Assert `x >= ceil(v)` as a lower bound.
     Ceil,
+}
+
+impl BranchSide {
+    /// The bound on `x` asserted by this side of the branch.
+    fn bound_ref(self, x: Var) -> BoundRef {
+        match self {
+            BranchSide::Floor => BoundRef::upper(x),
+            BranchSide::Ceil => BoundRef::lower(x),
+        }
+    }
 }
 
 /// One node of the branch-and-bound search, held on an explicit heap stack rather than the
@@ -63,8 +79,8 @@ struct BranchFrame {
     /// Which child this frame is about to explore or is currently waiting on.
     stage: Stage,
     /// The floor branch's conflict, kept while the ceil branch runs so the two can be
-    /// resolved on `x` once both branches are pruned.
-    floor_conflict: Option<Conflict<Var>>,
+    /// resolved on `x`'s branch bounds once both branches are pruned.
+    floor_conflict: Option<Conflict<BoundRef>>,
     /// LRA backtrack level to restore once the currently-awaited child completes. `None`
     /// when no bound is outstanding (the child finished without recursing, or none started).
     pending_level: Option<usize>,
@@ -77,7 +93,8 @@ enum Stage {
     ExploreFloor,
     /// Floor branch is running; its outcome is pending.
     AwaitFloor,
-    /// Floor branch was pruned by a conflict on `x`; yet to explore the ceil branch.
+    /// Floor branch was pruned by a conflict on its bound `U(x)`; yet to explore the ceil
+    /// branch.
     ExploreCeil,
     /// Ceil branch is running; its outcome is pending.
     AwaitCeil,
@@ -194,7 +211,7 @@ impl LIRASolver {
                 let outcome = self.branch_iterative(0)?;
                 Ok(self.finish(match outcome {
                     NodeOutcome::Feasible(assg) => SolverDecision::FEASIBLE(assg),
-                    NodeOutcome::Pruned(conflict) => SolverDecision::INFEASIBLE(conflict),
+                    NodeOutcome::Pruned(conflict) => SolverDecision::INFEASIBLE(conflict.vars()),
                     NodeOutcome::Unknown => SolverDecision::UNKNOWN,
                 }))
             }
@@ -211,10 +228,16 @@ impl LIRASolver {
     ///
     /// The per-node combine rules are unchanged from the recursive form:
     /// - either child feasible -> propagate it up (the search is done),
-    /// - either child pruned by a conflict not mentioning `x` -> that conflict alone proves
-    ///   this node infeasible, so the other branch is irrelevant and skipped,
-    /// - both children pruned -> resolve the two conflicts on `x` (drops `x`, unions the
-    ///   rest), yielding this node's conflict.
+    /// - either child pruned by a conflict not mentioning the bound it asserted on `x`
+    ///   (`U(x)` for floor, `L(x)` for ceil) -> that conflict alone proves this node
+    ///   infeasible, so the other branch is irrelevant and skipped,
+    /// - both children pruned -> resolve the two conflicts on the branch bounds (drop `U(x)`
+    ///   from the floor conflict and `L(x)` from the ceil conflict, union the rest), yielding
+    ///   this node's conflict.
+    ///
+    /// Conflicts are kept as sets of [`BoundRef`]s rather than variables because `x` may be
+    /// branched on again further down the same path. A conflict found below can then depend on
+    /// a bound on `x` asserted by a node above this one, which must survive the resolution here.
     ///
     /// The LRA solver is still driven incrementally with the same
     /// set_backtrack/assert/solve/backtrack discipline the recursion used: every bound
@@ -326,10 +349,15 @@ impl LIRASolver {
             }
             NodeOutcome::Unknown => Self::finish_frame(stack, child, NodeOutcome::Unknown),
             NodeOutcome::Pruned(floor_conflict) => {
-                // Optimization: a floor conflict independent of `x` proves this node infeasible on
-                // its own; the ceil branch cannot change that, so skip it.
-                if !floor_conflict.contains(&x) {
-                    debug_println!(15, 0, "lia::lira_solver: floor conflict independent of {x}");
+                // Optimization: a floor conflict independent of the floor bound proves this node
+                // infeasible on its own; the ceil branch cannot change that, so skip it.
+                let floor_bound = BranchSide::Floor.bound_ref(x);
+                if !floor_conflict.contains(&floor_bound) {
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver: floor conflict independent of {floor_bound}"
+                    );
                     Self::finish_frame(stack, child, NodeOutcome::Pruned(floor_conflict));
                 } else {
                     // Keep the floor conflict and explore the ceil branch next.
@@ -352,28 +380,35 @@ impl LIRASolver {
         let final_outcome = match outcome {
             NodeOutcome::Feasible(assg) => NodeOutcome::Feasible(assg),
             NodeOutcome::Unknown => NodeOutcome::Unknown,
-            NodeOutcome::Pruned(ceil_conflict) => {
-                if !ceil_conflict.contains(&x) {
-                    debug_println!(15, 0, "lia::lira_solver: ceil conflict independent of {x}");
+            NodeOutcome::Pruned(mut ceil_conflict) => {
+                let ceil_bound = BranchSide::Ceil.bound_ref(x);
+                if !ceil_conflict.contains(&ceil_bound) {
+                    debug_println!(
+                        15,
+                        0,
+                        "lia::lira_solver: ceil conflict independent of {ceil_bound}"
+                    );
                     NodeOutcome::Pruned(ceil_conflict)
                 } else {
-                    // Both branches are infeasible and both depend on `x`. Resolve on `x` to
-                    // obtain a conflict that no longer mentions it, proving this node
-                    // infeasible.
-                    let floor_conflict = stack[top]
+                    // Both branches are infeasible and both depend on their branch bound. Resolve
+                    // on the branch bounds to obtain a conflict that no longer mentions them,
+                    // proving this node infeasible. Any other bound on `x` in either conflict was
+                    // asserted above this node and stays.
+                    let mut floor_conflict = stack[top]
                         .floor_conflict
                         .take()
                         .expect("ceil branch completed without a saved floor conflict");
-                    let resolved = floor_conflict.resolve(x, &ceil_conflict);
+                    floor_conflict.remove(&BranchSide::Floor.bound_ref(x));
+                    ceil_conflict.remove(&ceil_bound);
+                    let resolved = floor_conflict.union(&ceil_conflict);
                     // An empty resolved would surface as `Infeasible({})`, which the propagator
                     // reads as an empty learned clause and hence unconditional (global) UNSAT.
-                    // That is only ever the case if the two branches were mutually infeasible on
-                    // `x`'s bounds *alone* with no other assertion involved. In this solver `x` is
-                    // always an original (non-slack) variable whose only direct bounds are the
-                    // integer floor/ceil asserted by branching; at a fractional node
-                    // `L(x) <= floor(v) < v < ceil(v) <= U(x)`, so neither branch can be trivially
-                    // infeasible on `x` alone, and a real relaxation conflict always drags in the
-                    // slacks that constrained `x`. The `resolved` is therefore never empty.
+                    // That is only ever the case if each branch was infeasible on its branch
+                    // bound *alone*. A single bound is always satisfiable on its own, and at a
+                    // fractional node `L(x) <= floor(v) < v < ceil(v) <= U(x)`, so neither branch
+                    // can be trivially infeasible either: a real relaxation conflict always drags
+                    // in the other bounds that constrained `x`. The `resolved` is therefore never
+                    // empty.
                     assert!(
                         !resolved.is_empty(),
                         "branch-and-bound resolved an empty conflict on {x:?}; \
@@ -478,7 +513,7 @@ impl LIRASolver {
 
         if let Some(false) = assert_res {
             // The bound directly contradicts an existing one on `x`, so the branch is
-            // infeasible without any solving. The conflict is `x`'s bound alone.
+            // infeasible without any solving. The conflict is `x`'s two bounds alone.
             debug_println!(
                 15,
                 0,
@@ -486,16 +521,19 @@ impl LIRASolver {
             );
             self.lra_solver.backtrack(level);
             return Ok(ExploreStep::Done(NodeOutcome::Pruned(
-                [x].into_iter().collect(),
+                [BoundRef::lower(x), BoundRef::upper(x)]
+                    .into_iter()
+                    .collect(),
             )));
         }
 
         // Solve the relaxation under the new bound.
-        let ret = self.lra_solver.solve()?;
+        let (ret, bound_conflict) = self.lra_solver.solve_with_bound_conflict()?;
         self.stats.combine(&ret.stats);
         match ret.decision {
-            SolverDecision::INFEASIBLE(conflict) => {
+            SolverDecision::INFEASIBLE(_) => {
                 self.lra_solver.backtrack(level);
+                let conflict = bound_conflict.expect("infeasible solve without a bound conflict");
                 Ok(ExploreStep::Done(NodeOutcome::Pruned(conflict)))
             }
             // Feasible but not necessarily integral: keep the bound live and branch deeper.
@@ -1105,5 +1143,47 @@ mod tests {
             let (_, val) = assg.iter().next().unwrap();
             assert_eq!(Rational::from(2) * val, Rational::from(3));
         }
+    }
+
+    /// Branch-and-bound branches on the same variable more than once along a path here. The
+    /// conflict of an inner branch then depends on the bound asserted by an outer branch on
+    /// that variable, which must survive the resolution at the inner node. Resolving the
+    /// variable away entirely made the search prune a subtree containing the model and report
+    /// INFEASIBLE.
+    ///
+    /// This is a linearization of the following, with `q = (div x1 3)` and `r = (div x0 3)`:
+    /// ```smt2
+    /// (assert (< (+ 4 (mod x0 3)) (+ 4 (* 2 (div x1 3)))))
+    /// (assert (not (< (+ (- 2) (* (- 3) x2) (* 2 x1)) (+ 2 (* (- 1) x1) x2))))
+    /// ```
+    /// It is satisfied by `x0 = 0, x1 = 3, x2 = 0`.
+    #[test]
+    fn regression_repeated_branch_on_same_var() {
+        let smt = r#"
+        (set-logic QF_LIA)
+        (declare-const x0 Int)
+        (declare-const x1 Int)
+        (declare-const x2 Int)
+        (declare-const q Int)
+        (declare-const r Int)
+        (assert (<= (- 3) x0))
+        (assert (<= x0 3))
+        (assert (<= (- 3) x1))
+        (assert (<= x1 3))
+        (assert (<= (- 3) x2))
+        (assert (<= x2 3))
+        (assert (<= (* 3 q) x1))
+        (assert (<= x1 (+ (* 3 q) 2)))
+        (assert (<= (* 3 r) x0))
+        (assert (<= x0 (+ (* 3 r) 2)))
+        (assert (< (- x0 (* 3 r)) (* 2 q)))
+        (assert (>= (- (* 3 x1) (* 4 x2)) 4))
+        (check-sat)
+        "#;
+        let result = solve_smtlib(smt, &SolverConfig::default()).expect("solver failed");
+        assert!(
+            matches!(result, SolverDecisionApi::FEASIBLE(_)),
+            "{result:?}"
+        );
     }
 }

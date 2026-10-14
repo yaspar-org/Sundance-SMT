@@ -1139,5 +1139,7 @@
   "arithmetic_lia_rounding/rounding_f1622.smt2": "unsat",
   "arithmetic_lia_rounding/rounding_f1690.smt2": "unsat",
   "arithmetic_lia_rounding/rounding_f1891.smt2": "unsat",
-  "arithmetic_lia_rounding/rounding_f1894.smt2": "unsat"
+  "arithmetic_lia_rounding/rounding_f1894.smt2": "unsat",
+  "arithmetic/bnb_repeated_branch_sat_1.smt2": "sat",
+  "arithmetic/bnb_repeated_branch_sat_2.smt2": "sat"
 }
