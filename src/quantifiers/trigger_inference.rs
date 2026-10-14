@@ -11,7 +11,9 @@
 //!      **uninterpreted** function/predicate and that contain at least one bound
 //!      variable. Interpreted symbols (`=`, `and`, `+`, `<`, `ite`, …) are never
 //!      admissible pattern heads — the theory solvers already reason about them,
-//!      and e-matching on them explodes.
+//!      and e-matching on them explodes. Like Z3, collection descends into
+//!      nested quantifiers; a candidate found there must not mention the nested
+//!      quantifier's own variables.
 //!   2. If any candidates jointly with the *fewest* function symbols cover all
 //!      bound variables on their own, emit them as **single-term triggers**
 //!      (preferring shallow/minimal terms).
@@ -38,24 +40,34 @@ struct Candidate {
 /// Recursively collect candidate trigger subterms of `term` (the quantifier
 /// body at the top-level call).
 ///
-/// `bound` is the set of bound-variable names of the quantifier. A subterm is a
-/// candidate iff it is an application with an uninterpreted head, contains at
-/// least one bound variable, and is safe to compile as a pattern (see
+/// `bound` holds the names of the quantifier's bound variables that are in
+/// scope, and `shadowed` the names bound by the nested quantifiers on the way
+/// down. A subterm is a candidate iff it is an application with an
+/// uninterpreted head, contains at least one variable of `bound`, contains no
+/// variable of `shadowed`, and is safe to compile as a pattern (see
 /// [`is_pattern_safe`]). We collect candidates from every level so that step
 /// 2/3 can prefer the shallowest covering terms.
-fn collect_candidates(term: &Term, bound: &BTreeSet<String>, out: &mut Vec<Candidate>) {
+fn collect_candidates(
+    term: &Term,
+    bound: &BTreeSet<String>,
+    shadowed: &BTreeSet<String>,
+    out: &mut Vec<Candidate>,
+) {
     match term.repr() {
         App(func, args, _) => {
             // Recurse into arguments first (collect nested candidates too).
             for a in args.iter() {
-                collect_candidates(a, bound, out);
+                collect_candidates(a, bound, shadowed, out);
             }
             // Built-in/theory identifiers have an IR kind; user-declared
             // functions do not. Use that metadata rather than the symbol's
             // spelling, since names such as `rem` are valid user functions.
             if func.get_kind().is_none() {
                 let vars = free_bound_vars(term, bound);
-                if !vars.is_empty() && is_pattern_safe(term) {
+                if !vars.is_empty()
+                    && is_pattern_safe(term)
+                    && (shadowed.is_empty() || free_bound_vars(term, shadowed).is_empty())
+                {
                     out.push(Candidate {
                         term: term.clone(),
                         vars,
@@ -67,30 +79,38 @@ fn collect_candidates(term: &Term, bound: &BTreeSet<String>, out: &mut Vec<Candi
         // Interpreted logical/relational connectives: never candidates
         // themselves, but their subterms can be.
         Eq(l, r) => {
-            collect_candidates(l, bound, out);
-            collect_candidates(r, bound, out);
+            collect_candidates(l, bound, shadowed, out);
+            collect_candidates(r, bound, shadowed, out);
         }
-        Not(t) => collect_candidates(t, bound, out),
+        Not(t) => collect_candidates(t, bound, shadowed, out),
         Ite(c, t, e) => {
-            collect_candidates(c, bound, out);
-            collect_candidates(t, bound, out);
-            collect_candidates(e, bound, out);
+            collect_candidates(c, bound, shadowed, out);
+            collect_candidates(t, bound, shadowed, out);
+            collect_candidates(e, bound, shadowed, out);
         }
         And(items) | Or(items) | Distinct(items) | Xor(items) => {
             for it in items.iter() {
-                collect_candidates(it, bound, out);
+                collect_candidates(it, bound, shadowed, out);
             }
         }
         Implies(ante, cons) => {
             for a in ante.iter() {
-                collect_candidates(a, bound, out);
+                collect_candidates(a, bound, shadowed, out);
             }
-            collect_candidates(cons, bound, out);
+            collect_candidates(cons, bound, shadowed, out);
         }
-        // Do not descend into nested quantifiers: their bound variables shadow
-        // ours and their triggers are handled when they are registered.
-        Forall(..) | Exists(..) => {}
-        Annotated(inner, _) => collect_candidates(inner, bound, out),
+        // Look inside nested quantifiers, as Z3 does: a variable of ours may
+        // occur under an uninterpreted head only there. The nested variables
+        // shadow ours, and a term mentioning one cannot match a ground term.
+        Forall(vars, inner) | Exists(vars, inner) => {
+            let names: BTreeSet<String> = vars.iter().map(|v| v.0.get().clone()).collect();
+            let bound: BTreeSet<String> = bound.difference(&names).cloned().collect();
+            if !bound.is_empty() {
+                let shadowed: BTreeSet<String> = shadowed.union(&names).cloned().collect();
+                collect_candidates(inner, &bound, &shadowed, out);
+            }
+        }
+        Annotated(inner, _) => collect_candidates(inner, bound, shadowed, out),
         Let(..) => {} // Lets are inlined before registration.
         _ => {}
     }
@@ -200,7 +220,7 @@ pub fn infer_triggers(
     }
 
     let mut candidates: Vec<Candidate> = Vec::new();
-    collect_candidates(body, &bound, &mut candidates);
+    collect_candidates(body, &bound, &BTreeSet::new(), &mut candidates);
 
     // Drop `:no-pattern` terms: they are explicitly forbidden as triggers.
     if !excluded.is_empty() {
@@ -276,4 +296,86 @@ pub fn infer_triggers(
             .map(|candidate| candidate.term.clone())
             .collect(),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yaspar_ir::ast::{Context, Typecheck, alg};
+    use yaspar_ir::untyped::UntypedAst;
+
+    /// Parse `script`, take its last assertion (a quantifier), and return the
+    /// printed triggers inferred for it, one string per multi-pattern.
+    fn triggers_of(script: &str) -> Option<Vec<String>> {
+        let commands = UntypedAst.parse_script_str(script).expect("parse failed");
+        let mut context = Context::new();
+        let typed = commands.type_check(&mut context).expect("typecheck failed");
+        let quantifier = typed
+            .iter()
+            .rev()
+            .find_map(|c| match c.repr() {
+                alg::Command::Assert(t) => Some(t.clone()),
+                _ => None,
+            })
+            .expect("no assertion");
+        let (Forall(vars, body) | Exists(vars, body)) = quantifier.repr() else {
+            panic!("last assertion is not a quantifier: {quantifier}");
+        };
+        let (body, excluded) = match body.repr() {
+            Annotated(inner, attrs) => (
+                inner.clone(),
+                attrs
+                    .iter()
+                    .filter_map(|a| match a {
+                        yaspar_ir::ast::Attribute::NoPattern(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => (body.clone(), vec![]),
+        };
+        let names: Vec<String> = vars.iter().map(|v| v.0.get().clone()).collect();
+        infer_triggers(&body, &names, &excluded).map(|mps| {
+            mps.iter()
+                .map(|mp| {
+                    mp.iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn candidates_are_collected_inside_nested_quantifiers() {
+        // i occurs under an uninterpreted head only inside the nested forall.
+        // (R o (h i)) mentions the nested variable o and is not a candidate.
+        let triggers = triggers_of(
+            "(declare-sort T 0) (declare-fun h (Int) T) (declare-fun R (T T) Bool)
+             (assert (forall ((i Int)) (=> (<= 0 i)
+                (forall ((o T)) (! (R o (h i)) :pattern ((R o (h i))))))))",
+        );
+        assert_eq!(triggers, Some(vec!["(h i)".into()]));
+    }
+
+    #[test]
+    fn nested_variable_with_the_same_name_shadows_ours() {
+        // Inside the nested forall, x is the nested variable: (p x) there is not
+        // a candidate for the outer x, which has no trigger.
+        let triggers = triggers_of(
+            "(declare-fun p (Int) Bool)
+             (assert (forall ((x Int)) (or (> x 0) (forall ((x Int)) (p x)))))",
+        );
+        assert_eq!(triggers, None);
+    }
+
+    #[test]
+    fn uncoverable_variable_has_no_trigger() {
+        let triggers = triggers_of(
+            "(declare-fun p (Int) Bool)
+             (assert (forall ((x Int) (y Int)) (or (p x) (> y 0))))",
+        );
+        assert_eq!(triggers, None);
+    }
 }
