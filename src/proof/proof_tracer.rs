@@ -4,6 +4,7 @@
 //! Keeps track of the eDRAT proof
 //!
 use crate::debug_println;
+use crate::proof::let_sharing::LetSharer;
 use crate::proof::{ProofStep, ProofStepType, Theory};
 use core::panic;
 use std::cmp::Eq;
@@ -12,7 +13,9 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::io::{self, Write};
 use std::ops::{Neg, Range};
-use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, Sort, SortDef, Str, SymbolQuote, Term};
+use yaspar_ir::ast::{
+    ATerm::*, Context, FunctionMeta, Repr, Sig, Sort, SortDef, Str, SymbolQuote, Term,
+};
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
 /// to generate an eDRAT proof.
@@ -613,7 +616,15 @@ impl SMTProofTracer {
     /// With `trim`, and when the solver tracked a core (see [`SMTProofTracer::track_core`]), only
     /// the steps the refutation depends on are written, together with the literals and the
     /// function declarations they use. Otherwise every step is written.
-    pub fn write_edrat(&self, out: &mut impl Write, trim: bool) -> io::Result<()> {
+    ///
+    /// With `share_terms`, the context the terms live in, literal terms are printed with `let`
+    /// bindings for their repeated subterms (see [`LetSharer`]).
+    pub fn write_edrat(
+        &self,
+        out: &mut impl Write,
+        trim: bool,
+        share_terms: Option<&mut Context>,
+    ) -> io::Result<()> {
         let keep = if trim { self.core_steps() } else { None };
 
         // A trimmed proof only declares the functions its literal terms mention
@@ -638,8 +649,14 @@ impl SMTProofTracer {
             format_function_declarations(&self.symbol_table, used_symbols.as_ref()).as_bytes(),
         )?;
 
+        let mut sharer = share_terms.map(LetSharer::new);
         self.visit_proof(keep.as_deref(), |item| match item {
-            ProofItem::Literal(lit, term) => writeln!(out, "(edrat-literal {lit} {term})"),
+            ProofItem::Literal(lit, mut term) => {
+                if let Some(sharer) = &mut sharer {
+                    term = sharer.share(&term);
+                }
+                writeln!(out, "(edrat-literal {lit} {term})")
+            }
             ProofItem::Skolem(parent, i, var) => {
                 writeln!(out, "(declare-skolem {} {} {} {})", parent, i, var.0, var.1)
             }
@@ -651,7 +668,7 @@ impl SMTProofTracer {
     #[cfg(test)]
     pub(crate) fn generate_edrat(&self) -> String {
         let mut out = Vec::new();
-        self.write_edrat(&mut out, false)
+        self.write_edrat(&mut out, false, None)
             .expect("writing to a Vec cannot fail");
         String::from_utf8(out).expect("eDRAT proofs are UTF-8")
     }
@@ -731,7 +748,7 @@ mod tests {
 
     fn trimmed(tracer: &SMTProofTracer) -> String {
         let mut out = Vec::new();
-        tracer.write_edrat(&mut out, true).unwrap();
+        tracer.write_edrat(&mut out, true, None).unwrap();
         String::from_utf8(out).unwrap()
     }
 
