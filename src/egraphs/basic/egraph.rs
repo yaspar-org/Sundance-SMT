@@ -5,14 +5,18 @@ use super::datastructures::{CanonicalOp, DisequalTerm, Predecessor};
 use super::proofforest::*;
 use super::repr::{Children, Op, Pattern, PatternId, TermEntry, TermSlot};
 use crate::debug_println;
-use crate::egraphs::traits::{Conflict, EgraphResult, EgraphTrait, Lit};
+use crate::egraphs::traits::{Conflict, EMatching, EgraphResult, EgraphTrait, Lit};
 use crate::log::is_important;
 use crate::utils::{
     DeterministicHashMap, DeterministicHashSet, FastDeterministicHashMap, FastDeterministicHashSet,
 };
+use std::cell::RefCell;
 use std::default::Default;
 use std::fmt;
 use yaspar_ir::ast::Local;
+
+mod indexed;
+use indexed::MatchIndex;
 
 /// Key for the signature table: (operator, canonical children).
 type SigKey = (CanonicalOp, Children);
@@ -241,6 +245,14 @@ pub struct Egraph {
     /// congruence-derived unions where either root was arithmetic-tagged.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Strategy used by `match_triggers`.
+    ematching: EMatching,
+    /// Lazily built lookup tables for [`EMatching::Indexed`]. They describe the
+    /// current terms and classes, so every function that writes a term or a
+    /// proof-forest edge (`register_term_internal`, `register_opaque_term`,
+    /// `make_root`, `proof_forest_backtrack`), and `compile_pattern`, marks
+    /// them stale (see [`MatchIndex::invalidate`]).
+    match_index: RefCell<MatchIndex>,
     /// Accumulated egraph statistics.
     pub(crate) stats: EgraphStats,
 }
@@ -292,6 +304,8 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
+            ematching: EMatching::default(),
+            match_index: RefCell::new(MatchIndex::default()),
             stats: EgraphStats::default(),
         }
     }
@@ -332,6 +346,7 @@ impl Egraph {
     /// existing congruent term (needed for quantifier instantiation and datatype axioms).
     /// Returns true if the term was already registered.
     fn register_term_internal(&mut self, id: u32, op: Op, children: &[u32], dynamic: bool) -> bool {
+        self.match_index.get_mut().invalidate();
         self.ensure_capacity(id);
 
         // Check if already inserted
@@ -446,6 +461,7 @@ impl Egraph {
     /// but no op/children/function_maps/predecessors. Used for quantifier terms
     /// that participate in union-find (merged with true/false) but not congruence.
     fn register_opaque_term(&mut self) -> u32 {
+        self.match_index.get_mut().invalidate();
         let id = self.next_id;
         self.next_id += 1;
         self.ensure_capacity(id);
@@ -1073,6 +1089,7 @@ impl Egraph {
         y: u32,
         y_parent: ProofForestEdge,
     ) {
+        self.match_index.get_mut().invalidate();
         let child = &equality.get_child();
         let child_edge = self.proof_forest[*child as usize].clone();
         let parent = &equality.get_parent();
@@ -1468,6 +1485,7 @@ impl Egraph {
 
     /// Make vertex the root of its proof-forest tree.
     fn make_root(&mut self, vertex: u32, proof_parent: ProofForestEdge) {
+        self.match_index.get_mut().invalidate();
         debug_println!(
             16,
             0,
@@ -1771,6 +1789,8 @@ impl EgraphTrait for Egraph {
     }
 
     fn compile_pattern(&mut self, pattern: Pattern) -> PatternId {
+        // The index caches per-pattern results by address, which a push may move.
+        self.match_index.get_mut().invalidate();
         let id = self.compiled_patterns.len();
         self.compiled_patterns.push(pattern);
         id
@@ -1851,12 +1871,21 @@ impl EgraphTrait for Egraph {
         self.find(t1) == self.find(t2)
     }
 
+    fn set_ematching(&mut self, mode: EMatching) {
+        self.ematching = mode;
+    }
+
     fn match_triggers(
         &mut self,
         trigger_term_pairs: Vec<(PatternId, Option<Self::TermId>)>,
     ) -> Vec<DeterministicHashMap<Local, u32>> {
-        let mut assignment = DeterministicHashMap::default();
-        self.match_patterns(&mut assignment, &trigger_term_pairs)
+        match self.ematching {
+            EMatching::TopDown => {
+                let mut assignment = DeterministicHashMap::default();
+                self.match_patterns(&mut assignment, &trigger_term_pairs)
+            }
+            EMatching::Indexed => self.match_triggers_indexed(&trigger_term_pairs),
+        }
     }
 
     fn backtrack_to(&mut self, level: usize) {

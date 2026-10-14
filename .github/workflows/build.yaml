@@ -46,19 +46,28 @@ jobs:
           ./.github/copyright-check.sh benches
 
   test:
-    name: Test Suite (${{ matrix.arithmetic }}, ${{ matrix.sat_backend }}, ${{ matrix.os }})
+    name: Test Suite (${{ matrix.arithmetic }}, ${{ matrix.sat_backend }}, ${{ matrix.ematching }}, ${{ matrix.os }})
     strategy:
       matrix:
         os: [ ubuntu-latest, macos-latest ]
         arithmetic: [ internal, internalincremental, z3, z3incremental ]
         sat_backend: [ cadical ]
+        ematching: [ top-down ]
         include:
           - os: ubuntu-latest
             arithmetic: internal
             sat_backend: minisat
+            ematching: top-down
           - os: macos-latest
             arithmetic: internal
             sat_backend: minisat
+            ematching: top-down
+          # The indexed matcher must find the same instances as the default one;
+          # run the corpus with it on the default arithmetic backend.
+          - os: ubuntu-latest
+            arithmetic: z3incremental
+            sat_backend: cadical
+            ematching: indexed
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -88,6 +97,7 @@ jobs:
         env:
           SUNDANCE_ARITHMETIC: ${{ matrix.arithmetic }}
           SUNDANCE_SAT_BACKEND: ${{ matrix.sat_backend }}
+          SUNDANCE_EMATCHING: ${{ matrix.ematching }}
         run: cargo test --release --no-default-features --features local-z3,minisat -- --nocapture
 
   lints:

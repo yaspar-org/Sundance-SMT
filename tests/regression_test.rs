@@ -95,6 +95,10 @@ fn regression_test() {
             let arithmetic = env::var("SUNDANCE_ARITHMETIC").ok();
             // Optional SAT backend override (`cadical` or `minisat`)
             let sat_backend = env::var("SUNDANCE_SAT_BACKEND").ok();
+            // Optional e-matching override (`top-down` or `indexed`)
+            let ematching = env::var("SUNDANCE_EMATCHING")
+                .ok()
+                .filter(|e| !e.is_empty());
 
             // Run solver with timeout
             let mut cmd = Command::new("target/release/sundance-smt");
@@ -104,6 +108,9 @@ fn regression_test() {
             }
             if let Some(ref b) = sat_backend {
                 cmd.arg("--sat-backend").arg(b);
+            }
+            if let Some(ref e) = ematching {
+                cmd.arg("--ematching").arg(e);
             }
             // Trigger inference is off by default on the CLI; enable it for the
             // regression corpus so untriggered `forall`s are handled rather than

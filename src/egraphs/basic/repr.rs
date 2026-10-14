@@ -37,6 +37,22 @@ pub enum Op {
 }
 
 impl Op {
+    /// The string key used in function_maps, borrowed (see [`Op::to_function_map_key`]).
+    pub fn function_map_key(&self) -> &str {
+        match self {
+            Op::App(s) => s,
+            Op::Eq => "=",
+            Op::Ite => "ite",
+            Op::Not => "not",
+            Op::And => "and",
+            Op::Or => "or",
+            Op::Implies => "=>",
+            Op::Distinct => "distinct",
+            Op::Local(_) => "",
+            Op::Constant(s) => s,
+        }
+    }
+
     /// Convert to the string key used in function_maps.
     pub fn to_function_map_key(&self) -> String {
         match self {
