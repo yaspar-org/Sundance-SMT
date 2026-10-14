@@ -1,0 +1,17 @@
+; main answered sat: a level-0 disequality was replaced by a deeper duplicate over the
+; same classes and lost when that level was popped (found by differential fuzzing).
+(set-logic QF_UFLIA)
+(declare-const c0 Int)
+(declare-const c1 Int)
+(declare-fun f (Int) Int)
+(declare-fun q (Int) Bool)
+(declare-const p0 Bool)
+(assert (not (= (f (f c1)) c1)))
+(assert (or (= (f (f c0)) c0) (= c1 (f c1)) p0))
+(assert (or (= c1 (f (f c1))) (= c1 c0)))
+(assert (or (not (= (f (f c1)) (f (f c0)))) (= (f (f c1)) c1) (= (f c0) c1)))
+(assert (or (= c0 c1) (= (f (f c0)) c0) (= c0 c1)))
+(assert (or (= (f (f c0)) (f c1)) (not p0) (q (f (f c0)))))
+(assert (or (not (< (f c0) (+ (f c0) (- 1)))) (not p0) (not (= (f (f c1)) (f c0)))))
+(assert (or (= (f c1) (f (f c0))) (not (= (f (f c0)) (f (f c1)))) (not (q (f (f c0))))))
+(check-sat)
