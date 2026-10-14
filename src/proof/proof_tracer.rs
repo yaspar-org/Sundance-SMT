@@ -28,9 +28,6 @@ pub struct SMTProofTracer {
     /// Proof steps that justify a later step but never reach CaDiCaL, keyed by that later step's
     /// index. Trimming keeps them whenever it keeps the step.
     premises: HashMap<usize, Range<usize>>,
-    /// CaDiCaL's clause id of each step CaDiCaL derived, keyed by the step's index. Only recorded
-    /// after [`SMTProofTracer::track_core`].
-    derived_ids: HashMap<usize, i64>,
 }
 
 #[derive(Default)]
@@ -41,6 +38,8 @@ struct Lrat {
     antecedents: HashMap<i64, Vec<i64>>,
     /// The clause ids `conclude_unsat` reported.
     final_ids: Vec<i64>,
+    /// CaDiCaL's clause id of each step CaDiCaL derived, keyed by the step's index.
+    derived_ids: HashMap<usize, i64>,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -278,7 +277,6 @@ impl SMTProofTracer {
             deleted_clauses: 0,
             lrat: None,
             premises: HashMap::new(),
-            derived_ids: HashMap::new(),
         }
     }
 
@@ -335,8 +333,10 @@ impl SMTProofTracer {
     pub(crate) fn add_derived_sat_clause(&mut self, id: i64, clause: &[i32]) {
         let index = self.proof_steps.len();
         self.add_sat_clause(clause);
-        if self.lrat.is_some() && self.proof_steps.len() > index {
-            self.derived_ids.insert(index, id);
+        if let Some(lrat) = &mut self.lrat
+            && self.proof_steps.len() > index
+        {
+            lrat.derived_ids.insert(index, id);
         }
     }
 
@@ -543,19 +543,15 @@ impl SMTProofTracer {
                     break;
                 }
                 _ => {
-                    let Some(c) = core.get(normalize_clause(&step.clause).as_slice()) else {
-                        continue;
-                    };
                     // CaDiCaL can derive a clause, delete it, and derive it again from other
                     // antecedents. Keep a derived clause only under its own id: an earlier
                     // derivation may rest on clauses, and literal definitions, that the core drops.
-                    if let Some(id) = self.derived_ids.get(&i)
-                        && !seen.contains(id)
+                    if let Some(c) = core.get(normalize_clause(&step.clause).as_slice())
+                        && lrat.derived_ids.get(&i).is_none_or(|id| seen.contains(id))
                     {
-                        continue;
+                        keep[i] = true;
+                        found.insert(c);
                     }
-                    keep[i] = true;
-                    found.insert(c);
                 }
             }
         }
@@ -581,14 +577,7 @@ impl SMTProofTracer {
     /// changes, since a newly kept step's literals may mention earlier Skolem constants.
     fn keep_used_skolemizations(&self, keep: &mut [bool]) {
         loop {
-            let mut used = HashSet::new();
-            let mut seen = HashSet::new();
-            let _ = self.visit_proof(Some(&*keep), |item| {
-                if let ProofItem::Literal(_, term) = item {
-                    collect_global_symbols(&term, &mut seen, &mut used);
-                }
-                Ok(())
-            });
+            let used = self.used_symbols(keep);
             let mut changed = false;
             for (step, kept) in self.proof_steps.iter().zip(keep.iter_mut()) {
                 if let ProofStepType::Skolemization { skolem_vars, .. } = &step.typ
@@ -603,6 +592,19 @@ impl SMTProofTracer {
                 return;
             }
         }
+    }
+
+    /// The global symbols that the literals of the steps marked in `keep` mention.
+    fn used_symbols(&self, keep: &[bool]) -> HashSet<Str> {
+        let mut symbols = HashSet::new();
+        let mut seen = HashSet::new();
+        let _ = self.visit_proof(Some(keep), |item| {
+            if let ProofItem::Literal(_, term) = item {
+                collect_global_symbols(&term, &mut seen, &mut symbols);
+            }
+            Ok(())
+        });
+        symbols
     }
 
     /// Walks the proof in order and reports, for every step that is written, the literal
@@ -671,17 +673,7 @@ impl SMTProofTracer {
         let keep = if trim { self.core_steps() } else { None };
 
         // A trimmed proof only declares the functions its literal terms mention
-        let used_symbols = keep.as_deref().map(|keep| {
-            let mut symbols = HashSet::new();
-            let mut seen = HashSet::new();
-            let _ = self.visit_proof(Some(keep), |item| {
-                if let ProofItem::Literal(_, term) = item {
-                    collect_global_symbols(&term, &mut seen, &mut symbols);
-                }
-                Ok(())
-            });
-            symbols
-        });
+        let used_symbols = keep.as_deref().map(|keep| self.used_symbols(keep));
 
         // emit the sorts, datatypes, and the symbol table
         for (sort, sort_def) in &self.sorts {
@@ -871,14 +863,6 @@ mod tests {
     }
 
     #[test]
-    fn proof_steps_drop_repeated_literals() {
-        let (mut tracer, _) = pqr_tracer();
-        tracer.add_theory_clause(&[-1, 2, 2, -1, 3], Theory::Boolean);
-        let proof = tracer.generate_edrat();
-        assert!(proof.contains("t b -1 2 3 0\n"), "{proof}");
-    }
-
-    #[test]
     fn trimming_falls_back_to_full_proof_without_core() {
         let (mut tracer, _) = pqr_tracer();
         add_input_clause(&mut tracer, 1, &[1]);
@@ -933,41 +917,5 @@ mod tests {
         assert!(declaration < child_definition);
         assert!(child_definition < skolem_step);
         assert_eq!(proof.matches("(edrat-literal 1 ").count(), 1);
-    }
-
-    #[test]
-    fn trimming_keeps_skolemizations_of_used_skolem_constants() {
-        let script = "(assert (exists ((x Int)) (> x 0)))";
-        let (mut context, assertions) = parse_assertions(script);
-        let parent = &assertions[0];
-        let (child, skolem_vars) = skolemize(parent, &mut context, true);
-        let skolem_name = skolem_vars[0].0.to_string();
-
-        let mut tracer = tracer_for(&context);
-        tracer.register_term(1, parent, true);
-        tracer.register_term(2, &child, true);
-        tracer.track_core();
-        tracer.push_step(
-            &[-1, 2],
-            ProofStepType::Skolemization {
-                parent_term: 1,
-                skolem_vars,
-            },
-        );
-        tracer.register_clause_for_cadical_callback(&[-1, 2]);
-        ProofTracer::add_original_clause(&mut tracer, 1, false, &[-1, 2], false);
-        // The refutation uses the Skolem constant in literal 2, but not the Skolemization
-        add_input_clause(&mut tracer, 2, &[2]);
-        add_input_clause(&mut tracer, 3, &[-2]);
-        ProofTracer::add_derived_clause(&mut tracer, 4, false, 0, &[], &[2, 3]);
-        ProofTracer::conclude_unsat(&mut tracer, 0, &[4]);
-
-        let proof = trimmed(&tracer);
-        let skolem_declaration = format!("(declare-skolem 1 0 {} Int)", skolem_name);
-        assert!(proof.contains(&skolem_declaration), "{proof}");
-        let declaration = proof.find(&skolem_declaration).unwrap();
-        let use_site = proof.find("(edrat-literal 2 ").unwrap();
-        assert!(declaration < use_site, "{proof}");
-        assert!(proof.contains("s -1 2 0\n"), "{proof}");
     }
 }

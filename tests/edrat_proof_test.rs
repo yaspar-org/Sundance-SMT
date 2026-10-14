@@ -38,15 +38,9 @@ fn trimmed_proof(smt_file: &Path) -> String {
 }
 
 /// The Skolem constants mentioned in `line`.
-fn skolem_constants(line: &str) -> Vec<&str> {
-    line.match_indices(SKOLEM_PREFIX)
-        .map(|(start, _)| {
-            let digits = line[start + SKOLEM_PREFIX.len()..]
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(line.len() - start - SKOLEM_PREFIX.len());
-            &line[start..start + SKOLEM_PREFIX.len() + digits]
-        })
-        .collect()
+fn skolem_constants(line: &str) -> impl Iterator<Item = &str> {
+    line.split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .filter(|token| token.starts_with(SKOLEM_PREFIX))
 }
 
 /// Panics with the offending line if `proof` is not well-formed.
