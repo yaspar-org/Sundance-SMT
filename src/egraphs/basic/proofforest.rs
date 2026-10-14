@@ -3,6 +3,7 @@
 
 //! datastructures for proof forest inside of the egraph
 use super::datastructures::DisequalTerm;
+use super::egraph::valid_hash;
 use crate::debug_println;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use std::fmt;
@@ -306,9 +307,14 @@ impl ProofForestEdge {
             ProofForestEdge::Congruence { disequalities, .. } => disequalities,
         };
         // will only insert a disequality if is not already in the map
-        // or if the hash is outdated (i.e. we have already backtracked on this disequality)
+        // or if the hash is outdated (i.e. we have already backtracked on this disequality).
+        // Use the same validity test as everywhere else (`valid_hash`): an entry recorded
+        // after a backtrack to a level above its own carries a hash *greater* than
+        // `hash_level_map[level]` and is still in force. Treating it as outdated would
+        // replace it with this (higher-level) disequality, and backtracking past that
+        // level would then leave the class with no record of the still-asserted one.
         if let Some(disequality) = disequalities.get(&key) {
-            if disequality.hash != hash_level_map[disequality.level] && disequality.hash != 0 {
+            if !valid_hash(disequality.hash, disequality.level, hash_level_map) {
                 debug_println!(
                     5,
                     0,
@@ -330,5 +336,56 @@ impl ProofForestEdge {
             // should only insert if there is not a value for key
             disequalities.insert(key, t);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diseq(diseq_lit: i32, level: usize, hash: u32) -> DisequalTerm {
+        DisequalTerm {
+            term: 7,
+            level,
+            diseq_lit,
+            hash,
+            original_disequality: (3, 7),
+        }
+    }
+
+    fn root() -> ProofForestEdge {
+        ProofForestEdge::Root {
+            size: 1,
+            child: 0,
+            disequalities: DeterministicHashMap::new(),
+            children: DeterministicHashSet::new(),
+            arithmetic: false,
+        }
+    }
+
+    /// A disequality recorded at level 2 after the solver had already backtracked
+    /// (so its hash, 5, is newer than level 2's invalidation stamp, 4) is still in
+    /// force. Adding a second disequality between the same classes at level 3 must
+    /// keep it: otherwise backtracking to level 2 drops the only record of a
+    /// disequality that is still asserted.
+    #[test]
+    fn add_disequality_keeps_valid_lower_level_entry() {
+        // predecessor_level stamps per level: level 2 was last invalidated at hash 4.
+        let stamps = [0, 0, 4, 4];
+        let mut edge = root();
+        edge.add_disequality(7, diseq(-10, 2, 5), &stamps);
+        edge.add_disequality(7, diseq(-11, 3, 5), &stamps);
+        assert_eq!(edge.disequalities()[&7].diseq_lit, -10);
+    }
+
+    /// An entry whose level was backtracked over (hash older than the stamp) is
+    /// replaced.
+    #[test]
+    fn add_disequality_replaces_outdated_entry() {
+        let stamps = [0, 0, 6, 6];
+        let mut edge = root();
+        edge.add_disequality(7, diseq(-10, 2, 5), &stamps);
+        edge.add_disequality(7, diseq(-11, 2, 6), &stamps);
+        assert_eq!(edge.disequalities()[&7].diseq_lit, -11);
     }
 }
