@@ -93,10 +93,20 @@ impl<'a> LetSharer<'a> {
                 .iter()
                 .fold(1u64, |acc, c| acc.saturating_add(size[&c.uid()]));
             let level = children.iter().map(|c| depth[&c.uid()]).max().unwrap_or(0);
-            let shared = t.uid() != root.uid() && refs[&t.uid()] > 1 && s >= MIN_SHARED_SIZE;
+            let shared = t.uid() != root.uid() && s >= MIN_SHARED_SIZE && refs[&t.uid()] > 1;
             size.insert(t.uid(), s);
             depth.insert(t.uid(), level + usize::from(shared));
-            let mut rebuilt = self.rebuild(t, &uses);
+            // A term is rebuilt only when one of its children changed, or when it is a binder,
+            // whose body is a region of its own
+            let changed = matches!(
+                t.repr(),
+                ATerm::Exists(..) | ATerm::Forall(..) | ATerm::Matching(..)
+            ) || children.iter().any(|c| uses[&c.uid()].uid() != c.uid());
+            let mut rebuilt = if changed {
+                self.rebuild(t, &uses)
+            } else {
+                t.clone()
+            };
             if shared {
                 let sort = t.get_sort(self.context);
                 let id = self.context.arena().new_local();

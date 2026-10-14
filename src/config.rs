@@ -23,10 +23,6 @@ pub struct Args {
     /// Dump the eDRAT proof forest at termination for any result; complete on unsat, else a prefix. Mutually exclusive with --proof
     #[arg(long, conflicts_with = "proof")]
     pub partial_proof: Option<PathBuf>,
-    /// Print the terms of a --proof with `let` bindings for repeated subterms. Proofs can be much
-    /// smaller; the checker must expand `let`
-    #[arg(long, default_value_t = false, requires = "proof")]
-    pub proof_share_terms: bool,
     /// Log each refuted propositional model to this file. Line-tagged format, streamed as the search runs: `t <signed lits>` per refuted model, then `m <var> <atom>` map lines appended at the end
     #[arg(long)]
     pub trail_out: Option<PathBuf>,
