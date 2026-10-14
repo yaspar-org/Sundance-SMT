@@ -6,12 +6,10 @@
 use crate::debug_println;
 use crate::proof::{ProofStep, ProofStepType, Theory};
 use core::panic;
-use std::cmp::Eq;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::io::{self, Write};
-use std::ops::{Neg, Range};
+use std::ops::Range;
 use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, Sort, SortDef, Str, SymbolQuote, Term};
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
@@ -57,21 +55,20 @@ fn polarize_term(term: &Term, polarity: bool) -> Term {
     }
 }
 
-/// Returns true if the clause contains a literal and its negation (i.e., both `x` and `-x`).
-/// Written for generic iterators, since clauses in this file are both `Vec`s and `&[i32]` arrays.
-fn is_tautology<'a, I, T>(clause: I) -> bool
-where
-    I: IntoIterator<Item = &'a T>,
-    T: 'a + Copy + Eq + Hash + Neg<Output = T>,
-{
-    let mut seen = HashSet::new();
+/// Returns `clause` without repeated literals, keeping the first occurrence of each, or `None`
+/// if the clause contains a literal and its negation (i.e., both `x` and `-x`).
+fn simplify_clause(clause: &[i32]) -> Option<Vec<i32>> {
+    let mut seen = HashSet::with_capacity(clause.len());
+    let mut simplified = Vec::with_capacity(clause.len());
     for &lit in clause {
         if seen.contains(&-lit) {
-            return true;
+            return None;
         }
-        seen.insert(lit);
+        if seen.insert(lit) {
+            simplified.push(lit);
+        }
     }
-    false
+    Some(simplified)
 }
 
 fn normalize_clause(clause: &[i32]) -> Vec<i32> {
@@ -309,12 +306,14 @@ impl SMTProofTracer {
 
     ////////////////////////////////////////////////////////////////////////////
 
+    /// Adds a proof step for `clause`, unless it is a tautology.
+    ///
+    /// Repeated literals are dropped, e.g. from an unshrunk e-graph explanation or the Tseitin
+    /// clause of `(or a a)`. They do not change the clause, but an LRAT checker such as
+    /// lrat-check counts a repeated unassigned literal twice and rejects the step.
     pub fn push_step(&mut self, clause: &[i32], typ: ProofStepType) {
-        if !is_tautology(clause) {
-            self.proof_steps.push(ProofStep {
-                clause: clause.to_vec(),
-                typ,
-            })
+        if let Some(clause) = simplify_clause(clause) {
+            self.proof_steps.push(ProofStep { clause, typ })
         }
     }
 
@@ -869,6 +868,14 @@ mod tests {
         let derivation = proof.find("\n3 0\n").unwrap();
         assert!(definition < derivation, "{proof}");
         assert!(!proof.contains("a -1 3 0\n"), "{proof}");
+    }
+
+    #[test]
+    fn proof_steps_drop_repeated_literals() {
+        let (mut tracer, _) = pqr_tracer();
+        tracer.add_theory_clause(&[-1, 2, 2, -1, 3], Theory::Boolean);
+        let proof = tracer.generate_edrat();
+        assert!(proof.contains("t b -1 2 3 0\n"), "{proof}");
     }
 
     #[test]

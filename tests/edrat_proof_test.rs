@@ -3,7 +3,8 @@
 
 //! Checks that the trimmed eDRAT proofs `--proof` writes for the files in
 //! `tests/regression/smt_files/edrat_trimming` are well-formed: each Skolem constant is
-//! declared before it is used, and each literal in a clause is defined before the clause.
+//! declared before it is used, and each literal in a clause is defined before the clause and
+//! occurs in it once.
 
 use std::collections::HashSet;
 use std::fs;
@@ -75,11 +76,17 @@ fn check_well_formed(name: &str, proof: &str) {
             };
             let (zero, clause) = clause.split_last().unwrap();
             assert_eq!(*zero, "0", "{}", context());
+            let mut clause_literals = HashSet::new();
             for lit in clause {
                 let lit: i32 = lit.parse().unwrap();
                 assert!(
                     literals.contains(&lit.abs()),
                     "literal {lit} used before its definition in {}",
+                    context()
+                );
+                assert!(
+                    clause_literals.insert(lit),
+                    "repeated literal {lit} in {}",
                     context()
                 );
             }
