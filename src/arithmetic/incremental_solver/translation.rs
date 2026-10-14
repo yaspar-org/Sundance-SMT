@@ -259,7 +259,41 @@ impl ArithTranslator {
             let _ = self.get_or_register_model_var(egraph_id, solver_state);
         }
         let result = self.solver.check();
+        #[cfg(debug_assertions)]
+        if let ArithCheckResult::Sat(buckets) = &result {
+            self.debug_assert_one_value_per_class(buckets, solver_state);
+        }
         self.translate_result(result, solver_state)
+    }
+
+    /// Debug-build check of what `drain_merges` maintains: terms in one egraph class
+    /// get the same value in the solver's model. Nelson-Oppen probing only compares
+    /// class roots, so a missing equality would otherwise go unnoticed.
+    #[cfg(debug_assertions)]
+    fn debug_assert_one_value_per_class(
+        &self,
+        buckets: &DeterministicHashMap<IBig, DeterministicHashSet<VarId>>,
+        solver_state: &SolverState,
+    ) {
+        let mut class_value: DeterministicHashMap<u32, (&IBig, u64)> = DeterministicHashMap::new();
+        for (value, var_ids) in buckets {
+            for var_id in var_ids {
+                let Some(Some(uid)) = self.var_to_solver_uid.get(*var_id as usize) else {
+                    continue;
+                };
+                let root = solver_state.egraph.find(solver_state.to_egraph_id(*uid));
+                if let Some((other_value, other_uid)) = class_value.insert(root, (value, *uid)) {
+                    assert!(
+                        other_value == value,
+                        "egraph-equal Int terms {} and {} have different arithmetic values {} and {}",
+                        solver_state.get_term(other_uid),
+                        solver_state.get_term(*uid),
+                        other_value,
+                        value
+                    );
+                }
+            }
+        }
     }
 
     fn translate_result(
