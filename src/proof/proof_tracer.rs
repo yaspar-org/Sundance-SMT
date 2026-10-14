@@ -30,6 +30,9 @@ pub struct SMTProofTracer {
     /// Proof steps that justify a later step but never reach CaDiCaL, keyed by that later step's
     /// index. Trimming keeps them whenever it keeps the step.
     premises: HashMap<usize, Range<usize>>,
+    /// CaDiCaL's clause id of each step CaDiCaL derived, keyed by the step's index. Only recorded
+    /// after [`SMTProofTracer::track_core`].
+    derived_ids: HashMap<usize, i64>,
 }
 
 #[derive(Default)]
@@ -278,6 +281,7 @@ impl SMTProofTracer {
             deleted_clauses: 0,
             lrat: None,
             premises: HashMap::new(),
+            derived_ids: HashMap::new(),
         }
     }
 
@@ -326,6 +330,15 @@ impl SMTProofTracer {
 
     pub fn add_sat_clause(&mut self, clause: &[i32]) {
         self.push_step(clause, ProofStepType::SATClause);
+    }
+
+    /// Adds a clause CaDiCaL derived, under CaDiCaL's clause id `id`.
+    pub(crate) fn add_derived_sat_clause(&mut self, id: i64, clause: &[i32]) {
+        let index = self.proof_steps.len();
+        self.add_sat_clause(clause);
+        if self.lrat.is_some() && self.proof_steps.len() > index {
+            self.derived_ids.insert(index, id);
+        }
     }
 
     pub fn record_deletion(&mut self, clause: &[i32]) {
@@ -531,10 +544,19 @@ impl SMTProofTracer {
                     break;
                 }
                 _ => {
-                    if let Some(c) = core.get(normalize_clause(&step.clause).as_slice()) {
-                        keep[i] = true;
-                        found.insert(c);
+                    let Some(c) = core.get(normalize_clause(&step.clause).as_slice()) else {
+                        continue;
+                    };
+                    // CaDiCaL can derive a clause, delete it, and derive it again from other
+                    // antecedents. Keep a derived clause only under its own id: an earlier
+                    // derivation may rest on clauses, and literal definitions, that the core drops.
+                    if let Some(id) = self.derived_ids.get(&i)
+                        && !seen.contains(id)
+                    {
+                        continue;
                     }
+                    keep[i] = true;
+                    found.insert(c);
                 }
             }
         }
@@ -821,6 +843,32 @@ mod tests {
         }
         assert!(!proof.contains("\nd "), "deletions are dropped:\n{proof}");
         assert!(proof.ends_with("\n0\n"));
+    }
+
+    #[test]
+    fn trimming_keeps_a_rederived_clause_only_under_its_own_id() {
+        let (mut tracer, _) = pqr_tracer();
+        // CaDiCaL derives `r` from `p` and `-p | r`, deletes both, then derives `r` again from
+        // `q` and `-q | r`. Only the second derivation is in the core, and the first one
+        // precedes the only kept definition of literal 3.
+        add_input_clause(&mut tracer, 1, &[1]);
+        add_input_clause(&mut tracer, 2, &[-1, 3]);
+        ProofTracer::add_derived_clause(&mut tracer, 3, false, 0, &[3], &[1, 2]);
+        ProofTracer::delete_clause(&mut tracer, 3, false, &[3]);
+        ProofTracer::delete_clause(&mut tracer, 2, false, &[-1, 3]);
+        add_input_clause(&mut tracer, 4, &[2]);
+        add_input_clause(&mut tracer, 5, &[-2, 3]);
+        ProofTracer::add_derived_clause(&mut tracer, 6, false, 0, &[3], &[4, 5]);
+        add_input_clause(&mut tracer, 7, &[-3]);
+        ProofTracer::add_derived_clause(&mut tracer, 8, false, 0, &[], &[6, 7]);
+        ProofTracer::conclude_unsat(&mut tracer, 0, &[8]);
+
+        let proof = trimmed(&tracer);
+        assert_eq!(proof.matches("\n3 0\n").count(), 1, "{proof}");
+        let definition = proof.find("(edrat-literal 3 ").unwrap();
+        let derivation = proof.find("\n3 0\n").unwrap();
+        assert!(definition < derivation, "{proof}");
+        assert!(!proof.contains("a -1 3 0\n"), "{proof}");
     }
 
     #[test]
