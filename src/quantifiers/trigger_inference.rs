@@ -4,8 +4,9 @@
 //! Automatic trigger (pattern) inference for quantifiers with no `:pattern`.
 //!
 //! Sundance only instantiates by e-matching, so an untriggered `forall` needs
-//! an inferred trigger. This implements the Simplify/Z3 auto-trigger algorithm
-//! (Detlefs, Nelson & Saxe 2005, §5):
+//! an inferred trigger. This follows Z3's pattern inference
+//! (`ast/pattern/pattern_inference.cpp`, after Simplify; Detlefs, Nelson &
+//! Saxe 2005, §5):
 //!
 //!   1. Collect *candidate* subterms of the body: applications whose head is an
 //!      **uninterpreted** function/predicate and that contain at least one bound
@@ -14,42 +15,48 @@
 //!      and e-matching on them explodes. Like Z3, collection descends into
 //!      nested quantifiers; a candidate found there must not mention the nested
 //!      quantifier's own variables.
-//!   2. If any candidates jointly with the *fewest* function symbols cover all
-//!      bound variables on their own, emit them as **single-term triggers**
-//!      (preferring shallow/minimal terms).
-//!   3. Otherwise greedily assemble a **multi-pattern**: a minimal set of
-//!      candidates whose covered-variable sets union to all bound variables.
-//!   4. If some bound variable never appears under any uninterpreted symbol, no
-//!      valid trigger exists and we return `None`.
+//!   2. Drop the `:no-pattern` terms.
+//!   3. Drop *looping* candidates: a candidate is looping if another candidate
+//!      with the same variables is a proper instance of it, e.g. `(f x)` next to
+//!      `(f (g x))`. Each instance would create a new match for it.
+//!   4. Drop *bigger* candidates: those with a proper subterm that is a
+//!      candidate with the same variables.
+//!   5. Every remaining candidate that covers all bound variables is a
+//!      **single-term trigger**; all of them are returned, as alternatives.
+//!   6. Otherwise assemble one **multi-pattern**: go through the candidates with
+//!      the most variables first, smallest first among equals, and take each
+//!      one that adds a variable. Then drop members that the others make
+//!      redundant.
+//!   7. If nothing is found and step 2 dropped something, retry without the
+//!      `:no-pattern` terms: Z3 then ignores the annotation.
 //!
-//! `:no-pattern` terms are not used, unless no trigger exists without them: Z3
-//! then ignores the annotation.
+//! If some bound variable never appears under an uninterpreted symbol, no valid
+//! trigger exists and inference returns `None`.
 
-use std::collections::BTreeSet;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 
 use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{Repr, Term};
 
 /// A candidate trigger term together with the set of bound-variable names it
-/// covers and a rough size (number of nested applications), used to prefer
-/// shallow triggers.
+/// covers and its size (see [`pattern_size`]), used to prefer small triggers.
 struct Candidate {
     term: Term,
     vars: BTreeSet<String>,
-    depth: usize,
+    size: usize,
 }
 
 /// Recursively collect candidate trigger subterms of `term` (the quantifier
-/// body at the top-level call).
+/// body at the top-level call), in post-order.
 ///
 /// `bound` holds the names of the quantifier's bound variables that are in
 /// scope, and `shadowed` the names bound by the nested quantifiers on the way
 /// down. A subterm is a candidate iff it is an application with an
 /// uninterpreted head, contains at least one variable of `bound`, contains no
 /// variable of `shadowed`, and is safe to compile as a pattern (see
-/// [`is_pattern_safe`]). We collect candidates from every level so that step
-/// 2/3 can prefer the shallowest covering terms.
+/// [`is_pattern_safe`]).
 fn collect_candidates(
     term: &Term,
     bound: &BTreeSet<String>,
@@ -74,7 +81,7 @@ fn collect_candidates(
                     out.push(Candidate {
                         term: term.clone(),
                         vars,
-                        depth: term_depth(term),
+                        size: pattern_size(term, bound).0,
                     });
                 }
             }
@@ -139,6 +146,19 @@ fn is_pattern_safe(term: &Term) -> bool {
     }
 }
 
+/// The immediate subterms of a pattern-safe term (see [`is_pattern_safe`]).
+fn subterms(term: &Term) -> Vec<&Term> {
+    match term.repr() {
+        App(_, args, _) => args.iter().collect(),
+        Eq(l, r) => vec![l, r],
+        Not(t) => vec![t],
+        Ite(a, b, c) => vec![a, b, c],
+        And(items) | Or(items) | Distinct(items) => items.iter().collect(),
+        Implies(ante, cons) => ante.iter().chain(std::iter::once(cons)).collect(),
+        _ => vec![],
+    }
+}
+
 /// The subset of `bound` variable names that occur free in `term`
 /// (i.e. not shadowed by a nested binder).
 fn free_bound_vars(term: &Term, bound: &BTreeSet<String>) -> BTreeSet<String> {
@@ -190,72 +210,162 @@ fn collect_bound_vars(term: &Term, bound: &BTreeSet<String>, out: &mut BTreeSet<
     }
 }
 
-/// Rough structural depth of a term (max nesting of applications), used to
-/// prefer shallow triggers.
-fn term_depth(term: &Term) -> usize {
-    match term.repr() {
-        App(_, args, _) => 1 + args.iter().map(term_depth).max().unwrap_or(0),
-        Annotated(inner, _) => term_depth(inner),
-        _ => 0,
+/// Size of a pattern-safe term, and whether it contains a variable of `bound`.
+///
+/// Every application, variable and constant counts once (Z3's pattern size),
+/// except that a subterm with no bound variable counts as one node in total:
+/// e-matching checks it with a single e-class lookup. This also keeps the
+/// choice the same for every instance of a nested quantifier. Those instances
+/// are registered with the outer variables replaced by ground terms, whereas
+/// Z3 infers patterns once, before instantiation, when they are still
+/// variables.
+fn pattern_size(term: &Term, bound: &BTreeSet<String>) -> (usize, bool) {
+    if let Local(local) = term.repr() {
+        return (1, bound.contains(local.symbol.get()));
     }
+    let (size, has_var) = subterms(term)
+        .into_iter()
+        .map(|t| pattern_size(t, bound))
+        .fold((1, false), |(size, has_var), (s, h)| {
+            (size + s, has_var || h)
+        });
+    (if has_var { size } else { 1 }, has_var)
 }
 
-/// Steps 2-4 of the module documentation, on the given candidates.
+/// Whether `term` is an instance of `pattern`, reading the variables of `bound`
+/// in `pattern` as pattern variables (Z3's `smaller_pattern`). `bindings` maps
+/// each pattern variable to the uid of the subterm it is bound to.
+fn is_instance(
+    pattern: &Term,
+    term: &Term,
+    bound: &BTreeSet<String>,
+    bindings: &mut BTreeMap<String, u64>,
+) -> bool {
+    if let Local(local) = pattern.repr()
+        && bound.contains(local.symbol.get())
+    {
+        return match bindings.entry(local.symbol.get().clone()) {
+            Entry::Occupied(e) => *e.get() == term.uid(),
+            Entry::Vacant(e) => {
+                e.insert(term.uid());
+                true
+            }
+        };
+    }
+    match (pattern.repr(), term.repr()) {
+        (App(f, _, sf), App(g, _, sg)) if f != g || sf != sg => return false,
+        (App(..), App(..))
+        | (Eq(..), Eq(..))
+        | (Not(..), Not(..))
+        | (Ite(..), Ite(..))
+        | (And(..), And(..))
+        | (Or(..), Or(..))
+        | (Distinct(..), Distinct(..))
+        | (Implies(..), Implies(..)) => {}
+        _ => return pattern.uid() == term.uid(),
+    }
+    let (ps, ts) = (subterms(pattern), subterms(term));
+    ps.len() == ts.len()
+        && ps
+            .into_iter()
+            .zip(ts)
+            .all(|(p, t)| is_instance(p, t, bound, bindings))
+}
+
+/// Drop looping candidates (Z3's `filter_looping_patterns`): those of which
+/// another candidate with the same variables is a proper instance. For `(f x)`
+/// and `(f (g x))` in `f(x) = f(g(x))`, matching `(f x)` on `f(a)` yields the
+/// new term `f(g(a))`, which matches again, and so on forever.
+fn drop_looping<'a>(
+    candidates: Vec<&'a Candidate>,
+    bound: &BTreeSet<String>,
+) -> Vec<&'a Candidate> {
+    let instance =
+        |p: &Candidate, t: &Candidate| is_instance(&p.term, &t.term, bound, &mut BTreeMap::new());
+    candidates
+        .iter()
+        .filter(|c1| {
+            !candidates.iter().any(|c2| {
+                c2.term.uid() != c1.term.uid()
+                    && c2.vars == c1.vars
+                    && instance(c1, c2)
+                    && !instance(c2, c1)
+            })
+        })
+        .copied()
+        .collect()
+}
+
+/// Drop bigger candidates (Z3's `filter_bigger_patterns`): those with a proper
+/// subterm that is itself a candidate with the same variables. Such a subterm
+/// matches whenever the bigger term does.
+fn drop_bigger(candidates: Vec<&Candidate>) -> Vec<&Candidate> {
+    let vars_of: BTreeMap<u64, &BTreeSet<String>> =
+        candidates.iter().map(|c| (c.term.uid(), &c.vars)).collect();
+    let has_sub_candidate = |c: &Candidate| {
+        let mut seen = BTreeSet::new();
+        let mut todo = subterms(&c.term);
+        while let Some(t) = todo.pop() {
+            if !seen.insert(t.uid()) {
+                continue;
+            }
+            if vars_of.get(&t.uid()) == Some(&&c.vars) {
+                return true;
+            }
+            todo.extend(subterms(t));
+        }
+        false
+    };
+    candidates
+        .into_iter()
+        .filter(|c| !has_sub_candidate(c))
+        .collect()
+}
+
+/// Steps 3-6 of the module documentation, on the given candidates.
 fn select_triggers(
-    mut candidates: Vec<&Candidate>,
+    candidates: Vec<&Candidate>,
     bound: &BTreeSet<String>,
 ) -> Option<Vec<Vec<Term>>> {
     if candidates.is_empty() {
         return None;
     }
+    let candidates = drop_bigger(drop_looping(candidates, bound));
 
-    // Deduplicate candidates by printed form, keeping the shallowest.
-    candidates.sort_by(|a, b| {
-        a.depth
-            .cmp(&b.depth)
-            .then(a.term.to_string().cmp(&b.term.to_string()))
-    });
-    let mut seen = BTreeSet::new();
-    candidates.retain(|c| seen.insert(c.term.to_string()));
-
-    // Step 2: single-term triggers that cover ALL bound variables on their own.
-    // Prefer the shallowest; emit each as its own (disjunctive) single trigger.
-    let full_singletons: Vec<&Candidate> = candidates
+    // Step 5: every candidate that covers all bound variables on its own is a
+    // trigger. They are alternatives; the ground terms may contain only one of
+    // the heads.
+    let unary: Vec<Vec<Term>> = candidates
         .iter()
         .filter(|c| c.vars == *bound)
-        .copied()
+        .map(|c| vec![c.term.clone()])
         .collect();
-    if !full_singletons.is_empty() {
-        // Use the shallowest single trigger. (Emitting just one keeps the search
-        // space small; additional ones rarely help and can cause redundant
-        // instantiations.)
-        let best = full_singletons[0];
-        return Some(vec![vec![best.term.clone()]]);
+    if !unary.is_empty() {
+        return Some(unary);
     }
 
-    // Step 3: greedily cover all variables, then remove redundant candidates so
-    // the resulting multi-pattern is inclusion-minimal.
-    let mut uncovered: BTreeSet<String> = bound.clone();
+    // Step 6: one multi-pattern. Visit candidates with more variables first and
+    // smaller ones first among those (a stable sort keeps the collection order
+    // for ties), taking each one that covers a new variable.
+    let mut ordered = candidates;
+    ordered.sort_by(|a, b| b.vars.len().cmp(&a.vars.len()).then(a.size.cmp(&b.size)));
+    let mut covered: BTreeSet<String> = BTreeSet::new();
     let mut chosen: Vec<&Candidate> = Vec::new();
-    while !uncovered.is_empty() {
-        let best = candidates
-            .iter()
-            .map(|c| (c.vars.intersection(&uncovered).count(), *c))
-            .filter(|(gain, _)| *gain > 0)
-            .max_by(|(g1, c1), (g2, c2)| g1.cmp(g2).then(c2.depth.cmp(&c1.depth)));
-
-        match best {
-            Some((_, cand)) => {
-                for v in &cand.vars {
-                    uncovered.remove(v);
-                }
-                chosen.push(cand);
+    for candidate in ordered {
+        if !candidate.vars.is_subset(&covered) {
+            covered.extend(candidate.vars.iter().cloned());
+            chosen.push(candidate);
+            if covered == *bound {
+                break;
             }
-            // No candidate covers any remaining variable: uncoverable.
-            None => return None,
         }
     }
+    if covered != *bound {
+        // Some bound variable never occurs in a candidate: uncoverable.
+        return None;
+    }
 
+    // Remove redundant members so the multi-pattern is inclusion-minimal.
     let mut idx = 0;
     while idx < chosen.len() {
         let covered_without_candidate: BTreeSet<String> = chosen
@@ -303,8 +413,11 @@ pub fn infer_triggers(
 
     let mut candidates: Vec<Candidate> = Vec::new();
     collect_candidates(body, &bound, &BTreeSet::new(), &mut candidates);
+    // Terms are hash-consed: keep the first occurrence of each.
+    let mut seen = BTreeSet::new();
+    candidates.retain(|c| seen.insert(c.term.uid()));
 
-    // `:no-pattern` terms are not used as triggers...
+    // Step 2: `:no-pattern` terms are not used as triggers...
     let excluded: BTreeSet<String> = excluded.iter().map(|t| t.to_string()).collect();
     let allowed: Vec<&Candidate> = candidates
         .iter()
@@ -370,6 +483,63 @@ mod tests {
                 })
                 .collect()
         })
+    }
+
+    #[test]
+    fn every_minimal_single_trigger_is_kept() {
+        let triggers = triggers_of(
+            "(declare-sort T 0) (declare-fun P (T) Bool) (declare-fun Q (T) Bool)
+             (assert (forall ((x T)) (and (P x) (Q x))))",
+        );
+        assert_eq!(triggers, Some(vec!["(P x)".into(), "(Q x)".into()]));
+    }
+
+    #[test]
+    fn bigger_candidate_with_the_same_variables_is_dropped() {
+        // (f (g x)) contains the candidate (g x), which has the same variables.
+        let triggers = triggers_of(
+            "(declare-fun f (Int) Int) (declare-fun g (Int) Int)
+             (assert (forall ((x Int)) (> (f (g x)) 0)))",
+        );
+        assert_eq!(triggers, Some(vec!["(g x)".into()]));
+    }
+
+    #[test]
+    fn looping_candidate_is_dropped() {
+        // (f x) matches its own instance (f (g x)); Z3 keeps (g x) only.
+        let triggers = triggers_of(
+            "(declare-fun f (Int) Int) (declare-fun g (Int) Int)
+             (assert (forall ((x Int)) (= (f x) (f (g x)))))",
+        );
+        assert_eq!(triggers, Some(vec!["(g x)".into()]));
+    }
+
+    #[test]
+    fn multi_pattern_prefers_more_variables_then_smaller_terms() {
+        // No single candidate covers {x, y}. (g x) comes first and (h y) adds y;
+        // (k x) is never needed.
+        let triggers = triggers_of(
+            "(declare-sort T 0) (declare-fun g (T) Int) (declare-fun h (T) Int)
+             (declare-fun k (T) Int)
+             (assert (forall ((x T) (y T)) (= (+ (g x) (h y) (* 0 (k x))) 0)))",
+        );
+        assert_eq!(triggers, Some(vec!["(g x) (h y)".into()]));
+    }
+
+    #[test]
+    fn ground_subterms_count_as_one_node() {
+        // (Q (f (f (f c))) x) has size 3, not 6, so it is preferred over the
+        // size-4 (P x d e).
+        let triggers = triggers_of(
+            "(declare-sort T 0) (declare-fun P (T T T) Bool) (declare-fun Q (T T) T)
+             (declare-fun f (T) T) (declare-const c T) (declare-const d T) (declare-const e T)
+             (assert (forall ((x T) (y T))
+                (=> (and (P x d e) (P y d e)) (= (Q (f (f (f c))) x) (Q (f (f (f c))) y)))))",
+        );
+        assert_eq!(
+            triggers,
+            Some(vec!["(Q (f (f (f c))) x) (Q (f (f (f c))) y)".into()])
+        );
     }
 
     #[test]
