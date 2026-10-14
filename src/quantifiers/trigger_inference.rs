@@ -21,6 +21,9 @@
 //!      candidates whose covered-variable sets union to all bound variables.
 //!   4. If some bound variable never appears under any uninterpreted symbol, no
 //!      valid trigger exists and we return `None`.
+//!
+//! `:no-pattern` terms are not used, unless no trigger exists without them: Z3
+//! then ignores the annotation.
 
 use std::collections::BTreeSet;
 
@@ -197,37 +200,11 @@ fn term_depth(term: &Term) -> usize {
     }
 }
 
-/// Infer a set of triggers (multi-patterns) for a quantifier body.
-///
-/// `body` is the (de-annotated) body term; `bound_names` are the names of the
-/// quantifier's bound variables. `excluded` holds the terms named by any
-/// `:no-pattern` annotations — anti-trigger hints that must never be used as a
-/// trigger. Returns a list of multi-patterns, where each multi-pattern is a
-/// conjunctive list of trigger terms (matching the `Vec<Vec<_>>` shape used by
-/// the rest of the solver): the outer list is disjunctive (any multi-pattern
-/// may fire), the inner list conjunctive.
-///
-/// Returns `None` if no admissible trigger set covers all bound variables.
-pub fn infer_triggers(
-    body: &Term,
-    bound_names: &[String],
-    excluded: &[Term],
+/// Steps 2-4 of the module documentation, on the given candidates.
+fn select_triggers(
+    mut candidates: Vec<&Candidate>,
+    bound: &BTreeSet<String>,
 ) -> Option<Vec<Vec<Term>>> {
-    let bound: BTreeSet<String> = bound_names.iter().cloned().collect();
-    if bound.is_empty() {
-        // Ground body under a (degenerate) quantifier: nothing to instantiate on.
-        return None;
-    }
-
-    let mut candidates: Vec<Candidate> = Vec::new();
-    collect_candidates(body, &bound, &BTreeSet::new(), &mut candidates);
-
-    // Drop `:no-pattern` terms: they are explicitly forbidden as triggers.
-    if !excluded.is_empty() {
-        let excluded: BTreeSet<String> = excluded.iter().map(|t| t.to_string()).collect();
-        candidates.retain(|c| !excluded.contains(&c.term.to_string()));
-    }
-
     if candidates.is_empty() {
         return None;
     }
@@ -243,7 +220,11 @@ pub fn infer_triggers(
 
     // Step 2: single-term triggers that cover ALL bound variables on their own.
     // Prefer the shallowest; emit each as its own (disjunctive) single trigger.
-    let full_singletons: Vec<&Candidate> = candidates.iter().filter(|c| c.vars == bound).collect();
+    let full_singletons: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|c| c.vars == *bound)
+        .copied()
+        .collect();
     if !full_singletons.is_empty() {
         // Use the shallowest single trigger. (Emitting just one keeps the search
         // space small; additional ones rarely help and can cause redundant
@@ -259,7 +240,7 @@ pub fn infer_triggers(
     while !uncovered.is_empty() {
         let best = candidates
             .iter()
-            .map(|c| (c.vars.intersection(&uncovered).count(), c))
+            .map(|c| (c.vars.intersection(&uncovered).count(), *c))
             .filter(|(gain, _)| *gain > 0)
             .max_by(|(g1, c1), (g2, c2)| g1.cmp(g2).then(c2.depth.cmp(&c1.depth)));
 
@@ -283,7 +264,7 @@ pub fn infer_triggers(
             .filter(|(other_idx, _)| *other_idx != idx)
             .flat_map(|(_, candidate)| candidate.vars.iter().cloned())
             .collect();
-        if covered_without_candidate == bound {
+        if covered_without_candidate == *bound {
             chosen.remove(idx);
         } else {
             idx += 1;
@@ -296,6 +277,50 @@ pub fn infer_triggers(
             .map(|candidate| candidate.term.clone())
             .collect(),
     ])
+}
+
+/// Infer a set of triggers (multi-patterns) for a quantifier body.
+///
+/// `body` is the (de-annotated) body term; `bound_names` are the names of the
+/// quantifier's bound variables. `excluded` holds the terms named by any
+/// `:no-pattern` annotations — anti-trigger hints that are only used when no
+/// trigger exists without them (as in Z3). Returns a list of multi-patterns,
+/// where each multi-pattern is a conjunctive list of trigger terms (matching
+/// the `Vec<Vec<_>>` shape used by the rest of the solver): the outer list is
+/// disjunctive (any multi-pattern may fire), the inner list conjunctive.
+///
+/// Returns `None` if no admissible trigger set covers all bound variables.
+pub fn infer_triggers(
+    body: &Term,
+    bound_names: &[String],
+    excluded: &[Term],
+) -> Option<Vec<Vec<Term>>> {
+    let bound: BTreeSet<String> = bound_names.iter().cloned().collect();
+    if bound.is_empty() {
+        // Ground body under a (degenerate) quantifier: nothing to instantiate on.
+        return None;
+    }
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    collect_candidates(body, &bound, &BTreeSet::new(), &mut candidates);
+
+    // `:no-pattern` terms are not used as triggers...
+    let excluded: BTreeSet<String> = excluded.iter().map(|t| t.to_string()).collect();
+    let allowed: Vec<&Candidate> = candidates
+        .iter()
+        .filter(|c| excluded.is_empty() || !excluded.contains(&c.term.to_string()))
+        .collect();
+    let some_excluded = allowed.len() < candidates.len();
+    select_triggers(allowed, &bound).or_else(|| {
+        // ...unless they are the only way to instantiate the quantifier. Z3 then
+        // warns "ignoring nopats annotation because Z3 couldn't find any other
+        // pattern" and uses them.
+        if some_excluded {
+            select_triggers(candidates.iter().collect(), &bound)
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(test)]
@@ -368,6 +393,24 @@ mod tests {
              (assert (forall ((x Int)) (or (> x 0) (forall ((x Int)) (p x)))))",
         );
         assert_eq!(triggers, None);
+    }
+
+    #[test]
+    fn no_pattern_terms_are_avoided_when_possible() {
+        let triggers = triggers_of(
+            "(declare-fun le (Int Int) Bool) (declare-fun q (Int) Bool)
+             (assert (forall ((l Int)) (! (=> (le 0 l) (q l)) :no-pattern (le 0 l))))",
+        );
+        assert_eq!(triggers, Some(vec!["(q l)".into()]));
+    }
+
+    #[test]
+    fn no_pattern_is_ignored_when_it_leaves_no_trigger() {
+        let triggers = triggers_of(
+            "(declare-fun le (Int Int) Bool) (declare-const c Bool)
+             (assert (forall ((l Int)) (! (=> (le 0 l) c) :no-pattern (le 0 l))))",
+        );
+        assert_eq!(triggers, Some(vec!["(le 0 l)".into()]));
     }
 
     #[test]
