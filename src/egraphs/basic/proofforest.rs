@@ -308,7 +308,15 @@ impl ProofForestEdge {
         // will only insert a disequality if is not already in the map
         // or if the hash is outdated (i.e. we have already backtracked on this disequality)
         if let Some(disequality) = disequalities.get(&key) {
-            if disequality.hash != hash_level_map[disequality.level] && disequality.hash != 0 {
+            // Outdated means "popped": the same rule as `valid_hash` in
+            // egraph.rs. The former test (`hash != hash_level_map[level]`)
+            // also called outdated every live entry stamped after an earlier
+            // backtrack at its level, so a later, deeper disequality over the
+            // same two classes overwrote it and took it along when popped
+            // (conformance test `seed_764_minimal`).
+            let live =
+                disequality.level == 0 || disequality.hash >= hash_level_map[disequality.level];
+            if !live {
                 debug_println!(
                     5,
                     0,
