@@ -7,6 +7,7 @@ use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
+use sundance_smt::egraphs::EgraphTrait;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
 use sundance_smt::theory_check::{NonlinearityCheck, reject_unsupported_theories};
@@ -99,6 +100,7 @@ fn main() -> Result<(), String> {
     );
 
     solver_state.register_bool_constants(&true_term, &false_term);
+    solver_state.egraph.set_ematching(args.ematching);
 
     let mut nnf_terms = vec![];
     // Non-linear multiplication is the other input the solver cannot handle, and the arithmetic

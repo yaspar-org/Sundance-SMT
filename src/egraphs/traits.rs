@@ -8,8 +8,36 @@
 //! semi-persistent egraph) to be used interchangeably.
 
 use crate::egraphs::repr::{Pattern, PatternId};
+use clap::ValueEnum;
 use std::hash::Hash;
 use yaspar_ir::ast::Local;
+
+/// How [`EgraphTrait::match_triggers`] enumerates the candidate terms of a pattern.
+///
+/// Both strategies return the same substitutions in the same order; they only
+/// differ in how much work it takes to find them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum EMatching {
+    /// Walk the pattern top-down: for every application symbol in the pattern,
+    /// scan all registered applications of that symbol.
+    #[default]
+    TopDown,
+    /// Look candidates up in indexes keyed by equivalence class: applications
+    /// nested in a pattern are taken from the class they must belong to, and a
+    /// top-level application is entered through its most selective child (a
+    /// ground term or a rarer nested symbol). The indexes are built lazily and
+    /// dropped whenever the egraph changes.
+    Indexed,
+}
+
+impl std::fmt::Display for EMatching {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EMatching::TopDown => write!(f, "top-down"),
+            EMatching::Indexed => write!(f, "indexed"),
+        }
+    }
+}
 
 /// A SAT literal: positive means the variable is true, negative means false.
 /// Zero means "no decision" when returned from decision methods.
@@ -145,6 +173,9 @@ pub trait EgraphTrait {
     fn are_equal(&self, t1: Self::TermId, t2: Self::TermId) -> bool;
 
     // --- E-matching ---
+
+    /// Select the matching strategy used by [`EgraphTrait::match_triggers`].
+    fn set_ematching(&mut self, mode: EMatching);
 
     /// Match a multi-trigger pattern.
     ///

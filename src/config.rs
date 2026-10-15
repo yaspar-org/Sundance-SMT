@@ -4,6 +4,7 @@
 //! Solver configuration and command line parsing
 
 use crate::arithmetic::lp::ArithSolver;
+use crate::egraphs::EMatching;
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
@@ -56,6 +57,11 @@ pub struct Args {
     /// Propositional search engine driving the theory propagator
     #[arg(long, default_value_t = SatBackend::Cadical, value_enum)]
     pub sat_backend: SatBackend,
+    /// E-matching strategy for quantifier triggers. Both find the same instances in the same
+    /// order: `top-down` scans every application of each pattern symbol, `indexed` looks
+    /// candidates up by equivalence class (much faster on large egraphs)
+    #[arg(long, default_value_t = EMatching::TopDown, value_enum)]
+    pub ematching: EMatching,
     /// CaDiCaL elevate setting for lazy quantifier instantiation (0 to disable)
     #[arg(long, default_value_t = 3)]
     pub elevate: i32,
