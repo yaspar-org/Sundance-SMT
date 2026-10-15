@@ -5,6 +5,7 @@
 use crate::arithmetic::incremental_solver::IncrementalArithSolver;
 use crate::arithmetic::incremental_solver::lira::LiraIncrementalState;
 use crate::arithmetic::incremental_solver::translation::ArithTranslator;
+use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lp::ArithSolver;
 use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode, ObservedSink};
 use crate::config::SatBackend;
@@ -111,13 +112,8 @@ pub fn cdcl_decision_procedure(
         }
     };
 
-    let mut terminator = if timeout > 0 {
-        Some(DeadlineTerminator {
-            deadline: Instant::now() + std::time::Duration::from_secs(timeout),
-        })
-    } else {
-        None
-    };
+    let deadline = (timeout > 0).then(|| Instant::now() + std::time::Duration::from_secs(timeout));
+    let mut terminator = deadline.map(|deadline| DeadlineTerminator { deadline });
     if let Some(t) = terminator.as_mut() {
         match &mut solver {
             Backend::Cadical(cadical) => cadical.connect_terminator(t),
@@ -134,7 +130,14 @@ pub fn cdcl_decision_procedure(
     };
 
     let incremental_backend: Option<Box<dyn IncrementalArithSolver>> = match arithmetic {
-        ArithSolver::InternalIncremental => Some(Box::new(LiraIncrementalState::new())),
+        // Branch-and-bound runs inside a CaDiCaL callback, where the terminator is not polled,
+        // so it checks the deadline itself.
+        ArithSolver::InternalIncremental => {
+            Some(Box::new(LiraIncrementalState::with_config(SolverConfig {
+                deadline,
+                ..SolverConfig::default()
+            })))
+        }
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3Incremental => Some(Box::new(
             crate::arithmetic::incremental_solver::z3::Z3IncrementalState::new(),
@@ -163,6 +166,7 @@ pub fn cdcl_decision_procedure(
         last_observed_var: 1,
         batch_cap,
         arith: arith_translator,
+        arith_incomplete: false,
         trail_writer: trail_file
             .as_ref()
             .and_then(|p| match std::fs::File::create(p) {
@@ -229,6 +233,16 @@ pub fn cdcl_decision_procedure(
             minisat.disconnect_terminator();
             result
         }
+    };
+
+    // An accepted model is not known to be a model of the input if an arithmetic check gave up
+    // on it, or if the arithmetic solver is inexact (an opaque term).
+    let result = if result == Status::SATISFIABLE
+        && (propagator.arith_incomplete || propagator.arith.as_ref().is_some_and(|a| !a.is_exact()))
+    {
+        Status::UNKNOWN
+    } else {
+        result
     };
 
     // Write the proof after all borrows are released. `--proof` writes it on unsat only, trimmed

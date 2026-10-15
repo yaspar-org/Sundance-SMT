@@ -17,6 +17,7 @@ use crate::arithmetic::lia::solver_result::{
 use crate::arithmetic::lia::stats::Stats;
 use crate::arithmetic::lia::variables::{Var, VarType};
 use crate::debug_println;
+use std::time::Instant;
 
 /// Outcome of exploring one node of the branch-and-bound tree.
 ///
@@ -247,6 +248,20 @@ impl LIRASolver {
         let mut child: Option<NodeOutcome> = None;
 
         while let Some(top) = stack.len().checked_sub(1) {
+            // Once a node is Feasible or Unknown, every frame above it only passes that outcome
+            // up. Undo all their branch bounds with one backtrack to the outermost pending level
+            // instead of one assignment restore per frame: after a deadline, a deep stack would
+            // otherwise take long to unwind.
+            if matches!(
+                child,
+                Some(NodeOutcome::Feasible(_)) | Some(NodeOutcome::Unknown)
+            ) {
+                if let Some(level) = stack.iter().filter_map(|f| f.pending_level).min() {
+                    self.lra_solver.backtrack(level);
+                }
+                stack.clear();
+                break;
+            }
             match stack[top].stage {
                 // Explore the floor branch: x <= floor(val).
                 Stage::ExploreFloor => {
@@ -525,6 +540,12 @@ impl LIRASolver {
     /// LRA-solve budget or the maximum branch depth (also the recursion-depth guard) has
     /// been reached.
     fn over_budget(&self, depth: usize) -> bool {
+        if let Some(deadline) = self.config.deadline
+            && Instant::now() >= deadline
+        {
+            debug_println!(21, 0, "lia::lira_solver: deadline reached");
+            return true;
+        }
         if let Some(max) = self.config.max_lra_solve_calls
             && self.stats.num_lra_solve > max
         {

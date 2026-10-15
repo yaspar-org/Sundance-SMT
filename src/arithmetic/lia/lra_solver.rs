@@ -525,6 +525,38 @@ impl LRASolver {
         if level >= self.backtrack_level {
             return;
         }
+        self.relax_bounds_above(level);
+        self.restore_assignment();
+    }
+
+    /// Set a bounds-only backtrack point and return the new backtrack level, for
+    /// [`Self::backtrack_bounds`].
+    ///
+    /// Unlike [`Self::set_backtrack`], this takes no snapshot of the assignment (an O(variables)
+    /// copy), and works in any solver state. An incremental frontend calls it at every SAT
+    /// decision level.
+    pub fn set_bounds_backtrack(&mut self) -> usize {
+        let old_level = self.backtrack_level;
+        self.backtrack_level += 1;
+        old_level
+    }
+
+    /// Relax the bounds asserted above `level` and keep the current assignment.
+    ///
+    /// Restoring older bounds only loosens them, so every non-basic variable stays within its
+    /// bounds and every row equation still holds: the simplex invariants are kept without the
+    /// assignment restore of [`Self::backtrack`], which recomputes every basic variable. A
+    /// solver that was SAT stays SAT. Pair with [`Self::set_bounds_backtrack`]; a
+    /// [`Self::set_backtrack`] / [`Self::backtrack`] pair (branch-and-bound) may nest inside.
+    pub fn backtrack_bounds(&mut self, level: usize) {
+        if level >= self.backtrack_level {
+            return;
+        }
+        self.relax_bounds_above(level);
+    }
+
+    /// Restore the bounds recorded for levels above `level`.
+    fn relax_bounds_above(&mut self, level: usize) {
         while let Some((var, bound, _)) = self.old_lower_bounds.pop_if(|(_, _, l)| *l > level) {
             let var_info_idx = self.var_to_idx.get(&var).unwrap();
             self.variables[*var_info_idx].bounds.lower = bound;
@@ -533,7 +565,6 @@ impl LRASolver {
             let var_info_idx = self.var_to_idx.get(&var).unwrap();
             self.variables[*var_info_idx].bounds.upper = bound;
         }
-        self.restore_assignment();
     }
 
     /// Clear a terminal `Unsat` state back to `Unknown`, so the solver can be reused after a
@@ -2534,6 +2565,44 @@ mod tests {
         assert!(solver.variables[slack_idx].is_non_basic().is_some());
         // ...yet the check-invariant holds, with zero linear algebra on the backtrack path.
         assert!(solver.is_valid());
+    }
+
+    /// A bounds-only backtrack relaxes the popped bounds, leaves the assignment as it is, and
+    /// keeps the check-invariant, after pivots.
+    #[test]
+    fn backtrack_bounds_keeps_assignment_and_invariants() {
+        let mut solver = ex_sum_sparse();
+        let slack = Var::real(2);
+        let rel = Rel::mk_ge(
+            vec![Mon::new(1, Var::real(10)), Mon::new(1, Var::real(11))],
+            0,
+        );
+        solver.add_relation(rel, slack).unwrap();
+        let slack_idx = *solver.var_to_idx.get(&slack).unwrap();
+
+        let level = solver.set_bounds_backtrack();
+        assert_eq!(solver.assert_lower(&slack, &5i32.into()).unwrap(), None);
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
+        let before = solver.get_qdelta_model().unwrap();
+
+        solver.backtrack_bounds(level);
+        assert!(
+            solver.variables[slack_idx].is_totally_unbounded(),
+            "the popped slack bound must be relaxed"
+        );
+        assert_eq!(
+            solver.get_qdelta_model().unwrap(),
+            before,
+            "the assignment must not change"
+        );
+        assert!(solver.is_valid());
+        assert!(matches!(
+            solver.solve().unwrap().decision,
+            SolverDecision::FEASIBLE(_)
+        ));
     }
 
     /// Regression guard for the `restore_assignment` robustness fix: set the backtrack point
