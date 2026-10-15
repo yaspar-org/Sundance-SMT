@@ -4,6 +4,7 @@
 //! Solver configuration for the LIA arithmetic solver.
 
 use crate::arithmetic::lia::tableau::TableauKind;
+use std::time::Instant;
 
 /// Configuration parameters for the LIA solver pipeline.
 #[derive(Debug, Clone)]
@@ -20,6 +21,10 @@ pub struct SolverConfig {
     /// set high without risking stack overflow. When it is reached the search returns
     /// `UNKNOWN` rather than descending further. `None` means unlimited.
     pub max_branch_depth: Option<usize>,
+    /// Wall-clock deadline (the solver's `--timeout`). Branch-and-bound returns `UNKNOWN` once
+    /// it has passed; it runs inside a SAT-solver callback, where the SAT solver's own
+    /// terminator is not polled. `None` means no deadline.
+    pub deadline: Option<Instant>,
 }
 
 impl Default for SolverConfig {
@@ -36,8 +41,10 @@ impl Default for SolverConfig {
             // solvable instances (e.g. subtraction_copy.smt2) flip between UNKNOWN and TIMEOUT
             // depending on the runner/platform, since the search returns UNKNOWN the moment the
             // depth is hit. At 2^32 we effectively never bail early — a real runaway search hits
-            // the wall-clock timeout instead, which is deterministic across platforms.
+            // the wall-clock timeout instead (see `deadline`), which is deterministic across
+            // platforms.
             max_branch_depth: Some(1 << 32),
+            deadline: None,
         }
     }
 }
