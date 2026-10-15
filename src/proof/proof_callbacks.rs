@@ -37,7 +37,7 @@ impl ProofTracer for SMTProofTracer {
         debug_println!(6, 0, "RAT witness literal: {}", witness);
         debug_println!(6, 0, "Clause size: {}", clause.len());
 
-        self.add_sat_clause(clause);
+        self.add_derived_sat_clause(id, clause);
     }
 
     fn delete_clause(&mut self, _id: i64, _redundant: bool, clause: &[i32]) {

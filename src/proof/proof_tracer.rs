@@ -6,12 +6,10 @@
 use crate::debug_println;
 use crate::proof::{ProofStep, ProofStepType, Theory};
 use core::panic;
-use std::cmp::Eq;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::io::{self, Write};
-use std::ops::{Neg, Range};
+use std::ops::Range;
 use yaspar_ir::ast::{ATerm::*, FunctionMeta, Repr, Sig, Sort, SortDef, Str, SymbolQuote, Term};
 
 /// Implementation of ProofTracer both SAT solver clauses and theory clauses
@@ -40,6 +38,8 @@ struct Lrat {
     antecedents: HashMap<i64, Vec<i64>>,
     /// The clause ids `conclude_unsat` reported.
     final_ids: Vec<i64>,
+    /// CaDiCaL's clause id of each step CaDiCaL derived, keyed by the step's index.
+    derived_ids: HashMap<usize, i64>,
 }
 
 fn polarize_term(term: &Term, polarity: bool) -> Term {
@@ -54,21 +54,20 @@ fn polarize_term(term: &Term, polarity: bool) -> Term {
     }
 }
 
-/// Returns true if the clause contains a literal and its negation (i.e., both `x` and `-x`).
-/// Written for generic iterators, since clauses in this file are both `Vec`s and `&[i32]` arrays.
-fn is_tautology<'a, I, T>(clause: I) -> bool
-where
-    I: IntoIterator<Item = &'a T>,
-    T: 'a + Copy + Eq + Hash + Neg<Output = T>,
-{
-    let mut seen = HashSet::new();
+/// Returns `clause` without repeated literals, keeping the first occurrence of each, or `None`
+/// if the clause contains a literal and its negation (i.e., both `x` and `-x`).
+fn simplify_clause(clause: &[i32]) -> Option<Vec<i32>> {
+    let mut seen = HashSet::with_capacity(clause.len());
+    let mut simplified = Vec::with_capacity(clause.len());
     for &lit in clause {
         if seen.contains(&-lit) {
-            return true;
+            return None;
         }
-        seen.insert(lit);
+        if seen.insert(lit) {
+            simplified.push(lit);
+        }
     }
-    false
+    Some(simplified)
 }
 
 fn normalize_clause(clause: &[i32]) -> Vec<i32> {
@@ -305,12 +304,14 @@ impl SMTProofTracer {
 
     ////////////////////////////////////////////////////////////////////////////
 
+    /// Adds a proof step for `clause`, unless it is a tautology.
+    ///
+    /// Repeated literals are dropped, e.g. from an unshrunk e-graph explanation or the Tseitin
+    /// clause of `(or a a)`. They do not change the clause, but an LRAT checker such as
+    /// lrat-check counts a repeated unassigned literal twice and rejects the step.
     pub fn push_step(&mut self, clause: &[i32], typ: ProofStepType) {
-        if !is_tautology(clause) {
-            self.proof_steps.push(ProofStep {
-                clause: clause.to_vec(),
-                typ,
-            })
+        if let Some(clause) = simplify_clause(clause) {
+            self.proof_steps.push(ProofStep { clause, typ })
         }
     }
 
@@ -326,6 +327,17 @@ impl SMTProofTracer {
 
     pub fn add_sat_clause(&mut self, clause: &[i32]) {
         self.push_step(clause, ProofStepType::SATClause);
+    }
+
+    /// Adds a clause CaDiCaL derived, under CaDiCaL's clause id `id`.
+    pub(crate) fn add_derived_sat_clause(&mut self, id: i64, clause: &[i32]) {
+        let index = self.proof_steps.len();
+        self.add_sat_clause(clause);
+        if let Some(lrat) = &mut self.lrat
+            && self.proof_steps.len() > index
+        {
+            lrat.derived_ids.insert(index, id);
+        }
     }
 
     pub fn record_deletion(&mut self, clause: &[i32]) {
@@ -531,7 +543,12 @@ impl SMTProofTracer {
                     break;
                 }
                 _ => {
-                    if let Some(c) = core.get(normalize_clause(&step.clause).as_slice()) {
+                    // CaDiCaL can derive a clause, delete it, and derive it again from other
+                    // antecedents. Keep a derived clause only under its own id: an earlier
+                    // derivation may rest on clauses, and literal definitions, that the core drops.
+                    if let Some(c) = core.get(normalize_clause(&step.clause).as_slice())
+                        && lrat.derived_ids.get(&i).is_none_or(|id| seen.contains(id))
+                    {
                         keep[i] = true;
                         found.insert(c);
                     }
@@ -548,7 +565,46 @@ impl SMTProofTracer {
                 keep[premises.clone()].fill(true);
             }
         }
+        self.keep_used_skolemizations(&mut keep);
         Some(keep)
+    }
+
+    /// Marks the Skolemization steps whose Skolem constants a kept literal mentions.
+    ///
+    /// The refutation can use a term with a Skolem constant (e.g. in an instance) without using
+    /// the Skolemization that introduced it. That step's `declare-skolem` line is the only
+    /// declaration of the constant, so the step must be kept anyway. Repeats until nothing
+    /// changes, since a newly kept step's literals may mention earlier Skolem constants.
+    fn keep_used_skolemizations(&self, keep: &mut [bool]) {
+        loop {
+            let used = self.used_symbols(keep);
+            let mut changed = false;
+            for (step, kept) in self.proof_steps.iter().zip(keep.iter_mut()) {
+                if let ProofStepType::Skolemization { skolem_vars, .. } = &step.typ
+                    && !*kept
+                    && skolem_vars.iter().any(|(name, _)| used.contains(name))
+                {
+                    *kept = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    /// The global symbols that the literals of the steps marked in `keep` mention.
+    fn used_symbols(&self, keep: &[bool]) -> HashSet<Str> {
+        let mut symbols = HashSet::new();
+        let mut seen = HashSet::new();
+        let _ = self.visit_proof(Some(keep), |item| {
+            if let ProofItem::Literal(_, term) = item {
+                collect_global_symbols(&term, &mut seen, &mut symbols);
+            }
+            Ok(())
+        });
+        symbols
     }
 
     /// Walks the proof in order and reports, for every step that is written, the literal
@@ -617,17 +673,7 @@ impl SMTProofTracer {
         let keep = if trim { self.core_steps() } else { None };
 
         // A trimmed proof only declares the functions its literal terms mention
-        let used_symbols = keep.as_deref().map(|keep| {
-            let mut symbols = HashSet::new();
-            let mut seen = HashSet::new();
-            let _ = self.visit_proof(Some(keep), |item| {
-                if let ProofItem::Literal(_, term) = item {
-                    collect_global_symbols(&term, &mut seen, &mut symbols);
-                }
-                Ok(())
-            });
-            symbols
-        });
+        let used_symbols = keep.as_deref().map(|keep| self.used_symbols(keep));
 
         // emit the sorts, datatypes, and the symbol table
         for (sort, sort_def) in &self.sorts {
@@ -788,6 +834,32 @@ mod tests {
         }
         assert!(!proof.contains("\nd "), "deletions are dropped:\n{proof}");
         assert!(proof.ends_with("\n0\n"));
+    }
+
+    #[test]
+    fn trimming_keeps_a_rederived_clause_only_under_its_own_id() {
+        let (mut tracer, _) = pqr_tracer();
+        // CaDiCaL derives `r` from `p` and `-p | r`, deletes both, then derives `r` again from
+        // `q` and `-q | r`. Only the second derivation is in the core, and the first one
+        // precedes the only kept definition of literal 3.
+        add_input_clause(&mut tracer, 1, &[1]);
+        add_input_clause(&mut tracer, 2, &[-1, 3]);
+        ProofTracer::add_derived_clause(&mut tracer, 3, false, 0, &[3], &[1, 2]);
+        ProofTracer::delete_clause(&mut tracer, 3, false, &[3]);
+        ProofTracer::delete_clause(&mut tracer, 2, false, &[-1, 3]);
+        add_input_clause(&mut tracer, 4, &[2]);
+        add_input_clause(&mut tracer, 5, &[-2, 3]);
+        ProofTracer::add_derived_clause(&mut tracer, 6, false, 0, &[3], &[4, 5]);
+        add_input_clause(&mut tracer, 7, &[-3]);
+        ProofTracer::add_derived_clause(&mut tracer, 8, false, 0, &[], &[6, 7]);
+        ProofTracer::conclude_unsat(&mut tracer, 0, &[8]);
+
+        let proof = trimmed(&tracer);
+        assert_eq!(proof.matches("\n3 0\n").count(), 1, "{proof}");
+        let definition = proof.find("(edrat-literal 3 ").unwrap();
+        let derivation = proof.find("\n3 0\n").unwrap();
+        assert!(definition < derivation, "{proof}");
+        assert!(!proof.contains("a -1 3 0\n"), "{proof}");
     }
 
     #[test]
