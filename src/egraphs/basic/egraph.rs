@@ -219,16 +219,16 @@ pub struct Egraph {
     /// the current decision level of the SAT solver, useful to keep track for backtracking
     decision_level: usize,
     /// keeps track of terms created by quantifier instantiation and their predecessors.
-    /// Inner map: parent term id -> decision level at which the (child, parent) pair
-    /// was registered. Used by `backtrack_to` to skip re-registering entries that
-    /// were added at or below the target level (their predecessors are already
-    /// valid at that level and don't need refreshing).
-    predecessors_created_by_quantifiers:
-        DeterministicHashMap<u32, DeterministicHashMap<u32, usize>>,
+    /// Per decision level: the (child, parent) pairs registered at that level.
+    /// `backtrack_to` re-registers only the pairs of the levels it undoes; the
+    /// predecessors of the others are still valid at the target level. Keeping
+    /// them per level avoids cloning and scanning every entry on each backtrack
+    /// (18% of the samples on PagedBetreeRefinement_v.25 before this change).
+    predecessors_created_by_quantifiers: Vec<Vec<(u32, u32)>>,
     /// if a quantifier instantiates (f t) and t = s, then we want to add (f.uid(), "f", [t.uid()]).
-    /// Value is the decision level at which the term was registered; entries added
-    /// at or below the backtrack target level are skipped during `backtrack_to`.
-    union_to_eclass: DeterministicHashMap<u32, usize>,
+    /// Per decision level: the dynamic terms registered at that level.
+    /// `backtrack_to` probes the sig table again only for the levels it undoes.
+    union_to_eclass: Vec<Vec<u32>>,
     /// Signature table: maps (op, [find(c1),...,find(cn)]) → term_id.
     /// Maintained in parallel with the existing congruence detection for now.
     sig_table: FastDeterministicHashMap<SigKey, u32>,
@@ -250,6 +250,15 @@ pub struct Egraph {
 pub(crate) struct EgraphStats {
     /// Number of successful equality merges (where roots differed).
     pub(crate) merges: u64,
+}
+
+/// What the proof-forest path between two terms of one class shows directly.
+struct PathExplanation {
+    /// The asserted equalities on the path.
+    equalities: Vec<(u32, u32)>,
+    /// The argument pairs of the congruence edges on the path, which need
+    /// explanations of their own.
+    congruence_pairs: Vec<(u32, u32)>,
 }
 
 impl Default for Egraph {
@@ -277,8 +286,8 @@ impl Egraph {
             predecessor_level: vec![1, 1],
             function_maps: DeterministicHashMap::default(),
             decision_level: 0,
-            predecessors_created_by_quantifiers: DeterministicHashMap::new(),
-            union_to_eclass: DeterministicHashMap::new(),
+            predecessors_created_by_quantifiers: Vec::new(),
+            union_to_eclass: Vec::new(),
             sig_table: FastDeterministicHashMap::default(),
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
@@ -374,10 +383,12 @@ impl Egraph {
                     inner_term: child_uid,
                 };
 
-                self.predecessors_created_by_quantifiers
-                    .entry(child_uid)
-                    .or_default()
-                    .insert(id, self.decision_level);
+                let lvl = self.decision_level;
+                if self.predecessors_created_by_quantifiers.len() <= lvl {
+                    self.predecessors_created_by_quantifiers
+                        .resize_with(lvl + 1, Vec::new);
+                }
+                self.predecessors_created_by_quantifiers[lvl].push((child_uid, id));
 
                 self.predecessors[root as usize]
                     .entry(id)
@@ -398,7 +409,11 @@ impl Egraph {
         }
 
         if dynamic && !children.is_empty() {
-            self.union_to_eclass.insert(id, self.decision_level);
+            let lvl = self.decision_level;
+            if self.union_to_eclass.len() <= lvl {
+                self.union_to_eclass.resize_with(lvl + 1, Vec::new);
+            }
+            self.union_to_eclass[lvl].push(id);
         }
 
         false
@@ -744,10 +759,92 @@ impl Egraph {
             self.display_term(u),
             self.display_term(v)
         );
-        self.leastcommonancestor_helper(u, v, 0)
+        // Each pair is explained once: the explanation of a congruence edge
+        // is the explanations of its argument pairs, and those sub-proofs are
+        // shared across the proof DAG. Recursing into them without a memo
+        // explored the DAG as a tree (85% of the samples 27 levels deep on
+        // PagedBetreeRefinement_v.25). Z3's explain_eq marks each pair.
+        //
+        // The walk is a depth-first search that visits the argument pairs in
+        // order, so the equalities come out in the order of the former
+        // recursion, without its duplicates. A pair that is still open when it
+        // is needed again explains itself: the proof forest is broken and the
+        // conflict clause would be unsound, so that panics.
+        enum Step {
+            Explain(u32, u32),
+            Close((u32, u32)),
+        }
+        let mut explained: FastDeterministicHashSet<(u32, u32)> =
+            FastDeterministicHashSet::default();
+        let mut open: FastDeterministicHashSet<(u32, u32)> = FastDeterministicHashSet::default();
+        let mut work = vec![Step::Explain(u, v)];
+        let mut final_proof: Vec<(u32, u32)> = Vec::new();
+        let mut in_proof: FastDeterministicHashSet<(u32, u32)> =
+            FastDeterministicHashSet::default();
+        let mut first = true;
+        while let Some(step) = work.pop() {
+            let (a, b) = match step {
+                Step::Explain(a, b) => (a, b),
+                Step::Close(key) => {
+                    open.remove(&key);
+                    explained.insert(key);
+                    continue;
+                }
+            };
+            let key = if a < b { (a, b) } else { (b, a) };
+            if explained.contains(&key) {
+                continue;
+            }
+            if !open.insert(key) {
+                debug_println!(11, 0, "We have the proof forest :{}", self);
+                panic!(
+                    "Circular explanation: explaining {} = {} needs {} = {} itself",
+                    self.display_term(u),
+                    self.display_term(v),
+                    self.display_term(a),
+                    self.display_term(b)
+                );
+            }
+            work.push(Step::Close(key));
+            match self.leastcommonancestor_helper(a, b, open.len()) {
+                None if first => return None,
+                // A congruence edge whose arguments are not in one class: the
+                // conflict clause would miss the equalities behind that edge.
+                None => {
+                    debug_println!(11, 0, "We have the proof forest :{}", self);
+                    panic!(
+                        "Unexplained congruence: explaining {} = {} needs {} = {}, which are not in one class",
+                        self.display_term(u),
+                        self.display_term(v),
+                        self.display_term(a),
+                        self.display_term(b)
+                    );
+                }
+                Some(PathExplanation {
+                    equalities,
+                    congruence_pairs,
+                }) => {
+                    for e in equalities {
+                        if in_proof.insert(e) {
+                            final_proof.push(e);
+                        }
+                    }
+                    work.extend(
+                        congruence_pairs
+                            .into_iter()
+                            .rev()
+                            .map(|(x, y)| Step::Explain(x, y)),
+                    );
+                }
+            }
+            first = false;
+        }
+        Some(final_proof)
     }
 
-    fn leastcommonancestor_helper(&self, u: u32, v: u32, indent: usize) -> Option<Vec<(u32, u32)>> {
+    /// The path explanation of `u = v`, or `None` when `u` and `v` are not in
+    /// one class. The caller explains its congruence pairs in turn.
+    fn leastcommonancestor_helper(&self, u: u32, v: u32, indent: usize) -> Option<PathExplanation> {
         debug_println!(
             20,
             indent,
@@ -760,11 +857,6 @@ impl Egraph {
         let mut path_from_u: Vec<u32> = vec![];
         let mut curr = u;
 
-        let max_recursion_depth = 100;
-        if indent > max_recursion_depth {
-            debug_println!(11, 0, "We have the proof forest :{}", self);
-            panic!("Should not have this many recursive calls to LCH");
-        }
         loop {
             visited.insert(curr);
             if let ProofForestEdge::Root { .. } = self.proof_forest[curr as usize] {
@@ -845,14 +937,10 @@ impl Egraph {
             }
         }
 
-        for pairs in proof_congruences {
-            for &(a, b) in pairs {
-                if let Some(subproof) = self.leastcommonancestor_helper(a, b, indent + 1) {
-                    final_proof.extend(subproof);
-                }
-            }
-        }
-        Some(final_proof)
+        Some(PathExplanation {
+            equalities: final_proof,
+            congruence_pairs: proof_congruences.into_iter().flatten().copied().collect(),
+        })
     }
 
     /// Assert t1 = t2 at the current decision level.
@@ -944,19 +1032,18 @@ impl Egraph {
         // Skip entries added at or below `level`: their predecessor stamps are
         // still valid (predecessor_level only got bumped for levels > `level`)
         // and their roots didn't shift because of any pop above `level`.
-        for (term, parents) in &self.predecessors_created_by_quantifiers.clone() {
-            let current_ancestor = self.find(*term);
-            for (parent, added_at) in parents {
-                if *added_at <= level {
-                    continue;
-                }
+        let top = self.predecessors_created_by_quantifiers.len();
+        for lvl in level + 1..top {
+            for k in 0..self.predecessors_created_by_quantifiers[lvl].len() {
+                let (term, parent) = self.predecessors_created_by_quantifiers[lvl][k];
+                let current_ancestor = self.find(term);
                 let predecessor = Predecessor {
                     level,
                     hash: self.predecessor_hash,
-                    predecessor: *parent,
-                    inner_term: *term,
+                    predecessor: parent,
+                    inner_term: term,
                 };
-                self.predecessors[current_ancestor as usize].insert(*parent, predecessor);
+                self.predecessors[current_ancestor as usize].insert(parent, predecessor);
             }
         }
 
@@ -969,26 +1056,26 @@ impl Egraph {
         // Re-do union_to_eclass via sig table probe. Entries added at or below
         // `level` were already reconciled with the sig_table at that level and
         // their signatures are stable under this backtrack.
-        let union_to_eclass_info = self.union_to_eclass.clone();
-        for (term, added_at) in union_to_eclass_info {
-            if added_at <= level {
-                continue;
-            }
-            if let Some(sig) = self.compute_signature(term) {
-                if let Some(&existing) = self.sig_table.get(&sig) {
-                    if self.find(existing) != self.find(term) {
-                        self.congruence_merge(existing, term, self.decision_level);
+        let top = self.union_to_eclass.len();
+        for lvl in level + 1..top {
+            for k in 0..self.union_to_eclass[lvl].len() {
+                let term = self.union_to_eclass[lvl][k];
+                if let Some(sig) = self.compute_signature(term) {
+                    if let Some(&existing) = self.sig_table.get(&sig) {
+                        if self.find(existing) != self.find(term) {
+                            self.congruence_merge(existing, term, self.decision_level);
+                        }
+                    } else {
+                        self.sig_table_insert(sig, term, self.decision_level);
                     }
-                } else {
-                    self.sig_table_insert(sig, term, self.decision_level);
                 }
             }
         }
 
         // Clear at level 0
         if level == 0 {
-            self.predecessors_created_by_quantifiers = DeterministicHashMap::new();
-            self.union_to_eclass = DeterministicHashMap::new();
+            self.predecessors_created_by_quantifiers.clear();
+            self.union_to_eclass.clear();
             self.proof_forest_backtrack_stack = vec![];
             self.sig_trail.clear();
         }
