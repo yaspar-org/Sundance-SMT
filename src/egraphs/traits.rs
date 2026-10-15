@@ -99,9 +99,10 @@ pub trait EgraphTrait {
         lit: Lit,
     ) -> Self::TermId;
 
-    /// Tag `term`'s class as arithmetic. When incremental arithmetic is on,
-    /// any merge (direct or congruence-derived) where either pre-merge root
-    /// is tagged appends the merge to the arithmetic equality queue.
+    /// Mark `term` as Int-sorted, which makes its class arithmetic. When
+    /// incremental arithmetic is on, any merge (direct or congruence-derived)
+    /// where either pre-merge root is marked appends the merge to the
+    /// arithmetic equality queue.
     fn mark_arithmetic(&mut self, term: Self::TermId);
 
     /// Enable/disable arithmetic equality collection.

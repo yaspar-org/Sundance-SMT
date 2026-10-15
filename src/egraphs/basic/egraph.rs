@@ -58,18 +58,16 @@ impl fmt::Display for Egraph {
                         child,
                         disequalities,
                         children,
-                        arithmetic,
                     } => {
                         // we use get_term_safe here for child, because it could be that there actually is no child
                         writeln!(
                             f,
-                            "  {} -> root [Root (size: {}, child: {:?}, disequalities: {:?}, children: {:?}, arithmetic: {}])",
+                            "  {} -> root [Root (size: {}, child: {:?}, disequalities: {:?}, children: {:?}])",
                             self.display_term(term_id as u32),
                             size,
                             self.display_term(*child),
                             disequalities,
                             children,
-                            arithmetic,
                         )?;
                     }
                     ProofForestEdge::Equality {
@@ -238,9 +236,17 @@ pub struct Egraph {
     /// arithmetic backend.
     incremental_arithmetic: bool,
     /// Pre-merge (surviving_root, demoted_root) pairs from direct or
-    /// congruence-derived unions where either root was arithmetic-tagged.
+    /// congruence-derived unions of arithmetic classes.
     /// The incremental backend drains this to propagate equalities to Z3.
     arithmetic_merge_queue: Vec<(u32, u32)>,
+    /// Per term id: whether the term is Int-sorted (set by `mark_arithmetic`). A
+    /// class is arithmetic iff its root is marked. This used to be a flag on the
+    /// class root's proof-forest edge, which backtracking restores from the edge
+    /// saved at union time: a class that became arithmetic after the union lost the
+    /// flag when the union was undone, and later unions of it were never forwarded
+    /// to the arithmetic solver. A term's sort never changes, so a per-term mark
+    /// cannot go stale.
+    int_terms: Vec<bool>,
     /// Accumulated egraph statistics.
     pub(crate) stats: EgraphStats,
 }
@@ -278,7 +284,6 @@ impl Egraph {
                 child: 0,
                 disequalities: DeterministicHashMap::new(),
                 children: DeterministicHashSet::new(),
-                arithmetic: false,
             }],
             proof_forest_backtrack_stack: Vec::new(),
             predecessors: vec![FastDeterministicHashMap::default()],
@@ -292,6 +297,7 @@ impl Egraph {
             sig_trail: Vec::new(),
             incremental_arithmetic: false,
             arithmetic_merge_queue: Vec::new(),
+            int_terms: Vec::new(),
             stats: EgraphStats::default(),
         }
     }
@@ -350,7 +356,6 @@ impl Egraph {
             disequalities: DeterministicHashMap::new(),
             child: 0,
             children: DeterministicHashSet::new(),
-            arithmetic: false,
         };
 
         // Add to function_maps using the op's string key
@@ -432,7 +437,6 @@ impl Egraph {
                     child: 0,
                     disequalities: DeterministicHashMap::new(),
                     children: DeterministicHashSet::new(),
-                    arithmetic: false,
                 },
             );
             self.predecessors.resize(
@@ -455,7 +459,6 @@ impl Egraph {
             disequalities: DeterministicHashMap::new(),
             child: 0,
             children: DeterministicHashSet::new(),
-            arithmetic: false,
         };
         id
     }
@@ -473,6 +476,18 @@ impl Egraph {
             .iter()
             .map(|(_, _, y_root, _)| *y_root)
             .collect()
+    }
+
+    fn is_int_term(&self, id: u32) -> bool {
+        self.int_terms.get(id as usize).copied().unwrap_or(false)
+    }
+
+    fn set_int_term(&mut self, id: u32) {
+        let idx = id as usize;
+        if idx >= self.int_terms.len() {
+            self.int_terms.resize(idx + 1, false);
+        }
+        self.int_terms[idx] = true;
     }
 
     fn is_constant(&self, id: u32) -> bool {
@@ -1158,22 +1173,13 @@ impl Egraph {
             }
         }
 
-        // Splitting an arithmetic class yields two arithmetic classes, so
-        // both new roots inherit the flag from the still-merged class.
-        let merged_root_arithmetic = matches!(
-            &self.proof_forest[self.find(*child) as usize],
-            ProofForestEdge::Root {
-                arithmetic: true,
-                ..
-            }
-        );
+        let class_is_int = self.is_int_term(self.find(*child));
 
         let child_root = ProofForestEdge::Root {
             size: 0,
             child: childs_child,
             disequalities: new_disequalities,
             children: DeterministicHashSet::new(),
-            arithmetic: merged_root_arithmetic,
         };
 
         self.proof_forest[*child as usize] = child_root;
@@ -1185,6 +1191,12 @@ impl Egraph {
             self.display_term(y)
         );
         self.make_root(y, y_parent);
+        // Both halves of a class of Int terms are classes of Int terms. The restored
+        // root `y` may never have been marked itself (its class can have become
+        // arithmetic after the union), so mark it.
+        if class_is_int {
+            self.set_int_term(y);
+        }
     }
 
     /// Union two terms in the egraph, merging their equivalence classes
@@ -1282,34 +1294,15 @@ impl Egraph {
             (x, y, x_root, y_root)
         };
 
-        // `mark_arithmetic` runs *after* `register_term` in
-        // `insert_predecessor`, so a congruence merge here can precede tagging
-        // on one side. If either root is tagged, queue the merge and upgrade
-        // the surviving root's flag so it stays tagged going forward.
-        let x_root_arith = matches!(
-            &self.proof_forest[x_root as usize],
-            ProofForestEdge::Root {
-                arithmetic: true,
-                ..
-            }
-        );
-        let y_root_arith = matches!(
-            &self.proof_forest[y_root as usize],
-            ProofForestEdge::Root {
-                arithmetic: true,
-                ..
-            }
-        );
-        if x_root_arith || y_root_arith {
+        // `mark_arithmetic` runs *after* `register_term` in `insert_predecessor`,
+        // so a congruence merge here can precede marking on one side. If either
+        // root is marked, queue the merge and mark both: they have the same sort.
+        if self.is_int_term(x_root) || self.is_int_term(y_root) {
             if self.incremental_arithmetic {
                 self.arithmetic_merge_queue.push((x_root, y_root));
             }
-            if !x_root_arith
-                && let ProofForestEdge::Root { arithmetic, .. } =
-                    &mut self.proof_forest[x_root as usize]
-            {
-                *arithmetic = true;
-            }
+            self.set_int_term(x_root);
+            self.set_int_term(y_root);
         }
 
         // making x the parent of y ~> could also do this based on relative depth of x and y tree
@@ -1805,15 +1798,18 @@ impl EgraphTrait for Egraph {
     }
 
     fn mark_arithmetic(&mut self, term: Self::TermId) {
+        if self.is_int_term(term) {
+            return;
+        }
+        self.set_int_term(term);
         let root = self.find(term);
-        match &mut self.proof_forest[root as usize] {
-            ProofForestEdge::Root { arithmetic, .. } => {
-                *arithmetic = true;
+        if root != term && !self.is_int_term(root) {
+            // `term` was merged (by congruence, when it was registered) into a class
+            // that was not yet arithmetic, so that union was not queued.
+            self.set_int_term(root);
+            if self.incremental_arithmetic {
+                self.arithmetic_merge_queue.push((root, term));
             }
-            _ => panic!(
-                "mark_arithmetic: find({}) returned a non-root node",
-                self.display_term(term)
-            ),
         }
     }
 
