@@ -26,8 +26,11 @@
 //!   (a backtrackable trail mirroring the solver's). Conflicts cite those literals. A bound that
 //!   crosses the opposite one is never asserted; it is recorded as a pending conflict and reported
 //!   by the next check.
-//! - Decision levels are tracked by capturing an [`LRASolver::set_backtrack`] token at each level
-//!   boundary and replaying it via [`LRASolver::backtrack`].
+//! - Decision levels are tracked by capturing an [`LRASolver::set_bounds_backtrack`] token at each
+//!   level boundary and replaying it via [`LRASolver::backtrack_bounds`]. A SAT backtrack only
+//!   relaxes bounds and keeps the current assignment, which still satisfies the simplex
+//!   invariants; restoring a snapshot instead would recompute every basic variable on every
+//!   backtrack.
 //! - **`div`/`mod` by a nonzero constant** (resolved from the denominator's affine form):
 //!   `div(a, n)` is a quotient var `q`, shared per `(a, n)`, constrained by the single row
 //!   `0 ≤ a − n·q ≤ |n| − 1`; `mod(a, n) = a − n·q`. That row is definitional, so its bounds are
@@ -184,7 +187,7 @@ pub struct LiraIncrementalState {
     permanent_by_level: Vec<Vec<(Var, Bounds<QDelta>)>>,
     /// Current SAT decision level.
     sat_level: usize,
-    /// `lra_tokens[l]` is the [`LRASolver::set_backtrack`] token captured at the `l → l+1`
+    /// `lra_tokens[l]` is the [`LRASolver::set_bounds_backtrack`] token captured at the `l → l+1`
     /// decision-level boundary; replayed by `notify_backtrack`.
     lra_tokens: Vec<usize>,
     /// Constraints pushed since the last (partial or full) check.
@@ -659,11 +662,9 @@ impl IncrementalArithSolver for LiraIncrementalState {
     }
 
     fn notify_new_decision_level(&mut self) {
-        // If the previous check ended `Unsat`, clear it first: `set_backtrack` is a no-op while
-        // `Unsat`, which would capture a stale token and skip the assignment backup.
         let lra = self.solver.lra_solver_mut();
         lra.clear_unsat_state();
-        let token = lra.set_backtrack();
+        let token = lra.set_bounds_backtrack();
         self.lra_tokens.push(token);
         self.bound_marks.push(self.bound_trail.len());
         self.sat_level += 1;
@@ -680,7 +681,7 @@ impl IncrementalArithSolver for LiraIncrementalState {
         // replaying it relaxes all bounds asserted at levels > `level`.
         let token = self.lra_tokens[level];
         let lra = self.solver.lra_solver_mut();
-        lra.backtrack(token);
+        lra.backtrack_bounds(token);
         // Any `Unsat` state refers to bounds that may just have been relaxed.
         lra.clear_unsat_state();
         self.lra_tokens.truncate(level);
