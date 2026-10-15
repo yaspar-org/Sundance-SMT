@@ -18,6 +18,7 @@ use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
+use dashu::integer::IBig;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -251,6 +252,34 @@ impl<'a> CustomExternalPropagator<'a> {
                 ObservedSink::Minisat(solver) => (**solver).add_observed_var(abs_lit),
             }
         }
+    }
+
+    /// Whether the unions made since `union_mark` (a Nelson-Oppen probe merge and
+    /// the congruences it caused) joined two classes that the arithmetic model gives
+    /// different values. Every class that took part in such a union is checked: its
+    /// pre-probe root is either among the absorbed roots or is the surviving root.
+    fn probe_breaks_arithmetic_model(
+        &self,
+        union_mark: usize,
+        value_of_root: &DeterministicHashMap<u32, &IBig>,
+    ) -> bool {
+        let egraph = &self.solver_state.egraph;
+        let mut class_value: DeterministicHashMap<u32, &IBig> = DeterministicHashMap::new();
+        for absorbed in egraph.roots_absorbed_since(union_mark) {
+            let root = egraph.find(absorbed);
+            for member in [absorbed, root] {
+                if let Some(&value) = value_of_root.get(&member) {
+                    match class_value.get(&root) {
+                        Some(&other) if other != value => return true,
+                        Some(_) => {}
+                        None => {
+                            class_value.insert(root, value);
+                        }
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Emit `(x<y ∨ x>y ∨ x=y)` as a raw 3-literal clause (no Tseitin gate).
@@ -719,6 +748,15 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 // Probed pairs, keyed by canonical (egraph_root, egraph_root).
                 let mut probe_pair_uids: DeterministicHashMap<(u32, u32), (u64, u64)> =
                     DeterministicHashMap::default();
+                // Model value of each class root the arithmetic model reports.
+                let value_of_root: DeterministicHashMap<u32, &IBig> = literals
+                    .iter()
+                    .flat_map(|(value, set)| set.iter().map(move |uid| (*uid, value)))
+                    .map(|(uid, value)| (self.solver_state.to_egraph_id(uid), value))
+                    .collect();
+                // Probed pairs whose merge, without an E-graph conflict, still implied
+                // (by congruence) an equality the arithmetic model violates.
+                let mut arith_violations: Vec<(u64, u64)> = Vec::new();
 
                 'outer: for set in literals.values() {
                     let mut t = set.iter();
@@ -746,6 +784,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         // merge can be undone individually if it conflicts.
                         self.solver_state.egraph.notify_new_decision_level();
                         probe_level += 1;
+                        let union_mark = self.solver_state.egraph.union_mark();
                         let result = self.solver_state.egraph.assert_equal(x_root, y_root);
                         // Probe merges are speculative — discard queue entries
                         // so they don't leak into the incremental arithmetic backend.
@@ -754,11 +793,36 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                             self.solver_state.egraph.backtrack_to(probe_level - 1);
                             probe_level -= 1;
                             conflicts.push(c);
-                            if conflicts.len() >= self.max_arith_conflicts_per_round {
-                                break 'outer;
-                            }
+                        } else if self.probe_breaks_arithmetic_model(union_mark, &value_of_root) {
+                            // The merge is consistent in the E-graph, but by congruence
+                            // it equates classes the model keeps apart (x = 0+x forces
+                            // g(x) = g(0+x) while the model has g(x) > g(0+x)), so the
+                            // model is not a model of the combination. Undo the merge
+                            // and split on the pair below, as for a conflict.
+                            self.solver_state.egraph.backtrack_to(probe_level - 1);
+                            probe_level -= 1;
+                            arith_violations.push((x, y));
+                        }
+                        if conflicts.len() + arith_violations.len()
+                            >= self.max_arith_conflicts_per_round
+                        {
+                            break 'outer;
                         }
                     }
+                }
+
+                for &(x_uid, y_uid) in &arith_violations {
+                    // A pair whose trichotomy is already in the clause set is never
+                    // probed: the SAT solver has decided `x = y` (so x and y share a
+                    // class) or `x < y` / `x > y` (so their values differ).
+                    debug_assert!(
+                        !self
+                            .solver_state
+                            .nelson_oppen_ineq_literals
+                            .contains(&(x_uid, y_uid)),
+                        "re-probed a pair whose trichotomy was already emitted"
+                    );
+                    self.emit_trichotomy_for_pair(x_uid, y_uid);
                 }
 
                 for conflict in &conflicts {

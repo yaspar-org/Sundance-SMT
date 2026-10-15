@@ -3,6 +3,7 @@
 
 //! datastructures for proof forest inside of the egraph
 use super::datastructures::DisequalTerm;
+use super::egraph::valid_hash;
 use crate::debug_println;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use std::fmt;
@@ -18,10 +19,6 @@ pub(super) enum ProofForestEdge {
         child: u32, // TODO: I am not 100% sure if child actually does anything, I think it is useful for reversing edges in the proof forest, but not 100% sure
         disequalities: DeterministicHashMap<u32, DisequalTerm>, // TODO: this might lead to a lot of allocations
         children: DeterministicHashSet<u32>,
-        /// True iff the class contains an Int-sorted term. `cc_union`
-        /// propagates the flag with OR: if either pre-merge root is tagged,
-        /// the surviving root becomes tagged.
-        arithmetic: bool,
     },
     /// Represents a node with an equality relationship
     Equality {
@@ -55,12 +52,11 @@ impl fmt::Display for ProofForestEdge {
                 child,
                 disequalities,
                 children,
-                arithmetic,
             } => {
                 write!(
                     f,
-                    "Root(size: {}, child: {:?}, disequalities: {:?}, children: {:?}, arithmetic: {})",
-                    size, child, disequalities, children, arithmetic
+                    "Root(size: {}, child: {:?}, disequalities: {:?}, children: {:?})",
+                    size, child, disequalities, children
                 )
             }
             ProofForestEdge::Equality {
@@ -201,14 +197,12 @@ impl ProofForestEdge {
                 size,
                 child,
                 children,
-                arithmetic,
                 ..
             } => ProofForestEdge::Root {
                 size,
                 child,
                 disequalities: diseq,
                 children,
-                arithmetic,
             },
             ProofForestEdge::Equality {
                 term,
@@ -306,17 +300,14 @@ impl ProofForestEdge {
             ProofForestEdge::Congruence { disequalities, .. } => disequalities,
         };
         // will only insert a disequality if is not already in the map
-        // or if the hash is outdated (i.e. we have already backtracked on this disequality)
+        // or if the hash is outdated (i.e. we have already backtracked on this disequality).
+        // Use the same validity test as everywhere else (`valid_hash`): an entry recorded
+        // after a backtrack to a level above its own carries a hash *greater* than
+        // `hash_level_map[level]` and is still in force. Treating it as outdated would
+        // replace it with this (higher-level) disequality, and backtracking past that
+        // level would then leave the class with no record of the still-asserted one.
         if let Some(disequality) = disequalities.get(&key) {
-            // Outdated means "popped": the same rule as `valid_hash` in
-            // egraph.rs. The former test (`hash != hash_level_map[level]`)
-            // also called outdated every live entry stamped after an earlier
-            // backtrack at its level, so a later, deeper disequality over the
-            // same two classes overwrote it and took it along when popped
-            // (conformance test `seed_764_minimal`).
-            let live =
-                disequality.level == 0 || disequality.hash >= hash_level_map[disequality.level];
-            if !live {
+            if !valid_hash(disequality.hash, disequality.level, hash_level_map) {
                 debug_println!(
                     5,
                     0,
@@ -338,5 +329,55 @@ impl ProofForestEdge {
             // should only insert if there is not a value for key
             disequalities.insert(key, t);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diseq(diseq_lit: i32, level: usize, hash: u32) -> DisequalTerm {
+        DisequalTerm {
+            term: 7,
+            level,
+            diseq_lit,
+            hash,
+            original_disequality: (3, 7),
+        }
+    }
+
+    fn root() -> ProofForestEdge {
+        ProofForestEdge::Root {
+            size: 1,
+            child: 0,
+            disequalities: DeterministicHashMap::new(),
+            children: DeterministicHashSet::new(),
+        }
+    }
+
+    /// A disequality recorded at level 2 after the solver had already backtracked
+    /// (so its hash, 5, is newer than level 2's invalidation stamp, 4) is still in
+    /// force. Adding a second disequality between the same classes at level 3 must
+    /// keep it: otherwise backtracking to level 2 drops the only record of a
+    /// disequality that is still asserted.
+    #[test]
+    fn add_disequality_keeps_valid_lower_level_entry() {
+        // predecessor_level stamps per level: level 2 was last invalidated at hash 4.
+        let stamps = [0, 0, 4, 4];
+        let mut edge = root();
+        edge.add_disequality(7, diseq(-10, 2, 5), &stamps);
+        edge.add_disequality(7, diseq(-11, 3, 5), &stamps);
+        assert_eq!(edge.disequalities()[&7].diseq_lit, -10);
+    }
+
+    /// An entry whose level was backtracked over (hash older than the stamp) is
+    /// replaced.
+    #[test]
+    fn add_disequality_replaces_outdated_entry() {
+        let stamps = [0, 0, 6, 6];
+        let mut edge = root();
+        edge.add_disequality(7, diseq(-10, 2, 5), &stamps);
+        edge.add_disequality(7, diseq(-11, 2, 6), &stamps);
+        assert_eq!(edge.disequalities()[&7].diseq_lit, -11);
     }
 }
