@@ -231,6 +231,16 @@ pub fn cdcl_decision_procedure(
         }
     };
 
+    // With an inexact arithmetic solver (an opaque term), an accepted model is not known to be a
+    // model of the input.
+    let result = if result == Status::SATISFIABLE
+        && propagator.arith.as_ref().is_some_and(|a| !a.is_exact())
+    {
+        Status::UNKNOWN
+    } else {
+        result
+    };
+
     // Write the proof after all borrows are released. `--proof` writes it on unsat only, trimmed
     // to the refutation; `--partial-proof` writes everything recorded, for any result.
     if let Some(p) = proof_file
