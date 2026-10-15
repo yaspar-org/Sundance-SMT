@@ -106,6 +106,10 @@ pub struct CustomExternalPropagator<'a> {
     pub batch_cap: usize,
     /// Incremental arithmetic translator+solver. None when using eager mode.
     pub arith: Option<ArithTranslator>,
+    /// Set when an incremental arithmetic check gave up (e.g. branch-and-bound hit the
+    /// deadline). A model accepted after that is not known to be a model, so a `sat` result
+    /// must be reported as unknown.
+    pub arith_incomplete: bool,
     // --trail-out logging (inert unless the writer is Some). Trails stream to
     // disk as they are refuted; the small |lit| -> atom map is held and flushed
     // at the end (only complete then, as new literals appear during the search).
@@ -710,6 +714,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
             let result = arith.check(self.solver_state);
             self.arith = Some(arith);
+            if matches!(result, ArithResult::None) {
+                self.arith_incomplete = true;
+            }
             result
         } else {
             check_integer_constraints_satisfiable(&self.arithmetic, model, self.solver_state)

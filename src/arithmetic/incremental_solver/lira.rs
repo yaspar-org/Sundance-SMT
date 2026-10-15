@@ -1881,6 +1881,62 @@ mod tests {
         }
     }
 
+    /// `x = 2a` and `x = 2b + 1`: no integer solution, but each equality is tight on its own and
+    /// the rational relaxation is unbounded, so branch-and-bound never terminates.
+    fn push_parity_conflict(s: &mut LiraIncrementalState) {
+        let x = s.try_register_var(None, true).unwrap();
+        let a = s.try_register_var(None, true).unwrap();
+        let b = s.try_register_var(None, true).unwrap();
+        s.try_push_constraint(ArithConstraint::Eq(term(x, 1), term(a, 2)), 10)
+            .unwrap();
+        let two_b_plus_one = ArithExpr::linear(vec![(b, IBig::from(2))], IBig::ONE);
+        s.try_push_constraint(ArithConstraint::Eq(term(x, 1), two_b_plus_one), 20)
+            .unwrap();
+    }
+
+    #[test]
+    fn branch_and_bound_stops_at_deadline() {
+        // Deadline already passed: branch-and-bound gives up at its first branch.
+        let config = SolverConfig {
+            deadline: Some(std::time::Instant::now()),
+            ..SolverConfig::default()
+        };
+        let mut s = LiraIncrementalState::with_config(config);
+        push_parity_conflict(&mut s);
+        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unknown));
+
+        // Deadline during the search: the search, and the unwinding of its deep stack, end
+        // shortly after it.
+        let start = std::time::Instant::now();
+        let config = SolverConfig {
+            deadline: Some(start + std::time::Duration::from_millis(300)),
+            ..SolverConfig::default()
+        };
+        let mut s = LiraIncrementalState::with_config(config);
+        push_parity_conflict(&mut s);
+        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unknown));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}",
+            start.elapsed()
+        );
+        // Giving up leaves no stale conflict: after backtracking past the constraints, the
+        // (empty) system is not reported Unsat. It may still be Unknown, as the deadline has
+        // passed.
+        let mut s = LiraIncrementalState::with_config(SolverConfig {
+            deadline: Some(std::time::Instant::now()),
+            ..SolverConfig::default()
+        });
+        s.notify_new_decision_level();
+        push_parity_conflict(&mut s);
+        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unknown));
+        s.notify_backtrack(0);
+        assert!(!matches!(
+            s.try_check().unwrap(),
+            ArithCheckResult::Unsat(_)
+        ));
+    }
+
     #[test]
     fn branch_and_bound_budget_exhaustion_is_unknown() {
         let config = SolverConfig {

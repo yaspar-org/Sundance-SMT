@@ -66,3 +66,18 @@ fn opaque_div_never_answers_sat() {
         "expected unknown, got {out:?}"
     );
 }
+
+#[test]
+fn branch_and_bound_respects_timeout() {
+    let (out, elapsed) = run(
+        "branch_and_bound_diverges.smt2",
+        &["--timeout=2"],
+        Duration::from_secs(30),
+    )
+    .expect("no answer within 30 s: --timeout=2 was not honored");
+    assert!(
+        out == "unknown" || out == "unsat",
+        "expected unknown (or unsat), got {out:?}"
+    );
+    assert!(elapsed < Duration::from_secs(15), "took {elapsed:?}");
+}
