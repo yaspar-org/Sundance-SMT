@@ -579,19 +579,24 @@ impl SolverState {
                     (middle_term.clone(), vec![])
                 };
 
-            // Foralls are instantiated by e-matching and need a trigger.
-            // Existentials are skolemized, so they need none. When a forall
-            // has no `:pattern`, trigger inference is only attempted if it was
-            // explicitly enabled (`--infer-triggers`); otherwise we fail loudly
-            // rather than silently drop the axiom (unsound/incomplete answer).
-            if is_forall && trigger_ids.is_empty() {
-                if !self.infer_triggers {
-                    panic!(
-                        "forall without a :pattern trigger: {term}\n\
-                         Enable trigger inference with --infer-triggers to \
-                         instantiate such quantifiers."
-                    );
-                }
+            // Foralls are instantiated by e-matching and need a trigger. When a
+            // forall has no `:pattern`, trigger inference is only attempted if
+            // it was explicitly enabled (`--infer-triggers`); otherwise we fail
+            // loudly rather than silently drop the axiom (unsound/incomplete
+            // answer).
+            if is_forall && trigger_ids.is_empty() && !self.infer_triggers {
+                panic!(
+                    "forall without a :pattern trigger: {term}\n\
+                     Enable trigger inference with --infer-triggers to \
+                     instantiate such quantifiers."
+                );
+            }
+            // An existential is skolemized when it is true, but when it is
+            // false it acts as a forall and is instantiated by e-matching like
+            // one (Z3 turns it into a forall in NNF before inferring patterns).
+            // So it gets inferred triggers too; if it has none, it can still be
+            // skolemized.
+            if trigger_ids.is_empty() && self.infer_triggers {
                 let bound_names: Vec<String> =
                     sorted_vars.iter().map(|x| x.0.get().clone()).collect();
                 if let Some(multipatterns) = crate::quantifiers::trigger_inference::infer_triggers(
@@ -607,9 +612,9 @@ impl SolverState {
                         }
                     }
                 }
-                // Inference enabled but no admissible trigger found: still fail
-                // loudly rather than silently drop the axiom.
-                if trigger_ids.is_empty() {
+                // Inference enabled but no admissible trigger found for a
+                // forall: still fail loudly rather than silently drop the axiom.
+                if is_forall && trigger_ids.is_empty() {
                     panic!("Could not infer a trigger for untriggered forall: {term}");
                 }
             }

@@ -652,21 +652,32 @@ fn back_substitute_model(model: &mut Assignment<Var>, substitutions: &[Substitut
                 target,
                 replacement,
             } => {
-                if let Some(val) = model.get(replacement).cloned() {
-                    model.insert(*target, val);
-                }
+                let val = value_or_zero(model, *replacement);
+                model.insert(*target, val);
             }
             Substitution::Affine {
                 target,
                 replacement,
                 offset,
             } => {
-                if let Some(val) = model.get(replacement).cloned() {
-                    model.insert(*target, val + offset);
-                }
+                let val = value_or_zero(model, *replacement);
+                model.insert(*target, val + offset);
             }
         }
     }
+}
+
+/// The model value of `var`. A replacement variable that no remaining relation
+/// mentions is unconstrained, so the solver's model has no value for it; give it 0
+/// (and record it, so every variable eliminated in its favor gets a value too).
+/// Without this, those variables were missing from the model, and the propagator's
+/// Nelson-Oppen probe never saw that, e.g., `x` and `(+ 0 x)` are equal.
+fn value_or_zero(model: &mut Assignment<Var>, var: Var) -> Rational {
+    if let Some(value) = model.get(&var) {
+        return value.clone();
+    }
+    model.insert(var, Rational::ZERO);
+    Rational::ZERO
 }
 
 /// Run the solver given the provided context and return the resulting SolverDecision.
