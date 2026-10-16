@@ -96,8 +96,11 @@ fn regression_test() {
             // Optional SAT backend override (`cadical` or `minisat`)
             let sat_backend = env::var("SUNDANCE_SAT_BACKEND").ok();
 
-            // Run solver with timeout
-            let mut cmd = Command::new("target/release/sundance-smt");
+            // Run solver with timeout — env! resolves to the debug or release
+            // binary depending on whether `cargo test` or `cargo test --release`
+            // was used.
+            let solver_path = env!("CARGO_BIN_EXE_sundance-smt");
+            let mut cmd = Command::new(solver_path);
             cmd.arg(path.to_str().unwrap());
             if let Some(ref a) = arithmetic {
                 cmd.arg("--arithmetic").arg(a);
@@ -113,7 +116,12 @@ fn regression_test() {
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn()
-                .expect("Failed to execute solver");
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "Failed to execute solver '{}' for test file '{}': {}",
+                        solver_path, relative_path, e
+                    )
+                });
 
             // Wait for the process with timeout
             match wait_with_timeout(child, Duration::from_secs(10)) {
@@ -179,7 +187,8 @@ fn rejection_test() {
         print!("Rejection test: {} ... ", name);
         io::stdout().flush().unwrap();
 
-        let mut cmd = Command::new("target/release/sundance-smt");
+        let solver_path = env!("CARGO_BIN_EXE_sundance-smt");
+        let mut cmd = Command::new(solver_path);
         cmd.arg(path.to_str().unwrap());
         // Force the internal backend: rejection of unsupported arithmetic (e.g.
         // non-linear multiplication) is a property of the internal solver.
@@ -188,7 +197,14 @@ fn rejection_test() {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .expect("Failed to execute solver");
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to execute solver '{}' for rejection test '{}': {}",
+                    solver_path,
+                    path.display(),
+                    e
+                )
+            });
 
         match wait_with_timeout(child, Duration::from_secs(10)) {
             Ok(output) => {
