@@ -25,7 +25,7 @@ use crate::arithmetic::lia::context::ConvContext;
 use crate::arithmetic::lia::lra_solver::LRASolver;
 use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::utils;
-use crate::arithmetic::lia::variables::{Owner, Var, VarInfo};
+use crate::arithmetic::lia::variables::{Owner, Var, VarInfo, VarType};
 use crate::debug_println;
 
 /// Generic frontend error
@@ -547,6 +547,58 @@ impl Rel<Rational> {
         self.make_integral();
     }
 
+    /// Tighten a normalized inequality over integer variables to the integer grid.
+    ///
+    /// When every variable is integer-typed (and, after [`Self::normalize`], every coefficient is
+    /// an integer), `Σ aᵢxᵢ` only takes integer values. With `g = gcd(aᵢ)` the relation is
+    /// rewritten as `Σ (aᵢ/g)xᵢ ⋈ c/g` and then:
+    /// - `≤ c` becomes `≤ ⌊c⌋` and `< c` becomes `≤ ⌈c⌉ − 1`,
+    /// - `≥ c` becomes `≥ ⌈c⌉` and `> c` becomes `≥ ⌊c⌋ + 1`.
+    ///
+    /// The result has the same integer solutions but a strictly smaller (or equal) rational
+    /// relaxation. Without it, e.g. `−1 < x − y < 0` is feasible over the rationals and, if the
+    /// system is otherwise unbounded, branch-and-bound on `x` and `y` never terminates; tightened,
+    /// it is `x − y ≤ −1 ∧ x − y ≥ 0`, which the relaxation alone refutes.
+    ///
+    /// Equalities are left unchanged, but checked: `Σ aᵢxᵢ = c` has no integer solution when `g`
+    /// does not divide `c` (e.g. `2x + 2y = 1`), and `true` is returned. Relations mentioning a
+    /// non-integer variable are left unchanged. The coefficients stay integral, relatively prime,
+    /// and with positive leading term, so a normalized relation remains normalized.
+    ///
+    /// Returns `true` iff the relation is shown to have no integer solution.
+    pub fn tighten_integral(&mut self) -> bool {
+        if self.terms.is_empty()
+            || !self
+                .terms
+                .iter()
+                .all(|t| t.var.typ == VarType::Int && t.coeff.is_int())
+        {
+            return false;
+        }
+        let mut gcd = self.terms[0].coeff.numerator().abs();
+        for term in self.terms.iter().skip(1) {
+            gcd = gcd.gcd(term.coeff.numerator()).into();
+        }
+        let gcd = Rational::from(gcd);
+        if self.constraint_type == Constraint::Eq {
+            return !(&self.constant / &gcd).is_int();
+        }
+        for term in self.terms.iter_mut() {
+            term.coeff /= &gcd;
+        }
+        let c = &self.constant / &gcd;
+        let (constraint_type, constant) = match self.constraint_type {
+            Constraint::Le => (Constraint::Le, c.floor()),
+            Constraint::Lt => (Constraint::Le, c.ceil() - Integer::ONE),
+            Constraint::Ge => (Constraint::Ge, c.ceil()),
+            Constraint::Gt => (Constraint::Ge, c.floor() + Integer::ONE),
+            Constraint::Eq => unreachable!("equalities returned above"),
+        };
+        self.constraint_type = constraint_type;
+        self.constant = Rational::from(constant);
+        false
+    }
+
     /// Determine if self is normalized, independent of the `normalize` method
     pub fn is_normalized(&self) -> bool {
         // sorted by variable index
@@ -775,6 +827,64 @@ impl LinearSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tighten_integral` on a relation over integer vars `x_0, x_1`.
+    fn tightened(rel: Rel<Rational>) -> Rel<Rational> {
+        let mut rel = rel;
+        rel.normalize();
+        assert!(!rel.tighten_integral());
+        rel
+    }
+
+    #[test]
+    fn tighten_integral_strict_and_gcd() {
+        let (x, y) = (Var::int(0), Var::int(1));
+        // 2x + 4y < 5  ~>  x + 2y <= 2
+        assert_eq!(
+            tightened(Rel::mk_lt(vec![Mon::new(2, x), Mon::new(4, y)], 5)),
+            Rel::mk_le(vec![Mon::new(1, x), Mon::new(2, y)], 2)
+        );
+        // 3x > -2  ~>  x >= 0
+        assert_eq!(
+            tightened(Rel::mk_gt(vec![Mon::new(3, x)], -2)),
+            Rel::mk_ge(vec![Mon::new(1, x)], 0)
+        );
+        // 2x >= 3  ~>  x >= 2
+        assert_eq!(
+            tightened(Rel::mk_ge(vec![Mon::new(2, x)], 3)),
+            Rel::mk_ge(vec![Mon::new(1, x)], 2)
+        );
+        // x - y < 0  ~>  x - y <= -1
+        assert_eq!(
+            tightened(Rel::mk_lt(vec![Mon::new(1, x), Mon::new(-1, y)], 0)),
+            Rel::mk_le(vec![Mon::new(1, x), Mon::new(-1, y)], -1)
+        );
+    }
+
+    #[test]
+    fn tighten_integral_detects_gcd_infeasible_equality() {
+        let (x, y) = (Var::int(0), Var::int(1));
+        // 2x + 2y = 1 has no integer solution; 2x + 4y = 6 does.
+        let mut rel = Rel::mk_eq(vec![Mon::new(2, x), Mon::new(2, y)], 1);
+        rel.normalize();
+        assert!(rel.tighten_integral());
+        let mut rel = Rel::mk_eq(vec![Mon::new(2, x), Mon::new(4, y)], 6);
+        rel.normalize();
+        assert!(!rel.tighten_integral());
+    }
+
+    #[test]
+    fn tighten_integral_leaves_equalities_and_reals() {
+        let (x, r) = (Var::int(0), Var::real(1));
+        let eq = tightened(Rel::mk_eq(vec![Mon::new(2, x)], 4));
+        let mut expected = Rel::mk_eq(vec![Mon::new(2, x)], 4);
+        expected.normalize();
+        assert_eq!(eq, expected);
+        let mixed = tightened(Rel::mk_lt(vec![Mon::new(1, x), Mon::new(1, r)], 0));
+        let mut expected = Rel::mk_lt(vec![Mon::new(1, x), Mon::new(1, r)], 0);
+        expected.normalize();
+        assert_eq!(mixed, expected);
+    }
 
     use crate::arithmetic::lia::{
         config::SolverConfig,
