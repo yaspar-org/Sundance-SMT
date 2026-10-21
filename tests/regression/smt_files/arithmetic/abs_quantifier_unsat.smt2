@@ -1,0 +1,6 @@
+(set-logic ALL)
+(declare-const b Int)
+(declare-fun f (Int) Int)
+(assert (forall ((x Int)) (! (= (f x) (abs x)) :pattern ((f x)))))
+(assert (< (f (- 0 3)) 3))
+(check-sat)

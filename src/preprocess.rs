@@ -5,8 +5,10 @@
 //! see for example "tests/regression/smt_files/edge_cases/test_bool.smt2" or
 //! ""tests/regression/smt_files/edge_cases/test_bool_ite.smt2"" for an example
 
+use dashu::integer::UBig;
 use sat_interface::Formula;
-use yaspar_ir::ast::{ATerm::*, Attribute, TermAllocator};
+use yaspar_ir::ast::alg::{Constant, QualifiedIdentifier};
+use yaspar_ir::ast::{ATerm::*, Attribute, StrAllocator, TermAllocator};
 use yaspar_ir::ast::{FetchSort, ObjectAllocatorExt, Repr, Term};
 
 use crate::cnf::CNFConversion as _;
@@ -16,7 +18,8 @@ use crate::solver_state::SolverState;
 use crate::utils::DeterministicHashSet;
 
 /// For each Boolean subterm, we apply the Tseitin transformation and add those clauses
-/// We also include subcalls to `find_datatype_axioms` and `process_ite` to process datatype and ite axioms
+/// We also include subcalls to `find_datatype_axioms`, `process_ite` and `process_abs` to process
+/// datatype, ite and abs axioms
 pub fn check_for_function_bool(
     term: &Term,
     solver_state: &mut SolverState,
@@ -34,6 +37,10 @@ pub fn check_for_function_bool(
     let mut vector = vec![];
 
     if let Some(formula) = process_ite(term, solver_state, from_quantifier) {
+        vector.extend(formula.into_iter().map(|x| x.0));
+    }
+
+    if let Some(formula) = process_abs(term, solver_state, from_quantifier) {
         vector.extend(formula.into_iter().map(|x| x.0));
     }
 
@@ -428,4 +435,46 @@ fn process_ite(
     } else {
         None
     }
+}
+
+fn process_abs(
+    term: &Term,
+    solver_state: &mut SolverState,
+    from_quantifier: bool,
+) -> Option<Formula> {
+    let App(f, args, _) = term.repr() else {
+        return None;
+    };
+    if f.id_str().get() != "abs" || !f.0.indices.is_empty() || args.len() != 1 {
+        return None;
+    }
+    let t = args[0].clone();
+
+    let int_sort = solver_state.context.int_sort();
+    let bool_sort = solver_state.context.bool_sort();
+    let zero = solver_state
+        .context
+        .constant(Constant::Numeral(UBig::ZERO), Some(int_sort.clone()));
+
+    let geq = QualifiedIdentifier::simple(solver_state.context.allocate_symbol(">="));
+    let geq_zero = solver_state
+        .context
+        .app(geq, vec![t.clone(), zero], Some(bool_sort));
+
+    let minus = QualifiedIdentifier::simple(solver_state.context.allocate_symbol("-"));
+    let neg_t = solver_state
+        .context
+        .app(minus, vec![t.clone()], Some(int_sort));
+
+    let eq1 = solver_state.eq(term.clone(), t);
+    let imp1 = solver_state.implies(vec![geq_zero.clone()], eq1);
+
+    let eq2 = solver_state.eq(term.clone(), neg_t);
+    let neg = solver_state.not(geq_zero);
+    let imp2 = solver_state.implies(vec![neg], eq2);
+
+    let abs_axioms = solver_state.and(vec![imp1, imp2]);
+    let abs_axioms_nnf = abs_axioms.nnf(solver_state);
+    solver_state.insert_predecessor(&abs_axioms_nnf, None, None, from_quantifier);
+    Some(abs_axioms_nnf.cnf_tseitin(solver_state))
 }
