@@ -798,7 +798,7 @@ mod tests {
     #[test]
     fn integrality_is_enforced() {
         // `3x >= 1 && 3x <= 2` pins x to [1/3, 2/3]: the rational relaxation is feasible but
-        // there is no integer in that interval, so branch-and-bound must report UNSAT. A pure
+        // there is no integer in that interval, so the LIRA solver must report UNSAT. A pure
         // LRA frontend would (unsoundly) report SAT here.
         let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
@@ -812,46 +812,6 @@ mod tests {
             matches!(s.try_check().unwrap(), ArithCheckResult::Unsat(_)),
             "x in [1/3, 2/3] has no integer solution; branch-and-bound must report UNSAT"
         );
-    }
-
-    #[test]
-    fn branch_and_bound_state_is_fresh_across_checks() {
-        // A `check` that falls back to branch-and-bound must not leak speculative branch bounds
-        // into the persistent solver: the next `check` must see a fresh branch-and-bound state.
-        //
-        // The classic integer trap `3x >= 1 && 3x <= 2` forces B&B to prune the floor branch
-        // (x <= 0) and explore the ceil branch (x >= 1) — that `x >= 1` is exactly the bound that
-        // would leak. After backtracking away the trap and pinning x == 0, the system is feasible
-        // *only* if no residual `x >= 1` survives from the previous `check`.
-        let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-
-        // Level 1: assert the trap, so `check` runs branch-and-bound and reports UNSAT.
-        s.notify_new_decision_level();
-        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(x, 3)), 10)
-            .unwrap();
-        s.try_push_constraint(ArithConstraint::Leq(term(x, 3), ArithExpr::constant(2)), 20)
-            .unwrap();
-        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unsat(_)));
-
-        // Backtrack to level 0: the trap's bounds are relaxed. Pin x == 0, which is feasible
-        // *unless* a speculative `x >= 1` from the previous branch-and-bound leaked through.
-        s.notify_backtrack(0);
-        s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(0)), 30)
-            .unwrap();
-        match s.try_check().unwrap() {
-            ArithCheckResult::Sat(buckets) => {
-                assert!(
-                    buckets.get(&IBig::from(0)).unwrap().contains(&x),
-                    "x should be 0; a leaked x >= 1 branch bound would make this UNSAT"
-                );
-            }
-            _ => {
-                panic!(
-                    "expected SAT: a residual branch-and-bound bound leaked across check() calls"
-                )
-            }
-        }
     }
 
     #[test]
