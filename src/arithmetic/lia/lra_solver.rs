@@ -286,17 +286,7 @@ impl LRASolver {
 
         // Step 1: register any brand-new problem variables as unbounded non-basic columns.
         for term in rel.terms_ref() {
-            let v = term.var();
-            if !self.var_to_idx.contains_key(&v) {
-                let new_col = self.tableau.add_col().map_err(|e| {
-                    SolverError(format!("add_relation: failed to grow tableau column: {e}"))
-                })?;
-                let new_idx = self.variables.len();
-                self.variables
-                    .push(VarInfo::new(v, Owner::NonBasic(new_col)));
-                self.non_basic.push(new_idx);
-                self.var_to_idx.insert(v, new_idx);
-            }
+            self.ensure_var(term.var())?;
         }
 
         // Step 2: build the new row over the current non-basic columns, substituting out any
@@ -351,6 +341,26 @@ impl LRASolver {
 
         // Feasibility of the extended system must be re-established by solve().
         self.state = LRASolverState::Unknown;
+        Ok(())
+    }
+
+    /// Register `v` as an unbounded non-basic column if the solver has never seen it, so bounds
+    /// can be asserted on it directly. A no-op for known variables.
+    ///
+    /// A fresh column appears in no row, so all invariants are preserved.
+    pub fn ensure_var(&mut self, v: Var) -> SolverResult<()> {
+        if self.var_to_idx.contains_key(&v) {
+            return Ok(());
+        }
+        let new_col = self
+            .tableau
+            .add_col()
+            .map_err(|e| SolverError(format!("failed to grow tableau column: {e}")))?;
+        let new_idx = self.variables.len();
+        self.variables
+            .push(VarInfo::new(v, Owner::NonBasic(new_col)));
+        self.non_basic.push(new_idx);
+        self.var_to_idx.insert(v, new_idx);
         Ok(())
     }
 
@@ -1876,6 +1886,25 @@ mod tests {
         // basic variable should still be in bounds
         let s_val = assg.get(&Var::real(2)).unwrap();
         assert!(*s_val >= rbig!(0) && *s_val <= rbig!(20));
+    }
+
+    /// Rounding must not return a fractional *basic* integer variable.
+    ///   Tableau: y = (1/2)*x  (y integer basic, x integer non-basic in [0, 10])
+    ///   Set x = 3/2 => y = 3/4. Rounding x to 2 gives y = 1, but rounding to 1 gives y = 1/2,
+    ///   so start at x = 6/5 (rounds to 1) => y = 1/2 is fractional => None.
+    #[test]
+    fn try_rounding_heuristic_rejects_fractional_basic_int() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0))
+                .with_bounds(Bounds::new(Some(rbig!(0).into()), Some(rbig!(10).into()))),
+        ];
+        let basic = vec![VarInfo::new(Var::int(1), Owner::Basic(0))];
+        let equations = vec![vec![rbig!(1 / 2)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+        solver.update(0, &QDelta::from(rbig!(6 / 5)));
+        assert!(solver.try_rounding_heuristic().is_none());
     }
 
     /// Rounding fails because tight basic bounds make it infeasible.
