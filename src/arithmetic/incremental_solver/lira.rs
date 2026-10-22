@@ -14,10 +14,18 @@
 //!   Definitions therefore add no rows or bounds and hold at every decision level. This matters
 //!   because [`crate::arithmetic::incremental_solver::translation::ArithTranslator`] registers a
 //!   term's `VarId` once and never re-registers it after a backtrack.
-//! - A pushed constraint `Σ aᵢ xᵢ ⋈ c` becomes a fresh slack row added to the live tableau via
-//!   [`LRASolver::add_relation`], plus a bound on that slack asserted at the current decision
-//!   level. The tableau only ever grows; on backtrack the slack's bound is relaxed to
-//!   `(−∞, +∞)` by the solver's bound trail and the row stays (inert once unbounded).
+//! - A pushed constraint `Σ aᵢ xᵢ ⋈ c` is normalized and tightened to the integer grid
+//!   ([`Rel::normalize`], [`Rel::tighten_integral`]), giving a canonical linear form
+//!   `Σ a'ᵢ xᵢ` (sorted, coprime, leading coefficient positive) and bound(s). A single-variable
+//!   form `x` is bounded directly; otherwise the form's slack row is looked up in a cache and
+//!   created (via [`LRASolver::add_relation`]) only on first use, so re-asserting an atom, its
+//!   negation, or the same form with another constant shares one row. The tableau grows with the
+//!   number of distinct forms, not the number of pushes; on backtrack the bound trail relaxes the
+//!   bounds and the rows stay.
+//! - Each bounded var tracks which literal set its current lower and upper bound
+//!   (a backtrackable trail mirroring the solver's). Conflicts cite those literals. A bound that
+//!   crosses the opposite one is never asserted; it is recorded as a pending conflict and reported
+//!   by the next check.
 //! - Decision levels are tracked by capturing an [`LRASolver::set_backtrack`] token at each level
 //!   boundary and replaying it via [`LRASolver::backtrack`].
 //! - **`div`/`mod` require a constant divisor**, resolved from the denominator's affine form.
@@ -112,8 +120,23 @@ impl Affine {
     }
 }
 
+/// Which side of a variable's bounds.
+#[derive(Debug, Clone, Copy)]
+enum Side {
+    Lower,
+    Upper,
+}
+
+/// An entry of the undo trail for `lower_lits` / `upper_lits`: the var whose bound literal was
+/// overwritten on that side, and the literal it held before (`None` if it had none).
+#[derive(Debug, Clone, Copy)]
+enum BoundUndo {
+    Lower { var: Var, prev: Option<i32> },
+    Upper { var: Var, prev: Option<i32> },
+}
+
 /// Incremental LIRA backend: a persistent [`LIRASolver`] driven by push/pop of constraints keyed
-/// by SAT literal. See the module docs for the mapping onto the inner LIRA solver.
+/// by SAT literal. See the module docs for the mapping onto the incremental solver.
 #[derive(Debug)]
 pub struct LiraIncrementalState {
     /// The persistent underlying solver
@@ -126,9 +149,21 @@ pub struct LiraIncrementalState {
     model_vars: DeterministicHashSet<VarId>,
     /// `(numerator, divisor)` → quotient var of `div(numerator, divisor)`.
     quotients: DeterministicHashMap<(VarId, IBig), Var>,
-    /// Constraint slack → the negated SAT literal to cite if that slack appears in a conflict.
-    /// Permanent (definitional) slacks carry no literal.
-    slack_to_lit: DeterministicHashMap<Var, i32>,
+    /// Normalized multi-variable linear form `Σ aᵢ xᵢ` → its slack var.
+    slacks: DeterministicHashMap<Vec<(Var, Rational)>, Var>,
+    /// The literal that set a var's current lower bound. Vars bounded only permanently (or not
+    /// at all) have no entry.
+    lower_lits: DeterministicHashMap<Var, i32>,
+    /// The literal that set a var's current upper bound.
+    upper_lits: DeterministicHashMap<Var, i32>,
+    /// Undo trail for `lower_lits` / `upper_lits`.
+    bound_trail: Vec<BoundUndo>,
+    /// `bound_marks[l]` is the `bound_trail` length at the `l → l+1` decision-level boundary.
+    bound_marks: Vec<usize>,
+    /// A conflict found while pushing (a bound crossing the opposite one, or a constraint
+    /// infeasible on its own), with the decision level it was found at. Reported by the next
+    /// check; cleared by backtracking below that level.
+    pending_conflict: Option<(Vec<i32>, usize)>,
     /// Literals whose constraint is currently asserted (re-pushes are no-ops).
     active_lits: DeterministicHashSet<i32>,
     /// `lits_by_level[l]`: literals pushed at decision level `l`.
@@ -180,7 +215,12 @@ impl LiraIncrementalState {
             defs: Vec::new(),
             model_vars: DeterministicHashSet::default(),
             quotients: DeterministicHashMap::new(),
-            slack_to_lit: DeterministicHashMap::new(),
+            slacks: DeterministicHashMap::new(),
+            lower_lits: DeterministicHashMap::new(),
+            upper_lits: DeterministicHashMap::new(),
+            bound_trail: Vec::new(),
+            bound_marks: Vec::new(),
+            pending_conflict: None,
             active_lits: DeterministicHashSet::default(),
             lits_by_level: vec![Vec::new()],
             permanent_by_level: vec![Vec::new()],
@@ -229,7 +269,7 @@ impl LiraIncrementalState {
         let lower = Rational::from(-&r.constant);
         let upper = Rational::from(abs_n - IBig::ONE - &r.constant);
         let bounds = Bounds::new(Some(lower.into()), Some(upper.into()));
-        self.add_row(r.monomials(), bounds, None)?;
+        self.add_permanent_row(r.monomials(), bounds)?;
         self.quotients.insert((a, n.clone()), q);
         Ok(q)
     }
@@ -259,44 +299,124 @@ impl LiraIncrementalState {
         Ok(out)
     }
 
-    /// Assert `bounds` on `slack` at the current decision level.
-    fn assert_bounds(&mut self, slack: Var, bounds: &Bounds<QDelta>) -> SolverResult<()> {
+    /// Assert permanent `bounds` on `slack` at the current decision level.
+    fn assert_permanent_bounds(&mut self, slack: Var, bounds: &Bounds<QDelta>) -> SolverResult<()> {
         let lra = self.solver.lra_solver_mut();
-        // `Some(false)` (crossing an existing opposite bound) cannot happen: every slack is
-        // fresh, carries exactly one constraint's bounds, and those are consistent.
+        // `Some(false)` (crossing an existing opposite bound) cannot happen: a permanent slack is
+        // dedicated to its row, carries only these bounds, and they are consistent.
         if let Some(lower) = &bounds.lower {
             let r = lra.assert_lower(&slack, lower)?;
-            debug_assert_ne!(r, Some(false), "lower bound crossed on fresh slack");
+            debug_assert_ne!(r, Some(false), "lower bound crossed on permanent slack");
         }
         if let Some(upper) = &bounds.upper {
             let r = lra.assert_upper(&slack, upper)?;
-            debug_assert_ne!(r, Some(false), "upper bound crossed on fresh slack");
+            debug_assert_ne!(r, Some(false), "upper bound crossed on permanent slack");
         }
         Ok(())
     }
 
-    /// Add a fresh slack row `slack = Σ terms` to the tableau and assert `bounds` on it at the
-    /// current level. With `lit` the slack is citable in a conflict; without, the bounds are
-    /// permanent (re-asserted after any backtrack that relaxes them).
-    fn add_row(
+    /// Add a fresh, dedicated slack row `slack = Σ terms` with permanent `bounds`: they cite no
+    /// literal and are re-asserted after any backtrack that relaxes them.
+    fn add_permanent_row(
         &mut self,
         terms: Vec<Mon<Rational>>,
         bounds: Bounds<QDelta>,
-        lit: Option<i32>,
     ) -> SolverResult<()> {
         let slack = self.fresh_var();
         // `add_relation` only reads the relation's terms; the bounds are asserted separately.
         self.solver
             .lra_solver_mut()
             .add_relation(Rel::mk_eq(terms, Rational::ZERO), slack)?;
-        self.assert_bounds(slack, &bounds)?;
-        match lit {
-            Some(lit) => {
-                self.slack_to_lit.insert(slack, -lit);
-            }
-            None => self.permanent_by_level[self.sat_level].push((slack, bounds)),
-        }
+        self.assert_permanent_bounds(slack, &bounds)?;
+        self.permanent_by_level[self.sat_level].push((slack, bounds));
         Ok(())
+    }
+
+    /// The var to bound for a normalized linear form: the variable itself for `1·x`, otherwise
+    /// the form's cached slack (adding its row on first use).
+    fn bounded_var(&mut self, terms: &[Mon<Rational>]) -> SolverResult<Var> {
+        if let [mon] = terms {
+            // Normalized coefficients are coprime with a positive leading term.
+            debug_assert_eq!(*mon.coeff_ref(), Rational::ONE);
+            self.solver.lra_solver_mut().ensure_var(mon.var())?;
+            return Ok(mon.var());
+        }
+        let key: Vec<(Var, Rational)> = terms
+            .iter()
+            .map(|m| (m.var(), m.coeff_ref().clone()))
+            .collect();
+        if let Some(slack) = self.slacks.get(&key) {
+            return Ok(*slack);
+        }
+        let slack = self.fresh_var();
+        self.solver
+            .lra_solver_mut()
+            .add_relation(Rel::mk_eq(terms.to_vec(), Rational::ZERO), slack)?;
+        self.slacks.insert(key, slack);
+        Ok(slack)
+    }
+
+    /// Assert `val` as the `side` bound of `var`, citing `lit`, at the current decision level.
+    ///
+    /// A bound no tighter than the current one is a no-op (the tighter bound's literal stays
+    /// responsible). A bound crossing the opposite one is not asserted; the conflict clause is
+    /// returned instead.
+    fn assert_bound(
+        &mut self,
+        var: Var,
+        side: Side,
+        val: &QDelta,
+        lit: i32,
+    ) -> SolverResult<Option<Vec<i32>>> {
+        let lra = self.solver.lra_solver_mut();
+        let bounds = lra
+            .get_bounds(&var)
+            .ok_or_else(|| SolverError(format!("bounded var {var:?} is not in the tableau")))?;
+        let (tighter, crosses, opposite) = match side {
+            Side::Lower => (
+                bounds.above_lower(val),
+                bounds.above_upper(val),
+                &self.upper_lits,
+            ),
+            Side::Upper => (
+                bounds.below_upper(val),
+                bounds.below_lower(val),
+                &self.lower_lits,
+            ),
+        };
+        if crosses {
+            // Only literals bound these vars (permanent bounds live on dedicated slacks), so the
+            // opposite bound has one.
+            let other = opposite
+                .get(&var)
+                .expect("lira-inc: crossed bound has no literal");
+            return Ok(Some(vec![-lit, -other]));
+        }
+        if !tighter {
+            return Ok(None);
+        }
+        let undo = match side {
+            Side::Lower => {
+                lra.assert_lower(&var, val)?;
+                let prev = self.lower_lits.insert(var, lit);
+                BoundUndo::Lower { var, prev }
+            }
+            Side::Upper => {
+                lra.assert_upper(&var, val)?;
+                let prev = self.upper_lits.insert(var, lit);
+                BoundUndo::Upper { var, prev }
+            }
+        };
+        self.bound_trail.push(undo);
+        Ok(None)
+    }
+
+    /// Record a conflict found while pushing, unless one is already pending.
+    fn set_pending_conflict(&mut self, clause: Vec<i32>) {
+        debug_println!(21, 0, "[lira-inc] pending conflict {:?}", clause);
+        if self.pending_conflict.is_none() {
+            self.pending_conflict = Some((clause, self.sat_level));
+        }
     }
 
     /// Register a fresh integer variable; see [`IncrementalArithSolver::register_var`]. Errors if
@@ -345,41 +465,52 @@ impl LiraIncrementalState {
 
         self.active_lits.insert(lit);
         self.lits_by_level[self.sat_level].push(lit);
+        // With a conflict pending, nothing below matters: the next check reports it, and the
+        // backtrack that clears it also pops this (later-pushed) literal.
+        if self.pending_conflict.is_some() {
+            return Ok(());
+        }
 
-        // A constraint with no variables left is decided by its constant. A true one needs no
-        // row; a false one still gets its (all-zero) row, which simplex reports infeasible
-        // citing `lit`.
+        // A constraint with no variables left is decided by its constant.
         if diff.terms.is_empty() {
             let holds = match constraint {
                 ArithConstraint::Leq(..) => Rational::ZERO <= c,
                 ArithConstraint::Lt(..) => Rational::ZERO < c,
                 ArithConstraint::Eq(..) => Rational::ZERO == c,
             };
-            if holds {
-                return Ok(());
+            if !holds {
+                self.set_pending_conflict(vec![-lit]);
             }
+            return Ok(());
         }
 
-        // Tighten to the integer grid (all internal vars are integers), then derive the QDelta
-        // bound(s) (handles strict-inequality δ adjustment for anything left strict).
+        // Normalize and tighten to the integer grid (all internal vars are integers), then derive
+        // the QDelta bound(s) (handles strict-inequality δ adjustment for anything left strict).
         let mut rel = mk(diff.monomials(), c);
         rel.normalize();
         if rel.tighten_integral() {
             // No integer solution (e.g. `2x + 2y = 1`): the rational relaxation is feasible and
-            // branch-and-bound could diverge, so record the constraint as a conflict on its own,
-            // as an all-zero row bounded below by 1.
-            let bounds = Bounds::new(Some(QDelta::from(Rational::ONE)), None);
-            self.add_row(Vec::new(), bounds, Some(lit))?;
-        } else {
-            let bounds = rel.to_qdelta_bounds();
-            self.add_row(rel.terms_ref().to_vec(), bounds, Some(lit))?;
+            // branch-and-bound could diverge, so the constraint is a conflict on its own.
+            self.set_pending_conflict(vec![-lit]);
+            return Ok(());
+        }
+        let bounds = rel.to_qdelta_bounds();
+        let var = self.bounded_var(rel.terms_ref())?;
+        for (side, val) in [(Side::Lower, &bounds.lower), (Side::Upper, &bounds.upper)] {
+            if let Some(val) = val
+                && let Some(clause) = self.assert_bound(var, side, val, lit)?
+            {
+                self.set_pending_conflict(clause);
+                return Ok(());
+            }
         }
         self.pending_partial += 1;
         debug_println!(
             21,
             0,
-            "[lira-inc] pushed constraint lit={} at level {}",
+            "[lira-inc] pushed constraint lit={} on {:?} at level {}",
             lit,
+            var,
             self.sat_level
         );
         Ok(())
@@ -403,10 +534,15 @@ impl LiraIncrementalState {
     }
 
     /// The conflict clause (negated tracking lits) for a conflict over internal vars.
+    ///
+    /// A [`Conflict`] names vars, not which of their bounds it uses, so both current bounds'
+    /// literals are cited (a superset of the Farkas explanation, hence still a valid clause).
     fn conflict_clause(&self, conflict: &Conflict<Var>) -> Vec<i32> {
         let lits: DeterministicHashSet<i32> = conflict
             .iter()
-            .filter_map(|var| self.slack_to_lit.get(var).copied())
+            .flat_map(|var| [self.lower_lits.get(var), self.upper_lits.get(var)])
+            .flatten()
+            .map(|lit| -lit)
             .collect();
         assert!(
             !lits.is_empty(),
@@ -420,6 +556,9 @@ impl LiraIncrementalState {
     /// Variables that are unconstrained (never referenced by any row) default to `0`.
     pub fn try_check(&mut self) -> SolverResult<ArithCheckResult> {
         self.pending_partial = 0;
+        if let Some((clause, _)) = &self.pending_conflict {
+            return Ok(ArithCheckResult::Unsat(clause.clone()));
+        }
         let decision = self.solver.solve()?.decision;
         Ok(match decision {
             SolverDecision::FEASIBLE(assignment) => {
@@ -441,6 +580,9 @@ impl LiraIncrementalState {
 
     /// Check the rational relaxation only; see [`IncrementalArithSolver::check_partial_trail`].
     pub fn try_check_partial_trail(&mut self) -> SolverResult<PartialCheckResult> {
+        if let Some((clause, _)) = &self.pending_conflict {
+            return Ok(PartialCheckResult::Unsat(clause.clone()));
+        }
         if self.pending_partial < PARTIAL_CHECK_ASSERTION_BATCH {
             return Ok(PartialCheckResult::Unchanged);
         }
@@ -480,6 +622,7 @@ impl IncrementalArithSolver for LiraIncrementalState {
         lra.clear_unsat_state();
         let token = lra.set_backtrack();
         self.lra_tokens.push(token);
+        self.bound_marks.push(self.bound_trail.len());
         self.sat_level += 1;
         self.lits_by_level.push(Vec::new());
         self.permanent_by_level.push(Vec::new());
@@ -498,6 +641,26 @@ impl IncrementalArithSolver for LiraIncrementalState {
         // Any `Unsat` state refers to bounds that may just have been relaxed.
         lra.clear_unsat_state();
         self.lra_tokens.truncate(level);
+        // Restore which literal is responsible for each bound, mirroring the solver's trail.
+        let mark = self.bound_marks[level];
+        self.bound_marks.truncate(level);
+        for undo in self.bound_trail.drain(mark..).rev() {
+            let (lits, var, prev) = match undo {
+                BoundUndo::Lower { var, prev } => (&mut self.lower_lits, var, prev),
+                BoundUndo::Upper { var, prev } => (&mut self.upper_lits, var, prev),
+            };
+            match prev {
+                Some(lit) => lits.insert(var, lit),
+                None => lits.remove(&var),
+            };
+        }
+        if self
+            .pending_conflict
+            .as_ref()
+            .is_some_and(|(_, l)| *l > level)
+        {
+            self.pending_conflict = None;
+        }
         for lit in self.lits_by_level.drain(level + 1..).flatten() {
             self.active_lits.remove(&lit);
         }
@@ -510,7 +673,7 @@ impl IncrementalArithSolver for LiraIncrementalState {
         // Permanent (definitional) bounds asserted above `level` were just relaxed; re-assert
         // them at the surviving level.
         for (slack, bounds) in relaxed {
-            self.assert_bounds(slack, &bounds)
+            self.assert_permanent_bounds(slack, &bounds)
                 .unwrap_or_else(|e| panic!("lira-inc: re-asserting bound failed: {}", e.0));
             self.permanent_by_level[level].push((slack, bounds));
         }
@@ -1263,10 +1426,14 @@ mod tests {
     fn partial_check_is_batched_and_finds_relaxation_conflicts() {
         let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
-        // x >= 5, then x <= 1: infeasible already over the reals.
-        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 1)
+        let y = s.try_register_var(None, true).unwrap();
+        let sum = ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(1))], IBig::ZERO);
+        // x + y >= 5, x <= 1, y <= 1: infeasible already over the reals, but only via simplex.
+        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), sum), 1)
             .unwrap();
         s.try_push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 2)
+            .unwrap();
+        s.try_push_constraint(ArithConstraint::Leq(term(y, 1), ArithExpr::constant(1)), 3)
             .unwrap();
         // Below the batch threshold the check is skipped.
         assert!(matches!(
@@ -1274,18 +1441,270 @@ mod tests {
             PartialCheckResult::Unchanged
         ));
         // Pad with redundant constraints up to the threshold.
-        for lit in 3..=(PARTIAL_CHECK_ASSERTION_BATCH as i32) {
+        for lit in 4..=(PARTIAL_CHECK_ASSERTION_BATCH as i32) {
             s.try_push_constraint(
-                ArithConstraint::Leq(term(x, 1), ArithExpr::constant(100)),
+                ArithConstraint::Leq(term(x, 1), ArithExpr::constant(100 + lit)),
                 lit,
             )
             .unwrap();
         }
         match s.try_check_partial_trail().unwrap() {
-            PartialCheckResult::Unsat(core) => {
-                assert!(core.contains(&-1) && core.contains(&-2), "core {core:?}");
+            PartialCheckResult::Unsat(mut core) => {
+                core.sort();
+                assert_eq!(core, vec![-3, -2, -1]);
             }
             r => panic!("expected partial UNSAT, got {r:?}"),
+        }
+    }
+
+    #[test]
+    fn crossing_bounds_conflict_immediately() {
+        // x >= 5 then x <= 1 are direct bounds on x; the second crosses the first and is reported
+        // by the next (even partial, unbatched) check, citing exactly the two literals.
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(None, true).unwrap();
+        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 1)
+            .unwrap();
+        s.notify_new_decision_level();
+        s.try_push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 2)
+            .unwrap();
+        match s.try_check_partial_trail().unwrap() {
+            PartialCheckResult::Unsat(mut core) => {
+                core.sort();
+                assert_eq!(core, vec![-2, -1]);
+            }
+            r => panic!("expected partial UNSAT, got {r:?}"),
+        }
+        // Backtracking below the level it was found at clears the pending conflict.
+        s.notify_backtrack(0);
+        assert!(is_sat(&s.try_check().unwrap()));
+    }
+
+    #[test]
+    fn pending_conflict_survives_backtrack_to_its_level() {
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(None, true).unwrap();
+        s.notify_new_decision_level();
+        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 1)
+            .unwrap();
+        s.try_push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 2)
+            .unwrap();
+        s.notify_new_decision_level();
+        s.notify_backtrack(1);
+        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unsat(_)));
+        s.notify_backtrack(0);
+        assert!(is_sat(&s.try_check().unwrap()));
+    }
+
+    #[test]
+    fn shared_form_reuses_slack_and_tracks_tightest_lit() {
+        // x + y <= 5 (lit 1) and 2x + 2y <= 7 (lit 2, i.e. x + y <= 3) share one slack. The
+        // conflict with x + y >= 4 cites the tighter lit 2; after backtracking it away, the
+        // responsible lit reverts to 1.
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(None, true).unwrap();
+        let y = s.try_register_var(None, true).unwrap();
+        let sum =
+            |k: i32| ArithExpr::linear(vec![(x, IBig::from(k)), (y, IBig::from(k))], IBig::ZERO);
+        s.try_push_constraint(ArithConstraint::Leq(sum(1), ArithExpr::constant(5)), 1)
+            .unwrap();
+        s.notify_new_decision_level();
+        s.try_push_constraint(ArithConstraint::Leq(sum(2), ArithExpr::constant(7)), 2)
+            .unwrap();
+        assert_eq!(s.slacks.len(), 1);
+        s.notify_new_decision_level();
+        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(4), sum(1)), 3)
+            .unwrap();
+        assert_eq!(s.slacks.len(), 1, "opposite polarity must reuse the slack");
+        match s.try_check().unwrap() {
+            ArithCheckResult::Unsat(mut core) => {
+                core.sort();
+                assert_eq!(core, vec![-3, -2]);
+            }
+            r => panic!("expected UNSAT, got {r:?}"),
+        }
+        s.notify_backtrack(1);
+        s.notify_backtrack(0);
+        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(6), sum(1)), 4)
+            .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Unsat(mut core) => {
+                core.sort();
+                assert_eq!(core, vec![-4, -1]);
+            }
+            r => panic!("expected UNSAT, got {r:?}"),
+        }
+    }
+
+    #[test]
+    fn single_var_constraints_add_no_rows() {
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(None, true).unwrap();
+        for (lit, c) in [(1, 10), (2, 7), (3, 9)] {
+            s.try_push_constraint(
+                ArithConstraint::Leq(term(x, 1), ArithExpr::constant(c)),
+                lit,
+            )
+            .unwrap();
+        }
+        // 3x >= 4 tightens to x >= 2.
+        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(4), term(x, 3)), 4)
+            .unwrap();
+        assert!(s.slacks.is_empty());
+        assert_eq!(s.upper_lits.get(&Var::int(2)), Some(&2));
+        assert_eq!(s.lower_lits.get(&Var::int(2)), Some(&4));
+        assert!(is_sat(&s.try_check().unwrap()));
+    }
+
+    /// A test constraint `a·x + b·y ⋈ c` over two integer vars; `kind` 0/1/2 = `≤`/`<`/`=`.
+    #[derive(Clone, Copy, Debug)]
+    struct TestCon {
+        a: i64,
+        b: i64,
+        kind: u8,
+        c: i64,
+    }
+
+    impl TestCon {
+        fn holds(&self, x: i64, y: i64) -> bool {
+            let l = self.a * x + self.b * y;
+            match self.kind {
+                0 => l <= self.c,
+                1 => l < self.c,
+                _ => l == self.c,
+            }
+        }
+
+        fn to_arith(self, x: VarId, y: VarId) -> ArithConstraint {
+            let l = ArithExpr::linear(
+                vec![(x, IBig::from(self.a)), (y, IBig::from(self.b))],
+                IBig::ZERO,
+            );
+            let r = ArithExpr::constant(self.c);
+            match self.kind {
+                0 => ArithConstraint::Leq(l, r),
+                1 => ArithConstraint::Lt(l, r),
+                _ => ArithConstraint::Eq(l, r),
+            }
+        }
+    }
+
+    /// Whether the constraints have a common integer solution in `[-r, r]²`.
+    fn brute_force_sat(cons: &[TestCon], r: i64) -> bool {
+        (-r..=r).any(|x| (-r..=r).any(|y| cons.iter().all(|c| c.holds(x, y))))
+    }
+
+    #[test]
+    fn randomized_verdicts_and_cores_match_brute_force() {
+        // Deterministic LCG.
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |n: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % n
+        };
+        for _round in 0..300 {
+            let mut s = LiraIncrementalState::new();
+            let x = s.try_register_var(None, true).unwrap();
+            let y = s.try_register_var(None, true).unwrap();
+            // Box both vars to [-4, 4] with literals of their own (direct bounds) so
+            // branch-and-bound terminates and must cite them.
+            let mut cons: Vec<TestCon> = vec![
+                TestCon {
+                    a: 1,
+                    b: 0,
+                    kind: 0,
+                    c: 4,
+                },
+                TestCon {
+                    a: -1,
+                    b: 0,
+                    kind: 0,
+                    c: 4,
+                },
+                TestCon {
+                    a: 0,
+                    b: 1,
+                    kind: 0,
+                    c: 4,
+                },
+                TestCon {
+                    a: 0,
+                    b: -1,
+                    kind: 0,
+                    c: 4,
+                },
+            ];
+            // `active[l]`: indices into `cons` pushed at level `l` (lit = index + 1).
+            let mut active: Vec<Vec<usize>> = vec![(0..4).collect()];
+            for (i, con) in cons.iter().enumerate() {
+                s.try_push_constraint(con.to_arith(x, y), i as i32 + 1)
+                    .unwrap();
+            }
+            for _step in 0..12 {
+                match next(10) {
+                    0..=1 => {
+                        s.notify_new_decision_level();
+                        active.push(Vec::new());
+                    }
+                    2 if active.len() > 1 => {
+                        let level = next(active.len() as u64 - 1) as usize;
+                        s.notify_backtrack(level);
+                        active.truncate(level + 1);
+                    }
+                    _ => {
+                        let con = TestCon {
+                            a: next(7) as i64 - 3,
+                            b: next(7) as i64 - 3,
+                            kind: next(3) as u8,
+                            c: next(13) as i64 - 6,
+                        };
+                        cons.push(con);
+                        let i = cons.len() - 1;
+                        s.try_push_constraint(con.to_arith(x, y), i as i32 + 1)
+                            .unwrap();
+                        active.last_mut().unwrap().push(i);
+                    }
+                }
+                let live: Vec<TestCon> = active.iter().flatten().map(|&i| cons[i]).collect();
+                let expect_sat = brute_force_sat(&live, 4);
+                match s.try_check().unwrap() {
+                    ArithCheckResult::Sat(buckets) => {
+                        assert!(expect_sat, "SAT reported for {live:?}");
+                        let val = |v| {
+                            let (k, _) = buckets.iter().find(|(_, vs)| vs.contains(&v)).unwrap();
+                            i64::try_from(k.clone()).unwrap()
+                        };
+                        let (vx, vy) = (val(x), val(y));
+                        assert!(
+                            live.iter().all(|c| c.holds(vx, vy)),
+                            "bad model {vx},{vy} for {live:?}"
+                        );
+                    }
+                    ArithCheckResult::Unsat(core) => {
+                        assert!(!expect_sat, "UNSAT reported for {live:?}");
+                        let core_cons: Vec<TestCon> = core
+                            .iter()
+                            .map(|lit| {
+                                let i = (-lit - 1) as usize;
+                                assert!(
+                                    active.iter().flatten().any(|&j| j == i),
+                                    "core cites inactive lit {}",
+                                    -lit
+                                );
+                                cons[i]
+                            })
+                            .collect();
+                        // Integer points of these small systems lie well inside [-40, 40]².
+                        assert!(
+                            !brute_force_sat(&core_cons, 40),
+                            "unsound core {core_cons:?} for {live:?}"
+                        );
+                    }
+                    ArithCheckResult::Unknown => panic!("unexpected UNKNOWN for {live:?}"),
+                }
+            }
         }
     }
 
