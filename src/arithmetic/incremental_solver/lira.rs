@@ -360,10 +360,20 @@ impl LiraIncrementalState {
             }
         }
 
-        // Derive the QDelta bound(s) (handles strict-inequality δ adjustment).
-        let rel = mk(diff.monomials(), c);
-        let bounds = rel.to_qdelta_bounds();
-        self.add_row(rel.terms_ref().to_vec(), bounds, Some(lit))?;
+        // Tighten to the integer grid (all internal vars are integers), then derive the QDelta
+        // bound(s) (handles strict-inequality δ adjustment for anything left strict).
+        let mut rel = mk(diff.monomials(), c);
+        rel.normalize();
+        if rel.tighten_integral() {
+            // No integer solution (e.g. `2x + 2y = 1`): the rational relaxation is feasible and
+            // branch-and-bound could diverge, so record the constraint as a conflict on its own,
+            // as an all-zero row bounded below by 1.
+            let bounds = Bounds::new(Some(QDelta::from(Rational::ONE)), None);
+            self.add_row(Vec::new(), bounds, Some(lit))?;
+        } else {
+            let bounds = rel.to_qdelta_bounds();
+            self.add_row(rel.terms_ref().to_vec(), bounds, Some(lit))?;
+        }
         self.pending_partial += 1;
         debug_println!(
             21,
@@ -788,7 +798,7 @@ mod tests {
     #[test]
     fn integrality_is_enforced() {
         // `3x >= 1 && 3x <= 2` pins x to [1/3, 2/3]: the rational relaxation is feasible but
-        // there is no integer in that interval, so branch-and-bound must report UNSAT. A pure
+        // there is no integer in that interval, so the LIRA solver must report UNSAT. A pure
         // LRA frontend would (unsoundly) report SAT here.
         let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
@@ -802,46 +812,6 @@ mod tests {
             matches!(s.try_check().unwrap(), ArithCheckResult::Unsat(_)),
             "x in [1/3, 2/3] has no integer solution; branch-and-bound must report UNSAT"
         );
-    }
-
-    #[test]
-    fn branch_and_bound_state_is_fresh_across_checks() {
-        // A `check` that falls back to branch-and-bound must not leak speculative branch bounds
-        // into the persistent solver: the next `check` must see a fresh branch-and-bound state.
-        //
-        // The classic integer trap `3x >= 1 && 3x <= 2` forces B&B to prune the floor branch
-        // (x <= 0) and explore the ceil branch (x >= 1) — that `x >= 1` is exactly the bound that
-        // would leak. After backtracking away the trap and pinning x == 0, the system is feasible
-        // *only* if no residual `x >= 1` survives from the previous `check`.
-        let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-
-        // Level 1: assert the trap, so `check` runs branch-and-bound and reports UNSAT.
-        s.notify_new_decision_level();
-        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(x, 3)), 10)
-            .unwrap();
-        s.try_push_constraint(ArithConstraint::Leq(term(x, 3), ArithExpr::constant(2)), 20)
-            .unwrap();
-        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unsat(_)));
-
-        // Backtrack to level 0: the trap's bounds are relaxed. Pin x == 0, which is feasible
-        // *unless* a speculative `x >= 1` from the previous branch-and-bound leaked through.
-        s.notify_backtrack(0);
-        s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(0)), 30)
-            .unwrap();
-        match s.try_check().unwrap() {
-            ArithCheckResult::Sat(buckets) => {
-                assert!(
-                    buckets.get(&IBig::from(0)).unwrap().contains(&x),
-                    "x should be 0; a leaked x >= 1 branch bound would make this UNSAT"
-                );
-            }
-            _ => {
-                panic!(
-                    "expected SAT: a residual branch-and-bound bound leaked across check() calls"
-                )
-            }
-        }
     }
 
     #[test]
@@ -1321,13 +1291,17 @@ mod tests {
 
     #[test]
     fn partial_check_ignores_integrality() {
-        // 3x in [1, 2] is feasible over the reals: the partial check reports Sat, while the full
-        // check (branch-and-bound) reports Unsat.
+        // x + y = 1 and x - y = 0 pin x = y = 1/2: feasible over the reals (each constraint is
+        // integer-tight on its own), but not over the integers. The partial check reports Sat;
+        // the full check (branch-and-bound) reports Unsat.
         let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
-        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(x, 3)), 1)
+        let y = s.try_register_var(None, true).unwrap();
+        let sum = ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(1))], IBig::ZERO);
+        let diff = ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(-1))], IBig::ZERO);
+        s.try_push_constraint(ArithConstraint::Eq(sum, ArithExpr::constant(1)), 1)
             .unwrap();
-        s.try_push_constraint(ArithConstraint::Leq(term(x, 3), ArithExpr::constant(2)), 2)
+        s.try_push_constraint(ArithConstraint::Eq(diff, ArithExpr::constant(0)), 2)
             .unwrap();
         for lit in 3..=(PARTIAL_CHECK_ASSERTION_BATCH as i32) {
             s.try_push_constraint(
@@ -1359,16 +1333,12 @@ mod tests {
     }
 
     #[test]
-    fn branch_and_bound_budget_exhaustion_is_unknown() {
-        let config = SolverConfig {
-            max_lra_solve_calls: Some(1),
-            ..SolverConfig::default()
-        };
-        let mut s = LiraIncrementalState::with_config(config);
+    fn gcd_infeasible_equality_is_unsat() {
+        // 2x + 2y = 1 has no integer solution (gcd 2 does not divide 1) but is feasible over the
+        // reals and unbounded, where branch-and-bound would diverge. It is refuted on its own.
+        let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
         let y = s.try_register_var(None, true).unwrap();
-        // 2x + 2y = 1 is feasible over the reals but has no integer solution; showing that needs
-        // branching, which the one-solve budget does not allow.
         s.try_push_constraint(
             ArithConstraint::Eq(
                 ArithExpr::linear(vec![(x, IBig::from(2)), (y, IBig::from(2))], IBig::from(0)),
@@ -1377,6 +1347,63 @@ mod tests {
             10,
         )
         .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Unsat(core) => assert_eq!(core, vec![-10]),
+            r => panic!("expected UNSAT, got {r:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_and_bound_budget_exhaustion_is_unknown() {
+        let config = SolverConfig {
+            max_lra_solve_calls: Some(1),
+            ..SolverConfig::default()
+        };
+        let mut s = LiraIncrementalState::with_config(config);
+        let x = s.try_register_var(None, true).unwrap();
+        let y = s.try_register_var(None, true).unwrap();
+        // x + y = 1 and x - y = 0 pin x = y = 1/2: no integer solution, but each constraint is
+        // tight on its own, so showing it needs branching, which the one-solve budget forbids.
+        s.try_push_constraint(
+            ArithConstraint::Eq(
+                ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(1))], IBig::from(0)),
+                ArithExpr::constant(1),
+            ),
+            10,
+        )
+        .unwrap();
+        s.try_push_constraint(
+            ArithConstraint::Eq(
+                ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(-1))], IBig::from(0)),
+                ArithExpr::constant(0),
+            ),
+            20,
+        )
+        .unwrap();
         assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unknown));
+    }
+
+    #[test]
+    fn unbounded_integer_strip_is_unsat() {
+        // −1 < x − y < 0: rationally feasible, unbounded, no integer point. Integer tightening
+        // makes the relaxation infeasible, so branch-and-bound (which diverges here) never runs.
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(None, true).unwrap();
+        let y = s.try_register_var(None, true).unwrap();
+        let x_minus_y =
+            ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(-1))], IBig::ZERO);
+        s.try_push_constraint(
+            ArithConstraint::Lt(x_minus_y.clone(), ArithExpr::constant(0)),
+            1,
+        )
+        .unwrap();
+        s.try_push_constraint(ArithConstraint::Lt(ArithExpr::constant(-1), x_minus_y), 2)
+            .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Unsat(core) => {
+                assert!(core.contains(&-1) && core.contains(&-2), "core {core:?}")
+            }
+            r => panic!("expected UNSAT, got {r:?}"),
+        }
     }
 }
