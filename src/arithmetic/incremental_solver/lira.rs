@@ -127,6 +127,14 @@ enum Side {
     Upper,
 }
 
+/// An entry of the undo trail for `lower_lits` / `upper_lits`: the var whose bound literal was
+/// overwritten on that side, and the literal it held before (`None` if it had none).
+#[derive(Debug, Clone, Copy)]
+enum BoundUndo {
+    Lower { var: Var, prev: Option<i32> },
+    Upper { var: Var, prev: Option<i32> },
+}
+
 /// Incremental LIRA backend: a persistent [`LIRASolver`] driven by push/pop of constraints keyed
 /// by SAT literal. See the module docs for the mapping onto the incremental solver.
 #[derive(Debug)]
@@ -148,8 +156,8 @@ pub struct LiraIncrementalState {
     lower_lits: DeterministicHashMap<Var, i32>,
     /// The literal that set a var's current upper bound.
     upper_lits: DeterministicHashMap<Var, i32>,
-    /// Undo trail for `lower_lits` / `upper_lits`: `(var, side, previous lit)`.
-    bound_trail: Vec<(Var, Side, Option<i32>)>,
+    /// Undo trail for `lower_lits` / `upper_lits`.
+    bound_trail: Vec<BoundUndo>,
     /// `bound_marks[l]` is the `bound_trail` length at the `l → l+1` decision-level boundary.
     bound_marks: Vec<usize>,
     /// A conflict found while pushing (a bound crossing the opposite one, or a constraint
@@ -387,18 +395,19 @@ impl LiraIncrementalState {
         if !tighter {
             return Ok(None);
         }
-        let lits = match side {
+        let undo = match side {
             Side::Lower => {
                 lra.assert_lower(&var, val)?;
-                &mut self.lower_lits
+                let prev = self.lower_lits.insert(var, lit);
+                BoundUndo::Lower { var, prev }
             }
             Side::Upper => {
                 lra.assert_upper(&var, val)?;
-                &mut self.upper_lits
+                let prev = self.upper_lits.insert(var, lit);
+                BoundUndo::Upper { var, prev }
             }
         };
-        let prev = lits.insert(var, lit);
-        self.bound_trail.push((var, side, prev));
+        self.bound_trail.push(undo);
         Ok(None)
     }
 
@@ -635,10 +644,10 @@ impl IncrementalArithSolver for LiraIncrementalState {
         // Restore which literal is responsible for each bound, mirroring the solver's trail.
         let mark = self.bound_marks[level];
         self.bound_marks.truncate(level);
-        for (var, side, prev) in self.bound_trail.drain(mark..).rev() {
-            let lits = match side {
-                Side::Lower => &mut self.lower_lits,
-                Side::Upper => &mut self.upper_lits,
+        for undo in self.bound_trail.drain(mark..).rev() {
+            let (lits, var, prev) = match undo {
+                BoundUndo::Lower { var, prev } => (&mut self.lower_lits, var, prev),
+                BoundUndo::Upper { var, prev } => (&mut self.upper_lits, var, prev),
             };
             match prev {
                 Some(lit) => lits.insert(var, lit),
