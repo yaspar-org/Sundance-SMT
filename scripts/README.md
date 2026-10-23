@@ -40,8 +40,8 @@ Convenient wrapper that runs `run_verus.py` on four solver configurations in seq
 
 1. **Z3 4.15.4** with Verus-specific tuning flags
 2. **cvc5 1.3.3**
-3. **Sundance-SMT** (Z3 arithmetic backend)
-4. **Sundance-SMT** (internal arithmetic solver)
+3. **Sundance-SMT** (incremental Z3 arithmetic backend, `--arithmetic z3incremental`)
+4. **Sundance-SMT** (internal incremental arithmetic solver, `--arithmetic internalincremental`)
 
 Each run produces a `.out` results file and a `.log` file. All runs use 16 parallel workers with a 10-second timeout.
 

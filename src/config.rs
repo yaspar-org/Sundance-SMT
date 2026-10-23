@@ -33,7 +33,7 @@ pub struct Args {
     // #[arg(long)]
     // pub goal_based_instantiation: bool,
     #[cfg_attr(feature = "z3-solver", arg(long, default_value_t = ArithSolver::Z3Incremental, value_enum))]
-    #[cfg_attr(not(feature = "z3-solver"), arg(long, default_value_t = ArithSolver::Internal, value_enum))]
+    #[cfg_attr(not(feature = "z3-solver"), arg(long, default_value_t = ArithSolver::InternalIncremental, value_enum))]
     pub arithmetic: ArithSolver,
     /// Turns on lazy datatype instantiation for certain axioms
     #[arg(long, default_value_t = true)]

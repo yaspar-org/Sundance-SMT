@@ -3,6 +3,7 @@
 
 use dashu::integer::IBig;
 // use z3::{ast::{Ast, Bool, Int}, Context, Solver};
+use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::stats::Stats as LiaStats;
 use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
 #[cfg(feature = "z3-solver")]
@@ -74,7 +75,11 @@ pub enum ArithResult {
         DeterministicHashMap<IBig, DeterministicHashSet<u64>>,
         LiaStats,
     ), // literals that correspond to inequalities <= where the two terms are equal
+    /// No arithmetic content to check.
     None,
+    /// The solver gave up (e.g. branch-and-bound hit the deadline): no conflict was found, but
+    /// the model is not known to satisfy the arithmetic.
+    Unknown,
 }
 
 impl std::error::Error for ArithSolverParseError {}
@@ -98,14 +103,18 @@ impl FromStr for ArithSolver {
     }
 }
 
+/// `lia_config` configures the internal solver (`ArithSolver::Internal`).
 pub fn check_integer_constraints_satisfiable(
     arith_solver: &ArithSolver,
     terms: &[i32],
     // TODO: lialp: check that taking egraph mutable is okay
     solver_state: &mut SolverState,
+    lia_config: &SolverConfig,
 ) -> ArithResult {
     match arith_solver {
-        ArithSolver::Internal => check_integer_constraints_satisfiable_lia(terms, solver_state),
+        ArithSolver::Internal => {
+            check_integer_constraints_satisfiable_lia(terms, solver_state, lia_config)
+        }
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3 => check_integer_constraints_satisfiable_z3(terms, solver_state),
         // The incremental backends are driven from the propagator's ArithTranslator;

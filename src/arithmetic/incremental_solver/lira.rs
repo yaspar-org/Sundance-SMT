@@ -26,12 +26,21 @@
 //!   (a backtrackable trail mirroring the solver's). Conflicts cite those literals. A bound that
 //!   crosses the opposite one is never asserted; it is recorded as a pending conflict and reported
 //!   by the next check.
-//! - Decision levels are tracked by capturing an [`LRASolver::set_backtrack`] token at each level
-//!   boundary and replaying it via [`LRASolver::backtrack`].
-//! - **`div`/`mod` require a constant divisor**, resolved from the denominator's affine form.
+//! - Decision levels are tracked by capturing an [`LRASolver::set_bounds_backtrack`] token at each
+//!   level boundary and replaying it via [`LRASolver::backtrack_bounds`]. A SAT backtrack only
+//!   relaxes bounds and keeps the current assignment, which still satisfies the simplex
+//!   invariants; restoring a snapshot instead would recompute every basic variable on every
+//!   backtrack.
+//! - **`div`/`mod` by a nonzero constant** (resolved from the denominator's affine form):
 //!   `div(a, n)` is a quotient var `q`, shared per `(a, n)`, constrained by the single row
 //!   `0 ≤ a − n·q ≤ |n| − 1`; `mod(a, n) = a − n·q`. That row is definitional, so its bounds are
 //!   *permanent*: they cite no literal and are re-asserted whenever a backtrack relaxes them.
+//! - **`div`/`mod` by anything else** (a variable, an uninterpreted term, or zero) is an opaque
+//!   integer var, shared per `(a, b)`, with no constraints: the solver knows less about it, which
+//!   is sound for conflicts, and the egraph still equates it with congruent terms. This mirrors
+//!   how the translation layer treats non-linear products. From then on the solver is not exact
+//!   ([`IncrementalArithSolver::is_exact`]): a model it accepts may give the term a value that
+//!   is not the quotient.
 //! - **Integer reasoning is enforced** via the [`LIRASolver`]'s branch-and-bound;
 //!   [`IncrementalArithSolver::check_partial_trail`] only checks the rational relaxation, which is
 //!   sound for conflicts.
@@ -149,6 +158,11 @@ pub struct LiraIncrementalState {
     model_vars: DeterministicHashSet<VarId>,
     /// `(numerator, divisor)` → quotient var of `div(numerator, divisor)`.
     quotients: DeterministicHashMap<(VarId, IBig), Var>,
+    /// `(numerator, divisor)` → opaque var for `div` (`opaque_divs`) or `mod` (`opaque_mods`)
+    /// whose divisor is not a nonzero constant.
+    opaque_divs: DeterministicHashMap<(VarId, VarId), Var>,
+    /// See `opaque_divs`.
+    opaque_mods: DeterministicHashMap<(VarId, VarId), Var>,
     /// Normalized multi-variable linear form `Σ aᵢ xᵢ` → its slack var.
     slacks: DeterministicHashMap<Vec<(Var, Rational)>, Var>,
     /// The literal that set a var's current lower bound. Vars bounded only permanently (or not
@@ -173,7 +187,7 @@ pub struct LiraIncrementalState {
     permanent_by_level: Vec<Vec<(Var, Bounds<QDelta>)>>,
     /// Current SAT decision level.
     sat_level: usize,
-    /// `lra_tokens[l]` is the [`LRASolver::set_backtrack`] token captured at the `l → l+1`
+    /// `lra_tokens[l]` is the [`LRASolver::set_bounds_backtrack`] token captured at the `l → l+1`
     /// decision-level boundary; replayed by `notify_backtrack`.
     lra_tokens: Vec<usize>,
     /// Constraints pushed since the last (partial or full) check.
@@ -215,6 +229,8 @@ impl LiraIncrementalState {
             defs: Vec::new(),
             model_vars: DeterministicHashSet::default(),
             quotients: DeterministicHashMap::new(),
+            opaque_divs: DeterministicHashMap::new(),
+            opaque_mods: DeterministicHashMap::new(),
             slacks: DeterministicHashMap::new(),
             lower_lits: DeterministicHashMap::new(),
             upper_lits: DeterministicHashMap::new(),
@@ -244,15 +260,36 @@ impl LiraIncrementalState {
             .ok_or_else(|| SolverError(format!("unregistered VarId {var_id}")))
     }
 
-    /// Resolve a `div`/`mod` denominator to its constant, erroring if it is not constant or zero.
-    fn resolve_divisor(&self, denom: VarId) -> SolverResult<IBig> {
-        match self.def(denom)?.as_constant() {
-            Some(n) if *n != IBig::ZERO => Ok(n.clone()),
-            Some(_) => Err(SolverError("div/mod by zero".to_string())),
-            None => Err(SolverError(format!(
-                "div/mod divisor VarId {denom} is not a constant"
-            ))),
+    /// The value of a `div`/`mod` denominator if it is a nonzero constant, `None` otherwise.
+    fn constant_divisor(&self, denom: VarId) -> SolverResult<Option<IBig>> {
+        Ok(self
+            .def(denom)?
+            .as_constant()
+            .filter(|n| **n != IBig::ZERO)
+            .cloned())
+    }
+
+    /// The opaque var standing for `div(a, b)` (or `mod(a, b)` if `is_mod`) when `b` is not a
+    /// nonzero constant, created on first use.
+    fn opaque_div_mod(&mut self, is_mod: bool, a: VarId, b: VarId) -> SolverResult<Var> {
+        // Both operands must be registered, as for any other term of a definition.
+        self.def(a)?;
+        self.def(b)?;
+        let existing = if is_mod {
+            self.opaque_mods.get(&(a, b))
+        } else {
+            self.opaque_divs.get(&(a, b))
+        };
+        if let Some(v) = existing {
+            return Ok(*v);
         }
+        let v = self.fresh_var();
+        if is_mod {
+            self.opaque_mods.insert((a, b), v);
+        } else {
+            self.opaque_divs.insert((a, b), v);
+        }
+        Ok(v)
     }
 
     /// The quotient var `q = div(a, n)`, created on first use together with its permanent
@@ -275,7 +312,8 @@ impl LiraIncrementalState {
     }
 
     /// Convert an [`ArithExpr`] to an affine form, substituting variable definitions and
-    /// converting `div`/`mod` terms to quotient vars.
+    /// converting `div`/`mod` terms to quotient vars (constant divisor) or opaque vars (any other
+    /// divisor).
     fn expr_to_affine(&mut self, expr: &ArithExpr) -> SolverResult<Affine> {
         let mut out = Affine::constant(expr.constant.clone());
         for (var_id, coeff) in &expr.terms {
@@ -283,13 +321,21 @@ impl LiraIncrementalState {
             out.add_scaled(&def, coeff);
         }
         for (a, b, coeff) in &expr.divs {
-            let n = self.resolve_divisor(*b)?;
+            let Some(n) = self.constant_divisor(*b)? else {
+                let v = self.opaque_div_mod(false, *a, *b)?;
+                out.add_term(v, coeff);
+                continue;
+            };
             let q = self.quotient(*a, &n)?;
             // div(a, n) = q
             out.add_term(q, coeff);
         }
         for (a, b, coeff) in &expr.mods {
-            let n = self.resolve_divisor(*b)?;
+            let Some(n) = self.constant_divisor(*b)? else {
+                let v = self.opaque_div_mod(true, *a, *b)?;
+                out.add_term(v, coeff);
+                continue;
+            };
             let q = self.quotient(*a, &n)?;
             // mod(a, n) = a − n·q
             let def = self.def(*a)?.clone();
@@ -420,7 +466,7 @@ impl LiraIncrementalState {
     }
 
     /// Register a fresh integer variable; see [`IncrementalArithSolver::register_var`]. Errors if
-    /// `definition` refers to an unregistered variable or a non-constant/zero `div`/`mod` divisor.
+    /// `definition` refers to an unregistered variable.
     pub fn try_register_var(
         &mut self,
         definition: Option<ArithExpr>,
@@ -443,7 +489,7 @@ impl LiraIncrementalState {
 
     /// Push a constraint tracked by SAT literal `lit`; see
     /// [`IncrementalArithSolver::push_constraint`]. Errors if either side refers to an
-    /// unregistered variable or a non-constant/zero `div`/`mod` divisor.
+    /// unregistered variable.
     pub fn try_push_constraint(
         &mut self,
         constraint: ArithConstraint,
@@ -616,11 +662,9 @@ impl IncrementalArithSolver for LiraIncrementalState {
     }
 
     fn notify_new_decision_level(&mut self) {
-        // If the previous check ended `Unsat`, clear it first: `set_backtrack` is a no-op while
-        // `Unsat`, which would capture a stale token and skip the assignment backup.
         let lra = self.solver.lra_solver_mut();
         lra.clear_unsat_state();
-        let token = lra.set_backtrack();
+        let token = lra.set_bounds_backtrack();
         self.lra_tokens.push(token);
         self.bound_marks.push(self.bound_trail.len());
         self.sat_level += 1;
@@ -637,7 +681,7 @@ impl IncrementalArithSolver for LiraIncrementalState {
         // replaying it relaxes all bounds asserted at levels > `level`.
         let token = self.lra_tokens[level];
         let lra = self.solver.lra_solver_mut();
-        lra.backtrack(token);
+        lra.backtrack_bounds(token);
         // Any `Unsat` state refers to bounds that may just have been relaxed.
         lra.clear_unsat_state();
         self.lra_tokens.truncate(level);
@@ -700,6 +744,10 @@ impl IncrementalArithSolver for LiraIncrementalState {
     fn check_partial_trail(&mut self) -> PartialCheckResult {
         self.try_check_partial_trail()
             .unwrap_or_else(|e| panic!("lira-inc: partial check failed: {}", e.0))
+    }
+
+    fn is_exact(&self) -> bool {
+        self.opaque_divs.is_empty() && self.opaque_mods.is_empty()
     }
 }
 
@@ -1119,27 +1167,89 @@ mod tests {
     }
 
     #[test]
-    fn non_constant_divisor_is_rejected() {
+    fn non_constant_divisor_is_opaque() {
+        // div(x, d) and mod(x, d) with a free d are opaque vars: each is shared by every
+        // occurrence, so div(x, d) <= 0 and div(x, d) >= 1 conflict, but div(x, d) and mod(x, d)
+        // are unrelated.
         let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
         let d = s.try_register_var(None, false).unwrap(); // no constant definition
-        assert!(
-            s.try_push_constraint(
-                ArithConstraint::Leq(div_term(x, d, 1), ArithExpr::constant(0)),
-                10
-            )
-            .is_err()
-        );
+        let q = s.try_register_var(Some(div_term(x, d, 1)), true).unwrap();
+        s.try_push_constraint(
+            ArithConstraint::Leq(div_term(x, d, 1), ArithExpr::constant(0)),
+            10,
+        )
+        .unwrap();
+        s.try_push_constraint(
+            ArithConstraint::Leq(ArithExpr::constant(7), mod_term(x, d, 1)),
+            20,
+        )
+        .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Sat(buckets) => {
+                let q_val = buckets
+                    .iter()
+                    .find(|(_, vars)| vars.contains(&q))
+                    .map(|(v, _)| v.clone())
+                    .expect("q in model");
+                assert!(q_val <= IBig::ZERO, "div(x, d) = {q_val} should be <= 0");
+            }
+            r => panic!("expected SAT, got {r:?}"),
+        }
+        s.notify_new_decision_level();
+        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(q, 1)), 30)
+            .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Unsat(core) => {
+                assert!(core.contains(&-10) && core.contains(&-30), "core {core:?}");
+                assert!(
+                    !core.contains(&-20),
+                    "mod(x, d) is unrelated: core {core:?}"
+                );
+            }
+            r => panic!("expected UNSAT, got {r:?}"),
+        }
     }
 
     #[test]
-    fn zero_divisor_is_rejected() {
+    fn opaque_div_mod_makes_the_solver_inexact() {
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(None, true).unwrap();
+        let three = const_var(&mut s, 3);
+        s.try_register_var(Some(div_term(x, three, 1)), true)
+            .unwrap();
+        assert!(s.is_exact(), "div by a constant is interpreted");
+        let d = s.try_register_var(None, false).unwrap();
+        s.try_register_var(Some(mod_term(x, d, 1)), true).unwrap();
+        assert!(!s.is_exact(), "mod by a variable is opaque");
+    }
+
+    #[test]
+    fn zero_divisor_is_opaque() {
+        // SMT-LIB leaves div/mod by zero unspecified, so they are opaque too.
         let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
         let zero = const_var(&mut s, 0);
+        s.try_push_constraint(
+            ArithConstraint::Eq(div_term(x, zero, 1), ArithExpr::constant(5)),
+            10,
+        )
+        .unwrap();
+        s.try_push_constraint(
+            ArithConstraint::Eq(mod_term(x, zero, 1), ArithExpr::constant(-3)),
+            20,
+        )
+        .unwrap();
+        assert!(is_sat(&s.try_check().unwrap()));
+    }
+
+    #[test]
+    fn unregistered_divisor_is_an_error() {
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(None, true).unwrap();
         assert!(
             s.try_push_constraint(
-                ArithConstraint::Leq(div_term(x, zero, 1), ArithExpr::constant(0)),
+                ArithConstraint::Leq(div_term(x, 99, 1), ArithExpr::constant(0)),
                 10
             )
             .is_err()
@@ -1770,6 +1880,62 @@ mod tests {
             ArithCheckResult::Unsat(core) => assert_eq!(core, vec![-10]),
             r => panic!("expected UNSAT, got {r:?}"),
         }
+    }
+
+    /// `x = 2a` and `x = 2b + 1`: no integer solution, but each equality is tight on its own and
+    /// the rational relaxation is unbounded, so branch-and-bound never terminates.
+    fn push_parity_conflict(s: &mut LiraIncrementalState) {
+        let x = s.try_register_var(None, true).unwrap();
+        let a = s.try_register_var(None, true).unwrap();
+        let b = s.try_register_var(None, true).unwrap();
+        s.try_push_constraint(ArithConstraint::Eq(term(x, 1), term(a, 2)), 10)
+            .unwrap();
+        let two_b_plus_one = ArithExpr::linear(vec![(b, IBig::from(2))], IBig::ONE);
+        s.try_push_constraint(ArithConstraint::Eq(term(x, 1), two_b_plus_one), 20)
+            .unwrap();
+    }
+
+    #[test]
+    fn branch_and_bound_stops_at_deadline() {
+        // Deadline already passed: branch-and-bound gives up at its first branch.
+        let config = SolverConfig {
+            deadline: Some(std::time::Instant::now()),
+            ..SolverConfig::default()
+        };
+        let mut s = LiraIncrementalState::with_config(config);
+        push_parity_conflict(&mut s);
+        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unknown));
+
+        // Deadline during the search: the search, and the unwinding of its deep stack, end
+        // shortly after it.
+        let start = std::time::Instant::now();
+        let config = SolverConfig {
+            deadline: Some(start + std::time::Duration::from_millis(300)),
+            ..SolverConfig::default()
+        };
+        let mut s = LiraIncrementalState::with_config(config);
+        push_parity_conflict(&mut s);
+        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unknown));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "took {:?}",
+            start.elapsed()
+        );
+        // Giving up leaves no stale conflict: after backtracking past the constraints, the
+        // (empty) system is not reported Unsat. It may still be Unknown, as the deadline has
+        // passed.
+        let mut s = LiraIncrementalState::with_config(SolverConfig {
+            deadline: Some(std::time::Instant::now()),
+            ..SolverConfig::default()
+        });
+        s.notify_new_decision_level();
+        push_parity_conflict(&mut s);
+        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unknown));
+        s.notify_backtrack(0);
+        assert!(!matches!(
+            s.try_check().unwrap(),
+            ArithCheckResult::Unsat(_)
+        ));
     }
 
     #[test]

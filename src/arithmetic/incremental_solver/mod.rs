@@ -105,4 +105,11 @@ pub trait IncrementalArithSolver {
     /// Cheap feasibility check on the current trail — no model, no theory
     /// combination. Impls may return `Unchanged` to skip on their own policy.
     fn check_partial_trail(&mut self) -> PartialCheckResult;
+
+    /// Whether `Sat` models are models of the registered terms. False once the solver has
+    /// abstracted a term it does not interpret (e.g. an opaque `div`/`mod`): its conflicts are
+    /// still valid, but a model it accepts may not satisfy the input.
+    fn is_exact(&self) -> bool {
+        true
+    }
 }
