@@ -129,15 +129,16 @@ pub fn cdcl_decision_procedure(
         }
     };
 
+    // The internal solvers' branch-and-bound runs inside a CaDiCaL callback, where the
+    // terminator is not polled, so it checks the deadline itself.
+    let lia_config = SolverConfig {
+        deadline,
+        ..SolverConfig::default()
+    };
     let incremental_backend: Option<Box<dyn IncrementalArithSolver>> = match arithmetic {
-        // Branch-and-bound runs inside a CaDiCaL callback, where the terminator is not polled,
-        // so it checks the deadline itself.
-        ArithSolver::InternalIncremental => {
-            Some(Box::new(LiraIncrementalState::with_config(SolverConfig {
-                deadline,
-                ..SolverConfig::default()
-            })))
-        }
+        ArithSolver::InternalIncremental => Some(Box::new(LiraIncrementalState::with_config(
+            lia_config.clone(),
+        ))),
         #[cfg(feature = "z3-solver")]
         ArithSolver::Z3Incremental => Some(Box::new(
             crate::arithmetic::incremental_solver::z3::Z3IncrementalState::new(),
@@ -166,6 +167,7 @@ pub fn cdcl_decision_procedure(
         last_observed_var: 1,
         batch_cap,
         arith: arith_translator,
+        lia_config,
         arith_incomplete: false,
         trail_writer: trail_file
             .as_ref()

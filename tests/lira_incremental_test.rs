@@ -1,8 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! End-to-end tests of the incremental internal arithmetic backend
-//! (`--arithmetic internalincremental`), run on the release binary whatever arithmetic the CI
+//! End-to-end tests of the internal arithmetic backends (`--arithmetic internalincremental`,
+//! and `--arithmetic internal` where noted), run on the release binary whatever arithmetic the CI
 //! matrix row selects.
 
 use std::path::Path;
@@ -13,11 +13,21 @@ use std::time::{Duration, Instant};
 /// Run the solver on `file` with `--arithmetic internalincremental` plus `args`. Returns its
 /// stdout and wall time, or `None` if it is still running after `limit` (it is then killed).
 fn run(file: &str, args: &[&str], limit: Duration) -> Option<(String, Duration)> {
+    run_with("internalincremental", file, args, limit)
+}
+
+/// [`run`] with `--arithmetic arithmetic`.
+fn run_with(
+    arithmetic: &str,
+    file: &str,
+    args: &[&str],
+    limit: Duration,
+) -> Option<(String, Duration)> {
     let path = Path::new("tests/lira_incremental").join(file);
     let start = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_sundance-smt"))
         .arg(&path)
-        .args(["--arithmetic", "internalincremental"])
+        .args(["--arithmetic", arithmetic])
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -70,6 +80,22 @@ fn opaque_div_never_answers_sat() {
 #[test]
 fn branch_and_bound_respects_timeout() {
     let (out, elapsed) = run(
+        "branch_and_bound_diverges.smt2",
+        &["--timeout=2"],
+        Duration::from_secs(30),
+    )
+    .expect("no answer within 30 s: --timeout=2 was not honored");
+    assert!(
+        out == "unknown" || out == "unsat",
+        "expected unknown (or unsat), got {out:?}"
+    );
+    assert!(elapsed < Duration::from_secs(15), "took {elapsed:?}");
+}
+
+#[test]
+fn eager_branch_and_bound_respects_timeout() {
+    let (out, elapsed) = run_with(
+        "internal",
         "branch_and_bound_diverges.smt2",
         &["--timeout=2"],
         Duration::from_secs(30),

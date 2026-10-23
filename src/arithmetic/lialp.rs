@@ -24,6 +24,7 @@ pub fn check_integer_constraints_satisfiable_lia(
     terms: &[i32],
     // TODO: lialp: check that taking egraph mutable is okay
     solver_state: &mut SolverState,
+    config: &SolverConfig,
 ) -> ArithResult {
     let (constraints, arithmetic_literals) = extract_linear_constraints(terms, solver_state);
 
@@ -120,7 +121,7 @@ pub fn check_integer_constraints_satisfiable_lia(
         slack_to_lits.insert(slack, lits);
     }
 
-    match frontend::solve_ctx_raw(&mut ctx, &SolverConfig::default()) {
+    match frontend::solve_ctx_raw(&mut ctx, config) {
         Ok(ret) => {
             debug_println!(25, 4, "lia::frontend: stats: {:?}", ret.stats);
             let stats = ret.stats;
@@ -144,7 +145,7 @@ pub fn check_integer_constraints_satisfiable_lia(
                     debug_println!(21, 4, "LIA: Unsat core literals: {:?}", unsat_core_literals);
                     ArithResult::Unsat(unsat_core_literals, stats)
                 }
-                SolverDecision::UNKNOWN => ArithResult::None,
+                SolverDecision::UNKNOWN => ArithResult::Unknown,
             }
         }
         Err(e) => panic!("lialp: unexpected error: {e:?}"),
