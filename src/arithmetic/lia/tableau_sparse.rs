@@ -73,6 +73,16 @@ impl TableauSparse {
             .map_err(|e| TableauError(e.0))
     }
 
+    /// Iterate the non-zero entries `(col, value)` of `row`, in unspecified order.
+    pub fn row_iter(&self, row: usize) -> impl Iterator<Item = (usize, &Rational)> {
+        self.matrix.row_iter(row)
+    }
+
+    /// Iterate the non-zero entries `(row, value)` of `col`, in unspecified order.
+    pub fn col_iter(&self, col: usize) -> impl Iterator<Item = (usize, &Rational)> {
+        self.matrix.col_iter(col)
+    }
+
     /// Convert this sparse tableau to a dense tableau.
     ///
     /// Used in tests to compare the equivalence of the sparse/dense pivot algorithms.

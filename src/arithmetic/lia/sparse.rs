@@ -126,6 +126,16 @@ impl<V: Zero + Clone + fmt::Debug> Matrix<V> {
         Ok(existed)
     }
 
+    /// Iterate the non-zero entries `(col, value)` of `row`, in unspecified order.
+    pub fn row_iter(&self, row: usize) -> impl Iterator<Item = (usize, &V)> {
+        self.rows[row].iter().map(|(c, v)| (*c, v))
+    }
+
+    /// Iterate the non-zero entries `(row, value)` of `col`, in unspecified order.
+    pub fn col_iter(&self, col: usize) -> impl Iterator<Item = (usize, &V)> {
+        self.cols[col].iter().map(|(r, v)| (*r, v))
+    }
+
     /// Return the number of non-zero entries in the given column.
     pub fn col_nnz(&self, col: usize) -> usize {
         self.cols.get(col).map_or(0, |c| c.len())
