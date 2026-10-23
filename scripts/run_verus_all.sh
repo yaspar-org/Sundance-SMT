@@ -6,10 +6,10 @@
 #
 # Executes the Verus benchmark suite (via scripts/run_verus.py) against four
 # solver configurations in sequence:
-#   1. Z3 4.15.4 (with Verus-specific tuning flags)
-#   2. cvc5 1.3.3
-#   3. Sundance-SMT using Z3 as the arithmetic backend
-#   4. Sundance-SMT using its internal arithmetic solver
+#   1. Z3 (with Verus-specific tuning flags)
+#   2. cvc5
+#   3. Sundance-SMT using incremental Z3 as the arithmetic backend
+#   4. Sundance-SMT using its internal incremental arithmetic solver
 #
 # Each run produces a results file (<solver>.out) and a log (<solver>.log).
 # All runs use 16 parallel worker processes.
@@ -26,8 +26,8 @@ TIMEOUT=10
 
 Z3_COMMAND="z3 auto_config=false smt.mbqi=false smt.case_split=3 smt.qi.eager_threshold=100.0 smt.delay_units=true smt.arith.solver=2 smt.arith.nl=false pi.enabled=false rewriter.sort_disjunctions=false"
 CVC5_COMMAND="cvc5"
-SUNDANCE_ARITH_Z3_COMMAND="sundance-smt"
-SUNDANCE_ARITH_INTERNAL_COMMAND="sundance-smt --arithmetic internal"
+SUNDANCE_ARITH_Z3_COMMAND="sundance-smt --arithmetic z3incremental"
+SUNDANCE_ARITH_INTERNAL_COMMAND="sundance-smt --arithmetic internalincremental"
 
 # With proof files add to Sundance:
 #
@@ -39,9 +39,9 @@ python scripts/run_verus.py --solver-command "$Z3_COMMAND" --timeout $TIMEOUT -o
 echo "*** Running cvc5"
 python scripts/run_verus.py --solver-command "$CVC5_COMMAND" --timeout $TIMEOUT -o cvc5-1.3.3.out -j $NUM_WORKERS "$SMT_FOLDER" 2>&1 | tee cvc5-1.3.3.log
 
-echo "*** Running Sundance with z3 arithmetic"
+echo "*** Running Sundance with incremental z3 arithmetic"
 python scripts/run_verus.py --solver-command "$SUNDANCE_ARITH_Z3_COMMAND" --timeout $TIMEOUT -o sundance-arith-z3.out -j $NUM_WORKERS "$SMT_FOLDER" 2>&1 | tee sundance-arith-z3.log
 
-echo "*** Running Sundance with internal arithmetic"
+echo "*** Running Sundance with internal incremental arithmetic"
 python scripts/run_verus.py --solver-command "$SUNDANCE_ARITH_INTERNAL_COMMAND" --timeout $TIMEOUT -o sundance-arith-internal.out -j $NUM_WORKERS "$SMT_FOLDER" 2>&1 | tee sundance-arith-internal.log
 
