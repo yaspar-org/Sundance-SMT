@@ -10,19 +10,9 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Run the solver on `file` with `--arithmetic internalincremental` plus `args`. Returns its
-/// stdout and wall time, or `None` if it is still running after `limit` (it is then killed).
-fn run(file: &str, args: &[&str], limit: Duration) -> Option<(String, Duration)> {
-    run_with("internalincremental", file, args, limit)
-}
-
-/// [`run`] with `--arithmetic arithmetic`.
-fn run_with(
-    arithmetic: &str,
-    file: &str,
-    args: &[&str],
-    limit: Duration,
-) -> Option<(String, Duration)> {
+/// Run the solver on `file` with `--arithmetic <arithmetic>` plus `args`. Returns its stdout and
+/// wall time, or `None` if it is still running after `limit` (it is then killed).
+fn run(arithmetic: &str, file: &str, args: &[&str], limit: Duration) -> Option<(String, Duration)> {
     let path = Path::new("tests/lira_incremental").join(file);
     let start = Instant::now();
     let mut child = Command::new(env!("CARGO_BIN_EXE_sundance-smt"))
@@ -57,7 +47,7 @@ fn run_with(
 #[test]
 fn div_mod_by_symbol_is_supported() {
     for file in ["div_mod_by_symbol.smt2", "div_by_uninterpreted_term.smt2"] {
-        let (out, _) = run(file, &[], Duration::from_secs(30))
+        let (out, _) = run("internalincremental", file, &[], Duration::from_secs(30))
             .unwrap_or_else(|| panic!("{file}: no answer within 30 s"));
         assert_eq!(out, "unsat", "{file}");
     }
@@ -66,6 +56,7 @@ fn div_mod_by_symbol_is_supported() {
 #[test]
 fn opaque_div_never_answers_sat() {
     let (out, _) = run(
+        "internalincremental",
         "div_by_symbol_no_wrong_sat.smt2",
         &[],
         Duration::from_secs(30),
@@ -80,6 +71,7 @@ fn opaque_div_never_answers_sat() {
 #[test]
 fn branch_and_bound_respects_timeout() {
     let (out, elapsed) = run(
+        "internalincremental",
         "branch_and_bound_diverges.smt2",
         &["--timeout=2"],
         Duration::from_secs(30),
@@ -94,7 +86,7 @@ fn branch_and_bound_respects_timeout() {
 
 #[test]
 fn eager_branch_and_bound_respects_timeout() {
-    let (out, elapsed) = run_with(
+    let (out, elapsed) = run(
         "internal",
         "branch_and_bound_diverges.smt2",
         &["--timeout=2"],
