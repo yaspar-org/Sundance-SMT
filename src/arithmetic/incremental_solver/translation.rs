@@ -250,6 +250,11 @@ impl ArithTranslator {
         self.solver.check_partial_trail()
     }
 
+    /// See [`IncrementalArithSolver::is_exact`].
+    pub fn is_exact(&self) -> bool {
+        self.solver.is_exact()
+    }
+
     /// Register all arithmetic terms (with report_in_model=true), call check,
     /// and translate the result back.
     pub fn check(&mut self, solver_state: &mut SolverState) -> ArithResult {
@@ -323,7 +328,7 @@ impl ArithTranslator {
                 }
                 ArithResult::Sat(translated, LiaStats::new())
             }
-            ArithCheckResult::Unknown => ArithResult::None,
+            ArithCheckResult::Unknown => ArithResult::Unknown,
         }
     }
 
