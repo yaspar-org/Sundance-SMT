@@ -464,6 +464,7 @@ impl Egraph {
     }
 
     /// Mark the current position in the union log, for [`Egraph::roots_absorbed_since`].
+    #[cfg_attr(feature = "semper-egraph", allow(dead_code))]
     pub(crate) fn union_mark(&self) -> usize {
         self.proof_forest_backtrack_stack.len()
     }
@@ -471,6 +472,7 @@ impl Egraph {
     /// The roots that unions made since `mark` merged into another class (each was
     /// the root of its class just before its union). Only unions above level 0 are
     /// logged, which covers every union made inside a probe level.
+    #[cfg_attr(feature = "semper-egraph", allow(dead_code))]
     pub(crate) fn roots_absorbed_since(&self, mark: usize) -> Vec<u32> {
         self.proof_forest_backtrack_stack[mark..]
             .iter()

@@ -800,7 +800,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                         let result = self.solver_state.egraph.assert_equal(x_root, y_root);
                         // Probe merges are speculative — discard queue entries
                         // so they don't leak into the incremental arithmetic backend.
-                        let _ = self.solver_state.egraph.drain_arithmetic_equalities();
+                        self.solver_state
+                            .egraph
+                            .discard_speculative_arithmetic_equalities();
                         if let Some(c) = result.conflict {
                             self.solver_state.egraph.backtrack_to(probe_level - 1);
                             probe_level -= 1;
