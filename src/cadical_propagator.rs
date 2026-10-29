@@ -321,6 +321,10 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 
     fn queue_theory_clause(&self, clause: Vec<i32>, theory: Theory) {
+        // No theory lemma is the empty clause (that would say the theory alone is
+        // inconsistent). An empty one means an explanation lost its antecedents,
+        // and CaDiCaL would stop at once with an unjustified unsat.
+        debug_assert!(!clause.is_empty(), "empty {theory:?} theory lemma");
         self.proof_tracer
             .borrow_mut()
             .add_theory_clause(&clause, theory);

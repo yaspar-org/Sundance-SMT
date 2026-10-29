@@ -1256,7 +1256,6 @@ impl SemperEgraph {
     /// the antecedent set cites, transitively.
     fn explain_true_false(&mut self, t: u32, f: u32) -> Vec<(u32, u32)> {
         let mut out = self.explain_pairs(t, f);
-        let tf = [t, f];
         // Every assumption pair is a fact about its TERMS, but the forest path
         // it justifies runs over NODES. A term that interned onto a node some
         // OTHER term created (hash-cons keys on canonical children, so merely
@@ -1278,8 +1277,9 @@ impl SemperEgraph {
                 }
             }
         }
-        // Drop any incidental references to the true/false constants and dedup.
-        out.retain(|&(a, b)| !tf.contains(&a) || !tf.contains(&b));
+        // Drop reflexive pairs and dedup. A (false, true) pair is NOT incidental:
+        // it is the assignment of the `false` atom, the collision's antecedent.
+        out.retain(|&(a, b)| a != b);
         let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
         out.retain(|&p| seen.insert(p));
         out
@@ -1726,9 +1726,12 @@ impl SemperEgraph {
             let eqs = if explain_legacy() {
                 self.explain_true_false(t, f)
             } else {
+                // Keep pairs between the two constants: the driver asserts
+                // (false, true) when the SAT solver sets the `false` atom, and
+                // that assumption is the whole explanation (its literal becomes
+                // the lemma `not false`). Dropping it left the empty clause.
                 let mut eqs = self.explain_conflict(t, f);
-                let tf = [t, f];
-                eqs.retain(|&(a, b)| !tf.contains(&a) || !tf.contains(&b));
+                eqs.retain(|&(a, b)| a != b);
                 eqs
             };
             if explain_audit() {
