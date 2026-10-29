@@ -21,7 +21,10 @@ use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
 use crate::datatypes::axioms::{learn_ctor_selector_clauses, learn_or_not_term_tester_term};
 use crate::datatypes::process::DatatypeInfo;
 use crate::debug_println;
+#[cfg(not(feature = "semper-egraph"))]
 use crate::egraphs::basic::egraph::Egraph;
+#[cfg(feature = "semper-egraph")]
+use crate::egraphs::semper::SemperEgraph as Egraph;
 use crate::egraphs::traits::EgraphTrait;
 use crate::proof::Theory;
 use crate::solver_types::{
@@ -934,7 +937,10 @@ pub fn process_assignment(
     };
 
     debug_assert!(
-        solver_state.egraph.find(true_egraph_id) != solver_state.egraph.find(false_egraph_id),
+        additional_constraints.is_some()
+            || solver_state.egraph.true_false_conflict_pending()
+            || solver_state.egraph.find(true_egraph_id)
+                != solver_state.egraph.find(false_egraph_id),
         "true and false merged without conflict being detected"
     );
 

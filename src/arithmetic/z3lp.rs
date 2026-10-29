@@ -45,6 +45,7 @@ pub fn check_integer_constraints_satisfiable_z3(
 
     // Collect all unique variable IDs (egraph IDs) and create Z3 variables
     let mut variable_ids = std::collections::BTreeSet::new();
+    let mut divisor_ids = std::collections::BTreeSet::new();
     for constraint in &constraints {
         for var_name in constraint
             .left_expr
@@ -57,7 +58,7 @@ pub fn check_integer_constraints_satisfiable_z3(
                 }
                 Coefficient::Div(a, b) | Coefficient::Mod(a, b) => {
                     variable_ids.insert(*a);
-                    variable_ids.insert(*b);
+                    divisor_ids.insert(*b);
                 }
                 Coefficient::Constant => {}
             }
@@ -69,6 +70,11 @@ pub fn check_integer_constraints_satisfiable_z3(
         var_map
             .entry(id)
             .or_insert_with(|| Int::new_const(format!("var_{}", id)));
+    }
+    for id in divisor_ids {
+        var_map
+            .entry(id)
+            .or_insert_with(|| divisor_to_z3(id, solver_state));
     }
 
     // Create assumption-based constraints for proper unsat core extraction
@@ -108,7 +114,7 @@ pub fn check_integer_constraints_satisfiable_z3(
                             .or_insert_with(|| Int::new_const(format!("var_{}", a)));
                         var_map
                             .entry(*b)
-                            .or_insert_with(|| Int::new_const(format!("var_{}", b)));
+                            .or_insert_with(|| divisor_to_z3(*b, solver_state));
                     }
                     Coefficient::Constant => {}
                 }
@@ -229,6 +235,19 @@ fn convert_dashu_to_bigint(n: &IBig) -> num::BigInt {
     // Convert IBig to string and then parse as num::BigInt
     let n_str = n.to_string();
     num::BigInt::parse_bytes(n_str.as_bytes(), 10).unwrap()
+}
+
+/// The Z3 term for a `div`/`mod` divisor: its numeral when the divisor is a
+/// constant. The divisor id is the raw term, not its class root, so a fresh
+/// variable is constrained only when the divisor is a root (the basic e-graph
+/// keeps constants as roots; the semper e-graph does not).
+fn divisor_to_z3(egraph_id: u32, solver_state: &mut SolverState) -> Int {
+    let solver_uid = solver_state.to_solver_uid(egraph_id);
+    let (expr, _) = extract_linear_expression(solver_uid, solver_state);
+    match expr.get(&Coefficient::Constant) {
+        Some(n) if expr.len() == 1 => Int::from_big_int(&convert_dashu_to_bigint(n)),
+        _ => Int::new_const(format!("var_{}", egraph_id)),
+    }
 }
 
 /// Convert a (Coefficient, integer-coeff) pair into a Z3 Int expression.

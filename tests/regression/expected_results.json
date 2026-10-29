@@ -1156,5 +1156,6 @@
   "arithmetic/nelson_oppen_probe_congruence_3.smt2": "unsat",
   "arithmetic/nelson_oppen_probe_congruence_sat.smt2": "sat",
   "datatypes/disequality_kept_across_backtrack.smt2": "sat",
-  "arithmetic/egraph_arith_flag_split_on_backtrack.smt2": "unsat"
+  "arithmetic/egraph_arith_flag_split_on_backtrack.smt2": "unsat",
+  "edge_cases_quantifiers/false_atom_assigned_true.smt2": "unknown"
 }

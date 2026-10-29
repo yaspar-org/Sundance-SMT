@@ -55,6 +55,27 @@ impl<T> EgraphResult<T> {
 }
 
 pub trait EgraphTrait {
+    /// Whether any conflict this engine reported may carry an INCOMPLETE
+    /// antecedent set (the true=false-collision fallback, whose explanation is
+    /// documented as potentially omitting the argument equalities behind a
+    /// hash-cons collision). A refutation built on such a clause is not
+    /// trustworthy, so the driver downgrades `unsat` to `unknown` when this is
+    /// set. Sound by construction: it only ever widens `unsat` to `unknown`.
+    fn refutation_tainted(&self) -> bool {
+        false
+    }
+
+    /// Whether a true=false collision has already been reported as a conflict
+    /// at the current decision level and not yet cleared by a backtrack. While
+    /// one is outstanding the engine does not re-report the same unresolved
+    /// collision on every subsequent merge, so the driver's end-of-assignment
+    /// `true != false` invariant holds "unless a conflict is already pending".
+    /// Default false: an engine that keeps true and false apart except when it
+    /// returns the conflict in the same call never needs to override this.
+    fn true_false_conflict_pending(&self) -> bool {
+        false
+    }
+
     /// Operator key for congruence: two terms are congruent iff they have
     /// the same Op and pairwise-equal children.
     type Op: Clone + Eq + Hash;
@@ -111,6 +132,15 @@ pub trait EgraphTrait {
     /// Drain arithmetic equalities produced by merges since the last drain.
     /// Callers must drain before advancing the decision level.
     fn drain_arithmetic_equalities(&mut self) -> Vec<(Self::TermId, Self::TermId)>;
+
+    /// Drop the arithmetic equalities produced by a speculative merge (an
+    /// arithmetic probe that is undone right after), without losing
+    /// equalities that do not depend on that merge. Default: drain and
+    /// discard everything, which is right for a backend whose queue holds
+    /// merge-derived equalities only.
+    fn discard_speculative_arithmetic_equalities(&mut self) {
+        let _ = self.drain_arithmetic_equalities();
+    }
 
     // --- Decision level ---
 
