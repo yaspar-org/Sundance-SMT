@@ -62,6 +62,16 @@ fn main() -> Result<(), String> {
         .type_check(&mut context)
         .map_err(|e| format!("Error checking typed commands: {e}"))?;
 
+    if sundance_smt::script::is_incremental(&typed_commands) {
+        let stats = sundance_smt::script::run_incremental(&typed_commands, context, &args)?;
+        if args.stats
+            && let Some(stats) = stats
+        {
+            eprintln!("{stats}");
+        }
+        return Ok(());
+    }
+
     let mut assertions: Vec<Term> = typed_commands
         .iter()
         .filter_map(|c| {
