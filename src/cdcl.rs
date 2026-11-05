@@ -11,7 +11,9 @@ use crate::cadical_propagator::{CustomExternalPropagator, EagerQiMode, ObservedS
 use crate::config::SatBackend;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
+use crate::formula::FormulaStore;
 use crate::proof::{SMTProofTracer, Theory};
+use crate::sat_tableau::SatTableau;
 use crate::solver_state::SolverState;
 use crate::stats::SolverStats;
 use crate::utils::DeterministicHashSet;
@@ -46,6 +48,7 @@ enum Backend {
     Cadical(Box<CaDiCal>),
     #[cfg(feature = "minisat")]
     Minisat(Box<sat_interface::minisat::MiniSat>),
+    Tableau(Box<SatTableau>),
 }
 
 /// Main CDCL decision loop
@@ -64,6 +67,8 @@ pub fn cdcl_decision_procedure(
     arithmetic: ArithSolver,
     timeout: u64,
     sat_backend: SatBackend,
+    formulas: Option<FormulaStore>,
+    partial_models: bool,
     elevate: i32,
     max_arith_conflicts_per_round: usize,
     batch_cap: usize,
@@ -110,6 +115,7 @@ pub fn cdcl_decision_procedure(
                 panic!("--sat-backend minisat requires building with `--features minisat`")
             }
         }
+        SatBackend::Tableau => Backend::Tableau(Box::default()),
     };
 
     let deadline = (timeout > 0).then(|| Instant::now() + std::time::Duration::from_secs(timeout));
@@ -119,14 +125,29 @@ pub fn cdcl_decision_procedure(
             Backend::Cadical(cadical) => cadical.connect_terminator(t),
             #[cfg(feature = "minisat")]
             Backend::Minisat(minisat) => minisat.connect_terminator(t),
+            // The tableau polls the terminator it is handed by `solve`.
+            Backend::Tableau(_) => {}
         }
     }
+    if let Backend::Tableau(tableau) = &mut solver {
+        tableau.set_partial_models(partial_models);
+    }
+    // Shared with the propagator, which adds quantifier instance bodies.
+    let formulas = match &mut solver {
+        Backend::Tableau(tableau) => formulas.map(|f| {
+            let f = Rc::new(RefCell::new(f));
+            tableau.add_formulas(Rc::clone(&f));
+            f
+        }),
+        _ => None,
+    };
     let observed_sink = match &mut solver {
         Backend::Cadical(cadical) => ObservedSink::Cadical(&mut **cadical as *mut CaDiCal),
         #[cfg(feature = "minisat")]
         Backend::Minisat(minisat) => {
             ObservedSink::Minisat(&mut **minisat as *mut sat_interface::minisat::MiniSat)
         }
+        Backend::Tableau(tableau) => ObservedSink::Queue(tableau.observed_queue()),
     };
 
     // The internal solvers' branch-and-bound runs inside a CaDiCaL callback, where the
@@ -165,6 +186,9 @@ pub fn cdcl_decision_procedure(
         materializing_quantifiers: false,
         max_arith_conflicts_per_round,
         last_observed_var: 1,
+        observed_vars: vec![],
+        formulas,
+        decision_requests: vec![],
         batch_cap,
         arith: arith_translator,
         lia_config,
@@ -185,6 +209,8 @@ pub fn cdcl_decision_procedure(
         Backend::Cadical(cadical) => cadical.connect_external_propagator(&mut propagator),
         #[cfg(feature = "minisat")]
         Backend::Minisat(minisat) => minisat.connect_external_propagator(&mut propagator),
+        // The tableau is handed the propagator by `solve`.
+        Backend::Tableau(_) => {}
     }
     // note: not using a fixed listener anymore
     // solver.connect_fixed_listener(&mut propagator);
@@ -235,6 +261,11 @@ pub fn cdcl_decision_procedure(
             minisat.disconnect_terminator();
             result
         }
+        Backend::Tableau(tableau) => tableau.solve(
+            &mut propagator,
+            Some(&*proof_tracer),
+            terminator.as_mut().map(|t| t as &mut dyn Terminator),
+        ),
     };
 
     // An accepted model is not known to be a model of the input if an arithmetic check gave up
@@ -354,5 +385,6 @@ fn add_clause_to_proof_and_solver(
         Backend::Cadical(cadical) => cadical.clause6(clause), // TODO `clause1()`, `clause2()`, etc. might be more efficient
         #[cfg(feature = "minisat")]
         Backend::Minisat(minisat) => minisat.add_clause(clause),
+        Backend::Tableau(tableau) => tableau.add_clause(clause),
     }
 }
