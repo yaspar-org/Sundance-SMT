@@ -273,3 +273,72 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> Result<std::process
         }
     }
 }
+
+/// Incremental scripts (push/pop, check-sat-assuming, several check-sat commands): every
+/// `tests/regression/incremental/X.smt2` must print exactly the lines of `X.expected`, one
+/// answer per check. Always run on CaDiCaL, since MiniSat has no assumption interface, with any
+/// `SUNDANCE_ARITHMETIC` override from the CI matrix.
+#[test]
+fn incremental_test() {
+    run_incremental_corpus(&[]);
+}
+
+fn run_incremental_corpus(extra_args: &[&str]) {
+    let dir = Path::new("tests/regression/incremental");
+    let mut smt_files: Vec<_> = fs::read_dir(dir)
+        .expect("Failed to read incremental directory")
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension()?.to_str()? == "smt2").then_some(path)
+        })
+        .collect();
+    smt_files.sort();
+    assert!(!smt_files.is_empty(), "no incremental tests found");
+
+    let arithmetic = env::var("SUNDANCE_ARITHMETIC").ok();
+    let mut failures = Vec::new();
+    for path in &smt_files {
+        let expected = fs::read_to_string(path.with_extension("expected"))
+            .unwrap_or_else(|e| panic!("Missing expected output for {}: {e}", path.display()));
+        print!("Incremental test {:?}: {} ... ", extra_args, path.display());
+        io::stdout().flush().unwrap();
+
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_sundance-smt"));
+        cmd.arg(path).arg("--sat-backend").arg("cadical");
+        if let Some(ref a) = arithmetic {
+            cmd.arg("--arithmetic").arg(a);
+        }
+        cmd.args(extra_args);
+        let child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("Failed to execute solver");
+        match wait_with_timeout(child, Duration::from_secs(10)) {
+            Ok(output) => {
+                let actual = String::from_utf8_lossy(&output.stdout);
+                if actual.trim() == expected.trim() {
+                    println!("\x1b[32m✓\x1b[0m");
+                } else {
+                    println!("\x1b[31m✗\x1b[0m");
+                    failures.push(format!(
+                        "{}: expected {:?}, got {:?} (stderr: {})",
+                        path.display(),
+                        expected.trim(),
+                        actual.trim(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                }
+            }
+            Err(mut child) => {
+                let _ = child.kill();
+                failures.push(format!("{}: timeout", path.display()));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "incremental tests failed:\n{}",
+        failures.join("\n")
+    );
+}

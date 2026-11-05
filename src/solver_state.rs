@@ -30,6 +30,24 @@ use crate::solver_types::{
 
 use crate::utils::DeterministicHashMap;
 
+/// UIDs of the quantifier subterms of `term` that are not inside another quantifier.
+fn outermost_quantifiers(term: &Term) -> Vec<u64> {
+    let mut found = vec![];
+    let mut visited = HashSet::new();
+    let mut stack = vec![term.clone()];
+    while let Some(t) = stack.pop() {
+        if !visited.insert(t.uid()) {
+            continue;
+        }
+        if let Exists(..) | Forall(..) = t.repr() {
+            found.push(t.uid());
+            continue;
+        }
+        stack.extend(t.repr().sub_terms().cloned());
+    }
+    found
+}
+
 fn get_subterms(term: &Term) -> (String, Vec<&Term>) {
     match term.repr() {
         Annotated(term, _) => {
@@ -172,6 +190,22 @@ pub struct SolverState {
     pub stat_dt_constructor_ax: u64,
     /// Number of datatype case splits (deferred tester clauses)
     pub stat_dt_splits: u64,
+
+    // --- Incremental solving (push/pop) and quantifier-instantiation GC ---
+    /// SAT variables with no term behind them (push-scope selectors).
+    pub control_vars: HashSet<i32>,
+    /// Quantifiers occurring (outside any quantifier body) in an asserted formula, mapped to the
+    /// shallowest push depth at which they are currently asserted.
+    pub quantifier_roots: HashMap<u64, usize>,
+    /// Quantifiers created by instantiating or skolemizing a quantifier, keyed by that parent.
+    pub quantifier_children: HashMap<u64, Vec<u64>>,
+    /// Quantifiers no longer reachable from an asserted formula (their scope was popped). They
+    /// are not instantiated: their instances would be sound but useless.
+    pub inactive_quantifiers: HashSet<u64>,
+    /// Whether to maintain `quantifier_roots`/`quantifier_children` (scripts with push/pop).
+    pub track_quantifier_scopes: bool,
+    /// `distinct` atoms whose negation lemma has been emitted.
+    pub negated_distinct_lemmas: HashSet<u64>,
 }
 
 impl SolverState {
@@ -213,7 +247,81 @@ impl SolverState {
             stat_dt_accessor_ax: 0,
             stat_dt_constructor_ax: 0,
             stat_dt_splits: 0,
+            control_vars: HashSet::new(),
+            quantifier_roots: HashMap::new(),
+            quantifier_children: HashMap::new(),
+            inactive_quantifiers: HashSet::new(),
+            track_quantifier_scopes: false,
+            negated_distinct_lemmas: HashSet::new(),
         }
+    }
+
+    /// Allocate a SAT variable that has no term (a push selector).
+    pub fn new_control_var(&mut self) -> i32 {
+        let v = self.cnf_env().new_var();
+        self.control_vars.insert(v);
+        v
+    }
+
+    pub fn is_control_lit(&self, lit: i32) -> bool {
+        self.control_vars.contains(&lit.abs())
+    }
+
+    /// Record the quantifiers occurring in the asserted formula `term` (not inside another
+    /// quantifier's body; those are reached through `quantifier_children`) as asserted at push
+    /// depth `depth`.
+    pub fn mark_root_quantifiers(&mut self, term: &Term, depth: usize) {
+        for q in outermost_quantifiers(term) {
+            let entry = self.quantifier_roots.entry(q).or_insert(depth);
+            *entry = (*entry).min(depth);
+        }
+    }
+
+    /// Record the quantifiers occurring in `instance` (an instance or skolemization of `parent`)
+    /// as children of `parent`. Only needed once a scope has been popped, and cheap to skip
+    /// otherwise: nothing is inactive until then.
+    pub fn mark_child_quantifiers(&mut self, parent: u64, instance: &Term) {
+        if !self.track_quantifier_scopes {
+            return;
+        }
+        let children = outermost_quantifiers(instance);
+        if !children.is_empty() {
+            self.quantifier_children
+                .entry(parent)
+                .or_default()
+                .extend(children);
+        }
+    }
+
+    /// Forget the root occurrences asserted deeper than `depth` (their scopes were popped).
+    pub fn retract_root_quantifiers(&mut self, depth: usize) {
+        self.quantifier_roots.retain(|_, d| *d <= depth);
+    }
+
+    /// Recompute `inactive_quantifiers`: a quantifier is active if it is a root or descends
+    /// from an active quantifier through instantiation or skolemization.
+    pub fn recompute_inactive_quantifiers(&mut self) {
+        let mut active: HashSet<u64> = HashSet::new();
+        let mut stack: Vec<u64> = self.quantifier_roots.keys().copied().collect();
+        while let Some(q) = stack.pop() {
+            if active.insert(q)
+                && let Some(children) = self.quantifier_children.get(&q)
+            {
+                stack.extend(children.iter().copied());
+            }
+        }
+        self.inactive_quantifiers = self
+            .quantifiers
+            .iter()
+            .map(|q| q.id)
+            .filter(|id| !active.contains(id))
+            .collect();
+    }
+
+    pub fn has_active_quantifiers(&self) -> bool {
+        self.quantifiers
+            .iter()
+            .any(|q| !self.inactive_quantifiers.contains(&q.id))
     }
 
     fn cnf_env(&mut self) -> CNFEnv<'_> {
@@ -930,6 +1038,28 @@ pub fn process_assignment(
             }
             None
         }
+        Assertion::NegatedDistinct {
+            distinct_uid,
+            terms,
+        } => {
+            // `¬distinct(t1..tn)` holds iff some pair is equal. Emit the valid lemma
+            // `distinct(t1..tn) ∨ ⋁_{i<j} ti = tj` (written with the assigned literal, which may
+            // be the distinct atom negatively or a `not distinct` term positively) once per atom;
+            // the SAT solver then picks the equality and the e-graph merges it.
+            if !solver_state.negated_distinct_lemmas.insert(distinct_uid) {
+                return None;
+            }
+            let mut lemma = vec![-lit];
+            for i in 0..terms.len() {
+                for j in i + 1..terms.len() {
+                    let eq = solver_state.context.eq(terms[i].clone(), terms[j].clone());
+                    solver_state.insert_predecessor(&eq, None, None, true);
+                    lemma.push(solver_state.get_or_allocate_lit_for_term(&eq));
+                }
+            }
+            debug_println!(16, 0, "Negated distinct lemma: {:?}", lemma);
+            Some(vec![(lemma, Theory::QfUf)])
+        }
         Assertion::Other => None,
     };
 
@@ -987,7 +1117,10 @@ pub fn find_if_eq_diseq<'a>(
                     hash,
                 }
             } else {
-                panic!("We do not currently support the negation of a distinct")
+                Assertion::NegatedDistinct {
+                    distinct_uid: term.uid(),
+                    terms: terms.clone(),
+                }
             }
         }
         Not(inner) => match inner.repr() {
@@ -1001,9 +1134,10 @@ pub fn find_if_eq_diseq<'a>(
                     hash,
                 }
             }
-            Distinct(_) => {
-                panic!("We do not currently support the negation of a distinct")
-            }
+            Distinct(terms) if sign => Assertion::NegatedDistinct {
+                distinct_uid: inner.uid(),
+                terms: terms.clone(),
+            },
             _ => {
                 debug_println!(0, 2, "Found negation, treating as Other");
                 Assertion::Other

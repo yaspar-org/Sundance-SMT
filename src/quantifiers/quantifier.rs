@@ -35,6 +35,7 @@ struct DeferredInstantiation {
 }
 
 struct DeferredSkolemization {
+    quantifier_id: u64,
     skolem: Term,
     skolem_vars: Vec<(Str, Sort)>,
     is_exists: bool,
@@ -112,6 +113,12 @@ pub(crate) fn instantiate_quantifiers(
             continue;
         }
 
+        // A quantifier whose push scope was popped is no longer asserted. Its instances would
+        // still be valid lemmas, but cannot help refute what is asserted now.
+        if solver_state.inactive_quantifiers.contains(&quantifier.id) {
+            continue;
+        }
+
         // if an odd number of these is true (i.e., XOR true) -> skolemize
         // if an even number of these is true (i.e., XOR false) -> instantiate
         let quantifier_is_exists = quantifier.polarity == Polarity::Existential;
@@ -127,6 +134,7 @@ pub(crate) fn instantiate_quantifiers(
                 skolemize(&term, &mut solver_state.context, quantifier_is_exists);
 
             deferred_skolemizations.push_back(DeferredSkolemization {
+                quantifier_id: quantifier.id,
                 skolem,
                 skolem_vars,
                 is_exists: quantifier_is_exists,
@@ -252,6 +260,7 @@ fn process_deferred_skolemizations(
 ) -> Vec<QuantifierInstance> {
     let mut results = vec![];
     for DeferredSkolemization {
+        quantifier_id,
         skolem,
         skolem_vars,
         is_exists,
@@ -264,6 +273,7 @@ fn process_deferred_skolemizations(
             check_for_function_bool(&reduced_skolem, solver_state, true, ddsmt, lazy_dt);
 
         solver_state.insert_predecessor(&reduced_skolem, None, None, true);
+        solver_state.mark_child_quantifiers(quantifier_id, &reduced_skolem);
 
         // Must do Tseitin *before* allocating the skolem literal — see comment on instantiation path
         let clauses = reduced_skolem.cnf_tseitin(solver_state);
@@ -359,6 +369,7 @@ fn process_deferred_instantiations(
         debug_println!(26, 4, "(assert {})", nnf_term.clone());
 
         solver_state.insert_predecessor(&nnf_term, None, None, true);
+        solver_state.mark_child_quantifiers(quantifier_id, &nnf_term);
 
         let cnf_term = nnf_term.cnf_tseitin(solver_state);
 

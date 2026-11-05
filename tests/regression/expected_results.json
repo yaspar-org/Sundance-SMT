@@ -50,6 +50,7 @@
     "edge_cases/basic_ite.smt2": "sat",
     "edge_cases/distinct-test.smt2": "unsat",
     "edge_cases/not-distinct.smt2": "unsat",
+    "edge_cases/negated-distinct-in-or.smt2": "unsat",
     "edge_cases/not-distinct2.smt2": "unsat",
     "edge_cases/not-distinct3.smt2": "unsat",
     "edge_cases/functionandoneterm.smt2": "unsat",

@@ -51,7 +51,7 @@ pub(crate) struct CNFEnv<'a> {
 }
 
 impl CNFEnv<'_> {
-    fn new_var(&mut self) -> i32 {
+    pub(crate) fn new_var(&mut self) -> i32 {
         let v = self.cache.next_var;
         if v == i32::MAX {
             panic!("Too many boolean variables; reached i32::MAX!");
