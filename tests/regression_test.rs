@@ -336,5 +336,9 @@ fn run_incremental_corpus(extra_args: &[&str]) {
             }
         }
     }
-    assert!(failures.is_empty(), "incremental tests failed:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "incremental tests failed:\n{}",
+        failures.join("\n")
+    );
 }
