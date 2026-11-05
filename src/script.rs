@@ -37,11 +37,18 @@ use crate::stats::SolverStats;
 use crate::theory_check::{NonlinearityCheck, reject_unsupported_theories};
 
 /// Whether `commands` need the incremental driver rather than one solve over all assertions.
+///
+/// Scopes only matter if something is popped before a check: a single `check-sat` that no `pop`
+/// precedes sees every assertion, so e.g. Boogie/Dafny output (`(push 1)`, assertions,
+/// `(check-sat)`) keeps the plain single-solve path, where all assertions are permanent units.
 pub fn is_incremental(commands: &[TypedCommand]) -> bool {
     let mut check_sats = 0;
+    let mut popped = false;
     for c in commands {
         match c.repr() {
-            Command::Push(_) | Command::Pop(_) | Command::CheckSatAssuming(_) => return true,
+            Command::CheckSatAssuming(_) => return true,
+            Command::Pop(_) => popped = true,
+            Command::CheckSat if popped => return true,
             Command::CheckSat => check_sats += 1,
             _ => {}
         }
