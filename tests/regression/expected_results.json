@@ -271,6 +271,7 @@
     "datatypes/fromquantifiertrue2.smt2": "unsat",
     "datatypes/fromquantifiertrue3.smt2": "unsat",
     "datatypes/poly_nested_adt_sat.smt2": "sat",
+    "datatypes/poly_nullary_ctor_two_sorts_sat.smt2": "sat",
     "datatypes/poly_option_sat.smt2": "sat",
     "datatypes/poly_option_unsat.smt2": "unsat",
     "datatypes/phantom_param_unsat.smt2": "unsat",
