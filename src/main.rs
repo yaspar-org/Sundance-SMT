@@ -4,11 +4,13 @@
 use cadical_sys::Status;
 use clap::Parser;
 use std::fs;
+use std::path::PathBuf;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
+use sundance_smt::stats::SolverStats;
 use sundance_smt::theory_check::{NonlinearityCheck, reject_unsupported_theories};
 use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::alg::{self};
@@ -62,7 +64,7 @@ fn main() -> Result<(), String> {
         .type_check(&mut context)
         .map_err(|e| format!("Error checking typed commands: {e}"))?;
 
-    let mut assertions: Vec<Term> = typed_commands
+    let assertions: Vec<Term> = typed_commands
         .iter()
         .filter_map(|c| {
             if let alg::Command::Assert(t) = c.repr() {
@@ -73,6 +75,50 @@ fn main() -> Result<(), String> {
         })
         .collect::<Vec<_>>();
 
+    let (return_value, stats, quantifiers) = solve_single(
+        context,
+        assertions,
+        &args,
+        args.proof.clone(),
+        args.partial_proof.clone(),
+        args.trail_out.clone(),
+    )?;
+
+    print_status(return_value, quantifiers);
+
+    if args.stats {
+        eprintln!("{stats}");
+    }
+
+    Ok(())
+}
+
+/// Print the answer of one check. `sat` is weakened to `unknown` when the query has quantifiers,
+/// since the instantiation procedure is incomplete.
+fn print_status(status: Status, quantifiers: bool) {
+    match status {
+        Status::SATISFIABLE => {
+            if quantifiers {
+                println!("unknown")
+            } else {
+                println!("sat")
+            }
+        }
+        Status::UNSATISFIABLE => println!("unsat"),
+        Status::UNKNOWN => println!("unknown"),
+    }
+}
+
+/// Solve one query: the conjunction of `assertions`, all type-checked in `context`. Returns the
+/// SAT status, the solver statistics, and whether the query contains quantifiers.
+fn solve_single(
+    mut context: Context,
+    mut assertions: Vec<Term>,
+    args: &Args,
+    proof: Option<PathBuf>,
+    partial_proof: Option<PathBuf>,
+    trail_out: Option<PathBuf>,
+) -> Result<(Status, SolverStats, bool), String> {
     // Bail out before the assertions reach the egraph when operators from theories we do not
     // implement would silently become uninterpreted functions and could yield `sat` on an `unsat`
     // problem.
@@ -204,12 +250,12 @@ fn main() -> Result<(), String> {
         &mut solver_state,
         prop_skeleton,
         boolean_dt_constraints,
-        args.proof,
-        args.partial_proof,
-        args.trail_out,
+        proof,
+        partial_proof,
+        trail_out,
         sorts,
         symbol_table,
-        args.arithmetic,
+        args.arithmetic.clone(),
         args.timeout,
         args.sat_backend,
         args.elevate,
@@ -218,21 +264,5 @@ fn main() -> Result<(), String> {
         args.eager_qi,
     );
 
-    match return_value {
-        Status::SATISFIABLE => {
-            if quantifiers {
-                println!("unknown")
-            } else {
-                println!("sat")
-            }
-        }
-        Status::UNSATISFIABLE => println!("unsat"),
-        Status::UNKNOWN => println!("unknown"),
-    }
-
-    if args.stats {
-        eprintln!("{stats}");
-    }
-
-    Ok(())
+    Ok((return_value, stats, quantifiers))
 }
