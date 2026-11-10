@@ -117,7 +117,7 @@ impl SolverStats {
             dt_accessor_ax: 0,
             dt_constructor_ax: 0,
             dt_splits: 0,
-            num_checks: 1,
+            num_checks: 0,
             per_round: Vec::new(),
             snapshot_decisions: 0,
             snapshot_backtracks: 0,
