@@ -18,7 +18,7 @@
 use crate::utils::{FastDeterministicHashMap, FastDeterministicHashSet};
 use yaspar_ir::ast::alg::Constant;
 use yaspar_ir::ast::{ATerm, Context, FetchSort, Repr, Term};
-use yaspar_ir::statics::{ARRAY, BITVEC, REGLAN, SET, STRING};
+use yaspar_ir::statics::{ARRAY, BITVEC, REAL, REGLAN, SET, STRING};
 
 /// The theory name for a sort Sundance has no decision procedure for, or `None` if the sort is
 /// supported.
@@ -29,6 +29,8 @@ fn unsupported_theory(sort_name: &str) -> Option<&'static str> {
         REGLAN => Some("regular expressions"),
         ARRAY => Some("arrays"),
         SET => Some("sets"),
+        // The arithmetic backends only handle `Int` (see `register_arithmetic_and_quantifier`).
+        REAL => Some("real arithmetic"),
         _ => None,
     }
 }
@@ -61,6 +63,11 @@ pub fn reject_unsupported_theories(
                 "unsupported theory: {theory}. The term `{term}` has sort `{sort}`, \
                  and Sundance has no decision procedure for this theory."
             ));
+        }
+
+        // `match` is not supported by the egraph (`SolverState::extract_op`).
+        if let ATerm::Matching(..) = term.repr() {
+            return Err(format!("match expressions are not supported: `{term}`."));
         }
 
         stack.extend(term.repr().sub_terms());
@@ -230,6 +237,22 @@ mod tests {
             "(declare-const x Int)\n(declare-const y Int)\n(declare-const z Int)\n\
              (assert (= {term} 0))\n(check-sat)\n"
         )
+    }
+
+    #[test]
+    fn rejects_real_arithmetic() {
+        let input = "(declare-const r Real)\n(assert (> r 0.5))\n(check-sat)\n";
+        let err = check(input).expect_err("Real should be rejected");
+        assert!(err.contains("real arithmetic"), "{err}");
+    }
+
+    #[test]
+    fn rejects_match() {
+        let input = "(declare-datatypes ((L 0)) (((nil) (cons (hd Int) (tl L)))))\n\
+                     (declare-const l L)\n\
+                     (assert (= 0 (match l ((nil 0) ((cons h t) h)))))\n(check-sat)\n";
+        let err = check(input).expect_err("match should be rejected");
+        assert!(err.contains("match"), "{err}");
     }
 
     #[test]
