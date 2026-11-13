@@ -172,6 +172,8 @@ pub struct SolverState {
     pub stat_dt_constructor_ax: u64,
     /// Number of datatype case splits (deferred tester clauses)
     pub stat_dt_splits: u64,
+    /// `distinct` atoms whose negation lemma has been emitted.
+    pub negated_distinct_lemmas: HashSet<u64>,
 }
 
 impl SolverState {
@@ -213,6 +215,7 @@ impl SolverState {
             stat_dt_accessor_ax: 0,
             stat_dt_constructor_ax: 0,
             stat_dt_splits: 0,
+            negated_distinct_lemmas: HashSet::new(),
         }
     }
 
@@ -946,6 +949,28 @@ pub fn process_assignment(
             }
             None
         }
+        Assertion::NegatedDistinct {
+            distinct_uid,
+            terms,
+        } => {
+            // `¬distinct(t1..tn)` holds iff some pair is equal. Emit the valid lemma
+            // `distinct(t1..tn) ∨ ⋁_{i<j} ti = tj` (written with the assigned literal, which may
+            // be the distinct atom negatively or a `not distinct` term positively) once per atom;
+            // the SAT solver then picks the equality and the e-graph merges it.
+            if !solver_state.negated_distinct_lemmas.insert(distinct_uid) {
+                return None;
+            }
+            let mut lemma = vec![-lit];
+            for i in 0..terms.len() {
+                for j in i + 1..terms.len() {
+                    let eq = solver_state.context.eq(terms[i].clone(), terms[j].clone());
+                    solver_state.insert_predecessor(&eq, None, None, true);
+                    lemma.push(solver_state.get_or_allocate_lit_for_term(&eq));
+                }
+            }
+            debug_println!(16, 0, "Negated distinct lemma: {:?}", lemma);
+            Some(vec![(lemma, Theory::QfUf)])
+        }
         Assertion::Other => None,
     };
 
@@ -1003,7 +1028,10 @@ pub fn find_if_eq_diseq<'a>(
                     hash,
                 }
             } else {
-                panic!("We do not currently support the negation of a distinct")
+                Assertion::NegatedDistinct {
+                    distinct_uid: term.uid(),
+                    terms: terms.clone(),
+                }
             }
         }
         Not(inner) => match inner.repr() {
@@ -1017,9 +1045,10 @@ pub fn find_if_eq_diseq<'a>(
                     hash,
                 }
             }
-            Distinct(_) => {
-                panic!("We do not currently support the negation of a distinct")
-            }
+            Distinct(terms) if sign => Assertion::NegatedDistinct {
+                distinct_uid: inner.uid(),
+                terms: terms.clone(),
+            },
             _ => {
                 debug_println!(0, 2, "Found negation, treating as Other");
                 Assertion::Other

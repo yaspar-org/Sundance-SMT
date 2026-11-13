@@ -1,0 +1,12 @@
+; A non-Boolean `distinct` under a disjunction can be assigned false.
+(declare-sort S 0)
+(declare-const x S)
+(declare-const y S)
+(declare-const z S)
+(declare-const p Bool)
+(assert (or p (not (distinct x y z))))
+(assert (not p))
+(assert (not (= x y)))
+(assert (not (= y z)))
+(assert (not (= x z)))
+(check-sat)
