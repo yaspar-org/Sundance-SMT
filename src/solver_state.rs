@@ -392,6 +392,25 @@ impl SolverState {
         }
     }
 
+    /// The e-graph's key for a function or constant identifier.
+    ///
+    /// Congruence merges two applications with the same key, so distinct identifiers need distinct
+    /// keys.
+    fn identifier_key(
+        f: &yaspar_ir::ast::alg::QualifiedIdentifier<yaspar_ir::ast::Str, Sort>,
+    ) -> String {
+        let indices = &f.0.indices;
+        if indices.is_empty() {
+            // An unindexed identifier is keyed by its name
+            f.id_str().get().to_string()
+        } else {
+            // An indexed one (like `(_ is C)`) is keyed by its name, a `|` and all its indices: no
+            // symbol name contains a `|` (quoted symbols exclude it), so this never equals the key
+            // of another identifier.
+            format!("{}|{:?}", f.id_str().get(), indices)
+        }
+    }
+
     /// Extract Op from a yaspar Term.
     fn extract_op(term: &Term) -> crate::egraphs::repr::Op {
         use crate::egraphs::repr::Op;
@@ -403,18 +422,12 @@ impl SolverState {
             Or(_) => Op::Or,
             Implies(_, _) => Op::Implies,
             Distinct(_) => Op::Distinct,
-            App(f, _, sort) => {
-                let func_indices = &f.0.indices;
-                let key = if func_indices.is_empty() {
-                    f.id_str().get().to_string()
-                } else {
-                    // Indexed function (like (_ is Ctor)) — include indices in key
-                    format!("({} {})", f.id_str().get(), func_indices[0])
-                };
-                Op::App(Self::sort_qualified_key(key, sort.as_ref()))
-            }
+            App(f, _, sort) => Op::App(Self::sort_qualified_key(
+                Self::identifier_key(f),
+                sort.as_ref(),
+            )),
             Global(qid, sort) => Op::App(Self::sort_qualified_key(
-                qid.id_str().get().to_string(),
+                Self::identifier_key(qid),
                 sort.as_ref(),
             )),
             Constant(c, _) => Op::Constant(format!("{:?}", c)),
