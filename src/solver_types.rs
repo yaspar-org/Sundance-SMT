@@ -32,6 +32,11 @@ pub enum Assertion {
         inner_term: Term,
         term: Term,
     },
+    /// A `distinct` over non-Boolean terms assigned false.
+    NegatedDistinct {
+        distinct_uid: u64,
+        terms: Vec<Term>,
+    },
     Other,
 }
 

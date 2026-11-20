@@ -3,18 +3,22 @@
 
 use cadical_sys::Status;
 use clap::Parser;
+use std::fmt;
 use std::fs;
+use std::path::PathBuf;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
+use sundance_smt::stats::SolverStats;
 use sundance_smt::theory_check::{NonlinearityCheck, reject_unsupported_theories};
 use sundance_smt::{debug_println, log};
 use yaspar_ir::ast::alg::{self};
 use yaspar_ir::ast::{Context, LetElim, ObjectAllocatorExt, Repr, Term, Typecheck};
 use yaspar_ir::ast::{GlobalSubst, TermAllocator};
-use yaspar_ir::untyped::UntypedAst;
+use yaspar_ir::traits::MetaData;
+use yaspar_ir::untyped::{Command as UntypedCommand, UntypedAst};
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
@@ -56,13 +60,23 @@ fn main() -> Result<(), String> {
         .parse_script_str(&input)
         .map_err(|e| format!("Error parsing SMT file: {e}"))?;
 
+    if is_incremental(&commands) {
+        return run_incremental(&commands, &args);
+    }
+
     let mut context = Context::new();
 
+    // The whole script is type-checked, so an error anywhere is still reported, but only the
+    // assertions before the check-sat (or exit) are in scope at the check.
     let typed_commands = commands
         .type_check(&mut context)
         .map_err(|e| format!("Error checking typed commands: {e}"))?;
+    let in_scope = commands
+        .iter()
+        .position(|c| matches!(c.repr(), alg::Command::CheckSat | alg::Command::Exit))
+        .unwrap_or(commands.len());
 
-    let mut assertions: Vec<Term> = typed_commands
+    let assertions: Vec<Term> = typed_commands[..in_scope]
         .iter()
         .filter_map(|c| {
             if let alg::Command::Assert(t) = c.repr() {
@@ -73,6 +87,200 @@ fn main() -> Result<(), String> {
         })
         .collect::<Vec<_>>();
 
+    let (answer, stats) = solve_single(
+        context,
+        assertions,
+        &args,
+        args.proof.clone(),
+        args.partial_proof.clone(),
+        args.trail_out.clone(),
+    )?;
+
+    println!("{answer}");
+
+    if args.stats {
+        eprintln!("{stats}");
+    }
+
+    Ok(())
+}
+
+/// The answer printed for one check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    Sat,
+    Unsat,
+    Unknown,
+}
+
+impl Answer {
+    /// `sat` is weakened to `unknown` when the query has quantifiers, since the instantiation
+    /// procedure is incomplete.
+    fn new(status: Status, has_quantifiers: bool) -> Self {
+        match status {
+            Status::SATISFIABLE if has_quantifiers => Answer::Unknown,
+            Status::SATISFIABLE => Answer::Sat,
+            Status::UNSATISFIABLE => Answer::Unsat,
+            Status::UNKNOWN => Answer::Unknown,
+        }
+    }
+}
+
+impl fmt::Display for Answer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Answer::Sat => "sat",
+            Answer::Unsat => "unsat",
+            Answer::Unknown => "unknown",
+        })
+    }
+}
+
+/// Whether `commands` needs the incremental (one solve per check) path: it has a
+/// `check-sat-assuming`, more than one `check-sat`, or a `check-sat` after a `pop`. Every other
+/// script, including the Boogie/Dafny shape `(push 1) ... (check-sat)`, keeps the single-solve
+/// path. Commands after `exit` are never executed, so they are not counted.
+fn is_incremental(commands: &[UntypedCommand]) -> bool {
+    let mut seen_pop = false;
+    let mut checks = 0usize;
+    for c in commands {
+        match c.repr() {
+            alg::Command::CheckSatAssuming(_) => return true,
+            alg::Command::CheckSat => {
+                if seen_pop || checks > 0 {
+                    return true;
+                }
+                checks += 1;
+            }
+            alg::Command::Pop(_) => seen_pop = true,
+            alg::Command::Exit => break,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Run an incremental script by rebuilding everything at each check.
+///
+/// The untyped commands (declarations, definitions, assertions, options) are kept on a stack of
+/// frames, one per open `push` level. At every `check-sat` / `check-sat-assuming`, the commands of
+/// all open frames are type-checked from scratch into a fresh `Context` and solved by
+/// [`solve_single`] with a fresh `SolverState` and SAT solver. Nothing (instances, lemmas, learned
+/// clauses) is carried from one check to the next, so declarations made inside a popped frame
+/// are simply gone. `check-sat-assuming` adds its assumptions as extra assertions for that check
+/// only. `--timeout` applies to each check separately, and `--stats` prints the statistics of
+/// each check. `--trail-out` is rewritten by every check, so it ends up holding the trail of the
+/// last one. Proof output is rejected, because one proof file cannot hold one refutation per
+/// check.
+fn run_incremental(commands: &[UntypedCommand], args: &Args) -> Result<(), String> {
+    if args.proof.is_some() || args.partial_proof.is_some() {
+        return Err(
+            "--proof and --partial-proof are not supported for incremental scripts \
+             (push/pop, check-sat-assuming or several check-sat commands)"
+                .to_string(),
+        );
+    }
+
+    // Every command is also type-checked once, where it appears, against a context that follows
+    // the push/pop scopes. The per-check rebuild only sees the frames open at a check, so without
+    // this, errors in a frame popped before any check, or after the last check, would be missed.
+    let mut checker = Context::new();
+    let mut frames: Vec<Vec<UntypedCommand>> = vec![vec![]];
+    for c in commands {
+        match c.repr() {
+            alg::Command::Push(n) => {
+                let n = usize::try_from(n).map_err(|_| format!("push level too large: {n}"))?;
+                frames.extend((0..n).map(|_| vec![]));
+            }
+            alg::Command::Pop(n) => {
+                let n = usize::try_from(n).ok().filter(|n| *n < frames.len());
+                let Some(n) = n else {
+                    return Err(format!(
+                        "pop of more levels than were pushed ({} open){}",
+                        frames.len() - 1,
+                        c.display_meta_data()
+                    ));
+                };
+                frames.truncate(frames.len() - n);
+            }
+            alg::Command::CheckSat | alg::Command::CheckSatAssuming(_) => {
+                let assuming = matches!(c.repr(), alg::Command::CheckSatAssuming(_));
+                let mut script: Vec<UntypedCommand> = frames.concat();
+                if assuming {
+                    // Type-checked together with the prefix; its terms become assertions below.
+                    script.push(c.clone());
+                }
+                let (answer, stats) = solve_scope(&script, args)?;
+                println!("{answer}");
+                if args.stats {
+                    eprintln!("{stats}");
+                }
+            }
+            alg::Command::Exit => break,
+            alg::Command::Reset | alg::Command::ResetAssertions => {
+                return Err(format!(
+                    "reset and reset-assertions are not supported{}",
+                    c.display_meta_data()
+                ));
+            }
+            // Output-only commands: ignored, as on the single-solve path.
+            alg::Command::Echo(_)
+            | alg::Command::GetAssertions
+            | alg::Command::GetAssignment
+            | alg::Command::GetInfo(_)
+            | alg::Command::GetModel
+            | alg::Command::GetOption(_)
+            | alg::Command::GetProof
+            | alg::Command::GetUnsatAssumptions
+            | alg::Command::GetUnsatCore
+            | alg::Command::GetValue(_) => {}
+            _ => frames
+                .last_mut()
+                .expect("the base frame is never popped")
+                .push(c.clone()),
+        }
+        c.type_check(&mut checker)
+            .map_err(|e| format!("Error checking typed commands: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Type-check `script` (the in-scope commands of an incremental script, possibly ending in a
+/// `check-sat-assuming`) into a fresh `Context` and solve its assertions as one query.
+fn solve_scope(script: &[UntypedCommand], args: &Args) -> Result<(Answer, SolverStats), String> {
+    let mut context = Context::new();
+    let typed_commands = script
+        .to_vec()
+        .type_check(&mut context)
+        .map_err(|e| format!("Error checking typed commands: {e}"))?;
+    let mut assertions = vec![];
+    for c in &typed_commands {
+        match c.repr() {
+            alg::Command::Assert(t) => assertions.push(t.clone()),
+            alg::Command::CheckSatAssuming(ts) => assertions.extend(ts.iter().cloned()),
+            _ => {}
+        }
+    }
+    solve_single(
+        context,
+        assertions,
+        args,
+        None,
+        None,
+        args.trail_out.clone(),
+    )
+}
+
+/// Solve one query: the conjunction of `assertions`, all type-checked in `context`. Returns the
+/// answer to print and the solver statistics.
+fn solve_single(
+    mut context: Context,
+    mut assertions: Vec<Term>,
+    args: &Args,
+    proof: Option<PathBuf>,
+    partial_proof: Option<PathBuf>,
+    trail_out: Option<PathBuf>,
+) -> Result<(Answer, SolverStats), String> {
     // Bail out before the assertions reach the egraph when operators from theories we do not
     // implement would silently become uninterpreted functions and could yield `sat` on an `unsat`
     // problem.
@@ -204,12 +412,12 @@ fn main() -> Result<(), String> {
         &mut solver_state,
         prop_skeleton,
         boolean_dt_constraints,
-        args.proof,
-        args.partial_proof,
-        args.trail_out,
+        proof,
+        partial_proof,
+        trail_out,
         sorts,
         symbol_table,
-        args.arithmetic,
+        args.arithmetic.clone(),
         args.timeout,
         args.sat_backend,
         args.elevate,
@@ -218,21 +426,5 @@ fn main() -> Result<(), String> {
         args.eager_qi,
     );
 
-    match return_value {
-        Status::SATISFIABLE => {
-            if quantifiers {
-                println!("unknown")
-            } else {
-                println!("sat")
-            }
-        }
-        Status::UNSATISFIABLE => println!("unsat"),
-        Status::UNKNOWN => println!("unknown"),
-    }
-
-    if args.stats {
-        eprintln!("{stats}");
-    }
-
-    Ok(())
+    Ok((Answer::new(return_value, quantifiers), stats))
 }
