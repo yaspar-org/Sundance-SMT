@@ -1,0 +1,5 @@
+(set-logic ALL)
+(declare-datatype T ((wrap (u Int)) (wrap2 (v T)) (base)))
+(declare-const x Int)
+(assert (= (wrap x) base))
+(check-sat)
