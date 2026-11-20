@@ -316,15 +316,18 @@ fn incremental_test() {
         match wait_with_timeout(child, Duration::from_secs(10)) {
             Ok(output) => {
                 let actual = String::from_utf8_lossy(&output.stdout);
-                if actual.trim() == expected.trim() {
+                // A matching stdout is not enough: the solver could print every answer and then
+                // fail on a later command (e.g. a pop with nothing to pop).
+                if output.status.success() && actual.trim() == expected.trim() {
                     println!("\x1b[32m✓\x1b[0m");
                 } else {
                     println!("\x1b[31m✗\x1b[0m");
                     failures.push(format!(
-                        "{}: expected {:?}, got {:?} (stderr: {})",
+                        "{}: expected {:?}, got {:?} ({}, stderr: {})",
                         path.display(),
                         expected.trim(),
                         actual.trim(),
+                        output.status,
                         String::from_utf8_lossy(&output.stderr).trim()
                     ));
                 }
