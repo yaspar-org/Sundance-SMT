@@ -734,17 +734,35 @@ pub fn process_assignment(
     let true_egraph_id = solver_state.to_egraph_id(solver_state.true_uid);
     let false_egraph_id = solver_state.to_egraph_id(solver_state.false_uid);
 
-    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&lit) {
-        let egraph_t = solver_state.to_egraph_id(*t);
+    // The literal's term, and every term sharing its literal (see
+    // `CNFCache::var_map_aliases`), takes the literal's truth value in the e-graph.
+    let mut to_assign = vec![];
+    for (l, value_id) in [(lit, true_egraph_id), (-lit, false_egraph_id)] {
+        if let Some(&t) = solver_state.cnf_cache.var_map_reverse.get(&l) {
+            to_assign.push((solver_state.to_egraph_id(t), value_id));
+        }
+        for t in solver_state
+            .cnf_cache
+            .var_map_aliases
+            .get(&l)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(&egraph_t) = solver_state.id_map.get_by_left(t) {
+                to_assign.push((egraph_t, value_id));
+            }
+        }
+    }
+    for (egraph_t, value_id) in to_assign {
         debug_println!(
             16,
             0,
-            "We are in process_assignment, unioning with true for lit {} and t {} and true_term {}",
-            lit,
-            t,
-            true_egraph_id
+            "We are in process_assignment, unioning {} with {} for lit {}",
+            egraph_t,
+            value_id,
+            lit
         );
-        let union_result = solver_state.egraph.assert_equal(egraph_t, true_egraph_id);
+        let union_result = solver_state.egraph.assert_equal(egraph_t, value_id);
         if let Some(conflict) = union_result.conflict {
             let mut model_terms: Vec<i32> = conflict
                 .equalities
@@ -756,30 +774,6 @@ pub fn process_assignment(
             }
             return Some(vec![(model_terms, Theory::QfUf)]);
         }
-    }
-
-    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&-lit) {
-        let egraph_t = solver_state.to_egraph_id(*t);
-        debug_println!(
-            16,
-            0,
-            "We are in process_assignment, unioning with false for lit {} and t {} and false_term {}",
-            lit,
-            t,
-            false_egraph_id
-        );
-        let union_result = solver_state.egraph.assert_equal(egraph_t, false_egraph_id);
-        if let Some(conflict) = union_result.conflict {
-            let mut model_terms: Vec<i32> = conflict
-                .equalities
-                .iter()
-                .map(|(a, b)| -solver_state.make_eq(*a, *b))
-                .collect();
-            if let Some(lit) = conflict.diseq_lit {
-                model_terms.push(-lit);
-            }
-            return Some(vec![(model_terms, Theory::QfUf)]);
-        };
     }
 
     debug_println!("Finished union to True/False");

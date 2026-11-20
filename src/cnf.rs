@@ -24,6 +24,9 @@ pub trait CNFConversion<Env> {
 pub struct CNFCache {
     pub var_map: HashMap<u64, i32>,
     pub var_map_reverse: HashMap<i32, u64>,
+    /// Further terms that share a literal with the term in `var_map_reverse`, e.g. a term
+    /// and its NNF. They must get the same truth value in the e-graph.
+    pub var_map_aliases: HashMap<i32, Vec<u64>>,
     pub next_var: i32,
     pub nnf_cache: HashMap<u64, [Option<Term>; 2]>,
 }
@@ -39,6 +42,7 @@ impl CNFCache {
         Self {
             var_map: HashMap::default(),
             var_map_reverse: HashMap::default(),
+            var_map_aliases: HashMap::default(),
             next_var: 1,
             nnf_cache: HashMap::default(),
         }
