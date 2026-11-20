@@ -177,6 +177,13 @@ fn expr_to_monomials(
                 let a_var = *var_map.entry(*a_id).or_insert_with(|| {
                     ctx.allocate_var(&format!("!ext_var_{}", a_id), VarType::Int)
                 });
+                if n == Rational::ZERO {
+                    // SMT-LIB leaves division by zero unspecified: `(div a 0)` is an
+                    // unconstrained function of `a`, so share one free var per numerator.
+                    let v = ctx.allocate_var(&format!("!div_zero_{}", a_id), VarType::Int);
+                    monomials.push(Mon::new(&sign * &rational_coeff, v));
+                    continue;
+                }
                 let q = ctx.allocate_var(&format!("!div_q_{}_{}", a_id, b_id), VarType::Int);
                 let (slack_ge, slack_le) = add_euclidean_constraints(a_var, q, &n, ctx);
                 euclidean_slacks.push(slack_ge);
@@ -188,6 +195,12 @@ fn expr_to_monomials(
                 let a_var = *var_map.entry(*a_id).or_insert_with(|| {
                     ctx.allocate_var(&format!("!ext_var_{}", a_id), VarType::Int)
                 });
+                if n == Rational::ZERO {
+                    // As for `div`: `(mod a 0)` is an unconstrained function of `a`.
+                    let v = ctx.allocate_var(&format!("!mod_zero_{}", a_id), VarType::Int);
+                    monomials.push(Mon::new(&sign * &rational_coeff, v));
+                    continue;
+                }
                 let q = ctx.allocate_var(&format!("!mod_q_{}_{}", a_id, b_id), VarType::Int);
                 let (slack_ge, slack_le) = add_euclidean_constraints(a_var, q, &n, ctx);
                 euclidean_slacks.push(slack_ge);
