@@ -65,11 +65,17 @@ fn main() -> Result<(), String> {
 
     let mut context = Context::new();
 
+    // The whole script is type-checked, so an error anywhere is still reported, but only the
+    // assertions before the check-sat (or exit) are in scope at the check.
     let typed_commands = commands
         .type_check(&mut context)
         .map_err(|e| format!("Error checking typed commands: {e}"))?;
+    let in_scope = commands
+        .iter()
+        .position(|c| matches!(c.repr(), alg::Command::CheckSat | alg::Command::Exit))
+        .unwrap_or(commands.len());
 
-    let assertions: Vec<Term> = typed_commands
+    let assertions: Vec<Term> = typed_commands[..in_scope]
         .iter()
         .filter_map(|c| {
             if let alg::Command::Assert(t) = c.repr() {
