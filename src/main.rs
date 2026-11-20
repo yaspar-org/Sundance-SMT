@@ -165,6 +165,10 @@ fn run_incremental(commands: &[UntypedCommand], args: &Args) -> Result<(), Strin
         );
     }
 
+    // Every command is also type-checked once, where it appears, against a context that follows
+    // the push/pop scopes. The per-check rebuild only sees the frames open at a check, so without
+    // this, errors in a frame popped before any check, or after the last check, would be missed.
+    let mut checker = Context::new();
     let mut frames: Vec<Vec<UntypedCommand>> = vec![vec![]];
     for c in commands {
         match c.repr() {
@@ -219,6 +223,8 @@ fn run_incremental(commands: &[UntypedCommand], args: &Args) -> Result<(), Strin
                 .expect("the base frame is never popped")
                 .push(c.clone()),
         }
+        c.type_check(&mut checker)
+            .map_err(|e| format!("Error checking typed commands: {e}"))?;
     }
     Ok(())
 }
