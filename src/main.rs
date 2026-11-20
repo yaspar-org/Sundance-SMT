@@ -3,6 +3,7 @@
 
 use cadical_sys::Status;
 use clap::Parser;
+use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 use sundance_smt::cdcl::cdcl_decision_procedure;
@@ -86,7 +87,7 @@ fn main() -> Result<(), String> {
         })
         .collect::<Vec<_>>();
 
-    let (return_value, stats, quantifiers) = solve_single(
+    let (answer, stats) = solve_single(
         context,
         assertions,
         &args,
@@ -95,7 +96,7 @@ fn main() -> Result<(), String> {
         args.trail_out.clone(),
     )?;
 
-    print_status(return_value, quantifiers);
+    println!("{answer}");
 
     if args.stats {
         eprintln!("{stats}");
@@ -104,19 +105,34 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Print the answer of one check. `sat` is weakened to `unknown` when the query has quantifiers,
-/// since the instantiation procedure is incomplete.
-fn print_status(status: Status, quantifiers: bool) {
-    match status {
-        Status::SATISFIABLE => {
-            if quantifiers {
-                println!("unknown")
-            } else {
-                println!("sat")
-            }
+/// The answer printed for one check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answer {
+    Sat,
+    Unsat,
+    Unknown,
+}
+
+impl Answer {
+    /// `sat` is weakened to `unknown` when the query has quantifiers, since the instantiation
+    /// procedure is incomplete.
+    fn new(status: Status, has_quantifiers: bool) -> Self {
+        match status {
+            Status::SATISFIABLE if has_quantifiers => Answer::Unknown,
+            Status::SATISFIABLE => Answer::Sat,
+            Status::UNSATISFIABLE => Answer::Unsat,
+            Status::UNKNOWN => Answer::Unknown,
         }
-        Status::UNSATISFIABLE => println!("unsat"),
-        Status::UNKNOWN => println!("unknown"),
+    }
+}
+
+impl fmt::Display for Answer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Answer::Sat => "sat",
+            Answer::Unsat => "unsat",
+            Answer::Unknown => "unknown",
+        })
     }
 }
 
@@ -194,8 +210,8 @@ fn run_incremental(commands: &[UntypedCommand], args: &Args) -> Result<(), Strin
                     // Type-checked together with the prefix; its terms become assertions below.
                     script.push(c.clone());
                 }
-                let (status, stats, quantifiers) = solve_scope(&script, args)?;
-                print_status(status, quantifiers);
+                let (answer, stats) = solve_scope(&script, args)?;
+                println!("{answer}");
                 if args.stats {
                     eprintln!("{stats}");
                 }
@@ -231,10 +247,7 @@ fn run_incremental(commands: &[UntypedCommand], args: &Args) -> Result<(), Strin
 
 /// Type-check `script` (the in-scope commands of an incremental script, possibly ending in a
 /// `check-sat-assuming`) into a fresh `Context` and solve its assertions as one query.
-fn solve_scope(
-    script: &[UntypedCommand],
-    args: &Args,
-) -> Result<(Status, SolverStats, bool), String> {
+fn solve_scope(script: &[UntypedCommand], args: &Args) -> Result<(Answer, SolverStats), String> {
     let mut context = Context::new();
     let typed_commands = script
         .to_vec()
@@ -259,7 +272,7 @@ fn solve_scope(
 }
 
 /// Solve one query: the conjunction of `assertions`, all type-checked in `context`. Returns the
-/// SAT status, the solver statistics, and whether the query contains quantifiers.
+/// answer to print and the solver statistics.
 fn solve_single(
     mut context: Context,
     mut assertions: Vec<Term>,
@@ -267,7 +280,7 @@ fn solve_single(
     proof: Option<PathBuf>,
     partial_proof: Option<PathBuf>,
     trail_out: Option<PathBuf>,
-) -> Result<(Status, SolverStats, bool), String> {
+) -> Result<(Answer, SolverStats), String> {
     // Bail out before the assertions reach the egraph when operators from theories we do not
     // implement would silently become uninterpreted functions and could yield `sat` on an `unsat`
     // problem.
@@ -413,5 +426,5 @@ fn solve_single(
         args.eager_qi,
     );
 
-    Ok((return_value, stats, quantifiers))
+    Ok((Answer::new(return_value, quantifiers), stats))
 }
