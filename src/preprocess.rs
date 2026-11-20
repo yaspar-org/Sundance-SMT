@@ -78,17 +78,19 @@ pub fn check_for_function_bool(
             } else {
                 // For terms like ite/implies, cnf_tseitin converts to NNF first, so only the NNF
                 // term's UID ends up in var_map. Register the original term's UID here so
-                // downstream code can find its literal.
+                // downstream code can find its literal. The literal already maps back to the
+                // NNF term, so record the original term as an alias rather than overwriting it.
                 assert!(vector_lit.len() == 1);
-                if vector_lit.len() == 1 {
-                    solver_state
-                        .cnf_cache
-                        .var_map
-                        .insert(term.uid(), vector_lit[0]);
-                    solver_state
-                        .cnf_cache
-                        .var_map_reverse
-                        .insert(vector_lit[0], term.uid());
+                let lit = vector_lit[0];
+                let cache = &mut solver_state.cnf_cache;
+                cache.var_map.insert(term.uid(), lit);
+                let primary = *cache.var_map_reverse.entry(lit).or_insert(term.uid());
+                if primary != term.uid() {
+                    cache
+                        .var_map_aliases
+                        .entry(lit)
+                        .or_default()
+                        .push(term.uid());
                 }
             }
         }
