@@ -1163,5 +1163,6 @@
   "datatypes/disequality_kept_across_backtrack.smt2": "sat",
   "arithmetic/egraph_arith_flag_split_on_backtrack.smt2": "unsat",
   "datatypes/tester_key_collision_sat.smt2": "sat",
-  "datatypes/tester_key_collision2_sat.smt2": "sat"
+  "datatypes/tester_key_collision2_sat.smt2": "sat",
+  "datatypes/inductive_tester_congruence.smt2": "unsat"
 }
