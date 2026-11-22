@@ -14,7 +14,7 @@ use yaspar_ir::ast::ATerm::*;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
     Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization, Repr,
-    Term, TermAllocator,
+    Sort, Term, TermAllocator,
 };
 
 use crate::cnf::{CNFCache, CNFConversion, CNFEnv};
@@ -382,6 +382,38 @@ impl SolverState {
         self.id_map.insert(false_uid, false_egraph_id);
     }
 
+    /// Congruence key of an application or global symbol `key` whose result sort is `sort`.
+    ///
+    /// When the result sort is an instance of a parametric sort, the key will carry it. A
+    /// constructor of a parametric datatype names a different term at each instantiation
+    /// (`(as None (Option Int))` and `(as None (Option Bool))`), and its arguments, if any, need
+    /// not determine the instantiation.
+    fn sort_qualified_key(key: String, sort: Option<&Sort>) -> String {
+        match sort {
+            Some(sort) if !sort.1.is_empty() => format!("(as {key} {sort})"),
+            _ => key,
+        }
+    }
+
+    /// The e-graph's key for a function or constant identifier.
+    ///
+    /// Congruence merges two applications with the same key, so distinct identifiers need distinct
+    /// keys.
+    fn identifier_key(
+        f: &yaspar_ir::ast::alg::QualifiedIdentifier<yaspar_ir::ast::Str, Sort>,
+    ) -> String {
+        let indices = &f.0.indices;
+        if indices.is_empty() {
+            // An unindexed identifier is keyed by its name
+            f.id_str().get().to_string()
+        } else {
+            // An indexed one (like `(_ is C)`) is keyed by its name, a `|` and all its indices: no
+            // symbol name contains a `|` (quoted symbols exclude it), so this never equals the key
+            // of another identifier.
+            format!("{}|{:?}", f.id_str().get(), indices)
+        }
+    }
+
     /// Extract Op from a yaspar Term.
     fn extract_op(term: &Term) -> crate::egraphs::repr::Op {
         use crate::egraphs::repr::Op;
@@ -393,17 +425,14 @@ impl SolverState {
             Or(_) => Op::Or,
             Implies(_, _) => Op::Implies,
             Distinct(_) => Op::Distinct,
-            App(f, _, _) => {
-                let func_indices = &f.0.indices;
-                if func_indices.is_empty() {
-                    Op::App(f.id_str().get().to_string())
-                } else {
-                    // Indexed function (like (_ is Ctor)) — include indices in key
-                    let key = format!("({} {})", f.id_str().get(), func_indices[0]);
-                    Op::App(key)
-                }
-            }
-            Global(qid, _) => Op::App(qid.id_str().get().to_string()),
+            App(f, _, sort) => Op::App(Self::sort_qualified_key(
+                Self::identifier_key(f),
+                sort.as_ref(),
+            )),
+            Global(qid, sort) => Op::App(Self::sort_qualified_key(
+                Self::identifier_key(qid),
+                sort.as_ref(),
+            )),
             Constant(c, _) => Op::Constant(format!("{:?}", c)),
             Local(local) => Op::Local(local.clone()),
             _ => panic!("extract_op: unsupported term type {:?}", term.repr()),

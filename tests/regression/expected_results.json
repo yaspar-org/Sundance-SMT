@@ -272,6 +272,7 @@
     "datatypes/fromquantifiertrue2.smt2": "unsat",
     "datatypes/fromquantifiertrue3.smt2": "unsat",
     "datatypes/poly_nested_adt_sat.smt2": "sat",
+    "datatypes/poly_nullary_ctor_two_sorts_sat.smt2": "sat",
     "datatypes/poly_option_sat.smt2": "sat",
     "datatypes/poly_option_unsat.smt2": "unsat",
     "datatypes/phantom_param_unsat.smt2": "unsat",
@@ -1119,6 +1120,10 @@
   "arithmetic/div_negative_divisor_unsat.smt2": "unsat",
   "arithmetic/div_negative_numerator_unsat.smt2": "unsat",
   "arithmetic/left_assoc_subtraction_sat.smt2": "sat",
+  "arithmetic/nary_mul_eq_unsat.smt2": "unsat",
+  "arithmetic/nary_mul_ineq_unsat.smt2": "unsat",
+  "arithmetic/nary_mul_middle_var_unsat.smt2": "unsat",
+  "arithmetic/nary_mul_sat.smt2": "sat",
   "arithmetic/mod_basic_sat.smt2": "sat",
   "arithmetic/mod_basic_unsat.smt2": "unsat",
   "arithmetic/mod_constant_divisor_unsat.smt2": "unsat",
@@ -1157,5 +1162,8 @@
   "arithmetic/nelson_oppen_probe_congruence_3.smt2": "unsat",
   "arithmetic/nelson_oppen_probe_congruence_sat.smt2": "sat",
   "datatypes/disequality_kept_across_backtrack.smt2": "sat",
-  "arithmetic/egraph_arith_flag_split_on_backtrack.smt2": "unsat"
+  "arithmetic/egraph_arith_flag_split_on_backtrack.smt2": "unsat",
+  "datatypes/tester_key_collision_sat.smt2": "sat",
+  "datatypes/tester_key_collision2_sat.smt2": "sat",
+  "datatypes/inductive_tester_congruence.smt2": "unsat"
 }

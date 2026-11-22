@@ -422,21 +422,28 @@ pub fn extract_lazy_expression(
                 }
                 Some(expr)
             }
-            ("*", 2) => {
-                let left = extract_lazy_expression(args[0].uid(), solver_state)?;
-                let right = extract_lazy_expression(args[1].uid(), solver_state)?;
-                let (cst, other) = if left.len() == 1 && left.contains_key(&Coefficient::Constant) {
-                    (left[&Coefficient::Constant].clone(), right)
-                } else if right.len() == 1 && right.contains_key(&Coefficient::Constant) {
-                    (right[&Coefficient::Constant].clone(), left)
-                } else {
-                    opaque(solver_state, &mut expr);
-                    return Some(expr);
+            ("*", n) if n > 0 => {
+                // Fold the (possibly n-ary) factors left-to-right, scaling by constant
+                // factors, as `extract_linear_expression` (lp.rs) does. The product is
+                // linear iff at most one factor is non-constant; otherwise the whole
+                // term stays opaque.
+                let is_constant = |m: &DeterministicHashMap<Coefficient, Integer>| {
+                    m.len() == 1 && m.contains_key(&Coefficient::Constant)
                 };
-                for (k, c) in other {
-                    expr.insert(k, &cst * c);
+                let mut acc = extract_lazy_expression(args[0].uid(), solver_state)?;
+                for arg in args.iter().skip(1) {
+                    let factor = extract_lazy_expression(arg.uid(), solver_state)?;
+                    let (scale, other) = if is_constant(&acc) {
+                        (acc[&Coefficient::Constant].clone(), factor)
+                    } else if is_constant(&factor) {
+                        (factor[&Coefficient::Constant].clone(), acc)
+                    } else {
+                        opaque(solver_state, &mut expr);
+                        return Some(expr);
+                    };
+                    acc = other.into_iter().map(|(k, c)| (k, &scale * c)).collect();
                 }
-                Some(expr)
+                Some(acc)
             }
             ("div", 2) => {
                 let a = solver_state.to_egraph_id(args[0].uid());

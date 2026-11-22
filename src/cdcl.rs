@@ -190,6 +190,11 @@ pub fn cdcl_decision_procedure(
     // solver.connect_fixed_listener(&mut propagator);
 
     debug_println!(2, 0, "CDCL: Starting CDCL solver");
+    // Observe all known CNF variables at startup, before any clause can fix one: CaDiCaL
+    // notifies a variable that is already fixed when it is observed from inside
+    // `add_observed_var`, which would re-enter the propagator while `sync_new_vars` holds it.
+    propagator.sync_new_vars();
+
     debug_println!(1, 1, "Adding {} clauses to solver", clauses.len());
 
     // Add all clauses to the solver
@@ -202,9 +207,6 @@ pub fn cdcl_decision_procedure(
     for clause in &boolean_dt_constraints {
         add_clause_to_proof_and_solver(clause, &mut solver, &proof_tracer, Some(Theory::Datatypes));
     }
-
-    // Observe all known CNF variables at startup
-    propagator.sync_new_vars();
 
     debug_println!(2, 1, "All clauses added, starting solver");
 
