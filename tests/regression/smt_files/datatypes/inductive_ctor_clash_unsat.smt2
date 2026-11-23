@@ -1,0 +1,6 @@
+(set-logic ALL)
+(declare-datatype Tree ((leaf (val Int)) (node (l Tree) (r Tree))))
+(declare-const a Tree)
+(declare-const b Tree)
+(assert (= (leaf 1) (node a b)))
+(check-sat)

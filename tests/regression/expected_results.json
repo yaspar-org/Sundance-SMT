@@ -294,6 +294,8 @@
     "datatypes/inductive_mutual_length4_cycle.smt2": "unsat",
     "datatypes/inductive_mutual_no_cycle_sat.smt2": "sat",
     "datatypes/inductive_forced_recursive_sat.smt2": "sat",
+    "datatypes/inductive_ctor_clash_nullary_unsat.smt2": "unsat",
+    "datatypes/inductive_ctor_clash_unsat.smt2": "unsat",
     "datatypes/inductive_disequality_no_cycle_sat.smt2": "sat",
     "datatypes/inductive_cond_mutual_blocked_safe.smt2": "unsat",
     "datatypes/inductive_tree_self_child.smt2": "unsat",
