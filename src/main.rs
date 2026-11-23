@@ -409,7 +409,7 @@ fn solve_single(
     let quantifiers = !solver_state.quantifiers.is_empty();
 
     let (return_value, stats) = cdcl_decision_procedure(
-        &mut solver_state,
+        solver_state,
         prop_skeleton,
         boolean_dt_constraints,
         proof,
