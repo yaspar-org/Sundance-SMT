@@ -9,6 +9,7 @@ pub mod cdcl;
 pub mod cnf;
 pub mod config;
 pub mod datatypes;
+pub mod der;
 pub mod egraphs;
 pub mod log;
 pub mod preprocess;

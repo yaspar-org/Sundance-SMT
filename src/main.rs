@@ -7,6 +7,7 @@ use std::fs;
 use sundance_smt::cdcl::cdcl_decision_procedure;
 use sundance_smt::cnf::CNFConversion;
 use sundance_smt::config::Args;
+use sundance_smt::der::der;
 use sundance_smt::preprocess::check_for_function_bool;
 use sundance_smt::solver_state::SolverState;
 use sundance_smt::theory_check::{NonlinearityCheck, reject_unsupported_theories};
@@ -117,6 +118,14 @@ fn main() -> Result<(), String> {
     for (assert, expanded_term) in assertions.iter().zip(expanded_terms) {
         debug_println!(22, 0, "We have the assertion {} [{}]", assert, assert.uid());
         debug_println!(10, 0, "Expanded form: {}", expanded_term);
+
+        // Eliminate quantified variables defined by an equality. Not with proofs: the proof
+        // refers to the assertions as given.
+        let expanded_term = if args.proof.is_none() && args.partial_proof.is_none() {
+            der(&expanded_term, &mut solver_state.context)
+        } else {
+            expanded_term
+        };
 
         nonlinearity.check(&expanded_term)?;
 

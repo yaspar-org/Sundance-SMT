@@ -1,4 +1,9 @@
 {
+    "edge_cases_quantifiers/der_forall.smt2": "unsat",
+    "edge_cases_quantifiers/der_forall_sat.smt2": "sat",
+    "edge_cases_quantifiers/der_partial.smt2": "unsat",
+    "edge_cases_quantifiers/der_exists.smt2": "unsat",
+    "edge_cases_quantifiers/der_occurs_check.smt2": "unsat",
     "handwritten/example10.smt2": "unsat",
     "handwritten/example8.smt2": "unsat",
     "handwritten/example9.smt2": "unsat",
