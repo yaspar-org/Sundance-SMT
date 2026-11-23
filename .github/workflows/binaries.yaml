@@ -1,0 +1,103 @@
+name: Release binaries
+# Build sundance-smt for each platform and attach the binaries to a GitHub
+# release. Runs on a `bin-*` tag (e.g. `bin-0.2.0`); by hand, or on a pull
+# request that changes this file, it only builds. The tag deliberately
+# differs from `v*`, which publishes to crates.io (release.yaml).
+#
+# The binaries are built without Z3, so they need no Z3 library. The default
+# arithmetic backend is then `internalincremental`; the `z3`/`z3incremental`
+# backends are not available.
+on:
+  push:
+    tags:
+      - 'bin-*'
+  pull_request:
+    paths:
+      - .github/workflows/binaries.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Cross-compiled on the arm64 runner; it cannot run the smoke test.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        env:
+          CARGO_PROFILE_RELEASE_DEBUG: 'false'
+        run: cargo build --release --no-default-features --features minisat --target ${{ matrix.target }}
+
+      - name: Smoke test
+        if: ${{ !matrix.cross }}
+        shell: bash
+        run: |
+          result=$(target/${{ matrix.target }}/release/sundance-smt tests/regression/smt_files/handwritten/test_qf_uf_unsat.smt2)
+          test "$result" = unsat
+
+      - name: Package
+        shell: bash
+        run: |
+          # The tag without `bin-`; outside a tag (e.g. `274/merge` on a pull request), the commit
+          if [[ "$GITHUB_REF" == refs/tags/bin-* ]]; then
+            version="${GITHUB_REF_NAME#bin-}"
+          else
+            version="${GITHUB_SHA::7}"
+          fi
+          name="sundance-smt-$version-${{ matrix.target }}"
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/sundance-smt LICENSE NOTICE README.md "$name"/
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: sundance-smt-*.tar.gz*
+
+  release:
+    name: Create release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/bin-')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Sundance ${GITHUB_REF_NAME#bin-}" \
+            --notes "Prebuilt sundance-smt binaries, built without Z3 (default arithmetic: internalincremental)."
