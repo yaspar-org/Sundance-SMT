@@ -21,8 +21,7 @@ minisat = ["sat-interface/minisat"]
 [dependencies]
 yaspar-ir = { version = "=2.7.7", features = ["cache", "no-pattern"] }
 sat-interface = "0.1.2"
-# Pin the fork until upstream cadical-sys moves to CaDiCaL 3.0.1
-cadical-sys = { git = "https://github.com/leeabarnett/cadical-sys.git", branch = "cadical-3.0.1" }
+cadical-sys = "0.8.0"
 
 array2d = "^0.3"
 clap = { version = "4.5.40", features = ["derive"] }

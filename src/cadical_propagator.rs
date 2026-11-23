@@ -86,9 +86,9 @@ pub enum ObservedSink {
 }
 
 /// Our implementation of an IPASIR-UP external propagator
-pub struct CustomExternalPropagator<'a> {
+pub struct CustomExternalPropagator {
     pub decision_level: usize,
-    pub solver_state: &'a mut SolverState,
+    pub solver_state: SolverState,
     pub disequalities: RefCell<Vec<Vec<i32>>>, // might be paying a bit of overhead for RefCell
     pub fixed_literals: DeterministicHashSet<i32>,
     pub proof_tracer: Rc<RefCell<SMTProofTracer>>,
@@ -120,7 +120,7 @@ pub struct CustomExternalPropagator<'a> {
     pub trail_atoms: std::collections::HashMap<i32, String>,
 }
 
-impl<'a> CustomExternalPropagator<'a> {
+impl CustomExternalPropagator {
     fn check_partial_arithmetic_trail(&mut self) {
         let Some(arith) = self.arith.as_mut() else {
             return;
@@ -295,7 +295,7 @@ impl<'a> CustomExternalPropagator<'a> {
     /// exist elsewhere in the egraph and we want congruence to find them.
     fn emit_trichotomy_for_pair(&mut self, x: u64, y: u64) {
         if let Some((lt_term, gt_term, eq_term)) =
-            nelson_oppen_trichotomy_terms(x, y, self.solver_state)
+            nelson_oppen_trichotomy_terms(x, y, &mut self.solver_state)
         {
             self.solver_state
                 .insert_predecessor(&lt_term, None, None, true);
@@ -357,7 +357,7 @@ impl<'a> CustomExternalPropagator<'a> {
         // empty before control returns to CaDiCaL, as `notify_new_decision_level`
         // requires.
         if let Some(arith) = self.arith.as_mut() {
-            arith.drain_merges(self.solver_state);
+            arith.drain_merges(&mut self.solver_state);
         }
         self.sync_new_vars();
     }
@@ -374,7 +374,7 @@ impl<'a> CustomExternalPropagator<'a> {
         let mut count = 0;
         while (cap == 0 || count < cap)
             && let Some(instances) =
-                materialize_next(&mut pending, self.solver_state, &self.proof_tracer)
+                materialize_next(&mut pending, &mut self.solver_state, &self.proof_tracer)
         {
             self.apply_instances(&instances);
             count += 1;
@@ -396,8 +396,11 @@ impl<'a> CustomExternalPropagator<'a> {
     /// round has been materialized.
     fn start_quantifier_instantiation_round(&mut self, allow_skolemization: bool) -> bool {
         debug_assert!(self.pending.is_none());
-        let pending =
-            instantiate_quantifiers(self.solver_state, &self.assignments, allow_skolemization);
+        let pending = instantiate_quantifiers(
+            &mut self.solver_state,
+            &self.assignments,
+            allow_skolemization,
+        );
         if pending.is_empty() {
             return false;
         }
@@ -442,7 +445,7 @@ impl<'a> CustomExternalPropagator<'a> {
     }
 }
 
-impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
+impl ExternalPropagator for CustomExternalPropagator {
     fn notify_assignment(&mut self, lits: &[i32]) {
         debug_println!(
             22,
@@ -479,13 +482,13 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             self.add_lit_to_proof_tracer(*lit);
 
             let negated_model_or_datatype_constraints_opt =
-                process_assignment(*lit, self.solver_state, self.decision_level);
+                process_assignment(*lit, &mut self.solver_state, self.decision_level);
 
             // Drain merges triggered by this assignment, then push the lit
             // itself if it's arithmetic.
             if let Some(arith) = self.arith.as_mut() {
-                let new_merge_lits = arith.drain_merges(self.solver_state);
-                arith.on_literal(*lit, self.solver_state);
+                let new_merge_lits = arith.drain_merges(&mut self.solver_state);
+                arith.on_literal(*lit, &mut self.solver_state);
                 for new_lit in new_merge_lits {
                     self.add_observed_variable(new_lit);
                     self.add_lit_to_proof_tracer(new_lit);
@@ -633,7 +636,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
         if let Some(arith) = self.arith.as_mut() {
             arith.notify_backtrack(level);
-            let new_merge_lits = arith.drain_merges(self.solver_state);
+            let new_merge_lits = arith.drain_merges(&mut self.solver_state);
             for new_lit in new_merge_lits {
                 self.add_observed_variable(new_lit);
                 self.add_lit_to_proof_tracer(new_lit);
@@ -710,19 +713,19 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // eager entry point.
         let arith_result = if self.arith.is_some() {
             let mut arith = self.arith.take().unwrap();
-            let new_lits = arith.drain_merges(self.solver_state);
+            let new_lits = arith.drain_merges(&mut self.solver_state);
             for new_lit in new_lits {
                 self.add_observed_variable(new_lit);
                 self.add_lit_to_proof_tracer(new_lit);
             }
-            let result = arith.check(self.solver_state);
+            let result = arith.check(&mut self.solver_state);
             self.arith = Some(arith);
             result
         } else {
             check_integer_constraints_satisfiable(
                 &self.arithmetic,
                 model,
-                self.solver_state,
+                &mut self.solver_state,
                 &self.lia_config,
             )
         };
@@ -878,7 +881,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
                 // congruence merges.
                 self.solver_state.egraph.backtrack_to(base_level);
                 if let Some(arith) = self.arith.as_mut() {
-                    let new_merge_lits = arith.drain_merges(self.solver_state);
+                    let new_merge_lits = arith.drain_merges(&mut self.solver_state);
                     for new_lit in new_merge_lits {
                         self.add_observed_variable(new_lit);
                         self.add_lit_to_proof_tracer(new_lit);
@@ -900,7 +903,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
         // Occurs check for recursive datatypes (well-foundedness)
         if self.solver_state.datatype_info.has_recursive_datatype() {
             if let Some(conflict_clause) =
-                crate::datatypes::occurs_check::datatype_occurs_check(self.solver_state)
+                crate::datatypes::occurs_check::datatype_occurs_check(&mut self.solver_state)
             {
                 self.queue_theory_clause(conflict_clause, Theory::Datatypes);
                 self.stats.conflicts += 1;
@@ -908,8 +911,9 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
             }
 
             // Lazy case split: add tester clauses for uninitialized datatype terms
-            let new_clauses =
-                crate::datatypes::occurs_check::generate_deferred_tester_clauses(self.solver_state);
+            let new_clauses = crate::datatypes::occurs_check::generate_deferred_tester_clauses(
+                &mut self.solver_state,
+            );
             if !new_clauses.is_empty() {
                 for clause in new_clauses {
                     self.queue_theory_clause(clause, Theory::Datatypes);
@@ -1040,7 +1044,7 @@ impl<'a> ExternalPropagator for CustomExternalPropagator<'a> {
 
 /// The MiniSat feature uses the IPASIR-UP trait defined in `sat_interface`
 #[cfg(feature = "minisat")]
-impl<'a> sat_interface::ExternalPropagator for CustomExternalPropagator<'a> {
+impl sat_interface::ExternalPropagator for CustomExternalPropagator {
     fn is_lazy(&mut self) -> bool {
         ExternalPropagator::is_lazy(self)
     }
