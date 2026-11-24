@@ -1,0 +1,8 @@
+(set-logic UFLIA)
+(declare-fun Mul (Int Int) Int)
+(assert (forall ((x Int) (y Int)) (! (= (Mul x y) (* x y)) :pattern ((Mul x y)))))
+(declare-const PAGE_SIZE Int)
+(assert (= PAGE_SIZE 4096))
+(declare-const i Int)
+(assert (not (= (Mul i PAGE_SIZE) (* 4096 i))))
+(check-sat)
