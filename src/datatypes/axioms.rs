@@ -85,14 +85,19 @@ pub fn find_datatype_axioms(
 
     // Step 3. Learn the constraint  /\_i=1^k f_i(f(t1, ... tk)) = t_i
     //         and assert is-f(f(t1, ..., tk))
-    if let App(f, terms, _) = term.repr()
+    let ctor_app = match term.repr() {
+        App(f, terms, _) => Some((f, terms.as_slice())),
+        Global(f, _) => Some((f, &[][..])),
+        _ => None,
+    };
+    if let Some((f, terms)) = ctor_app
         && solver_state
             .datatype_info
             .constructors
             .contains_key(f.id_str())
     {
         let tester_clause =
-            learn_tester_for_ctor_app(solver_state, term, f.id_str(), from_quantifier);
+            learn_tester_for_ctor_app(solver_state, term, f.id_str(), &dt_dec, from_quantifier);
         if !tester_clause.is_empty() {
             solver_state.stat_dt_constructor_ax += 1;
         }
@@ -373,37 +378,60 @@ pub fn learn_ctor_selector_clauses(
     vector
 }
 
-/// For a term of the form f(t1, ..., tk) where f is a constructor, assert is-f(term) as a unit clause.
+/// For a term of the form f(t1, ..., tk) where f is a constructor, assert is-f(term) as a unit clause,
+/// and for recursive sorts also assert not is-g(term) for every other constructor g.
 ///
 /// This is needed because tester clauses are deferred for recursive sorts (to avoid infinite
-/// unfolding). Without this, the SAT solver doesn't know that a constructor application implies
+/// unfolding). Without is-f(term), the SAT solver doesn't know that a constructor application implies
 /// its tester, which can lead to spurious occurs check conflicts when cb_decide forces a
 /// conflicting tester (e.g., is-Nil on a term that is syntactically Cons(...)).
 /// See: tests/regression/smt_files/datatypes/inductive_disequality_no_cycle_sat.smt2
+/// Without the negated testers, f(..) = g(..) is not a conflict: the testers of the two terms are
+/// different e-graph terms, so congruence never relates them.
 fn learn_tester_for_ctor_app(
     solver_state: &mut SolverState,
     term: &Term,
     ctor_name: &Str,
+    dt_dec: &DatatypeDec,
     from_quantifier: bool,
 ) -> Vec<Vec<i32>> {
     let bool_sort = solver_state.bool_sort();
     let is_symbol = solver_state.allocate_symbol("is");
-    let tester_identifier = Identifier {
-        symbol: is_symbol,
-        indices: vec![Index::Symbol(ctor_name.clone())],
-    };
-    let tester_app = solver_state.app(
-        tester_identifier.into(),
-        vec![term.clone()],
-        Some(bool_sort),
-    );
-    let tester_nnf = tester_app.nnf(solver_state);
-    solver_state.insert_predecessor(&tester_nnf, None, None, from_quantifier);
-    tester_nnf
-        .cnf_tseitin(solver_state)
-        .into_iter()
-        .map(|x| x.0)
-        .collect()
+    let sort = term.get_sort(solver_state);
+    let recursive = solver_state
+        .datatype_info
+        .recursive_sorts
+        .contains(sort.sort_name());
+    let mut vector = vec![];
+    for ctor in &dt_dec.constructors {
+        let own = ctor.ctor == *ctor_name;
+        if !own && !recursive {
+            continue;
+        }
+        let tester_identifier = Identifier {
+            symbol: is_symbol.clone(),
+            indices: vec![Index::Symbol(ctor.ctor.clone())],
+        };
+        let tester_app = solver_state.app(
+            tester_identifier.into(),
+            vec![term.clone()],
+            Some(bool_sort.clone()),
+        );
+        let tester_lit = if own {
+            tester_app
+        } else {
+            solver_state.not(tester_app)
+        };
+        let tester_nnf = tester_lit.nnf(solver_state);
+        solver_state.insert_predecessor(&tester_nnf, None, None, from_quantifier);
+        vector.extend(
+            tester_nnf
+                .cnf_tseitin(solver_state)
+                .into_iter()
+                .map(|x| x.0),
+        );
+    }
+    vector
 }
 
 /// We are learning the clause /\_i=1^k f_i(f(t1, ... tk)) = t_i

@@ -172,6 +172,8 @@ pub struct SolverState {
     pub stat_dt_constructor_ax: u64,
     /// Number of datatype case splits (deferred tester clauses)
     pub stat_dt_splits: u64,
+    /// `distinct` atoms whose negation lemma has been emitted.
+    pub negated_distinct_lemmas: HashSet<u64>,
 }
 
 impl SolverState {
@@ -213,6 +215,7 @@ impl SolverState {
             stat_dt_accessor_ax: 0,
             stat_dt_constructor_ax: 0,
             stat_dt_splits: 0,
+            negated_distinct_lemmas: HashSet::new(),
         }
     }
 
@@ -738,17 +741,35 @@ pub fn process_assignment(
     let true_egraph_id = solver_state.to_egraph_id(solver_state.true_uid);
     let false_egraph_id = solver_state.to_egraph_id(solver_state.false_uid);
 
-    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&lit) {
-        let egraph_t = solver_state.to_egraph_id(*t);
+    // The literal's term, and every term sharing its literal (see
+    // `CNFCache::var_map_aliases`), takes the literal's truth value in the e-graph.
+    let mut to_assign = vec![];
+    for (l, value_id) in [(lit, true_egraph_id), (-lit, false_egraph_id)] {
+        if let Some(&t) = solver_state.cnf_cache.var_map_reverse.get(&l) {
+            to_assign.push((solver_state.to_egraph_id(t), value_id));
+        }
+        for t in solver_state
+            .cnf_cache
+            .var_map_aliases
+            .get(&l)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(&egraph_t) = solver_state.id_map.get_by_left(t) {
+                to_assign.push((egraph_t, value_id));
+            }
+        }
+    }
+    for (egraph_t, value_id) in to_assign {
         debug_println!(
             16,
             0,
-            "We are in process_assignment, unioning with true for lit {} and t {} and true_term {}",
-            lit,
-            t,
-            true_egraph_id
+            "We are in process_assignment, unioning {} with {} for lit {}",
+            egraph_t,
+            value_id,
+            lit
         );
-        let union_result = solver_state.egraph.assert_equal(egraph_t, true_egraph_id);
+        let union_result = solver_state.egraph.assert_equal(egraph_t, value_id);
         if let Some(conflict) = union_result.conflict {
             let mut model_terms: Vec<i32> = conflict
                 .equalities
@@ -760,30 +781,6 @@ pub fn process_assignment(
             }
             return Some(vec![(model_terms, Theory::QfUf)]);
         }
-    }
-
-    if let Some(t) = solver_state.cnf_cache.var_map_reverse.get(&-lit) {
-        let egraph_t = solver_state.to_egraph_id(*t);
-        debug_println!(
-            16,
-            0,
-            "We are in process_assignment, unioning with false for lit {} and t {} and false_term {}",
-            lit,
-            t,
-            false_egraph_id
-        );
-        let union_result = solver_state.egraph.assert_equal(egraph_t, false_egraph_id);
-        if let Some(conflict) = union_result.conflict {
-            let mut model_terms: Vec<i32> = conflict
-                .equalities
-                .iter()
-                .map(|(a, b)| -solver_state.make_eq(*a, *b))
-                .collect();
-            if let Some(lit) = conflict.diseq_lit {
-                model_terms.push(-lit);
-            }
-            return Some(vec![(model_terms, Theory::QfUf)]);
-        };
     }
 
     debug_println!("Finished union to True/False");
@@ -963,6 +960,28 @@ pub fn process_assignment(
             }
             None
         }
+        Assertion::NegatedDistinct {
+            distinct_uid,
+            terms,
+        } => {
+            // `¬distinct(t1..tn)` holds iff some pair is equal. Emit the valid lemma
+            // `distinct(t1..tn) ∨ ⋁_{i<j} ti = tj` (written with the assigned literal, which may
+            // be the distinct atom negatively or a `not distinct` term positively) once per atom;
+            // the SAT solver then picks the equality and the e-graph merges it.
+            if !solver_state.negated_distinct_lemmas.insert(distinct_uid) {
+                return None;
+            }
+            let mut lemma = vec![-lit];
+            for i in 0..terms.len() {
+                for j in i + 1..terms.len() {
+                    let eq = solver_state.context.eq(terms[i].clone(), terms[j].clone());
+                    solver_state.insert_predecessor(&eq, None, None, true);
+                    lemma.push(solver_state.get_or_allocate_lit_for_term(&eq));
+                }
+            }
+            debug_println!(16, 0, "Negated distinct lemma: {:?}", lemma);
+            Some(vec![(lemma, Theory::QfUf)])
+        }
         Assertion::Other => None,
     };
 
@@ -1020,7 +1039,10 @@ pub fn find_if_eq_diseq<'a>(
                     hash,
                 }
             } else {
-                panic!("We do not currently support the negation of a distinct")
+                Assertion::NegatedDistinct {
+                    distinct_uid: term.uid(),
+                    terms: terms.clone(),
+                }
             }
         }
         Not(inner) => match inner.repr() {
@@ -1034,9 +1056,10 @@ pub fn find_if_eq_diseq<'a>(
                     hash,
                 }
             }
-            Distinct(_) => {
-                panic!("We do not currently support the negation of a distinct")
-            }
+            Distinct(terms) if sign => Assertion::NegatedDistinct {
+                distinct_uid: inner.uid(),
+                terms: terms.clone(),
+            },
             _ => {
                 debug_println!(0, 2, "Found negation, treating as Other");
                 Assertion::Other

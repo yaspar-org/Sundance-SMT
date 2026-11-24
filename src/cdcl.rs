@@ -24,6 +24,7 @@ use std::rc::Rc;
 use std::time::Instant;
 use yaspar_ir::ast::{FunctionMeta, Sig, SortDef, Str};
 
+#[derive(Clone, Copy)]
 struct DeadlineTerminator {
     deadline: Instant,
 }
@@ -53,7 +54,7 @@ enum Backend {
 /// todo: reduce the number of arguments
 #[allow(clippy::too_many_arguments)]
 pub fn cdcl_decision_procedure(
-    solver_state: &mut SolverState,
+    mut solver_state: SolverState,
     clauses: Vec<Vec<i32>>,
     boolean_dt_constraints: Vec<Vec<i32>>,
     proof_file: Option<PathBuf>,
@@ -84,11 +85,12 @@ pub fn cdcl_decision_procedure(
             // Boxed so the propagator's pointer stays valid when `solver` moves.
             let mut cadical = Box::new(CaDiCal::new());
             assert!(
-                cadical.set("elevate".to_string(), elevate),
+                cadical.set("elevate", elevate),
                 "CaDiCaL option 'elevate' is unavailable; Sundance requires CaDiCaL >= 3.0.1 for lazy quantifier instantiation"
             );
             // Connect the proof tracer (must be done in CONFIGURING state)
-            cadical.connect_proof_tracer1(&mut *proof_tracer.borrow_mut(), true); // true for antecedents
+            // With antecedents, without finalized clauses
+            cadical.connect_proof_tracer1(Rc::clone(&proof_tracer), true, false);
             Backend::Cadical(cadical)
         }
         SatBackend::Minisat => {
@@ -116,7 +118,7 @@ pub fn cdcl_decision_procedure(
     let mut terminator = deadline.map(|deadline| DeadlineTerminator { deadline });
     if let Some(t) = terminator.as_mut() {
         match &mut solver {
-            Backend::Cadical(cadical) => cadical.connect_terminator(t),
+            Backend::Cadical(cadical) => cadical.connect_terminator(*t),
             #[cfg(feature = "minisat")]
             Backend::Minisat(minisat) => minisat.connect_terminator(t),
         }
@@ -150,7 +152,7 @@ pub fn cdcl_decision_procedure(
         .incremental_arithmetic(incremental_backend.is_some());
     let arith_translator = incremental_backend.map(ArithTranslator::new);
 
-    let mut propagator = CustomExternalPropagator {
+    let propagator = Rc::new(RefCell::new(CustomExternalPropagator {
         decision_level: 0,
         solver_state,
         disequalities: RefCell::new(vec![]),
@@ -179,12 +181,15 @@ pub fn cdcl_decision_procedure(
                 }
             }),
         trail_atoms: std::collections::HashMap::new(),
-    };
+    }));
 
     match &mut solver {
-        Backend::Cadical(cadical) => cadical.connect_external_propagator(&mut propagator),
+        // CaDiCaL owns one handle; we keep the other to use the propagator outside its callbacks.
+        Backend::Cadical(cadical) => cadical.connect_external_propagator(Rc::clone(&propagator)),
         #[cfg(feature = "minisat")]
-        Backend::Minisat(minisat) => minisat.connect_external_propagator(&mut propagator),
+        Backend::Minisat(minisat) => {
+            minisat.connect_external_propagator(&mut *propagator.borrow_mut())
+        }
     }
     // note: not using a fixed listener anymore
     // solver.connect_fixed_listener(&mut propagator);
@@ -193,7 +198,7 @@ pub fn cdcl_decision_procedure(
     // Observe all known CNF variables at startup, before any clause can fix one: CaDiCaL
     // notifies a variable that is already fixed when it is observed from inside
     // `add_observed_var`, which would re-enter the propagator while `sync_new_vars` holds it.
-    propagator.sync_new_vars();
+    propagator.borrow_mut().sync_new_vars();
 
     debug_println!(1, 1, "Adding {} clauses to solver", clauses.len());
 
@@ -210,18 +215,20 @@ pub fn cdcl_decision_procedure(
 
     debug_println!(2, 1, "All clauses added, starting solver");
 
-    for clause in &boolean_dt_constraints {
-        match clause.len() {
-            0 | 1 => {}
-            2 => propagator.stats.binary_clauses += 1,
-            _ => propagator.stats.clauses += 1,
+    {
+        let stats = &mut propagator.borrow_mut().stats;
+        for clause in &boolean_dt_constraints {
+            match clause.len() {
+                0 | 1 => {}
+                2 => stats.binary_clauses += 1,
+                _ => stats.clauses += 1,
+            }
         }
     }
 
     let result = match &mut solver {
         Backend::Cadical(cadical) => {
             let result = cadical.solve();
-            // Disconnect the proof tracer before dropping the propagator
             cadical.disconnect_proof_tracer1();
             result
         }
@@ -238,6 +245,10 @@ pub fn cdcl_decision_procedure(
             result
         }
     };
+
+    // CaDiCaL keeps its handle until `solver` is dropped (disconnecting would flush pending
+    // notifications into the propagator, which then calls back into CaDiCaL).
+    let mut propagator = propagator.borrow_mut();
 
     // An accepted model is not known to be a model of the input if an arithmetic check gave up
     // on it, or if the arithmetic solver is inexact (an opaque term).
@@ -280,7 +291,7 @@ pub fn cdcl_decision_procedure(
     // Harvest stats from solver_state, egraph, and proof tracer
     propagator.sync_external_stats();
     propagator.stats.finish();
-    (result, propagator.stats)
+    (result, std::mem::take(&mut propagator.stats))
 }
 
 /// Creates `path` and streams the proof into it through `write`.
