@@ -1,0 +1,11 @@
+; g(f(x)) and g(f(y)) differ, so f(x) != f(y), so x != y; but x = y by arithmetic.
+(set-logic QF_UFLRA)
+(declare-fun f (Real) Real)
+(declare-fun g (Real) Real)
+(declare-const x Real)
+(declare-const y Real)
+(assert (< (- x y) 0.001))
+(assert (> (- x y) (- 0.001)))
+(assert (= (* 1000 x) (* 1000 y)))
+(assert (> (g (f x)) (+ (g (f y)) 0.5)))
+(check-sat)

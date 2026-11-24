@@ -4,7 +4,9 @@
 use crate::arithmetic::incremental_solver::PartialCheckResult;
 use crate::arithmetic::incremental_solver::translation::ArithTranslator;
 use crate::arithmetic::lia::config::SolverConfig;
-use crate::arithmetic::lp::{ArithResult, ArithSolver, check_integer_constraints_satisfiable};
+use crate::arithmetic::lp::{
+    ArithResult, ArithSolver, ArithValue, check_integer_constraints_satisfiable,
+};
 use crate::arithmetic::nelsonoppen::nelson_oppen_trichotomy_terms;
 use crate::debug_println;
 use crate::egraphs::EgraphTrait;
@@ -19,7 +21,6 @@ use crate::solver_state::{SolverState, process_assignment};
 use crate::stats::SolverStats;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use cadical_sys::{CaDiCal, ExternalPropagator};
-use dashu::integer::IBig;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -268,10 +269,10 @@ impl CustomExternalPropagator {
     fn probe_breaks_arithmetic_model(
         &self,
         union_mark: usize,
-        value_of_root: &DeterministicHashMap<u32, &IBig>,
+        value_of_root: &DeterministicHashMap<u32, &ArithValue>,
     ) -> bool {
         let egraph = &self.solver_state.egraph;
-        let mut class_value: DeterministicHashMap<u32, &IBig> = DeterministicHashMap::new();
+        let mut class_value: DeterministicHashMap<u32, &ArithValue> = DeterministicHashMap::new();
         for absorbed in egraph.roots_absorbed_since(union_mark) {
             let root = egraph.find(absorbed);
             for member in [absorbed, root] {
@@ -764,7 +765,7 @@ impl ExternalPropagator for CustomExternalPropagator {
                 let mut probe_pair_uids: DeterministicHashMap<(u32, u32), (u64, u64)> =
                     DeterministicHashMap::default();
                 // Model value of each class root the arithmetic model reports.
-                let value_of_root: DeterministicHashMap<u32, &IBig> = literals
+                let value_of_root: DeterministicHashMap<u32, &ArithValue> = literals
                     .iter()
                     .flat_map(|(value, set)| set.iter().map(move |uid| (*uid, value)))
                     .map(|(uid, value)| (self.solver_state.to_egraph_id(uid), value))

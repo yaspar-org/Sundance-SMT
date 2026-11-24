@@ -490,6 +490,13 @@ impl Egraph {
         self.int_terms[idx] = true;
     }
 
+    fn same_op(&self, x: u32, y: u32) -> bool {
+        match (&self.terms[x as usize], &self.terms[y as usize]) {
+            (TermSlot::Term(a), TermSlot::Term(b)) => a.op == b.op,
+            _ => false,
+        }
+    }
+
     fn is_constant(&self, id: u32) -> bool {
         matches!(
             &self.terms[id as usize],
@@ -1246,8 +1253,10 @@ impl Egraph {
         let y_root_is_const = self.is_constant(y_root);
 
         // Two distinct constants merged — immediate conflict since constant
-        // disequality is implicit (no SAT literal needed).
-        if x_root_is_const && y_root_is_const {
+        // disequality is implicit (no SAT literal needed). Constants with the same
+        // op are the same value (e.g. the `Real`s `1` and `1.0`, see
+        // `SolverState::extract_op`) and merge like any other terms.
+        if x_root_is_const && y_root_is_const && !self.same_op(x_root, y_root) {
             debug_assert!(self.display_term(x_root) != self.display_term(y_root));
             let mut equalities = Vec::new();
             if x != x_root

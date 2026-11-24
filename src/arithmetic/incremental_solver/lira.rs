@@ -14,8 +14,12 @@
 //!   Definitions therefore add no rows or bounds and hold at every decision level. This matters
 //!   because [`crate::arithmetic::incremental_solver::translation::ArithTranslator`] registers a
 //!   term's `VarId` once and never re-registers it after a backtrack.
-//! - A pushed constraint `Σ aᵢ xᵢ ⋈ c` is normalized and tightened to the integer grid
-//!   ([`Rel::normalize`], [`Rel::tighten_integral`]), giving a canonical linear form
+//! - Each [`VarId`] has a sort, `Int` or `Real`, and so does each internal [`Var`]: a free
+//!   variable takes its `VarId`'s sort; quotient vars (below) are `Int`; a slack is `Int` iff
+//!   every variable of its row is. Branch-and-bound only branches on `Int` vars, and an `Int`
+//!   slack is integral whenever its row's variables are.
+//! - A pushed constraint `Σ aᵢ xᵢ ⋈ c` is normalized and, if every `xᵢ` is `Int`, tightened to the
+//!   integer grid ([`Rel::normalize`], [`Rel::tighten_integral`]), giving a canonical linear form
 //!   `Σ a'ᵢ xᵢ` (sorted, coprime, leading coefficient positive) and bound(s). A single-variable
 //!   form `x` is bounded directly; otherwise the form's slack row is looked up in a cache and
 //!   created (via [`LRASolver::add_relation`]) only on first use, so re-asserting an atom, its
@@ -41,7 +45,7 @@
 //!   how the translation layer treats non-linear products. From then on the solver is not exact
 //!   ([`IncrementalArithSolver::is_exact`]): a model it accepts may give the term a value that
 //!   is not the quotient.
-//! - **Integer reasoning is enforced** via the [`LIRASolver`]'s branch-and-bound;
+//! - **Integer reasoning is enforced** on `Int` vars via the [`LIRASolver`]'s branch-and-bound;
 //!   [`IncrementalArithSolver::check_partial_trail`] only checks the rational relaxation, which is
 //!   sound for conflicts.
 
@@ -58,9 +62,11 @@ use crate::arithmetic::lia::qdelta::QDelta;
 use crate::arithmetic::lia::solver_result::{Conflict, SolverDecision, SolverError, SolverResult};
 use crate::arithmetic::lia::tableau::TableauKind;
 use crate::arithmetic::lia::types::Rational;
-use crate::arithmetic::lia::variables::{Owner, Var, VarInfo};
+use crate::arithmetic::lia::variables::{Owner, Var, VarInfo, VarType};
+use crate::arithmetic::lp::ArithValue;
 use crate::debug_println;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use dashu::base::Gcd;
 use dashu::integer::IBig;
 
 /// Min new constraints before `check_partial_trail` actually runs simplex.
@@ -74,12 +80,12 @@ type RelMk = fn(Vec<Mon<Rational>>, Rational) -> Rel<Rational>;
 /// coefficients).
 #[derive(Debug, Clone)]
 struct Affine {
-    terms: DeterministicHashMap<Var, IBig>,
-    constant: IBig,
+    terms: DeterministicHashMap<Var, Rational>,
+    constant: Rational,
 }
 
 impl Affine {
-    fn constant(c: IBig) -> Self {
+    fn constant(c: Rational) -> Self {
         Self {
             terms: DeterministicHashMap::new(),
             constant: c,
@@ -87,46 +93,67 @@ impl Affine {
     }
 
     fn var(v: Var) -> Self {
-        let mut a = Self::constant(IBig::ZERO);
-        a.add_term(v, &IBig::ONE);
+        let mut a = Self::constant(Rational::ZERO);
+        a.add_term(v, &Rational::ONE);
         a
     }
 
     /// `self += k * v`.
-    fn add_term(&mut self, v: Var, k: &IBig) {
-        let c = self.terms.entry(v).or_insert(IBig::ZERO);
+    fn add_term(&mut self, v: Var, k: &Rational) {
+        let c = self.terms.entry(v).or_insert(Rational::ZERO);
         *c += k;
-        if *c == IBig::ZERO {
+        if *c == Rational::ZERO {
             self.terms.remove(&v);
         }
     }
 
     /// `self += k * other`.
-    fn add_scaled(&mut self, other: &Affine, k: &IBig) {
+    fn add_scaled(&mut self, other: &Affine, k: &Rational) {
         for (v, c) in &other.terms {
             self.add_term(*v, &(k * c));
         }
         self.constant += k * &other.constant;
     }
 
-    fn as_constant(&self) -> Option<&IBig> {
+    fn as_constant(&self) -> Option<&Rational> {
         self.terms.is_empty().then_some(&self.constant)
     }
 
     fn monomials(&self) -> Vec<Mon<Rational>> {
         self.terms
             .iter()
-            .map(|(v, c)| Mon::new(Rational::from(c.clone()), *v))
+            .map(|(v, c)| Mon::new(c.clone(), *v))
             .collect()
     }
 
     fn eval(&self, value: impl Fn(&Var) -> Rational) -> Rational {
-        let mut acc = Rational::from(self.constant.clone());
+        let mut acc = self.constant.clone();
         for (v, c) in &self.terms {
-            acc += Rational::from(c.clone()) * value(v);
+            acc += c * value(v);
         }
         acc
     }
+}
+
+/// Divide a normalized relation by the gcd `g` of its (integral) coefficients: `Σ aᵢxᵢ ⋈ c`
+/// becomes `Σ (aᵢ/g)xᵢ ⋈ c/g`.
+///
+/// [`Rel::normalize`] makes the coefficients coprime only together with the constant, so over
+/// `Real` vars e.g. `2x ≤ 1` keeps its `2`. With `g` divided out, a single-variable form is `1·x`
+/// and bounds `x` directly, and proportional forms share one slack. Over `Int` vars it is a no-op:
+/// [`Rel::tighten_integral`] has already left `g = 1`.
+fn divide_out_coefficient_gcd(rel: &mut Rel<Rational>) {
+    let g = rel
+        .terms_ref()
+        .iter()
+        .fold(IBig::ZERO, |g, m| g.gcd(m.coeff_ref().numerator()).into());
+    if g <= IBig::ONE {
+        return;
+    }
+    let inv = Rational::ONE / Rational::from(g);
+    let terms = rel.terms_ref().iter().map(|m| m.clone() * &inv).collect();
+    rel.set_terms(terms);
+    *rel.constant_mut() *= &inv;
 }
 
 /// Which side of a variable's bounds.
@@ -154,6 +181,8 @@ pub struct LiraIncrementalState {
     next_internal_id: usize,
     /// `VarId` → its affine form over internal vars.
     defs: Vec<Affine>,
+    /// `VarId` → its sort.
+    sorts: Vec<VarType>,
     /// `VarId`s to include in the model buckets on `check` SAT.
     model_vars: DeterministicHashSet<VarId>,
     /// `(numerator, divisor)` → quotient var of `div(numerator, divisor)`.
@@ -227,6 +256,7 @@ impl LiraIncrementalState {
             solver,
             next_internal_id: 2, // ids 0 and 1 reserved for the dummy seed
             defs: Vec::new(),
+            sorts: Vec::new(),
             model_vars: DeterministicHashSet::default(),
             quotients: DeterministicHashMap::new(),
             opaque_divs: DeterministicHashMap::new(),
@@ -246,9 +276,9 @@ impl LiraIncrementalState {
         }
     }
 
-    /// Allocate a fresh internal integer [`Var`].
-    fn fresh_var(&mut self) -> Var {
-        let v = Var::int(self.next_internal_id);
+    /// Allocate a fresh internal [`Var`] of sort `typ`.
+    fn fresh_var(&mut self, typ: VarType) -> Var {
+        let v = Var::new(self.next_internal_id, typ);
         self.next_internal_id += 1;
         v
     }
@@ -261,12 +291,13 @@ impl LiraIncrementalState {
     }
 
     /// The value of a `div`/`mod` denominator if it is a nonzero constant, `None` otherwise.
+    /// (`div`/`mod` operands are `Int`, so a constant one is an integer.)
     fn constant_divisor(&self, denom: VarId) -> SolverResult<Option<IBig>> {
         Ok(self
             .def(denom)?
             .as_constant()
-            .filter(|n| **n != IBig::ZERO)
-            .cloned())
+            .filter(|n| n.is_int() && **n != Rational::ZERO)
+            .map(|n| n.numerator().clone()))
     }
 
     /// The opaque var standing for `div(a, b)` (or `mod(a, b)` if `is_mod`) when `b` is not a
@@ -283,7 +314,7 @@ impl LiraIncrementalState {
         if let Some(v) = existing {
             return Ok(*v);
         }
-        let v = self.fresh_var();
+        let v = self.fresh_var(VarType::Int);
         if is_mod {
             self.opaque_mods.insert((a, b), v);
         } else {
@@ -298,13 +329,13 @@ impl LiraIncrementalState {
         if let Some(q) = self.quotients.get(&(a, n.clone())) {
             return Ok(*q);
         }
-        let q = self.fresh_var();
+        let q = self.fresh_var(VarType::Int);
         // r = a − n·q, as an affine form; the row's slack is r minus its constant part.
         let mut r = self.def(a)?.clone();
-        r.add_term(q, &-n);
+        r.add_term(q, &-Rational::from(n.clone()));
         let abs_n = if *n < IBig::ZERO { -n } else { n.clone() };
-        let lower = Rational::from(-&r.constant);
-        let upper = Rational::from(abs_n - IBig::ONE - &r.constant);
+        let lower = -&r.constant;
+        let upper = Rational::from(abs_n - IBig::ONE) - &r.constant;
         let bounds = Bounds::new(Some(lower.into()), Some(upper.into()));
         self.add_permanent_row(r.monomials(), bounds)?;
         self.quotients.insert((a, n.clone()), q);
@@ -340,7 +371,7 @@ impl LiraIncrementalState {
             // mod(a, n) = a − n·q
             let def = self.def(*a)?.clone();
             out.add_scaled(&def, coeff);
-            out.add_term(q, &-(coeff * &n));
+            out.add_term(q, &-(coeff * Rational::from(n)));
         }
         Ok(out)
     }
@@ -368,7 +399,8 @@ impl LiraIncrementalState {
         terms: Vec<Mon<Rational>>,
         bounds: Bounds<QDelta>,
     ) -> SolverResult<()> {
-        let slack = self.fresh_var();
+        // Only `div`/`mod` rows are permanent; they are over `Int` vars.
+        let slack = self.fresh_var(VarType::Int);
         // `add_relation` only reads the relation's terms; the bounds are asserted separately.
         self.solver
             .lra_solver_mut()
@@ -394,7 +426,14 @@ impl LiraIncrementalState {
         if let Some(slack) = self.slacks.get(&key) {
             return Ok(*slack);
         }
-        let slack = self.fresh_var();
+        // Normalized coefficients are integers, so the slack of a row over `Int` vars is
+        // integral; with any `Real` var it is not, and branching on it would be unsound.
+        let typ = if terms.iter().all(|m| m.var().typ == VarType::Int) {
+            VarType::Int
+        } else {
+            VarType::Real
+        };
+        let slack = self.fresh_var(typ);
         self.solver
             .lra_solver_mut()
             .add_relation(Rel::mk_eq(terms.to_vec(), Rational::ZERO), slack)?;
@@ -465,22 +504,24 @@ impl LiraIncrementalState {
         }
     }
 
-    /// Register a fresh integer variable; see [`IncrementalArithSolver::register_var`]. Errors if
-    /// `definition` refers to an unregistered variable.
+    /// Register a fresh variable of sort `sort`; see [`IncrementalArithSolver::register_var`].
+    /// Errors if `definition` refers to an unregistered variable.
     pub fn try_register_var(
         &mut self,
+        sort: VarType,
         definition: Option<ArithExpr>,
         report_in_model: bool,
     ) -> SolverResult<VarId> {
         let affine = match definition {
             Some(def) => self.expr_to_affine(&def)?,
             None => {
-                let v = self.fresh_var();
+                let v = self.fresh_var(sort);
                 Affine::var(v)
             }
         };
         let var_id = self.defs.len() as VarId;
         self.defs.push(affine);
+        self.sorts.push(sort);
         if report_in_model {
             self.model_vars.insert(var_id);
         }
@@ -506,8 +547,8 @@ impl LiraIncrementalState {
         };
         let mut diff = self.expr_to_affine(lhs)?;
         let rhs = self.expr_to_affine(rhs)?;
-        diff.add_scaled(&rhs, &-IBig::ONE);
-        let c = Rational::from(-&diff.constant);
+        diff.add_scaled(&rhs, &-Rational::ONE);
+        let c = -&diff.constant;
 
         self.active_lits.insert(lit);
         self.lits_by_level[self.sat_level].push(lit);
@@ -530,8 +571,8 @@ impl LiraIncrementalState {
             return Ok(());
         }
 
-        // Normalize and tighten to the integer grid (all internal vars are integers), then derive
-        // the QDelta bound(s) (handles strict-inequality δ adjustment for anything left strict).
+        // Normalize and, if every var is `Int`, tighten to the integer grid, then derive the
+        // QDelta bound(s) (handles strict-inequality δ adjustment for anything left strict).
         let mut rel = mk(diff.monomials(), c);
         rel.normalize();
         if rel.tighten_integral() {
@@ -540,6 +581,7 @@ impl LiraIncrementalState {
             self.set_pending_conflict(vec![-lit]);
             return Ok(());
         }
+        divide_out_coefficient_gcd(&mut rel);
         let bounds = rel.to_qdelta_bounds();
         let var = self.bounded_var(rel.terms_ref())?;
         for (side, val) in [(Side::Lower, &bounds.lower), (Side::Upper, &bounds.upper)] {
@@ -566,13 +608,13 @@ impl LiraIncrementalState {
     fn model_buckets(
         &self,
         value: impl Fn(&Var) -> Rational,
-    ) -> DeterministicHashMap<IBig, DeterministicHashSet<VarId>> {
-        let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<VarId>> =
+    ) -> DeterministicHashMap<ArithValue, DeterministicHashSet<VarId>> {
+        let mut buckets: DeterministicHashMap<ArithValue, DeterministicHashSet<VarId>> =
             DeterministicHashMap::new();
         for var_id in &self.model_vars {
             let v = self.defs[*var_id as usize].eval(&value);
             buckets
-                .entry(v.to_int().value().clone())
+                .entry((self.sorts[*var_id as usize], v))
                 .or_default()
                 .insert(*var_id);
         }
@@ -652,8 +694,13 @@ impl Default for LiraIncrementalState {
 }
 
 impl IncrementalArithSolver for LiraIncrementalState {
-    fn register_var(&mut self, definition: Option<ArithExpr>, report_in_model: bool) -> VarId {
-        self.try_register_var(definition, report_in_model)
+    fn register_var(
+        &mut self,
+        sort: VarType,
+        definition: Option<ArithExpr>,
+        report_in_model: bool,
+    ) -> VarId {
+        self.try_register_var(sort, definition, report_in_model)
             .unwrap_or_else(|e| panic!("lira-inc: register_var failed: {}", e.0))
     }
 
@@ -764,8 +811,8 @@ mod tests {
     fn div_term(a: VarId, b: VarId, coeff: i32) -> ArithExpr {
         ArithExpr {
             terms: vec![],
-            constant: IBig::from(0),
-            divs: vec![(a, b, IBig::from(coeff))],
+            constant: Rational::ZERO,
+            divs: vec![(a, b, Rational::from(coeff))],
             mods: vec![],
         }
     }
@@ -774,16 +821,21 @@ mod tests {
     fn mod_term(a: VarId, b: VarId, coeff: i32) -> ArithExpr {
         ArithExpr {
             terms: vec![],
-            constant: IBig::from(0),
+            constant: Rational::ZERO,
             divs: vec![],
-            mods: vec![(a, b, IBig::from(coeff))],
+            mods: vec![(a, b, Rational::from(coeff))],
         }
     }
 
     /// Register a hidden variable defined as the constant `c` (usable as a divisor).
     fn const_var(s: &mut LiraIncrementalState, c: i32) -> VarId {
-        s.try_register_var(Some(ArithExpr::constant(c)), false)
+        s.try_register_var(VarType::Int, Some(ArithExpr::constant(c)), false)
             .unwrap()
+    }
+
+    /// The model value of an `Int` var with value `n`.
+    fn int(n: i32) -> ArithValue {
+        (VarType::Int, Rational::from(n))
     }
 
     fn is_sat(r: &ArithCheckResult) -> bool {
@@ -799,7 +851,7 @@ mod tests {
     #[test]
     fn single_feasible_constraint() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         // x <= 5
         s.try_push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(5)), 10)
             .unwrap();
@@ -809,7 +861,7 @@ mod tests {
     #[test]
     fn conflicting_constraints_are_unsat_with_core() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         // x >= 5 (encoded as 5 <= x), lit 10
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 10)
             .unwrap();
@@ -829,7 +881,7 @@ mod tests {
     #[test]
     fn backtrack_recovers_from_conflict() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         // Level 0: x >= 5.
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 10)
             .unwrap();
@@ -850,10 +902,10 @@ mod tests {
                 let x_val = buckets
                     .iter()
                     .find(|(_, vars)| vars.contains(&x))
-                    .map(|(val, _)| val.clone())
+                    .map(|((_, val), _)| val.clone())
                     .expect("x should appear in the model");
                 assert!(
-                    x_val >= IBig::from(5),
+                    x_val >= Rational::from(5),
                     "x = {x_val} should be >= 5 with the x <= 1 bound relaxed"
                 );
             }
@@ -866,7 +918,7 @@ mod tests {
         // C: x >= 5 (encoded as 5 <= x). D: x <= 1. C alone is feasible; C && D is not.
         // Exercises assert → backtrack → assert-again of the same constraint D.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
 
         // Assert C at level 0; feasible on its own.
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 10)
@@ -893,10 +945,11 @@ mod tests {
     #[test]
     fn definition_is_enforced_in_model() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         // y := x + 3
         let y = s
             .try_register_var(
+                VarType::Int,
                 Some(ArithExpr::linear(vec![(x, IBig::from(1))], IBig::from(3))),
                 true,
             )
@@ -907,8 +960,8 @@ mod tests {
         match s.try_check().unwrap() {
             ArithCheckResult::Sat(buckets) => {
                 // x is 4, y is 7.
-                assert!(buckets.get(&IBig::from(4)).unwrap().contains(&x));
-                assert!(buckets.get(&IBig::from(7)).unwrap().contains(&y));
+                assert!(buckets.get(&int(4)).unwrap().contains(&x));
+                assert!(buckets.get(&int(7)).unwrap().contains(&y));
             }
             _ => panic!("expected SAT"),
         }
@@ -917,25 +970,133 @@ mod tests {
     #[test]
     fn equality_constraint_ties_two_vars() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-        let y = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let y = s.try_register_var(VarType::Int, None, true).unwrap();
         // x == y (via push_equality), and x == 9.
         s.push_equality(x, y, 10);
         s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(9)), 20)
             .unwrap();
         match s.try_check().unwrap() {
             ArithCheckResult::Sat(buckets) => {
-                let nine = buckets.get(&IBig::from(9)).unwrap();
+                let nine = buckets.get(&int(9)).unwrap();
                 assert!(nine.contains(&x) && nine.contains(&y));
             }
             _ => panic!("expected SAT"),
         }
     }
 
+    /// The value of `var` in a SAT result's buckets.
+    fn value_of(
+        buckets: &DeterministicHashMap<ArithValue, DeterministicHashSet<VarId>>,
+        var: VarId,
+    ) -> ArithValue {
+        buckets
+            .iter()
+            .find(|(_, vars)| vars.contains(&var))
+            .map(|(value, _)| value.clone())
+            .expect("var should appear in the model")
+    }
+
+    #[test]
+    fn real_var_strictly_between_integers() {
+        // 0 < x < 1 has no Int solution but is SAT over Real, with a value in the open interval.
+        for (sort, sat) in [(VarType::Int, false), (VarType::Real, true)] {
+            let mut s = LiraIncrementalState::new();
+            let x = s.try_register_var(sort, None, true).unwrap();
+            s.try_push_constraint(ArithConstraint::Lt(ArithExpr::constant(0), term(x, 1)), 10)
+                .unwrap();
+            s.try_push_constraint(ArithConstraint::Lt(term(x, 1), ArithExpr::constant(1)), 20)
+                .unwrap();
+            match s.try_check().unwrap() {
+                ArithCheckResult::Sat(buckets) => {
+                    assert!(sat, "{sort:?}: expected UNSAT");
+                    let (value_sort, v) = value_of(&buckets, x);
+                    assert_eq!(value_sort, VarType::Real);
+                    assert!(Rational::ZERO < v && v < Rational::ONE, "x = {v}");
+                }
+                ArithCheckResult::Unsat(_) => assert!(!sat, "{sort:?}: expected SAT"),
+                r => panic!("unexpected {r:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn real_single_var_bound_divides_out_coefficient() {
+        // 2x <= 1 and 2x >= 1 pin the Real x to 1/2 (not to 1: `normalize` keeps the 2 in
+        // `2x <= 1`, and bounding x by 1 would be wrong), so x = 1 conflicts.
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(VarType::Real, None, true).unwrap();
+        s.try_push_constraint(ArithConstraint::Leq(term(x, 2), ArithExpr::constant(1)), 10)
+            .unwrap();
+        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(x, 2)), 20)
+            .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Sat(buckets) => {
+                assert_eq!(
+                    value_of(&buckets, x).1,
+                    Rational::from(1) / Rational::from(2)
+                );
+            }
+            r => panic!("expected SAT, got {r:?}"),
+        }
+        s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(1)), 30)
+            .unwrap();
+        assert!(matches!(s.try_check().unwrap(), ArithCheckResult::Unsat(_)));
+    }
+
+    #[test]
+    fn mixed_int_real_slack_is_not_integral() {
+        // 1/4 <= n + x <= 1/2 with n Int and x Real in [0, 1] is SAT (n = 0, x = 1/4). The
+        // slack for `n + x` must be Real: branching on it as an Int would refute it.
+        let mut s = LiraIncrementalState::new();
+        let n = s.try_register_var(VarType::Int, None, true).unwrap();
+        let x = s.try_register_var(VarType::Real, None, true).unwrap();
+        let sum = ArithExpr::linear(vec![(n, 1), (x, 1)], 0);
+        let quarter = Rational::from(1) / Rational::from(4);
+        let half = Rational::from(1) / Rational::from(2);
+        s.try_push_constraint(
+            ArithConstraint::Leq(ArithExpr::constant(quarter), sum.clone()),
+            10,
+        )
+        .unwrap();
+        s.try_push_constraint(ArithConstraint::Leq(sum, ArithExpr::constant(half)), 20)
+            .unwrap();
+        s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(0), term(x, 1)), 30)
+            .unwrap();
+        s.try_push_constraint(ArithConstraint::Leq(term(x, 1), ArithExpr::constant(1)), 40)
+            .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Sat(buckets) => {
+                let (n_sort, n_val) = value_of(&buckets, n);
+                assert_eq!(n_sort, VarType::Int);
+                assert!(n_val.is_int(), "n = {n_val}");
+            }
+            r => panic!("expected SAT, got {r:?}"),
+        }
+    }
+
+    #[test]
+    fn int_and_real_vars_with_equal_values_get_separate_buckets() {
+        let mut s = LiraIncrementalState::new();
+        let n = s.try_register_var(VarType::Int, None, true).unwrap();
+        let x = s.try_register_var(VarType::Real, None, true).unwrap();
+        s.try_push_constraint(ArithConstraint::Eq(term(n, 1), ArithExpr::constant(3)), 10)
+            .unwrap();
+        s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(3)), 20)
+            .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Sat(buckets) => {
+                assert_eq!(value_of(&buckets, n), int(3));
+                assert_eq!(value_of(&buckets, x), (VarType::Real, Rational::from(3)));
+            }
+            r => panic!("expected SAT, got {r:?}"),
+        }
+    }
+
     #[test]
     fn strict_inequality_conflict() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         // x < 3 and x > 3 (encoded as 3 < x): infeasible.
         s.try_push_constraint(ArithConstraint::Lt(term(x, 1), ArithExpr::constant(3)), 10)
             .unwrap();
@@ -947,8 +1108,8 @@ mod tests {
     #[test]
     fn model_only_reports_marked_vars() {
         let mut s = LiraIncrementalState::new();
-        let reported = s.try_register_var(None, true).unwrap();
-        let hidden = s.try_register_var(None, false).unwrap();
+        let reported = s.try_register_var(VarType::Int, None, true).unwrap();
+        let hidden = s.try_register_var(VarType::Int, None, false).unwrap();
         s.try_push_constraint(
             ArithConstraint::Eq(term(reported, 1), ArithExpr::constant(1)),
             10,
@@ -972,7 +1133,7 @@ mod tests {
         s.mark_model_var(hidden);
         match s.try_check().unwrap() {
             ArithCheckResult::Sat(buckets) => {
-                assert!(buckets.get(&IBig::from(2)).unwrap().contains(&hidden));
+                assert!(buckets.get(&int(2)).unwrap().contains(&hidden));
             }
             _ => panic!("expected SAT"),
         }
@@ -981,7 +1142,7 @@ mod tests {
     #[test]
     fn nested_levels_backtrack_partially() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         // L0: x >= 0.
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(0), term(x, 1)), 10)
             .unwrap();
@@ -1012,7 +1173,7 @@ mod tests {
         // there is no integer in that interval, so the LIRA solver must report UNSAT. A pure
         // LRA frontend would (unsoundly) report SAT here.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         // 3x >= 1, encoded as 1 <= 3x.
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(x, 3)), 10)
             .unwrap();
@@ -1029,7 +1190,7 @@ mod tests {
     fn div_floor_semantics_sat() {
         // x = 3, div(x, 2) = 1: floor(3/2) = 1 holds under Euclidean division.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let two = const_var(&mut s, 2);
         s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(3)), 10)
             .unwrap();
@@ -1047,7 +1208,7 @@ mod tests {
         let mut s = LiraIncrementalState::new();
         let seven = const_var(&mut s, 7);
         let two = const_var(&mut s, 2);
-        let r = s.try_register_var(None, true).unwrap();
+        let r = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(r, 1), div_term(seven, two, 1)), 10)
             .unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(r, 1), ArithExpr::constant(3)), 20)
@@ -1061,7 +1222,7 @@ mod tests {
         let mut s = LiraIncrementalState::new();
         let seven = const_var(&mut s, 7);
         let two = const_var(&mut s, 2);
-        let r = s.try_register_var(None, true).unwrap();
+        let r = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(r, 1), div_term(seven, two, 1)), 10)
             .unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(r, 1), ArithExpr::constant(4)), 20)
@@ -1075,7 +1236,7 @@ mod tests {
         let mut s = LiraIncrementalState::new();
         let neg1 = const_var(&mut s, -1);
         let two = const_var(&mut s, 2);
-        let r = s.try_register_var(None, true).unwrap();
+        let r = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(r, 1), div_term(neg1, two, 1)), 10)
             .unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(r, 1), ArithExpr::constant(-1)), 20)
@@ -1089,7 +1250,7 @@ mod tests {
         let mut s = LiraIncrementalState::new();
         let nine = const_var(&mut s, 9);
         let neg2 = const_var(&mut s, -2);
-        let r = s.try_register_var(None, true).unwrap();
+        let r = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(r, 1), div_term(nine, neg2, 1)), 10)
             .unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(r, 1), ArithExpr::constant(-4)), 20)
@@ -1101,7 +1262,7 @@ mod tests {
     fn mod_matches_euclidean_remainder() {
         // x = 7, mod(x, 3) = 1 (7 = 3*2 + 1).
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let three = const_var(&mut s, 3);
         s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(7)), 10)
             .unwrap();
@@ -1117,7 +1278,7 @@ mod tests {
     fn mod_out_of_range_unsat() {
         // mod(x, 3) = 5 exceeds the remainder bound (0 <= r <= 2), infeasible even over the reals.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let three = const_var(&mut s, 3);
         s.try_push_constraint(
             ArithConstraint::Eq(mod_term(x, three, 1), ArithExpr::constant(5)),
@@ -1132,7 +1293,7 @@ mod tests {
         // x = 7, mod(x, 3) = 2 has no integer solution (7 mod 3 = 1), but the real quotient
         // q = 5/3 satisfies the Euclidean rows, so the LIRA frontend reports Unsat.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let three = const_var(&mut s, 3);
         s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(7)), 10)
             .unwrap();
@@ -1148,7 +1309,7 @@ mod tests {
     fn div_constraint_backtracks() {
         // L0: div(x, 2) = 5 forces 10 <= x <= 11. L1: x <= 3 conflicts; backtrack recovers.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let two = const_var(&mut s, 2);
         s.try_push_constraint(
             ArithConstraint::Eq(div_term(x, two, 1), ArithExpr::constant(5)),
@@ -1172,9 +1333,11 @@ mod tests {
         // occurrence, so div(x, d) <= 0 and div(x, d) >= 1 conflict, but div(x, d) and mod(x, d)
         // are unrelated.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-        let d = s.try_register_var(None, false).unwrap(); // no constant definition
-        let q = s.try_register_var(Some(div_term(x, d, 1)), true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let d = s.try_register_var(VarType::Int, None, false).unwrap(); // no constant definition
+        let q = s
+            .try_register_var(VarType::Int, Some(div_term(x, d, 1)), true)
+            .unwrap();
         s.try_push_constraint(
             ArithConstraint::Leq(div_term(x, d, 1), ArithExpr::constant(0)),
             10,
@@ -1190,9 +1353,12 @@ mod tests {
                 let q_val = buckets
                     .iter()
                     .find(|(_, vars)| vars.contains(&q))
-                    .map(|(v, _)| v.clone())
+                    .map(|((_, v), _)| v.clone())
                     .expect("q in model");
-                assert!(q_val <= IBig::ZERO, "div(x, d) = {q_val} should be <= 0");
+                assert!(
+                    q_val <= Rational::ZERO,
+                    "div(x, d) = {q_val} should be <= 0"
+                );
             }
             r => panic!("expected SAT, got {r:?}"),
         }
@@ -1214,13 +1380,14 @@ mod tests {
     #[test]
     fn opaque_div_mod_makes_the_solver_inexact() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let three = const_var(&mut s, 3);
-        s.try_register_var(Some(div_term(x, three, 1)), true)
+        s.try_register_var(VarType::Int, Some(div_term(x, three, 1)), true)
             .unwrap();
         assert!(s.is_exact(), "div by a constant is interpreted");
-        let d = s.try_register_var(None, false).unwrap();
-        s.try_register_var(Some(mod_term(x, d, 1)), true).unwrap();
+        let d = s.try_register_var(VarType::Int, None, false).unwrap();
+        s.try_register_var(VarType::Int, Some(mod_term(x, d, 1)), true)
+            .unwrap();
         assert!(!s.is_exact(), "mod by a variable is opaque");
     }
 
@@ -1228,7 +1395,7 @@ mod tests {
     fn zero_divisor_is_opaque() {
         // SMT-LIB leaves div/mod by zero unspecified, so they are opaque too.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let zero = const_var(&mut s, 0);
         s.try_push_constraint(
             ArithConstraint::Eq(div_term(x, zero, 1), ArithExpr::constant(5)),
@@ -1246,7 +1413,7 @@ mod tests {
     #[test]
     fn unregistered_divisor_is_an_error() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         assert!(
             s.try_push_constraint(
                 ArithConstraint::Leq(div_term(x, 99, 1), ArithExpr::constant(0)),
@@ -1261,7 +1428,7 @@ mod tests {
         // A constant registered at level 1 is a substituted definition, not a relaxable row, so
         // it stays usable as a divisor after backtracking below the level it was registered at.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
 
         s.notify_new_decision_level();
         let two = const_var(&mut s, 2);
@@ -1290,7 +1457,7 @@ mod tests {
         // after backtracking to level 0 the shared quotient must still satisfy it: with x = 7,
         // div(x, 2) = 4 is infeasible. (Were the row relaxed, q would be free and this SAT.)
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let two = const_var(&mut s, 2);
 
         s.notify_new_decision_level();
@@ -1326,7 +1493,7 @@ mod tests {
     fn constant_divisor_at_level_zero_survives_backtrack() {
         // A constant registered at level 0 stays valid as a divisor across backtracking.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let two = const_var(&mut s, 2);
 
         s.notify_new_decision_level();
@@ -1353,9 +1520,10 @@ mod tests {
         // but the definition equality persists (asserted at level 0), so re-pinning x
         // after backtracking still forces y = x + 3.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let y = s
             .try_register_var(
+                VarType::Int,
                 Some(ArithExpr::linear(vec![(x, IBig::from(1))], IBig::from(3))),
                 true,
             )
@@ -1367,8 +1535,8 @@ mod tests {
             .unwrap();
         match s.try_check().unwrap() {
             ArithCheckResult::Sat(b) => {
-                assert!(b.get(&IBig::from(4)).unwrap().contains(&x));
-                assert!(b.get(&IBig::from(7)).unwrap().contains(&y));
+                assert!(b.get(&int(4)).unwrap().contains(&x));
+                assert!(b.get(&int(7)).unwrap().contains(&y));
             }
             _ => panic!("expected SAT"),
         }
@@ -1383,8 +1551,8 @@ mod tests {
         .unwrap();
         match s.try_check().unwrap() {
             ArithCheckResult::Sat(b) => {
-                assert!(b.get(&IBig::from(100)).unwrap().contains(&x));
-                assert!(b.get(&IBig::from(103)).unwrap().contains(&y));
+                assert!(b.get(&int(100)).unwrap().contains(&x));
+                assert!(b.get(&int(103)).unwrap().contains(&y));
             }
             _ => panic!("expected SAT"),
         }
@@ -1395,7 +1563,7 @@ mod tests {
         // A definition registered above the backtrack target is substituted, so it holds at every
         // level: the translator never re-registers a VarId after backtracking.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(4)), 10)
             .unwrap();
 
@@ -1403,12 +1571,13 @@ mod tests {
         s.notify_new_decision_level();
         let y = s
             .try_register_var(
+                VarType::Int,
                 Some(ArithExpr::linear(vec![(x, IBig::from(1))], IBig::from(3))),
                 true,
             )
             .unwrap();
         match s.try_check().unwrap() {
-            ArithCheckResult::Sat(b) => assert!(b.get(&IBig::from(7)).unwrap().contains(&y)),
+            ArithCheckResult::Sat(b) => assert!(b.get(&int(7)).unwrap().contains(&y)),
             _ => panic!("expected SAT"),
         }
 
@@ -1424,7 +1593,7 @@ mod tests {
         // Full cycle: def → solve → backtrack → solve → assert the (redundant) defining
         // equality explicitly → solve. The definition survives the backtrack throughout.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(4)), 10)
             .unwrap();
 
@@ -1432,6 +1601,7 @@ mod tests {
         s.notify_new_decision_level();
         let y = s
             .try_register_var(
+                VarType::Int,
                 Some(ArithExpr::linear(vec![(x, IBig::from(1))], IBig::from(3))),
                 true,
             )
@@ -1454,7 +1624,7 @@ mod tests {
         )
         .unwrap();
         match s.try_check().unwrap() {
-            ArithCheckResult::Sat(b) => assert!(b.get(&IBig::from(7)).unwrap().contains(&y)),
+            ArithCheckResult::Sat(b) => assert!(b.get(&int(7)).unwrap().contains(&y)),
             _ => panic!("expected SAT with y == x + 3"),
         }
 
@@ -1482,7 +1652,7 @@ mod tests {
         // Constraints whose variables cancel are decided by their constant: x <= x + 1 holds
         // (no row), x == x + 1 is UNSAT citing only its own lit.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         let x_plus_1 = ArithExpr::linear(vec![(x, IBig::from(1))], IBig::from(1));
         s.try_push_constraint(ArithConstraint::Leq(term(x, 1), x_plus_1.clone()), 10)
             .unwrap();
@@ -1499,14 +1669,16 @@ mod tests {
     fn aliased_definition_equality_is_trivial() {
         // y := x substitutes to the same internal var, so x == y has no variables left.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-        let y = s.try_register_var(Some(term(x, 1)), true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let y = s
+            .try_register_var(VarType::Int, Some(term(x, 1)), true)
+            .unwrap();
         s.push_equality(x, y, 10);
         s.try_push_constraint(ArithConstraint::Eq(term(x, 1), ArithExpr::constant(3)), 20)
             .unwrap();
         match s.try_check().unwrap() {
             ArithCheckResult::Sat(b) => {
-                let three = b.get(&IBig::from(3)).unwrap();
+                let three = b.get(&int(3)).unwrap();
                 assert!(three.contains(&x) && three.contains(&y));
             }
             r => panic!("expected SAT, got {r:?}"),
@@ -1516,7 +1688,7 @@ mod tests {
     #[test]
     fn repushed_active_lit_is_noop_and_repushable_after_backtrack() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 10)
             .unwrap();
         s.notify_new_decision_level();
@@ -1535,8 +1707,8 @@ mod tests {
     #[test]
     fn partial_check_is_batched_and_finds_relaxation_conflicts() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-        let y = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let y = s.try_register_var(VarType::Int, None, true).unwrap();
         let sum = ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(1))], IBig::ZERO);
         // x + y >= 5, x <= 1, y <= 1: infeasible already over the reals, but only via simplex.
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), sum), 1)
@@ -1572,7 +1744,7 @@ mod tests {
         // x >= 5 then x <= 1 are direct bounds on x; the second crosses the first and is reported
         // by the next (even partial, unbatched) check, citing exactly the two literals.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 1)
             .unwrap();
         s.notify_new_decision_level();
@@ -1593,7 +1765,7 @@ mod tests {
     #[test]
     fn pending_conflict_survives_backtrack_to_its_level() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         s.notify_new_decision_level();
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(5), term(x, 1)), 1)
             .unwrap();
@@ -1612,8 +1784,8 @@ mod tests {
         // conflict with x + y >= 4 cites the tighter lit 2; after backtracking it away, the
         // responsible lit reverts to 1.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-        let y = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let y = s.try_register_var(VarType::Int, None, true).unwrap();
         let sum =
             |k: i32| ArithExpr::linear(vec![(x, IBig::from(k)), (y, IBig::from(k))], IBig::ZERO);
         s.try_push_constraint(ArithConstraint::Leq(sum(1), ArithExpr::constant(5)), 1)
@@ -1649,7 +1821,7 @@ mod tests {
     #[test]
     fn single_var_constraints_add_no_rows() {
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         for (lit, c) in [(1, 10), (2, 7), (3, 9)] {
             s.try_push_constraint(
                 ArithConstraint::Leq(term(x, 1), ArithExpr::constant(c)),
@@ -1716,8 +1888,8 @@ mod tests {
         };
         for _round in 0..300 {
             let mut s = LiraIncrementalState::new();
-            let x = s.try_register_var(None, true).unwrap();
-            let y = s.try_register_var(None, true).unwrap();
+            let x = s.try_register_var(VarType::Int, None, true).unwrap();
+            let y = s.try_register_var(VarType::Int, None, true).unwrap();
             // Box both vars to [-4, 4] with literals of their own (direct bounds) so
             // branch-and-bound terminates and must cite them.
             let mut cons: Vec<TestCon> = vec![
@@ -1783,8 +1955,10 @@ mod tests {
                     ArithCheckResult::Sat(buckets) => {
                         assert!(expect_sat, "SAT reported for {live:?}");
                         let val = |v| {
-                            let (k, _) = buckets.iter().find(|(_, vs)| vs.contains(&v)).unwrap();
-                            i64::try_from(k.clone()).unwrap()
+                            let ((_, k), _) =
+                                buckets.iter().find(|(_, vs)| vs.contains(&v)).unwrap();
+                            assert!(k.is_int(), "Int var with value {k}");
+                            i64::try_from(k.numerator().clone()).unwrap()
                         };
                         let (vx, vy) = (val(x), val(y));
                         assert!(
@@ -1824,8 +1998,8 @@ mod tests {
         // integer-tight on its own), but not over the integers. The partial check reports Sat;
         // the full check (branch-and-bound) reports Unsat.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-        let y = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let y = s.try_register_var(VarType::Int, None, true).unwrap();
         let sum = ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(1))], IBig::ZERO);
         let diff = ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(-1))], IBig::ZERO);
         s.try_push_constraint(ArithConstraint::Eq(sum, ArithExpr::constant(1)), 1)
@@ -1851,7 +2025,7 @@ mod tests {
         // not round basic variables independently of their rows (it used to, returning x = 0
         // here even though 3x >= 1).
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Leq(ArithExpr::constant(1), term(x, 3)), 1)
             .unwrap();
         s.try_push_constraint(ArithConstraint::Leq(term(x, 3), ArithExpr::constant(2)), 2)
@@ -1866,8 +2040,8 @@ mod tests {
         // 2x + 2y = 1 has no integer solution (gcd 2 does not divide 1) but is feasible over the
         // reals and unbounded, where branch-and-bound would diverge. It is refuted on its own.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-        let y = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let y = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(
             ArithConstraint::Eq(
                 ArithExpr::linear(vec![(x, IBig::from(2)), (y, IBig::from(2))], IBig::from(0)),
@@ -1885,9 +2059,9 @@ mod tests {
     /// `x = 2a` and `x = 2b + 1`: no integer solution, but each equality is tight on its own and
     /// the rational relaxation is unbounded, so branch-and-bound never terminates.
     fn push_parity_conflict(s: &mut LiraIncrementalState) {
-        let x = s.try_register_var(None, true).unwrap();
-        let a = s.try_register_var(None, true).unwrap();
-        let b = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let a = s.try_register_var(VarType::Int, None, true).unwrap();
+        let b = s.try_register_var(VarType::Int, None, true).unwrap();
         s.try_push_constraint(ArithConstraint::Eq(term(x, 1), term(a, 2)), 10)
             .unwrap();
         let two_b_plus_one = ArithExpr::linear(vec![(b, IBig::from(2))], IBig::ONE);
@@ -1945,8 +2119,8 @@ mod tests {
             ..SolverConfig::default()
         };
         let mut s = LiraIncrementalState::with_config(config);
-        let x = s.try_register_var(None, true).unwrap();
-        let y = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let y = s.try_register_var(VarType::Int, None, true).unwrap();
         // x + y = 1 and x - y = 0 pin x = y = 1/2: no integer solution, but each constraint is
         // tight on its own, so showing it needs branching, which the one-solve budget forbids.
         s.try_push_constraint(
@@ -1973,8 +2147,8 @@ mod tests {
         // −1 < x − y < 0: rationally feasible, unbounded, no integer point. Integer tightening
         // makes the relaxation infeasible, so branch-and-bound (which diverges here) never runs.
         let mut s = LiraIncrementalState::new();
-        let x = s.try_register_var(None, true).unwrap();
-        let y = s.try_register_var(None, true).unwrap();
+        let x = s.try_register_var(VarType::Int, None, true).unwrap();
+        let y = s.try_register_var(VarType::Int, None, true).unwrap();
         let x_minus_y =
             ArithExpr::linear(vec![(x, IBig::from(1)), (y, IBig::from(-1))], IBig::ZERO);
         s.try_push_constraint(

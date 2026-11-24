@@ -10,7 +10,7 @@ use crate::arithmetic::lia::linear_system::{Mon, Rel};
 use crate::arithmetic::lia::solver_result::SolverDecision;
 use crate::arithmetic::lia::variables::{Var, VarType};
 use crate::arithmetic::lp::{
-    ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
+    ArithResult, ArithValue, Coefficient, FunctionType::*, extract_linear_constraints,
     extract_linear_expression,
 };
 use crate::debug_println;
@@ -127,12 +127,17 @@ pub fn check_integer_constraints_satisfiable_lia(
             let stats = ret.stats;
             match ret.decision {
                 SolverDecision::FEASIBLE(assignment) => {
-                    let mut model_hashmap: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
-                        DeterministicHashMap::new();
+                    let mut model_hashmap: DeterministicHashMap<
+                        ArithValue,
+                        DeterministicHashSet<u64>,
+                    > = DeterministicHashMap::new();
                     for (term_id, root_var) in &roots {
                         if let Some(value) = assignment.get(root_var) {
                             let val: IBig = value.to_int().value().clone();
-                            model_hashmap.entry(val).or_default().insert(*term_id);
+                            model_hashmap
+                                .entry((VarType::Int, Rational::from(val)))
+                                .or_default()
+                                .insert(*term_id);
                         }
                     }
                     ArithResult::Sat(model_hashmap, stats)

@@ -9,40 +9,47 @@ pub mod translation;
 #[cfg(feature = "z3-solver")]
 pub(crate) mod z3;
 
+use crate::arithmetic::lia::variables::VarType;
+use crate::arithmetic::lp::ArithValue;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
-use dashu::integer::IBig;
+use dashu::Rational;
 
 /// Opaque variable handle assigned by the solver via `register_var`.
 pub type VarId = u32;
 
-/// A linear expression: sum of (coeff * var) terms + constant + div/mod terms.
+/// A linear expression: sum of (coeff * var) terms + constant + div/mod terms. Coefficients are
+/// rational, as a `Real` expression may scale by a decimal or divide by a constant; `div`/`mod`
+/// operands are always `Int` vars.
 #[derive(Debug, Clone)]
 pub struct ArithExpr {
-    pub terms: Vec<(VarId, IBig)>,
-    pub constant: IBig,
-    pub divs: Vec<(VarId, VarId, IBig)>, // (numerator_var, denominator_var, coeff)
-    pub mods: Vec<(VarId, VarId, IBig)>,
+    pub terms: Vec<(VarId, Rational)>,
+    pub constant: Rational,
+    pub divs: Vec<(VarId, VarId, Rational)>, // (numerator_var, denominator_var, coeff)
+    pub mods: Vec<(VarId, VarId, Rational)>,
 }
 
 impl ArithExpr {
     /// A pure-linear expression from terms and a constant (no div/mod).
-    pub fn linear(terms: Vec<(VarId, IBig)>, constant: IBig) -> Self {
+    pub fn linear<C: Into<Rational>>(
+        terms: Vec<(VarId, C)>,
+        constant: impl Into<Rational>,
+    ) -> Self {
         Self {
-            terms,
-            constant,
+            terms: terms.into_iter().map(|(v, c)| (v, c.into())).collect(),
+            constant: constant.into(),
             divs: Vec::new(),
             mods: Vec::new(),
         }
     }
 
     /// A constant expression.
-    pub fn constant(c: impl Into<IBig>) -> Self {
-        Self::linear(Vec::new(), c.into())
+    pub fn constant(c: impl Into<Rational>) -> Self {
+        Self::linear(Vec::<(VarId, Rational)>::new(), c)
     }
 
     /// The single-variable expression `1 * var`.
     pub fn var(var: VarId) -> Self {
-        Self::linear(vec![(var, IBig::from(1))], IBig::from(0))
+        Self::linear(vec![(var, Rational::ONE)], Rational::ZERO)
     }
 }
 
@@ -59,8 +66,9 @@ pub enum ArithConstraint {
 pub enum ArithCheckResult {
     /// Conflict: negated SAT lits forming a clause.
     Unsat(Vec<i32>),
-    /// Model-value → set of VarIds assigned that value.
-    Sat(DeterministicHashMap<IBig, DeterministicHashSet<VarId>>),
+    /// Model value → set of VarIds assigned that value. The value includes the sort, so `Int`
+    /// and `Real` vars never share a set.
+    Sat(DeterministicHashMap<ArithValue, DeterministicHashSet<VarId>>),
     /// The solver gave up (e.g. a resource limit); no conflict and no model.
     Unknown,
 }
@@ -76,10 +84,15 @@ pub enum PartialCheckResult {
 /// An incremental arithmetic solver that the propagator drives via
 /// push/pop of constraints and equalities, keyed by solver-assigned VarIds.
 pub trait IncrementalArithSolver {
-    /// Register a fresh integer variable. If `definition` is Some, the solver
+    /// Register a fresh variable of sort `sort`. If `definition` is Some, the solver
     /// asserts `new_var == definition` at the current level. If `report_in_model`
     /// is true, this var's value is included in the model buckets on SAT.
-    fn register_var(&mut self, definition: Option<ArithExpr>, report_in_model: bool) -> VarId;
+    fn register_var(
+        &mut self,
+        sort: VarType,
+        definition: Option<ArithExpr>,
+        report_in_model: bool,
+    ) -> VarId;
 
     /// Mark an already-registered var for model reporting. Idempotent.
     fn mark_model_var(&mut self, var: VarId);

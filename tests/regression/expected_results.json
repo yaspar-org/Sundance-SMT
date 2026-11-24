@@ -1172,5 +1172,22 @@
   "arithmetic/egraph_arith_flag_split_on_backtrack.smt2": "unsat",
   "datatypes/tester_key_collision_sat.smt2": "sat",
   "datatypes/tester_key_collision2_sat.smt2": "sat",
-  "datatypes/inductive_tester_congruence.smt2": "unsat"
+  "datatypes/inductive_tester_congruence.smt2": "unsat",
+  "real_arithmetic/between_zero_and_one_real_sat.smt2": "sat",
+  "real_arithmetic/between_zero_and_one_int_unsat.smt2": "unsat",
+  "real_arithmetic/strict_cycle_unsat.smt2": "unsat",
+  "real_arithmetic/strict_split_unsat.smt2": "unsat",
+  "real_arithmetic/strict_bounds_sat.smt2": "sat",
+  "real_arithmetic/decimal_coefficient_unsat.smt2": "unsat",
+  "real_arithmetic/division_by_constant_unsat.smt2": "unsat",
+  "real_arithmetic/division_by_constant_sat.smt2": "sat",
+  "real_arithmetic/numeral_equals_decimal_sat.smt2": "sat",
+  "real_arithmetic/numeral_distinct_decimal_unsat.smt2": "unsat",
+  "real_arithmetic/distinct_unsat.smt2": "unsat",
+  "real_arithmetic/uf_nelson_oppen_unsat.smt2": "unsat",
+  "real_arithmetic/uf_nelson_oppen_division_unsat.smt2": "unsat",
+  "real_arithmetic/uf_nelson_oppen_sat.smt2": "sat",
+  "real_arithmetic/uf_nelson_oppen_chain_unsat.smt2": "unsat",
+  "real_arithmetic/to_real_sat.smt2": "sat",
+  "real_arithmetic/to_real_unsat.smt2": "unsat"
 }
