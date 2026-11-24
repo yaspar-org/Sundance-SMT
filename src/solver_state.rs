@@ -613,14 +613,16 @@ impl SolverState {
 
             // Foralls are instantiated by e-matching and need a trigger. When a
             // forall has no `:pattern`, trigger inference is only attempted if
-            // it was explicitly enabled (`--infer-triggers`); otherwise we fail
-            // loudly rather than silently drop the axiom (unsound/incomplete
-            // answer).
+            // it was explicitly enabled (`--infer-triggers`). A forall that ends
+            // up with no trigger is still registered, but is never instantiated
+            // (like Z3 without MBQI). This loses completeness but not soundness:
+            // with any quantifier present, a model is reported as `unknown`.
             if is_forall && trigger_ids.is_empty() && !self.infer_triggers {
-                panic!(
-                    "forall without a :pattern trigger: {term}\n\
-                     Enable trigger inference with --infer-triggers to \
-                     instantiate such quantifiers."
+                debug_println!(
+                    2,
+                    0,
+                    "forall without a :pattern trigger will not be instantiated \
+                     (use --infer-triggers): {term}"
                 );
             }
             // An existential is skolemized when it is true, but when it is
@@ -644,10 +646,12 @@ impl SolverState {
                         }
                     }
                 }
-                // Inference enabled but no admissible trigger found for a
-                // forall: still fail loudly rather than silently drop the axiom.
                 if is_forall && trigger_ids.is_empty() {
-                    panic!("Could not infer a trigger for untriggered forall: {term}");
+                    debug_println!(
+                        2,
+                        0,
+                        "could not infer a trigger; forall will not be instantiated: {term}"
+                    );
                 }
             }
 

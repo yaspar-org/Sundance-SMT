@@ -1,4 +1,6 @@
 {
+    "edge_cases_quantifiers/untriggerable_forall_unknown.smt2": "unknown",
+    "edge_cases_quantifiers/untriggerable_forall_unsat.smt2": "unsat",
     "handwritten/example10.smt2": "unsat",
     "handwritten/example8.smt2": "unsat",
     "handwritten/example9.smt2": "unsat",
