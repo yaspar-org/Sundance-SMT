@@ -180,7 +180,7 @@ fn expr_to_monomials(
                 if n == Rational::ZERO {
                     // SMT-LIB leaves division by zero unspecified: `(div a 0)` is an
                     // unconstrained function of `a`, so share one free var per numerator.
-                    let v = ctx.allocate_var(&format!("!div_zero_{}", a_id), VarType::Int);
+                    let v = ctx.allocate_var(&format!("@div_zero_{}", a_id), VarType::Int);
                     monomials.push(Mon::new(&sign * &rational_coeff, v));
                     continue;
                 }
@@ -197,7 +197,7 @@ fn expr_to_monomials(
                 });
                 if n == Rational::ZERO {
                     // As for `div`: `(mod a 0)` is an unconstrained function of `a`.
-                    let v = ctx.allocate_var(&format!("!mod_zero_{}", a_id), VarType::Int);
+                    let v = ctx.allocate_var(&format!("@mod_zero_{}", a_id), VarType::Int);
                     monomials.push(Mon::new(&sign * &rational_coeff, v));
                     continue;
                 }
