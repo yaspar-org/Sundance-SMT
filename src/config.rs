@@ -49,8 +49,9 @@ pub struct Args {
     #[arg(long, default_value_t = 0, allow_negative_numbers = true)]
     pub eager_qi: i32,
     /// Infer triggers for `forall` quantifiers that lack a `:pattern` annotation
-    /// (Simplify/Z3-style auto-trigger inference). When off (default), an
-    /// untriggered `forall` panics instead.
+    /// (Simplify/Z3-style auto-trigger inference). A `forall` without a trigger
+    /// (when this is off, or when no trigger can be inferred) is never
+    /// instantiated, so a model of a query with quantifiers is reported as `unknown`.
     #[arg(long, default_value_t = false)]
     pub infer_triggers: bool,
     /// Propositional search engine driving the theory propagator

@@ -1207,7 +1207,7 @@ impl LRASolver {
 
         let ret = self.solve()?;
 
-        match ret.decision {
+        let rounded = match ret.decision {
             SolverDecision::FEASIBLE(_) => {
                 let d0 = self.calculate_d0();
                 // Round the integer variables that were non-basic *before* this solve and
@@ -1242,48 +1242,34 @@ impl LRASolver {
                     }
                     rounded_assignments.insert(self.variables[idx].var, val);
                 }
-
-                // Verify the rounded assignment satisfies all original bounds and integrality
-                for v in self.variables.iter() {
-                    let rounded_val = &rounded_assignments[&v.var];
-                    let rounded_qdelta = QDelta::from(rounded_val.clone());
-                    if !v.bounds.in_bounds(&rounded_qdelta)
-                        || (v.var.typ == VarType::Int && !rounded_val.is_int())
-                    {
-                        self.state = LRASolverState::Unknown;
-                        self.restore_tableau(
-                            &saved_tableau,
-                            &saved_basic,
-                            &saved_non_basic,
-                            &saved_owners,
-                        );
-                        self.backtrack(level);
-                        return Ok(None);
-                    }
-                }
-
-                self.state = LRASolverState::Sat;
-                self.restore_tableau(
-                    &saved_tableau,
-                    &saved_basic,
-                    &saved_non_basic,
-                    &saved_owners,
-                );
-                self.backtrack(level);
-                Ok(Some(Assignment::new(rounded_assignments)))
+                Some(rounded_assignments)
             }
-            _ => {
-                self.state = LRASolverState::Unknown;
-                self.restore_tableau(
-                    &saved_tableau,
-                    &saved_basic,
-                    &saved_non_basic,
-                    &saved_owners,
-                );
-                self.backtrack(level);
-                Ok(None)
-            }
-        }
+            _ => None,
+        };
+
+        self.restore_tableau(
+            &saved_tableau,
+            &saved_basic,
+            &saved_non_basic,
+            &saved_owners,
+        );
+        self.backtrack(level);
+
+        // Verify the rounded assignment against the original bounds, which `backtrack` has just
+        // restored, and integrality
+        let rounded = rounded.filter(|rounded_assignments| {
+            self.variables.iter().all(|v| {
+                let rounded_val = &rounded_assignments[&v.var];
+                v.bounds.in_bounds(&QDelta::from(rounded_val.clone()))
+                    && (v.var.typ != VarType::Int || rounded_val.is_int())
+            })
+        });
+        self.state = if rounded.is_some() {
+            LRASolverState::Sat
+        } else {
+            LRASolverState::Unknown
+        };
+        Ok(rounded.map(Assignment::new))
     }
 
     /// Check the two tableau invariants. In particular, this validates that the current assignment
@@ -2274,6 +2260,39 @@ mod tests {
             lhs2
         );
 
+        assert!(solver.is_valid());
+    }
+
+    /// The rounded point must be checked against the original bounds, not the tightened ones:
+    ///   Tableau: s = 4x + 3y, x, y integer non-basic and unbounded, s integer basic with s >= 1
+    ///
+    ///   |A_1|_1 = 7, so the tightened bound is s >= 9/2. Rounding can lower s by up to 7/2,
+    ///   e.g. x = 9/8, y = 0 rounds to x = 1, y = 0, s = 4, which satisfies s >= 1 only.
+    #[test]
+    fn try_unit_cube_test_checks_original_bounds() {
+        let non_basic = vec![
+            VarInfo::new(Var::int(0), Owner::NonBasic(0)),
+            VarInfo::new(Var::int(1), Owner::NonBasic(1)),
+        ];
+        let basic = vec![
+            VarInfo::new(Var::int(2), Owner::Basic(0))
+                .with_bounds(Bounds::new(Some(rbig!(1).into()), None)),
+        ];
+        let equations = vec![vec![rbig!(4), rbig!(3)]];
+        let ctx = ConvContext::default();
+        let mut solver =
+            LRASolver::from_eqs(basic, non_basic, equations, ctx, TableauKind::Dense).unwrap();
+
+        let assg = solver
+            .try_unit_cube_test()
+            .unwrap()
+            .expect("unit cube test should succeed");
+        let x = assg.get(&Var::int(0)).unwrap();
+        let y = assg.get(&Var::int(1)).unwrap();
+        let s = assg.get(&Var::int(2)).unwrap();
+        assert!(x.is_int() && y.is_int());
+        assert_eq!(*s, rbig!(4) * x + rbig!(3) * y);
+        assert!(*s >= rbig!(1));
         assert!(solver.is_valid());
     }
 
