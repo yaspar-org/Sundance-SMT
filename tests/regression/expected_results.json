@@ -1118,6 +1118,7 @@
   "arithmetic/div_basic_unsat.smt2": "unsat",
   "arithmetic/div_constant_divisor_unsat.smt2": "unsat",
   "arithmetic/div_in_sum_unsat.smt2": "unsat",
+  "arithmetic/div_mod_by_zero_sat.smt2": "sat",
   "arithmetic/div_mod_combined_sat.smt2": "sat",
   "arithmetic/div_mod_combined_unsat.smt2": "unsat",
   "arithmetic/div_mod_nested_sat.smt2": "sat",

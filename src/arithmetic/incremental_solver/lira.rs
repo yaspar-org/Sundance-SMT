@@ -35,10 +35,13 @@
 //!   `div(a, n)` is a quotient var `q`, shared per `(a, n)`, constrained by the single row
 //!   `0 ≤ a − n·q ≤ |n| − 1`; `mod(a, n) = a − n·q`. That row is definitional, so its bounds are
 //!   *permanent*: they cite no literal and are re-asserted whenever a backtrack relaxes them.
-//! - **`div`/`mod` by anything else** (a variable, an uninterpreted term, or zero) is an opaque
-//!   integer var, shared per `(a, b)`, with no constraints: the solver knows less about it, which
-//!   is sound for conflicts, and the egraph still equates it with congruent terms. This mirrors
-//!   how the translation layer treats non-linear products. From then on the solver is not exact
+//! - **`div`/`mod` by zero** is a free integer var, shared per numerator, with no constraints.
+//!   SMT-LIB leaves division by zero unspecified, so this is exact: any value is a model, and the
+//!   egraph equates it with congruent terms.
+//! - **`div`/`mod` by anything else** (a variable or an uninterpreted term) is an opaque integer
+//!   var, shared per `(a, b)`, with no constraints: the solver knows less about it, which is
+//!   sound for conflicts, and the egraph still equates it with congruent terms. This mirrors how
+//!   the translation layer treats non-linear products. From then on the solver is not exact
 //!   ([`IncrementalArithSolver::is_exact`]): a model it accepts may give the term a value that
 //!   is not the quotient.
 //! - **Integer reasoning is enforced** via the [`LIRASolver`]'s branch-and-bound;
@@ -159,10 +162,17 @@ pub struct LiraIncrementalState {
     /// `(numerator, divisor)` → quotient var of `div(numerator, divisor)`.
     quotients: DeterministicHashMap<(VarId, IBig), Var>,
     /// `(numerator, divisor)` → opaque var for `div` (`opaque_divs`) or `mod` (`opaque_mods`)
-    /// whose divisor is not a nonzero constant.
+    /// whose divisor is not a constant.
     opaque_divs: DeterministicHashMap<(VarId, VarId), Var>,
     /// See `opaque_divs`.
     opaque_mods: DeterministicHashMap<(VarId, VarId), Var>,
+    /// `numerator` → free var for `div(numerator, 0)` (`zero_divs`) or `mod(numerator, 0)`
+    /// (`zero_mods`), shared by every divisor whose affine form is the constant 0. Unlike the
+    /// opaque vars these do not make the solver inexact: SMT-LIB leaves division by zero
+    /// unspecified, so any value is a model, and congruence comes from the egraph.
+    zero_divs: DeterministicHashMap<VarId, Var>,
+    /// See `zero_divs`.
+    zero_mods: DeterministicHashMap<VarId, Var>,
     /// Normalized multi-variable linear form `Σ aᵢ xᵢ` → its slack var.
     slacks: DeterministicHashMap<Vec<(Var, Rational)>, Var>,
     /// The literal that set a var's current lower bound. Vars bounded only permanently (or not
@@ -231,6 +241,8 @@ impl LiraIncrementalState {
             quotients: DeterministicHashMap::new(),
             opaque_divs: DeterministicHashMap::new(),
             opaque_mods: DeterministicHashMap::new(),
+            zero_divs: DeterministicHashMap::new(),
+            zero_mods: DeterministicHashMap::new(),
             slacks: DeterministicHashMap::new(),
             lower_lits: DeterministicHashMap::new(),
             upper_lits: DeterministicHashMap::new(),
@@ -269,12 +281,29 @@ impl LiraIncrementalState {
             .cloned())
     }
 
-    /// The opaque var standing for `div(a, b)` (or `mod(a, b)` if `is_mod`) when `b` is not a
-    /// nonzero constant, created on first use.
+    /// The var standing for `div(a, b)` (or `mod(a, b)` if `is_mod`) when `b` is not a nonzero
+    /// constant, created on first use: a free var per numerator if `b` is the constant 0, an
+    /// opaque var per `(a, b)` otherwise.
     fn opaque_div_mod(&mut self, is_mod: bool, a: VarId, b: VarId) -> SolverResult<Var> {
         // Both operands must be registered, as for any other term of a definition.
         self.def(a)?;
-        self.def(b)?;
+        if self.def(b)?.as_constant().is_some_and(|n| *n == IBig::ZERO) {
+            let existing = if is_mod {
+                self.zero_mods.get(&a)
+            } else {
+                self.zero_divs.get(&a)
+            };
+            if let Some(v) = existing {
+                return Ok(*v);
+            }
+            let v = self.fresh_var();
+            if is_mod {
+                self.zero_mods.insert(a, v);
+            } else {
+                self.zero_divs.insert(a, v);
+            }
+            return Ok(v);
+        }
         let existing = if is_mod {
             self.opaque_mods.get(&(a, b))
         } else {
@@ -312,8 +341,8 @@ impl LiraIncrementalState {
     }
 
     /// Convert an [`ArithExpr`] to an affine form, substituting variable definitions and
-    /// converting `div`/`mod` terms to quotient vars (constant divisor) or opaque vars (any other
-    /// divisor).
+    /// converting `div`/`mod` terms to quotient vars (nonzero constant divisor), free vars (zero
+    /// divisor) or opaque vars (any other divisor).
     fn expr_to_affine(&mut self, expr: &ArithExpr) -> SolverResult<Affine> {
         let mut out = Affine::constant(expr.constant.clone());
         for (var_id, coeff) in &expr.terms {
@@ -1225,8 +1254,9 @@ mod tests {
     }
 
     #[test]
-    fn zero_divisor_is_opaque() {
-        // SMT-LIB leaves div/mod by zero unspecified, so they are opaque too.
+    fn zero_divisor_is_free_and_exact() {
+        // SMT-LIB leaves div/mod by zero unspecified: they are unconstrained, and a model that
+        // gives them any value is a model, so the solver stays exact.
         let mut s = LiraIncrementalState::new();
         let x = s.try_register_var(None, true).unwrap();
         let zero = const_var(&mut s, 0);
@@ -1241,6 +1271,42 @@ mod tests {
         )
         .unwrap();
         assert!(is_sat(&s.try_check().unwrap()));
+        assert!(s.is_exact(), "div/mod by zero is not opaque");
+    }
+
+    #[test]
+    fn zero_divisor_is_shared_per_numerator() {
+        // div(x, 0) is one function of x, whichever term denotes the 0: div(x, 0) <= 0 and
+        // div(x, 1 - 1) >= 1 conflict.
+        let mut s = LiraIncrementalState::new();
+        let x = s.try_register_var(None, true).unwrap();
+        let zero = const_var(&mut s, 0);
+        let one = const_var(&mut s, 1);
+        let one_minus_one = s
+            .try_register_var(
+                Some(ArithExpr::linear(
+                    vec![(one, IBig::from(1))],
+                    IBig::from(-1),
+                )),
+                false,
+            )
+            .unwrap();
+        s.try_push_constraint(
+            ArithConstraint::Leq(div_term(x, zero, 1), ArithExpr::constant(0)),
+            10,
+        )
+        .unwrap();
+        s.try_push_constraint(
+            ArithConstraint::Leq(ArithExpr::constant(1), div_term(x, one_minus_one, 1)),
+            20,
+        )
+        .unwrap();
+        match s.try_check().unwrap() {
+            ArithCheckResult::Unsat(core) => {
+                assert!(core.contains(&-10) && core.contains(&-20), "core {core:?}");
+            }
+            r => panic!("expected UNSAT, got {r:?}"),
+        }
     }
 
     #[test]
