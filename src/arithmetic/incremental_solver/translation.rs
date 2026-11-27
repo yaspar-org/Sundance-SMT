@@ -9,17 +9,18 @@ use crate::arithmetic::incremental_solver::{
     ArithCheckResult, ArithConstraint, ArithExpr, IncrementalArithSolver, PartialCheckResult, VarId,
 };
 use crate::arithmetic::lia::stats::Stats as LiaStats;
-use crate::arithmetic::lp::{ArithResult, Coefficient};
+use crate::arithmetic::lia::variables::VarType;
+use crate::arithmetic::lp::{ArithResult, ArithValue, Coefficient};
 use crate::egraphs::EgraphTrait;
 use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
-use dashu::Integer;
-use dashu::integer::IBig;
+use dashu::Rational;
 use yaspar_ir::ast::{
     ATerm::{self, App, Global, Not},
-    Repr,
+    FetchSort, Repr,
     alg::Constant as AlgConstant,
 };
+use yaspar_ir::statics::REAL;
 
 /// Bridges the propagator's egraph/term world and the abstract arithmetic solver.
 pub struct ArithTranslator {
@@ -60,8 +61,9 @@ impl ArithTranslator {
             return var_id;
         }
         let solver_uid = solver_state.to_solver_uid(egraph_id);
+        let sort = var_type(solver_uid, solver_state);
         let definition = self.build_var_definition(egraph_id, solver_state);
-        let var_id = self.solver.register_var(definition, false);
+        let var_id = self.solver.register_var(sort, definition, false);
         self.egraph_to_var.insert(egraph_id, var_id);
         while self.var_to_solver_uid.len() <= var_id as usize {
             self.var_to_solver_uid.push(None);
@@ -83,8 +85,8 @@ impl ArithTranslator {
         let solver_uid = solver_state.to_solver_uid(egraph_id);
         let expr_map = extract_lazy_expression(solver_uid, solver_state)?;
         let is_self_reference = expr_map.len() == 2
-            && expr_map.get(&Coefficient::Constant) == Some(&IBig::from(0))
-            && expr_map.get(&Coefficient::Term(egraph_id)) == Some(&IBig::from(1));
+            && expr_map.get(&Coefficient::Constant) == Some(&Rational::ZERO)
+            && expr_map.get(&Coefficient::Term(egraph_id)) == Some(&Rational::ONE);
         if is_self_reference {
             return None;
         }
@@ -94,11 +96,11 @@ impl ArithTranslator {
     /// Convert a Coefficient map to an ArithExpr, registering referenced vars.
     fn coeff_map_to_expr(
         &mut self,
-        map: &DeterministicHashMap<Coefficient, Integer>,
+        map: &DeterministicHashMap<Coefficient, Rational>,
         solver_state: &mut SolverState,
     ) -> ArithExpr {
         let mut terms = Vec::new();
-        let mut constant = IBig::from(0);
+        let mut constant = Rational::ZERO;
         let mut divs = Vec::new();
         let mut mods = Vec::new();
         for (k, c) in map {
@@ -165,8 +167,9 @@ impl ArithTranslator {
             return var_id;
         }
         let solver_uid = solver_state.to_solver_uid(egraph_id);
+        let sort = var_type(solver_uid, solver_state);
         let definition = self.build_var_definition(egraph_id, solver_state);
-        let var_id = self.solver.register_var(definition, report_in_model);
+        let var_id = self.solver.register_var(sort, definition, report_in_model);
         self.egraph_to_var.insert(egraph_id, var_id);
         while self.var_to_solver_uid.len() <= var_id as usize {
             self.var_to_solver_uid.push(None);
@@ -277,10 +280,11 @@ impl ArithTranslator {
     #[cfg(debug_assertions)]
     fn debug_assert_one_value_per_class(
         &self,
-        buckets: &DeterministicHashMap<IBig, DeterministicHashSet<VarId>>,
+        buckets: &DeterministicHashMap<ArithValue, DeterministicHashSet<VarId>>,
         solver_state: &SolverState,
     ) {
-        let mut class_value: DeterministicHashMap<u32, (&IBig, u64)> = DeterministicHashMap::new();
+        let mut class_value: DeterministicHashMap<u32, (&ArithValue, u64)> =
+            DeterministicHashMap::new();
         for (value, var_ids) in buckets {
             for var_id in var_ids {
                 let Some(Some(uid)) = self.var_to_solver_uid.get(*var_id as usize) else {
@@ -290,7 +294,7 @@ impl ArithTranslator {
                 if let Some((other_value, other_uid)) = class_value.insert(root, (value, *uid)) {
                     assert!(
                         other_value == value,
-                        "egraph-equal Int terms {} and {} have different arithmetic values {} and {}",
+                        "egraph-equal arithmetic terms {} and {} have different values {:?} and {:?}",
                         solver_state.get_term(other_uid),
                         solver_state.get_term(*uid),
                         other_value,
@@ -309,7 +313,7 @@ impl ArithTranslator {
         match result {
             ArithCheckResult::Unsat(lits) => ArithResult::Unsat(lits, LiaStats::new()),
             ArithCheckResult::Sat(buckets) => {
-                let mut translated: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
+                let mut translated: DeterministicHashMap<ArithValue, DeterministicHashSet<u64>> =
                     DeterministicHashMap::new();
                 for (value, var_ids) in buckets {
                     let mut set = DeterministicHashSet::default();
@@ -353,33 +357,55 @@ impl ArithTranslator {
     }
 }
 
+/// The arithmetic sort of the term `solver_uid` (`Int` unless it is `Real`).
+fn var_type(solver_uid: u64, solver_state: &mut SolverState) -> VarType {
+    let term = solver_state.get_term(solver_uid);
+    if term
+        .get_sort(&mut solver_state.context)
+        .sort_name()
+        .as_str()
+        == REAL
+    {
+        VarType::Real
+    } else {
+        VarType::Int
+    }
+}
+
 /// `find()`-free linear expression extractor. Returns a map of
-/// Coefficient → IBig, or None if the term isn't arithmetic.
+/// Coefficient → Rational, or None if the term isn't arithmetic.
 pub fn extract_lazy_expression(
     term_id: u64,
     solver_state: &mut SolverState,
-) -> Option<DeterministicHashMap<Coefficient, Integer>> {
+) -> Option<DeterministicHashMap<Coefficient, Rational>> {
     let term = solver_state.get_term(term_id);
-    let mut expr: DeterministicHashMap<Coefficient, Integer> = DeterministicHashMap::new();
-    expr.insert(Coefficient::Constant, IBig::from(0));
+    let mut expr: DeterministicHashMap<Coefficient, Rational> = DeterministicHashMap::new();
+    expr.insert(Coefficient::Constant, Rational::ZERO);
 
-    let opaque = |ss: &mut SolverState, expr: &mut DeterministicHashMap<Coefficient, Integer>| {
-        expr.insert(Coefficient::Term(ss.to_egraph_id(term_id)), IBig::from(1));
+    let opaque = |ss: &mut SolverState, expr: &mut DeterministicHashMap<Coefficient, Rational>| {
+        expr.insert(Coefficient::Term(ss.to_egraph_id(term_id)), Rational::ONE);
     };
-    let accumulate = |expr: &mut DeterministicHashMap<Coefficient, Integer>,
-                      sub: DeterministicHashMap<Coefficient, Integer>,
+    let accumulate = |expr: &mut DeterministicHashMap<Coefficient, Rational>,
+                      sub: DeterministicHashMap<Coefficient, Rational>,
                       negate: bool| {
         for (k, c) in sub {
             let c = if negate { -c } else { c };
-            *expr.entry(k).or_insert(IBig::from(0)) += c;
+            *expr.entry(k).or_insert(Rational::ZERO) += c;
         }
+    };
+    let is_constant = |m: &DeterministicHashMap<Coefficient, Rational>| {
+        m.len() == 1 && m.contains_key(&Coefficient::Constant)
     };
 
     match term.repr() {
         ATerm::Constant(AlgConstant::Numeral(num), _) => {
-            if let Ok(value) = num.to_string().parse::<Integer>() {
-                *expr.get_mut(&Coefficient::Constant).unwrap() = value;
-            }
+            *expr.get_mut(&Coefficient::Constant).unwrap() = Rational::from(num.clone());
+            Some(expr)
+        }
+        ATerm::Constant(AlgConstant::Decimal(dec), _) => {
+            // A decimal literal is finite, so its conversion is exact.
+            let value = Rational::try_from(dec.clone()).expect("decimal literal is not finite");
+            *expr.get_mut(&Coefficient::Constant).unwrap() = value;
             Some(expr)
         }
         ATerm::Constant(..) => Some(expr),
@@ -427,9 +453,6 @@ pub fn extract_lazy_expression(
                 // factors, as `extract_linear_expression` (lp.rs) does. The product is
                 // linear iff at most one factor is non-constant; otherwise the whole
                 // term stays opaque.
-                let is_constant = |m: &DeterministicHashMap<Coefficient, Integer>| {
-                    m.len() == 1 && m.contains_key(&Coefficient::Constant)
-                };
                 let mut acc = extract_lazy_expression(args[0].uid(), solver_state)?;
                 for arg in args.iter().skip(1) {
                     let factor = extract_lazy_expression(arg.uid(), solver_state)?;
@@ -445,19 +468,42 @@ pub fn extract_lazy_expression(
                 }
                 Some(acc)
             }
+            ("/", n) if n > 1 => {
+                // Real division, left-associative. Dividing by a nonzero constant scales the
+                // dividend; any other divisor (a variable, or zero, which SMT-LIB leaves
+                // unspecified) leaves the whole term opaque, so the egraph treats it like an
+                // uninterpreted function of its arguments.
+                let mut acc = extract_lazy_expression(args[0].uid(), solver_state)?;
+                for arg in args.iter().skip(1) {
+                    let divisor = extract_lazy_expression(arg.uid(), solver_state)?;
+                    let scale = match divisor.get(&Coefficient::Constant) {
+                        Some(d) if is_constant(&divisor) && *d != Rational::ZERO => {
+                            Rational::ONE / d
+                        }
+                        _ => {
+                            opaque(solver_state, &mut expr);
+                            return Some(expr);
+                        }
+                    };
+                    acc = acc.into_iter().map(|(k, c)| (k, &scale * c)).collect();
+                }
+                Some(acc)
+            }
+            // An `Int` as a `Real`: the same linear expression.
+            ("to_real", 1) => extract_lazy_expression(args[0].uid(), solver_state),
             ("div", 2) => {
                 let a = solver_state.to_egraph_id(args[0].uid());
                 let b = solver_state.to_egraph_id(args[1].uid());
-                expr.insert(Coefficient::Div(a, b), IBig::from(1));
+                expr.insert(Coefficient::Div(a, b), Rational::ONE);
                 Some(expr)
             }
             ("mod", 2) => {
                 let a = solver_state.to_egraph_id(args[0].uid());
                 let b = solver_state.to_egraph_id(args[1].uid());
-                expr.insert(Coefficient::Mod(a, b), IBig::from(1));
+                expr.insert(Coefficient::Mod(a, b), Rational::ONE);
                 Some(expr)
             }
-            ("*" | "div" | "mod", _) => None,
+            ("*" | "/" | "div" | "mod", _) => None,
             _ => {
                 opaque(solver_state, &mut expr);
                 Some(expr)

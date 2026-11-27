@@ -9,6 +9,19 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 
+/// Subfolders of `Real` arithmetic inputs, which only the arithmetic backends in
+/// [`REAL_BACKENDS`] decide; the others reject them up front.
+const REAL_SUBFOLDERS: &[&str] = &["real_arithmetic"];
+
+/// The `SUNDANCE_ARITHMETIC` values whose backend supports `Real` (`ArithSolver::supports_reals`).
+/// Without an override the solver's default backend runs, and both defaults are among them.
+const REAL_BACKENDS: &[&str] = &[
+    "internalincremental",
+    "internal-incremental",
+    "z3incremental",
+    "z3-incremental",
+];
+
 #[test]
 fn regression_test() {
     let smt_files_dir = Path::new("tests/regression/smt_files");
@@ -51,9 +64,28 @@ fn regression_test() {
     let mut timeout = 0;
     let mut total = 0;
 
+    // Optional arithmetic override (CI matrix passes SUNDANCE_ARITHMETIC to
+    // exercise every backend against the same test corpus).
+    let arithmetic = env::var("SUNDANCE_ARITHMETIC").ok();
+    let reals_supported = arithmetic
+        .as_deref()
+        .is_none_or(|a| REAL_BACKENDS.contains(&a));
+
     // Process each subdirectory
     for subdir in subdirs {
         // continue;
+        let is_real_subfolder = subdir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| REAL_SUBFOLDERS.contains(&name));
+        if is_real_subfolder && !reals_supported {
+            println!(
+                "\nSkipping directory {}: --arithmetic {} does not support Real",
+                subdir.display(),
+                arithmetic.as_deref().unwrap_or_default()
+            );
+            continue;
+        }
         println!("\nProcessing directory: {}", subdir.display());
 
         // Get all .smt2 files in the subdirectory
@@ -90,9 +122,6 @@ fn regression_test() {
             print!("Testing file: {} ... ", relative_path);
             io::stdout().flush().unwrap();
 
-            // Optional arithmetic override (CI matrix passes SUNDANCE_ARITHMETIC to
-            // exercise every backend against the same test corpus).
-            let arithmetic = env::var("SUNDANCE_ARITHMETIC").ok();
             // Optional SAT backend override (`cadical` or `minisat`)
             let sat_backend = env::var("SUNDANCE_SAT_BACKEND").ok();
 

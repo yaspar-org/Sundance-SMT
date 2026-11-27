@@ -8,6 +8,9 @@
 //! operator, that is unsound. Rather than answer incorrectly, we reject the input with an error
 //! naming the theory and the offending term.
 //!
+//! `Real` arithmetic is decided only by the incremental arithmetic backends, so it is rejected for
+//! the others; `to_int` and `is_int` are rejected for all of them.
+//!
 //! The same applies to non-linear multiplication, which the arithmetic frontend cannot translate.
 //! Rejecting it before the search rather than mid-solve matters: by the time
 //! `extract_linear_expression` runs we are inside a CaDiCaL external-propagator callback, and cxx
@@ -16,6 +19,7 @@
 //! inlining) and is necessarily incomplete; see [`NonlinearityCheck`].
 
 use crate::utils::{FastDeterministicHashMap, FastDeterministicHashSet};
+use dashu::Rational;
 use yaspar_ir::ast::alg::Constant;
 use yaspar_ir::ast::{ATerm, Context, FetchSort, Repr, Term};
 use yaspar_ir::statics::{ARRAY, BITVEC, REAL, REGLAN, SET, STRING};
@@ -29,15 +33,15 @@ fn unsupported_theory(sort_name: &str) -> Option<&'static str> {
         REGLAN => Some("regular expressions"),
         ARRAY => Some("arrays"),
         SET => Some("sets"),
-        // The arithmetic backends only handle `Int` (see `register_arithmetic_and_quantifier`).
-        REAL => Some("real arithmetic"),
         _ => None,
     }
 }
 
 /// Reject `assertions` if any subterm belongs to an unsupported theory.
 ///
-/// Detection is by sort rather than by operator.
+/// Detection is by sort rather than by operator, except for `to_int` and `is_int`. `Real` terms
+/// are rejected unless `reals` (the arithmetic backend supports them, see
+/// [`crate::arithmetic::lp::ArithSolver::supports_reals`]).
 ///
 /// Call this as early as possible: it wants the raw typechecked assertions, before let-elimination,
 /// NNF, or any egraph registration, so detecting an unsupported input costs little beyond parsing.
@@ -46,6 +50,7 @@ fn unsupported_theory(sort_name: &str) -> Option<&'static str> {
 pub fn reject_unsupported_theories(
     assertions: &[Term],
     context: &mut Context,
+    reals: bool,
 ) -> Result<(), String> {
     let mut stack: Vec<&Term> = assertions.iter().collect();
     // Terms are hash-consed, so subterms are shared within and across assertions. Memoizing on
@@ -64,6 +69,22 @@ pub fn reject_unsupported_theories(
                  and Sundance has no decision procedure for this theory."
             ));
         }
+        if !reals && sort.sort_name().as_str() == REAL {
+            return Err(format!(
+                "real arithmetic is not supported by this arithmetic backend: the term `{term}` \
+                 has sort `Real`. Use `--arithmetic internalincremental`."
+            ));
+        }
+
+        // The arithmetic backends do not interpret these; as uninterpreted functions they would
+        // be unsound.
+        if let ATerm::App(identifier, _, _) = term.repr()
+            && matches!(identifier.0.symbol.as_str(), "to_int" | "is_int")
+        {
+            return Err(format!(
+                "`to_int` and `is_int` are not supported: `{term}`."
+            ));
+        }
 
         // `match` is not supported by the egraph (`SolverState::extract_op`).
         if let ATerm::Matching(..) = term.repr() {
@@ -76,10 +97,12 @@ pub fn reject_unsupported_theories(
     Ok(())
 }
 
-/// Rejects *ground* non-linear multiplication, one term at a time.
+/// Rejects *ground* non-linear multiplication and division, one term at a time.
 ///
 /// [`Self::check`] rejects any `*` with two or more factors that do not fold to a constant. That is
-/// precisely the condition under which `extract_linear_expression` panics.
+/// precisely the condition under which `extract_linear_expression` panics. It also rejects any `/`
+/// whose divisor does not fold to a constant, which the incremental backends could only treat as
+/// an uninterpreted term.
 ///
 /// **A product mentioning a bound variable is exempt**, even when it looks non-linear. The Verus
 /// prelude asserts `(forall ((x Int) (y Int)) (! (= (Mul x y) (* x y)) :pattern ((Mul x y))))`, and
@@ -103,39 +126,55 @@ pub fn reject_unsupported_theories(
 pub struct NonlinearityCheck {
     /// Terms whose subtree [`Self::check`] has already walked.
     walked: FastDeterministicHashSet<u64>,
-    /// Memoized [`Self::folds_to_constant`].
-    folds: FastDeterministicHashMap<u64, bool>,
+    /// Memoized [`Self::constant_value`].
+    folds: FastDeterministicHashMap<u64, Option<Rational>>,
     /// Memoized [`Self::contains_bound_variable`].
     bound: FastDeterministicHashMap<u64, bool>,
 }
 
 impl NonlinearityCheck {
-    /// Does `term` fold to a numeric constant, in exactly the sense
-    /// `extract_linear_expression` folds one?
+    /// Does `term` fold to a numeric constant, in exactly the sense the arithmetic frontends
+    /// (`extract_linear_expression` and `extract_lazy_expression`) fold one?
+    fn folds_to_constant(&mut self, term: &Term) -> bool {
+        self.constant_value(term).is_some()
+    }
+
+    /// The value of `term` if it folds to a numeric constant.
     ///
     /// Deliberately narrow, and kept in step with the `ATerm::Constant` and `App` arms of
-    /// `extract_linear_expression` (`arithmetic/lp.rs`):
+    /// `extract_linear_expression` (`arithmetic/lp.rs`) and, for `Real` terms, of
+    /// `extract_lazy_expression` (`arithmetic/incremental_solver/translation.rs`):
     ///
-    /// * only `Constant::Numeral` counts -- a `Decimal` makes that function panic rather than fold
-    /// * only `+`, `-` and `*` fold. `div` and `mod` become `Coefficient::Div`/`Mod` keys and `abs`
-    ///   and `/` fall through to the uninterpreted arm, so all four behave like variables even when
-    ///   applied to numerals
+    /// * only `Constant::Numeral` and `Constant::Decimal` count (a `Decimal` is always `Real`, so
+    ///   only reaches the incremental backends)
+    /// * only `+`, `-`, `*`, `to_real`, and `/` by nonzero constants fold. `div` and `mod` become
+    ///   `Coefficient::Div`/`Mod` keys, and `abs` and `/` by zero fall through to the uninterpreted
+    ///   arm, so they behave like variables even when applied to numerals
     /// * everything else (variables, `ite`, uninterpreted applications, annotated terms) becomes its
     ///   own variable
-    fn folds_to_constant(&mut self, term: &Term) -> bool {
-        if let Some(&cached) = self.folds.get(&term.uid()) {
-            return cached;
+    fn constant_value(&mut self, term: &Term) -> Option<Rational> {
+        if let Some(cached) = self.folds.get(&term.uid()) {
+            return cached.clone();
         }
-        let folds = match term.repr() {
-            ATerm::Constant(c, _) => matches!(c, Constant::Numeral(_)),
-            ATerm::App(identifier, args, _) => {
-                matches!(identifier.0.symbol.as_str(), "+" | "-" | "*")
-                    && args.iter().all(|arg| self.folds_to_constant(arg))
+        let value = match term.repr() {
+            ATerm::Constant(Constant::Numeral(n), _) => Some(Rational::from(n.clone())),
+            ATerm::Constant(Constant::Decimal(d), _) => Rational::try_from(d.clone()).ok(),
+            ATerm::App(identifier, args, _)
+                if matches!(
+                    identifier.0.symbol.as_str(),
+                    "+" | "-" | "*" | "/" | "to_real"
+                ) =>
+            {
+                let values = args
+                    .iter()
+                    .map(|arg| self.constant_value(arg))
+                    .collect::<Option<Vec<_>>>();
+                values.and_then(|values| fold(identifier.0.symbol.as_str(), values))
             }
-            _ => false,
+            _ => None,
         };
-        self.folds.insert(term.uid(), folds);
-        folds
+        self.folds.insert(term.uid(), value.clone());
+        value
     }
 
     /// Does `term` mention a variable bound by an enclosing quantifier, `let`, or `match` arm?
@@ -175,10 +214,34 @@ impl NonlinearityCheck {
                 ));
             }
 
+            if let ATerm::App(identifier, args, _) = term.repr()
+                && identifier.0.symbol.as_str() == "/"
+                && args.iter().skip(1).any(|a| !self.folds_to_constant(a))
+                && !self.contains_bound_variable(term)
+            {
+                return Err(format!("non-linear division is not supported: `{term}`."));
+            }
+
             stack.extend(term.repr().sub_terms());
         }
 
         Ok(())
+    }
+}
+
+/// Fold the arithmetic operator `op` over constant `args`. `None` for a division by zero, whose
+/// value SMT-LIB leaves unspecified.
+fn fold(op: &str, args: Vec<Rational>) -> Option<Rational> {
+    let mut args = args.into_iter();
+    let first = args.next()?;
+    match op {
+        "+" => Some(args.fold(first, |acc, a| acc + a)),
+        "*" => Some(args.fold(first, |acc, a| acc * a)),
+        "-" if args.len() == 0 => Some(-first),
+        "-" => Some(args.fold(first, |acc, a| acc - a)),
+        "/" => args.try_fold(first, |acc, a| (a != Rational::ZERO).then(|| acc / a)),
+        "to_real" => Some(first),
+        _ => None,
     }
 }
 
@@ -206,7 +269,13 @@ mod tests {
     /// Parse and typecheck `input`, then run the theory check over its assertions.
     fn check(input: &str) -> Result<(), String> {
         let (assertions, mut context) = assertions_of(input);
-        reject_unsupported_theories(&assertions, &mut context)
+        reject_unsupported_theories(&assertions, &mut context, false)
+    }
+
+    /// Like [`check`], for a backend that supports `Real`.
+    fn check_with_reals(input: &str) -> Result<(), String> {
+        let (assertions, mut context) = assertions_of(input);
+        reject_unsupported_theories(&assertions, &mut context, true)
     }
 
     /// Parse and typecheck `input`, then run the non-linearity check over its raw assertions.
@@ -244,6 +313,55 @@ mod tests {
         let input = "(declare-const r Real)\n(assert (> r 0.5))\n(check-sat)\n";
         let err = check(input).expect_err("Real should be rejected");
         assert!(err.contains("real arithmetic"), "{err}");
+    }
+
+    #[test]
+    fn accepts_real_arithmetic_when_supported() {
+        let input = "(declare-const r Real)\n(declare-fun f (Real) Real)\n\
+                     (assert (> (f (/ r 2)) 0.5))\n(check-sat)\n";
+        assert_eq!(check_with_reals(input), Ok(()));
+    }
+
+    #[test]
+    fn rejects_to_int_and_is_int() {
+        for term in ["(= (to_int r) 0)", "(is_int r)"] {
+            let input = format!(
+                "(set-logic QF_LIRA)\n(declare-const r Real)\n(assert {term})\n(check-sat)\n"
+            );
+            let err = check_with_reals(&input).expect_err("to_int/is_int should be rejected");
+            assert!(err.contains("to_int"), "{err}");
+        }
+    }
+
+    /// Wrap `term` in a minimal `QF_LRA` script declaring `x`, `y`.
+    fn with_real_vars(term: &str) -> String {
+        format!(
+            "(set-logic QF_LRA)\n(declare-const x Real)\n(declare-const y Real)\n\
+             (assert (= {term} 0))\n(check-sat)\n"
+        )
+    }
+
+    #[test]
+    fn accepts_linear_real_terms() {
+        for term in [
+            "(* 0.5 x)",
+            "(* (/ 1 3) x)",
+            "(/ x 3)",
+            "(/ x (- 4 2) 0.5)",
+            "(* x (/ 3 (+ 1 1)))",
+            "(/ x 0)",
+        ] {
+            let result = check_linear(&with_real_vars(term));
+            assert!(result.is_ok(), "{term}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_nonlinear_real_terms() {
+        for term in ["(/ x y)", "(/ 1 x)", "(* x (/ 1 y))", "(* (/ 1 0) x)"] {
+            let result = check_linear(&with_real_vars(term));
+            assert!(result.is_err(), "{term} should be rejected");
+        }
     }
 
     #[test]

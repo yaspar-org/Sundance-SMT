@@ -1,0 +1,10 @@
+; f(x) != f(y) only needs x != y, and x + y = 1 with x >= 0.5 allows x = 0.75, y = 0.25.
+(set-logic QF_UFLRA)
+(declare-fun f (Real) Real)
+(declare-const x Real)
+(declare-const y Real)
+(assert (= (+ x y) 1))
+(assert (>= x 0.5))
+(assert (not (= (f x) (f y))))
+(assert (< (f x) (f y)))
+(check-sat)

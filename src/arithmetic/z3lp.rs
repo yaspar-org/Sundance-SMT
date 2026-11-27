@@ -2,17 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::arithmetic::lia::stats::Stats as LiaStats;
+use crate::arithmetic::lia::variables::VarType;
 use crate::egraphs::traits::EgraphTrait;
 use crate::solver_state::SolverState;
 use crate::{
     arithmetic::lp::{
-        ArithResult, Coefficient, FunctionType::*, extract_linear_constraints,
+        ArithResult, ArithValue, Coefficient, FunctionType::*, extract_linear_constraints,
         extract_linear_expression,
     },
     debug_println,
     utils::{DeterministicHashMap, DeterministicHashSet},
 };
-use dashu::integer::IBig;
+use dashu::{Rational, integer::IBig};
 use std::collections::HashMap;
 use z3::{
     Solver,
@@ -178,7 +179,7 @@ pub fn check_integer_constraints_satisfiable_z3(
             // Satisfiable - return None to indicate no conflict
             let model = solver.get_model().unwrap();
 
-            let mut model_hashmap: DeterministicHashMap<IBig, DeterministicHashSet<u64>> =
+            let mut model_hashmap: DeterministicHashMap<ArithValue, DeterministicHashSet<u64>> =
                 DeterministicHashMap::new();
             for (var, value) in roots {
                 let model_val = model.eval(&value, true).unwrap();
@@ -196,7 +197,10 @@ pub fn check_integer_constraints_satisfiable_z3(
                         panic!("Failed to parse Z3 model value '{}': {}", model_val_str, e)
                     })
                 };
-                model_hashmap.entry(val).or_default().insert(var);
+                model_hashmap
+                    .entry((VarType::Int, Rational::from(val)))
+                    .or_default()
+                    .insert(var);
             }
             ArithResult::Sat(model_hashmap, LiaStats::new())
         }

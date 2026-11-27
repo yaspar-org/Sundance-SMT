@@ -8,9 +8,12 @@
 //! with `SolverState`; the egraph is an internal component accessible via
 //! `solver_state.egraph`.
 
+use dashu::Rational;
+use dashu::base::UnsignedAbs;
 use sat_interface::Formula;
 use std::collections::{HashMap, HashSet};
 use yaspar_ir::ast::ATerm::*;
+use yaspar_ir::ast::Constant as AlgConstant;
 use yaspar_ir::ast::alg::CheckIdentifier;
 use yaspar_ir::ast::{
     Arena, Attribute, Context, FetchSort, HasArena, IdentifierKind, Local, Monomorphization, Repr,
@@ -414,6 +417,26 @@ impl SolverState {
         }
     }
 
+    /// The egraph key of a constant. The egraph takes constants with different keys to be
+    /// different values, so a decimal is keyed by its value, as the numeral it equals when it is
+    /// a whole number: `1` and `1.0` (both `Real` in a `Real`-only logic) are the same constant.
+    fn constant_key(c: &AlgConstant) -> String {
+        if let AlgConstant::Decimal(d) = c
+            && let Ok(value) = Rational::try_from(d.clone())
+        {
+            if value.is_int() {
+                format!(
+                    "{:?}",
+                    AlgConstant::Numeral(value.numerator().unsigned_abs())
+                )
+            } else {
+                format!("Decimal({value})")
+            }
+        } else {
+            format!("{c:?}")
+        }
+    }
+
     /// Extract Op from a yaspar Term.
     fn extract_op(term: &Term) -> crate::egraphs::repr::Op {
         use crate::egraphs::repr::Op;
@@ -433,7 +456,7 @@ impl SolverState {
                 Self::identifier_key(qid),
                 sort.as_ref(),
             )),
-            Constant(c, _) => Op::Constant(format!("{:?}", c)),
+            Constant(c, _) => Op::Constant(Self::constant_key(c)),
             Local(local) => Op::Local(local.clone()),
             _ => panic!("extract_op: unsupported term type {:?}", term.repr()),
         }
@@ -561,21 +584,10 @@ impl SolverState {
     fn register_arithmetic_and_quantifier(&mut self, term: &Term, guard: Option<u64>) {
         let num = term.uid();
 
-        // Arithmetic term tracking
+        // Arithmetic term tracking. `Real` terms only get here with a backend that supports them
+        // (`ArithSolver::supports_reals`); the others reject them up front.
         let sort = term.get_sort(self.context.arena()).to_string();
-        // TODO: Real arithmetic is not yet plumbed through the arithmetic
-        // backends (they allocate integer variables and bucket Nelson-Oppen
-        // model values as integers). Registering Real terms as integer
-        // arithmetic is unsound, so panic instead of returning a wrong answer.
-        // Real support is planned; this guard is a stopgap until then.
-        if sort == "Real" {
-            panic!(
-                "Real arithmetic is not yet supported (term: {term}); \
-                 support for Reals is planned. For now the arithmetic \
-                 backends only handle Int."
-            );
-        }
-        if sort == "Int" {
+        if sort == "Int" || sort == "Real" {
             if !self.arithmetic_terms.contains(&num) {
                 self.arithmetic_terms.push(num);
             }

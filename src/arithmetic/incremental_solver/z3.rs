@@ -6,12 +6,16 @@
 use crate::arithmetic::incremental_solver::{
     ArithCheckResult, ArithConstraint, ArithExpr, IncrementalArithSolver, PartialCheckResult, VarId,
 };
+use crate::arithmetic::lia::variables::VarType;
+use crate::arithmetic::lp::ArithValue;
 use crate::debug_println;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
+use dashu::Rational;
+use dashu::float::DBig;
 use dashu::integer::IBig;
 use z3::{
     SatResult, Solver,
-    ast::{Bool, Int},
+    ast::{Bool, Int, Real},
 };
 
 /// Min new assertions before `check_partial_trail` actually calls Z3.
@@ -29,10 +33,61 @@ fn parse_z3_model_int(s: &str) -> IBig {
     }
 }
 
+/// Parse a Z3 real numeral as Z3 prints it: `n.0`, `(/ n.0 d.0)`, or `(- x)` of either.
+fn parse_z3_model_real(s: &str) -> Rational {
+    if let Some(inner) = s.strip_prefix("(- ").and_then(|t| t.strip_suffix(')')) {
+        -parse_z3_model_real(inner)
+    } else if let Some(inner) = s.strip_prefix("(/ ").and_then(|t| t.strip_suffix(')')) {
+        // The denominator is a positive numeral, so it is after the last space.
+        let (num, den) = inner.rsplit_once(' ').unwrap();
+        parse_z3_model_real(num) / parse_z3_model_real(den)
+    } else {
+        Rational::try_from(s.parse::<DBig>().unwrap()).unwrap()
+    }
+}
+
+fn rational_to_z3(r: &Rational) -> Real {
+    Real::from_rational_str(&r.numerator().to_string(), &r.denominator().to_string()).unwrap()
+}
+
+/// A Z3 arithmetic term of either sort. Terms over `Int` vars with integer coefficients stay
+/// `Int`; anything else is built as a `Real`, coercing its `Int` parts with `to_real`.
+#[derive(Clone)]
+enum Num {
+    Int(Int),
+    Real(Real),
+}
+
+impl Num {
+    fn into_real(self) -> Real {
+        match self {
+            Num::Int(i) => i.to_real(),
+            Num::Real(r) => r,
+        }
+    }
+
+    /// `a ⋈ b`, in `Int` if both sides are `Int` and in `Real` otherwise.
+    fn compare(
+        a: Num,
+        b: Num,
+        int_op: fn(&Int, Int) -> Bool,
+        real_op: fn(&Real, Real) -> Bool,
+    ) -> Bool {
+        match (a, b) {
+            (Num::Int(a), Num::Int(b)) => int_op(&a, b),
+            (a, b) => real_op(&a.into_real(), b.into_real()),
+        }
+    }
+
+    fn eq(a: Num, b: Num) -> Bool {
+        Num::compare(a, b, |a, b| a.eq(b), |a, b| a.eq(b))
+    }
+}
+
 pub struct Z3IncrementalState {
     solver: Solver,
-    /// VarId -> Z3 Int variable.
-    vars: Vec<Int>,
+    /// VarId -> Z3 variable, of the VarId's sort.
+    vars: Vec<Num>,
     /// VarIds whose model values should be reported in check() SAT buckets.
     model_vars: Vec<VarId>,
     /// abs(lit) -> tracker Bool for `assert_and_track`.
@@ -118,34 +173,77 @@ impl Z3IncrementalState {
         }
     }
 
-    fn get_var(&self, id: VarId) -> &Int {
+    fn get_var(&self, id: VarId) -> &Num {
         &self.vars[id as usize]
     }
 
-    fn expr_to_z3(&self, expr: &ArithExpr) -> Int {
-        let mut result = Int::from_big_int(&ibig_to_bigint(&expr.constant));
-        for (var, coeff) in &expr.terms {
-            let v = self.get_var(*var);
-            result += Int::from_big_int(&ibig_to_bigint(coeff)) * v.clone();
+    /// A `div`/`mod` operand, which is always an `Int` var.
+    fn get_int_var(&self, id: VarId) -> Int {
+        match self.get_var(id) {
+            Num::Int(v) => v.clone(),
+            Num::Real(_) => panic!("z3incremental: div/mod operand var_{id} is Real"),
         }
-        for (a, b, coeff) in &expr.divs {
-            let av = self.get_var(*a).clone();
-            let bv = self.get_var(*b).clone();
-            result += Int::from_big_int(&ibig_to_bigint(coeff)) * av.div(bv);
+    }
+
+    fn expr_to_z3(&self, expr: &ArithExpr) -> Num {
+        let is_int = expr.constant.is_int()
+            && expr
+                .terms
+                .iter()
+                .all(|(v, c)| c.is_int() && matches!(self.get_var(*v), Num::Int(_)))
+            && expr
+                .divs
+                .iter()
+                .chain(&expr.mods)
+                .all(|(_, _, c)| c.is_int());
+        let divs = expr
+            .divs
+            .iter()
+            .map(|(a, b, c)| (self.get_int_var(*a).div(self.get_int_var(*b)), c));
+        let mods = expr
+            .mods
+            .iter()
+            .map(|(a, b, c)| (self.get_int_var(*a).modulo(self.get_int_var(*b)), c));
+        if is_int {
+            let int = |c: &Rational| Int::from_big_int(&ibig_to_bigint(c.numerator()));
+            let mut result = int(&expr.constant);
+            for (var, coeff) in &expr.terms {
+                let Num::Int(v) = self.get_var(*var) else {
+                    unreachable!("checked above")
+                };
+                result += int(coeff) * v.clone();
+            }
+            for (t, coeff) in divs.chain(mods) {
+                result += int(coeff) * t;
+            }
+            Num::Int(result)
+        } else {
+            let mut result = rational_to_z3(&expr.constant);
+            for (var, coeff) in &expr.terms {
+                result += rational_to_z3(coeff) * self.get_var(*var).clone().into_real();
+            }
+            for (t, coeff) in divs.chain(mods) {
+                result += rational_to_z3(coeff) * t.to_real();
+            }
+            Num::Real(result)
         }
-        for (a, b, coeff) in &expr.mods {
-            let av = self.get_var(*a).clone();
-            let bv = self.get_var(*b).clone();
-            result += Int::from_big_int(&ibig_to_bigint(coeff)) * av.modulo(bv);
-        }
-        result
     }
 
     fn constraint_to_z3(&self, c: &ArithConstraint) -> Bool {
         match c {
-            ArithConstraint::Leq(l, r) => Int::le(&self.expr_to_z3(l), self.expr_to_z3(r)),
-            ArithConstraint::Lt(l, r) => Int::lt(&self.expr_to_z3(l), self.expr_to_z3(r)),
-            ArithConstraint::Eq(l, r) => Int::eq(&self.expr_to_z3(l), self.expr_to_z3(r)),
+            ArithConstraint::Leq(l, r) => Num::compare(
+                self.expr_to_z3(l),
+                self.expr_to_z3(r),
+                |a, b| a.le(b),
+                |a, b| a.le(b),
+            ),
+            ArithConstraint::Lt(l, r) => Num::compare(
+                self.expr_to_z3(l),
+                self.expr_to_z3(r),
+                |a, b| a.lt(b),
+                |a, b| a.lt(b),
+            ),
+            ArithConstraint::Eq(l, r) => Num::eq(self.expr_to_z3(l), self.expr_to_z3(r)),
         }
     }
 
@@ -165,9 +263,17 @@ impl Default for Z3IncrementalState {
 }
 
 impl IncrementalArithSolver for Z3IncrementalState {
-    fn register_var(&mut self, definition: Option<ArithExpr>, report_in_model: bool) -> VarId {
+    fn register_var(
+        &mut self,
+        sort: VarType,
+        definition: Option<ArithExpr>,
+        report_in_model: bool,
+    ) -> VarId {
         let id = self.vars.len() as VarId;
-        let v = Int::new_const(format!("var_{id}"));
+        let v = match sort {
+            VarType::Int => Num::Int(Int::new_const(format!("var_{id}"))),
+            VarType::Real => Num::Real(Real::new_const(format!("var_{id}"))),
+        };
         self.vars.push(v.clone());
         self.ensure_level_slot();
         self.vars_by_level[self.current_level].push(id);
@@ -178,7 +284,7 @@ impl IncrementalArithSolver for Z3IncrementalState {
 
         if let Some(rhs_expr) = definition {
             let rhs = self.expr_to_z3(&rhs_expr);
-            let def = Int::eq(&v, rhs);
+            let def = Num::eq(v, rhs);
             self.solver.assert(&def);
             // Record so backtrack can re-assert it if its push scope is popped.
             self.defs_by_level[self.current_level].push(def);
@@ -262,7 +368,7 @@ impl IncrementalArithSolver for Z3IncrementalState {
         }
         let va = self.get_var(a).clone();
         let vb = self.get_var(b).clone();
-        let ast = Int::eq(&va, vb);
+        let ast = Num::eq(va, vb);
         let tracker = self.get_or_create_tracker(lit);
         self.ensure_level_slot();
         self.solver.push();
@@ -288,14 +394,21 @@ impl IncrementalArithSolver for Z3IncrementalState {
         match self.solver.check_assumptions(&self.active_assumptions()) {
             SatResult::Sat => {
                 let model = self.solver.get_model().unwrap();
-                let mut buckets: DeterministicHashMap<IBig, DeterministicHashSet<VarId>> =
+                let mut buckets: DeterministicHashMap<ArithValue, DeterministicHashSet<VarId>> =
                     DeterministicHashMap::new();
                 for &var_id in &self.model_vars {
-                    if let Some(v) = self.vars.get(var_id as usize)
-                        && let Some(val) = model.eval(v, true)
-                    {
-                        let ibig = parse_z3_model_int(&val.to_string());
-                        buckets.entry(ibig).or_default().insert(var_id);
+                    let value = match self.vars.get(var_id as usize) {
+                        Some(Num::Int(v)) => model.eval(v, true).map(|val| {
+                            let n = parse_z3_model_int(&val.to_string());
+                            (VarType::Int, Rational::from(n))
+                        }),
+                        Some(Num::Real(v)) => model
+                            .eval(v, true)
+                            .map(|val| (VarType::Real, parse_z3_model_real(&val.to_string()))),
+                        None => None,
+                    };
+                    if let Some(value) = value {
+                        buckets.entry(value).or_default().insert(var_id);
                     }
                 }
                 debug_println!(21, 0, "[z3inc] SAT");
@@ -322,5 +435,20 @@ impl IncrementalArithSolver for Z3IncrementalState {
             SatResult::Unsat => PartialCheckResult::Unsat(self.unsat_core_clause()),
             SatResult::Unknown => panic!("z3incremental: Z3 returned unknown"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_z3_real_numerals() {
+        let third = Rational::from(1) / Rational::from(3);
+        assert_eq!(parse_z3_model_real("2.0"), Rational::from(2));
+        assert_eq!(parse_z3_model_real("(- 7.0)"), Rational::from(-7));
+        assert_eq!(parse_z3_model_real("(/ 1.0 3.0)"), third);
+        assert_eq!(parse_z3_model_real("(- (/ 1.0 3.0))"), -third.clone());
+        assert_eq!(parse_z3_model_real("(/ (- 1.0) 3.0)"), -third);
     }
 }

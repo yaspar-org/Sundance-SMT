@@ -1,7 +1,7 @@
 # The Sundance SMT Solver
 
-An SMT solver for program verification with support for uninterpreted functions, linear integer arithmetic, and
-quantifier instantiation.
+An SMT solver for program verification with support for uninterpreted functions, linear integer and real
+arithmetic, and quantifier instantiation.
 
 **Sundance is under active development, and there may be breaking
 changes!**
@@ -58,6 +58,9 @@ The arithmetic backend is selected with `--arithmetic <backend>`:
 | `none` | No arithmetic reasoning |
 
 The default is `z3incremental` when Sundance is built with Z3, and `internalincremental` otherwise.
+
+Linear `Real` arithmetic (including `to_real`) is supported by the two incremental backends only; the
+others reject `Real` inputs. `to_int` and `is_int` are not supported.
 
 ## Using z3 as an arithmetic solver
 

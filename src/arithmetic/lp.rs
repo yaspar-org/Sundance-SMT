@@ -5,6 +5,7 @@ use dashu::integer::IBig;
 // use z3::{ast::{Ast, Bool, Int}, Context, Solver};
 use crate::arithmetic::lia::config::SolverConfig;
 use crate::arithmetic::lia::stats::Stats as LiaStats;
+use crate::arithmetic::lia::variables::VarType;
 use crate::arithmetic::lialp::check_integer_constraints_satisfiable_lia;
 #[cfg(feature = "z3-solver")]
 use crate::arithmetic::z3lp::check_integer_constraints_satisfiable_z3;
@@ -13,7 +14,7 @@ use crate::egraphs::EgraphTrait;
 use crate::solver_state::SolverState;
 use crate::utils::{DeterministicHashMap, DeterministicHashSet};
 use clap::ValueEnum;
-use dashu::Integer;
+use dashu::{Integer, Rational};
 use std::fmt;
 use std::fmt::Display;
 use std::str::FromStr;
@@ -38,6 +39,19 @@ pub enum ArithSolver {
     #[value(name = "z3incremental", alias = "z3-incremental")]
     Z3Incremental,
     None,
+}
+
+impl ArithSolver {
+    /// Whether this backend decides `Real` arithmetic. The others reject it up front
+    /// (`theory_check::reject_unsupported_theories`).
+    pub fn supports_reals(&self) -> bool {
+        match self {
+            ArithSolver::InternalIncremental => true,
+            #[cfg(feature = "z3-solver")]
+            ArithSolver::Z3Incremental => true,
+            _ => false,
+        }
+    }
 }
 
 impl Display for ArithSolver {
@@ -69,10 +83,14 @@ impl fmt::Display for ArithSolverParseError {
     }
 }
 
+/// The value of an arithmetic term in a model, with its sort. Terms with the same `ArithValue` are
+/// Nelson-Oppen merge candidates; an `Int` and a `Real` term never are, whatever their values.
+pub type ArithValue = (VarType, Rational);
+
 pub enum ArithResult {
     Unsat(Vec<i32>, LiaStats), // conflict clause
     Sat(
-        DeterministicHashMap<IBig, DeterministicHashSet<u64>>,
+        DeterministicHashMap<ArithValue, DeterministicHashSet<u64>>,
         LiaStats,
     ), // literals that correspond to inequalities <= where the two terms are equal
     /// No arithmetic content to check.

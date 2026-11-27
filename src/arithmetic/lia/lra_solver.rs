@@ -1117,11 +1117,15 @@ impl LRASolver {
         }
 
         // Check if all variables are still in bounds, and that every integer variable (including
-        // basic ones recomputed from rational tableau coefficients) came out integral
-        let d0 = self.calculate_d0();
-        let feasible = self.variables.iter().all(|v| {
-            v.in_bounds() && (v.var.typ != VarType::Int || v.val.instantiate(&d0).is_int())
-        });
+        // basic ones recomputed from rational tableau coefficients) came out integral. δ_0 is
+        // only computed once every variable is known to be in bounds, which `calculate_d0`
+        // assumes (an out-of-bounds variable with a δ part can give a negative δ_0).
+        let feasible = self.variables.iter().all(|v| v.in_bounds()) && {
+            let d0 = self.calculate_d0();
+            self.variables
+                .iter()
+                .all(|v| v.var.typ != VarType::Int || v.val.instantiate(&d0).is_int())
+        };
 
         if feasible {
             let assg = self.compute_assignment();

@@ -284,7 +284,7 @@ fn solve_single(
     // Bail out before the assertions reach the egraph when operators from theories we do not
     // implement would silently become uninterpreted functions and could yield `sat` on an `unsat`
     // problem.
-    reject_unsupported_theories(&assertions, &mut context)?;
+    reject_unsupported_theories(&assertions, &mut context, args.arithmetic.supports_reals())?;
 
     let mut prop_skeleton: Vec<Vec<i32>> = vec![];
 
