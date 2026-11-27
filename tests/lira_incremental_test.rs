@@ -53,6 +53,19 @@ fn div_mod_by_symbol_is_supported() {
     }
 }
 
+/// #234: a product whose factor the e-graph equates with a numeral is linear.
+#[test]
+fn product_with_constant_factor_is_linear() {
+    for file in [
+        "constant_factor_product.smt2",
+        "constant_factor_product_case_split.smt2",
+    ] {
+        let (out, _) = run("internalincremental", file, &[], Duration::from_secs(30))
+            .unwrap_or_else(|| panic!("{file}: no answer within 30 s"));
+        assert_eq!(out, "unsat", "{file}");
+    }
+}
+
 #[test]
 fn opaque_div_never_answers_sat() {
     let (out, _) = run(

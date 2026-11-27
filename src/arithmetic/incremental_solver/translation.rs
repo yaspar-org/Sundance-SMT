@@ -17,7 +17,7 @@ use dashu::Integer;
 use dashu::integer::IBig;
 use yaspar_ir::ast::{
     ATerm::{self, App, Global, Not},
-    Repr,
+    Repr, TermAllocator,
     alg::Constant as AlgConstant,
 };
 
@@ -35,6 +35,12 @@ pub struct ArithTranslator {
     /// Abs-lits already returned by `drain_merges`. Never cleared: SAT lits
     /// persist across backtracks, so each only needs registering once.
     seen_merge_lits: DeterministicHashSet<i32>,
+    /// Solver uids of products registered as opaque vars (two or more non-constant factors).
+    products: Vec<u64>,
+    /// `(product, factor index, numeral)` triples already linearized by `linearize_products`.
+    linearized: DeterministicHashSet<(u64, usize, u32)>,
+    /// Set when a product is registered, so the next `drain_merges` scans it.
+    products_dirty: bool,
 }
 
 impl ArithTranslator {
@@ -46,6 +52,9 @@ impl ArithTranslator {
             vars_by_level: vec![Vec::new()],
             non_arithmetic_lits: DeterministicHashSet::default(),
             seen_merge_lits: DeterministicHashSet::default(),
+            products: Vec::new(),
+            linearized: DeterministicHashSet::default(),
+            products_dirty: false,
         }
     }
 
@@ -86,9 +95,50 @@ impl ArithTranslator {
             && expr_map.get(&Coefficient::Constant) == Some(&IBig::from(0))
             && expr_map.get(&Coefficient::Term(egraph_id)) == Some(&IBig::from(1));
         if is_self_reference {
+            if let App(identifier, _, _) = solver_state.get_term(solver_uid).repr()
+                && identifier.0.symbol.as_str() == "*"
+            {
+                self.products.push(solver_uid);
+                self.products_dirty = true;
+            }
             return None;
         }
         Some(self.coeff_map_to_expr(&expr_map, solver_state))
+    }
+
+    /// For each opaque product with a factor whose class has a numeral root `c`, add the product
+    /// with that factor replaced by `c`. Congruence merges the two, and the new term is linear
+    /// once at most one non-constant factor is left. Returns whether any term was added.
+    fn linearize_products(&mut self, solver_state: &mut SolverState) -> bool {
+        self.products_dirty = false;
+        let mut added = false;
+        for &product_uid in &self.products {
+            let product = solver_state.get_term(product_uid);
+            let App(identifier, args, sort) = product.repr() else {
+                continue;
+            };
+            for (k, arg) in args.iter().enumerate() {
+                let arg_id = solver_state.to_egraph_id(arg.uid());
+                let root = solver_state.egraph.find(arg_id);
+                if root == arg_id {
+                    continue;
+                }
+                let numeral = solver_state.get_term(solver_state.to_solver_uid(root));
+                if !matches!(numeral.repr(), ATerm::Constant(AlgConstant::Numeral(_), _))
+                    || !self.linearized.insert((product_uid, k, root))
+                {
+                    continue;
+                }
+                let mut new_args = args.clone();
+                new_args[k] = numeral;
+                let linear = solver_state
+                    .context
+                    .app(identifier.clone(), new_args, sort.clone());
+                solver_state.insert_predecessor(&linear, None, None, true);
+                added = true;
+            }
+        }
+        added
     }
 
     /// Convert a Coefficient map to an ArithExpr, registering referenced vars.
@@ -226,23 +276,28 @@ impl ArithTranslator {
         self.solver.push_constraint(constraint, lit);
     }
 
-    /// Drain egraph merge queue and push equalities. Returns new SAT lits.
+    /// Drain egraph merge queue and push equalities, linearizing products whose factors
+    /// merged with a numeral. Returns new SAT lits.
     pub fn drain_merges(&mut self, solver_state: &mut SolverState) -> Vec<i32> {
-        let merges = solver_state.egraph.drain_arithmetic_equalities();
-        if merges.is_empty() {
-            return Vec::new();
-        }
         let mut new_lits = Vec::new();
-        for (a, b) in merges {
-            let lit = solver_state.make_eq(a, b);
-            let va = self.get_or_register_var_internal(a, solver_state);
-            let vb = self.get_or_register_var_internal(b, solver_state);
-            if self.seen_merge_lits.insert(lit.abs()) {
-                new_lits.push(lit);
+        loop {
+            let merges = solver_state.egraph.drain_arithmetic_equalities();
+            let merged = !merges.is_empty();
+            for (a, b) in merges {
+                let lit = solver_state.make_eq(a, b);
+                let va = self.get_or_register_var_internal(a, solver_state);
+                let vb = self.get_or_register_var_internal(b, solver_state);
+                if self.seen_merge_lits.insert(lit.abs()) {
+                    new_lits.push(lit);
+                }
+                self.solver.push_equality(va, vb, lit);
             }
-            self.solver.push_equality(va, vb, lit);
+            // A merge may have fixed a product's factor to a numeral. A linearized product is
+            // merged with the original by congruence, which queues another merge to push.
+            if !(merged || self.products_dirty) || !self.linearize_products(solver_state) {
+                return new_lits;
+            }
         }
-        new_lits
     }
 
     /// Cheap feasibility check on the current trail (no model, no NO probe).
